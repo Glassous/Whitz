@@ -50,6 +50,7 @@ export const useChatStore = defineStore("chat", () => {
         step_id: b.step_id != null ? String(b.step_id) : null,
         title: b.title ?? "",
         text: typeof b.text === "string" ? b.text : "",
+        content: typeof b.content === "string" ? b.content : "",
         tools: Array.isArray(b.tools)
           ? b.tools
               .filter((t: any) => t && typeof t.name === "string")
@@ -154,7 +155,7 @@ export const useChatStore = defineStore("chat", () => {
   function reasoningBlock(step: number | null, title: string): ReasoningBlock {
     const last = reasoning.value[reasoning.value.length - 1];
     if (last && last.step === step) return last;
-    const block: ReasoningBlock = { step, step_id: null, title, text: "", tools: [] };
+    const block: ReasoningBlock = { step, step_id: null, title, text: "", content: "", tools: [] };
     reasoning.value.push(block);
     return block;
   }
@@ -215,6 +216,25 @@ export const useChatStore = defineStore("chat", () => {
       case "message.delta": {
         const a = assistant();
         if (a) a.content += d.text ?? "";
+        break;
+      }
+      case "commentary": {
+        const text = typeof d.text === "string" ? d.text.trim() : "";
+        if (!text) break;
+        const step = typeof d.step === "number" ? d.step : null;
+        const block = reasoningBlock(step, typeof d.title === "string" ? d.title : "");
+        const existing = block.content ?? "";
+        if (!existing.includes(text)) {
+          block.content = existing ? `${existing}\n\n${text}` : text;
+        }
+        if (d.already_streamed) {
+          const a = assistant();
+          if (a) {
+            const trimmed = a.content.trimEnd();
+            if (trimmed.endsWith(text)) a.content = trimmed.slice(0, -text.length).trimEnd();
+          }
+        }
+        syncTurnToMessage();
         break;
       }
       case "message.interim":

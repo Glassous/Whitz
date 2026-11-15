@@ -5,10 +5,16 @@ import type { ReasoningBlock, ReasoningTool } from "../../types";
 const props = defineProps<{ block: ReasoningBlock }>();
 
 const textOpen = ref(false);
+const contentOpen = ref(false);
 const openTools = ref<Set<number>>(new Set());
 
 const longText = computed(() => {
   const text = props.block.text;
+  return text.length > 180 || text.split("\n").filter((line) => line.trim()).length > 3;
+});
+
+const longContent = computed(() => {
+  const text = props.block.content ?? "";
   return text.length > 180 || text.split("\n").filter((line) => line.trim()).length > 3;
 });
 
@@ -169,6 +175,24 @@ function prettyResult(tool: ReasoningTool): string {
 
 <template>
   <div class="space-y-1.5">
+    <div v-if="block.content" class="rounded-md bg-surface/60 px-2 py-1.5">
+      <p class="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-fg-faint">过程回复</p>
+      <p
+        class="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-fg-muted"
+        :class="!contentOpen && longContent ? 'line-clamp-3' : ''"
+      >
+        {{ block.content }}
+      </p>
+      <button
+        v-if="longContent"
+        type="button"
+        class="mt-0.5 text-[11px] text-accent transition-opacity hover:opacity-70"
+        @click="contentOpen = !contentOpen"
+      >
+        {{ contentOpen ? "收起" : "展开全文" }}
+      </button>
+    </div>
+
     <div v-if="block.text">
       <p
         class="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-fg-muted"

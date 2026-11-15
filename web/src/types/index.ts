@@ -62,6 +62,7 @@ export interface ReasoningBlock {
   step_id?: string | null;
   title: string;
   text: string;
+  content?: string;
   tools?: ReasoningTool[];
 }
 

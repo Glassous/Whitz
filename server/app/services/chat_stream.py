@@ -165,10 +165,24 @@ class ChatPipeline:
             "step_id": str(step["id"]) if step and step.get("id") is not None else None,
             "title": step["title"] if step else "",
             "text": "",
+            "content": "",
             "tools": [],
         }
         self.reasoning.append(block)
         return block
+
+    def _add_commentary(self, text: str) -> dict:
+        block = self._reasoning_block()
+        existing = block.get("content") or ""
+        if text not in existing:
+            block["content"] = f"{existing}\n\n{text}".strip() if existing else text
+        return block
+
+    def _take_streamed(self, text: str) -> None:
+        joined = "".join(self.buffer).rstrip()
+        if joined.endswith(text):
+            rest = joined[: -len(text)].rstrip()
+            self.buffer = [rest] if rest else []
 
     @staticmethod
     def _clip(value, limit: int = 2000) -> str:
@@ -328,6 +342,8 @@ class ChatPipeline:
 
             text = msg.get("reasoning_content") or msg.get("reasoning") or ""
             text = text.strip() if isinstance(text, str) else ""
+            content = msg.get("content") if isinstance(msg.get("content"), str) else ""
+            content = content.strip()
             entries = self._tool_entries(msg.get("tool_calls"))
             if not text and not entries:
                 continue
@@ -342,11 +358,18 @@ class ChatPipeline:
                         title = item.get("content") or ""
                         break
                 else:
-                    title = "总结" if (msg.get("content") or "").strip() else ""
+                    title = "总结" if not entries else ""
             else:
-                title = "总结" if (msg.get("content") or "").strip() else ""
+                title = "" if entries else "总结"
 
-            block = {"step": step, "step_id": step_id, "title": title, "text": text, "tools": []}
+            block = {
+                "step": step,
+                "step_id": step_id,
+                "title": title,
+                "text": text,
+                "content": content if entries else "",
+                "tools": [],
+            }
             for call_id, name, args in entries:
                 tool = {"name": name, "args": args}
                 block["tools"].append(tool)
@@ -430,9 +453,41 @@ class ChatPipeline:
                 await self._flush()
 
         elif name == "message.interim":
-            yield sse("message.interim", payload)
+            text = payload.get("text") or payload.get("delta") or ""
+            text = text.strip() if isinstance(text, str) else ""
+            if not text:
+                yield sse("message.interim", payload)
+            else:
+                block = self._add_commentary(text)
+                streamed = bool(payload.get("already_streamed"))
+                if streamed:
+                    self._take_streamed(text)
+                await self._flush(force=True)
+                yield sse(
+                    "commentary",
+                    {
+                        "text": text,
+                        "step": block.get("step"),
+                        "title": block.get("title"),
+                        "already_streamed": streamed,
+                    },
+                )
 
         elif name == "tool.started":
+            streamed_text = "".join(self.buffer).strip()
+            if streamed_text:
+                block = self._add_commentary(streamed_text)
+                self.buffer = []
+                await self._flush(force=True)
+                yield sse(
+                    "commentary",
+                    {
+                        "text": streamed_text,
+                        "step": block.get("step"),
+                        "title": block.get("title"),
+                        "already_streamed": True,
+                    },
+                )
             tool = payload.get("tool") or "tool"
             preview = payload.get("preview")
             key = self._tool_key(tool, preview)
