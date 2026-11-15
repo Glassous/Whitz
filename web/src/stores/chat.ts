@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { api } from "../api/client";
 import { streamSSE, streamSSEGet, type SSEEvent } from "../api/sse";
 import type { ConversationDetail, Message, PendingControl, Plan, PlanItem, ReasoningBlock } from "../types";
+import { useConversationsStore } from "./conversations";
 
 let seq = 0;
 const tempId = (prefix: string) => `${prefix}-${Date.now()}-${seq++}`;
@@ -187,6 +188,12 @@ export const useChatStore = defineStore("chat", () => {
       case "run.started":
         activeRunId.value = d.run_id ?? null;
         break;
+      case "title.updated": {
+        const id = typeof d.conversation_id === "string" ? d.conversation_id : convId.value;
+        const title = typeof d.title === "string" ? d.title.trim() : "";
+        if (id && title) useConversationsStore().applyTitle(id, title);
+        break;
+      }
       case "run.reconnected":
         activeAssistantId.value = d.assistant_message_id ?? activeAssistantId.value;
         if (d.assistant_message_id) selectedTurnId.value = d.assistant_message_id;

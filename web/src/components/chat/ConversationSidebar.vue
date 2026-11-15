@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
+import { streamSSE } from "../../api/sse";
 import type { Conversation } from "../../types";
 import { useAuthStore } from "../../stores/auth";
 import BaseButton from "../ui/BaseButton.vue";
@@ -27,6 +28,9 @@ const router = useRouter();
 
 const renameTarget = ref<Conversation | null>(null);
 const renameText = ref("");
+const renameError = ref<string | null>(null);
+const renameGenerating = ref(false);
+let titleController: AbortController | null = null;
 const deleteTarget = ref<Conversation | null>(null);
 const openMenuId = ref<string | null>(null);
 
@@ -81,18 +85,73 @@ function closeMenu() {
 }
 
 onMounted(() => document.addEventListener("click", closeMenu));
-onBeforeUnmount(() => document.removeEventListener("click", closeMenu));
+onBeforeUnmount(() => {
+  document.removeEventListener("click", closeMenu);
+  stopTitleGeneration();
+});
+
+function stopTitleGeneration() {
+  titleController?.abort();
+  titleController = null;
+  renameGenerating.value = false;
+}
 
 function openRename(c: Conversation) {
   openMenuId.value = null;
+  stopTitleGeneration();
+  renameError.value = null;
   renameTarget.value = c;
   renameText.value = c.title;
 }
+
+function closeRename() {
+  stopTitleGeneration();
+  renameTarget.value = null;
+  renameText.value = "";
+  renameError.value = null;
+}
+
+async function generateRenameTitle() {
+  if (!renameTarget.value || renameGenerating.value) return;
+  const id = renameTarget.value.id;
+  renameError.value = null;
+  renameText.value = "";
+  renameGenerating.value = true;
+  const controller = new AbortController();
+  titleController = controller;
+  try {
+    for await (const ev of streamSSE(`/conversations/${id}/title/generate`, {}, controller.signal)) {
+      if (controller.signal.aborted) break;
+      if (ev.event === "title.delta") {
+        const text = typeof ev.data.text === "string" ? ev.data.text : "";
+        if (text) renameText.value += text;
+      } else if (ev.event === "title.done") {
+        const title = typeof ev.data.title === "string" ? ev.data.title.trim() : "";
+        if (title) renameText.value = title;
+        break;
+      } else if (ev.event === "error") {
+        renameError.value = typeof ev.data.detail === "string" ? ev.data.detail : "标题生成失败";
+        break;
+      }
+    }
+  } catch (e: any) {
+    if (!controller.signal.aborted) {
+      renameError.value = e?.detail?.detail ?? e?.message ?? "标题生成失败";
+    }
+  } finally {
+    if (titleController === controller) {
+      titleController = null;
+      renameGenerating.value = false;
+    }
+  }
+}
+
 function confirmRename() {
+  if (renameGenerating.value) return;
   if (renameTarget.value && renameText.value.trim()) {
     emit("rename", renameTarget.value.id, renameText.value.trim());
   }
-  renameTarget.value = null;
+  closeRename();
 }
 function askDelete(c: Conversation) {
   openMenuId.value = null;
@@ -253,11 +312,36 @@ async function logout() {
       </div>
     </div>
 
-    <BaseModal :open="!!renameTarget" title="重命名对话" @close="renameTarget = null">
-      <BaseInput v-model="renameText" label="标题" @keydown.enter="confirmRename" />
+    <BaseModal :open="!!renameTarget" title="重命名对话" @close="closeRename">
+      <BaseInput
+        v-model="renameText"
+        label="标题"
+        :disabled="renameGenerating"
+        :error="renameError"
+        :placeholder="renameGenerating ? '正在生成标题…' : ''"
+        @keydown.enter="confirmRename"
+      >
+        <template #label-action>
+          <button
+            type="button"
+            class="focus-ring inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-accent transition-opacity hover:opacity-70 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="renameGenerating"
+            @click="generateRenameTitle"
+          >
+            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3zM18.5 14l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"
+              />
+            </svg>
+            {{ renameGenerating ? "生成中…" : "AI 生成" }}
+          </button>
+        </template>
+      </BaseInput>
       <template #footer>
-        <BaseButton variant="secondary" @click="renameTarget = null">取消</BaseButton>
-        <BaseButton @click="confirmRename">保存</BaseButton>
+        <BaseButton variant="secondary" @click="closeRename">取消</BaseButton>
+        <BaseButton :disabled="renameGenerating" @click="confirmRename">保存</BaseButton>
       </template>
     </BaseModal>
 

@@ -35,6 +35,12 @@ export const useConversationsStore = defineStore("conversations", () => {
     if (current.value?.id === id) current.value.title = title;
   }
 
+  function applyTitle(id: string, title: string) {
+    const idx = conversations.value.findIndex((c) => c.id === id);
+    if (idx >= 0) conversations.value[idx] = { ...conversations.value[idx], title };
+    if (current.value?.id === id) current.value.title = title;
+  }
+
   async function remove(id: string) {
     await api.delete(`/conversations/${id}`);
     conversations.value = conversations.value.filter((c) => c.id !== id);
@@ -51,5 +57,5 @@ export const useConversationsStore = defineStore("conversations", () => {
     loading.value = false;
   }
 
-  return { conversations, current, loading, fetchList, create, open, rename, remove, clearCurrent, reset };
+  return { conversations, current, loading, fetchList, create, open, rename, applyTitle, remove, clearCurrent, reset };
 });

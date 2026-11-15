@@ -112,22 +112,12 @@ async function onDelete(id: string) {
   }
 }
 
-function suggestTitle(text: string): string {
-  const t = text.replace(/\s+/g, " ").trim();
-  return t.length > 24 ? t.slice(0, 24) + "…" : t;
-}
-
 async function onSend(content: string) {
   if (chat.streaming) return;
   try {
     if (!conversations.current) {
       const conv = await conversations.create();
       await openConversation(conv.id);
-    }
-    const current = conversations.current;
-    const fresh = !!current && current.messages.length === 0;
-    if (current && fresh && current.title === "新对话") {
-      void conversations.rename(current.id, suggestTitle(content)).catch(() => {});
     }
     await chat.send(content);
     await conversations.fetchList();

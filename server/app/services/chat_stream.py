@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Conversation, Message
 from app.db.session import SessionLocal
+from app.services import titles
 from app.services.hermes import HermesClient, HermesError
 
 logger = logging.getLogger("whitz.chat")
@@ -662,6 +663,64 @@ class ChatPipeline:
         yield sse("error", {"code": "run_timeout", "detail": "任务仍在后台执行，可稍后重新打开会话查看结果"})
 
 
+_title_inflight: set[uuid.UUID] = set()
+
+
+async def _auto_title_events(
+    db: AsyncSession,
+    conv: Conversation,
+    assistant: Message | None,
+    client: HermesClient,
+) -> AsyncIterator[dict]:
+    if conv.title != "新对话" or assistant is None or assistant.status != "completed":
+        return
+    content = (assistant.content or "").strip()
+    if not content or conv.id in _title_inflight:
+        return
+    first_assistant = (
+        await db.execute(
+            select(Message)
+            .where(Message.conversation_id == conv.id, Message.role == "assistant")
+            .order_by(Message.created_at)
+            .limit(1)
+        )
+    ).scalars().first()
+    if first_assistant is None or first_assistant.id != assistant.id:
+        return
+    user_msg = (
+        await db.execute(
+            select(Message)
+            .where(Message.conversation_id == conv.id, Message.role == "user")
+            .order_by(Message.created_at)
+            .limit(1)
+        )
+    ).scalars().first()
+    if user_msg is None or not (user_msg.content or "").strip():
+        return
+
+    _title_inflight.add(conv.id)
+    try:
+        prompt = titles.build_auto_prompt(user_msg.content, content)
+        title = await asyncio.wait_for(titles.complete_title(prompt), timeout=20)
+        await db.refresh(conv)
+        if conv.title != "新对话":
+            return
+        conv.title = title
+        await db.commit()
+        if conv.hermes_session_id:
+            try:
+                await client.patch_session(conv.hermes_session_id, title)
+            except HermesError:
+                pass
+        yield sse("title.updated", {"conversation_id": str(conv.id), "title": title})
+    except (asyncio.TimeoutError, titles.TitleServiceError):
+        logger.warning("auto title skipped for conversation %s", conv.id)
+    except Exception:
+        logger.exception("auto title failed")
+    finally:
+        _title_inflight.discard(conv.id)
+
+
 async def stream_chat(conv_id: uuid.UUID, profile: str, api_key: str, content: str) -> AsyncIterator[dict]:
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
@@ -709,6 +768,9 @@ async def stream_chat(conv_id: uuid.UUID, profile: str, api_key: str, content: s
             await pipeline.prepare()
             async for ev in pipeline.pump():
                 yield ev
+            if pipeline.terminal:
+                async for ev in _auto_title_events(db, conv, assistant, client):
+                    yield ev
         except HermesError as exc:
             if assistant is not None:
                 assistant.status = "failed"
@@ -750,6 +812,9 @@ async def stream_reconnect(conv_id: uuid.UUID, profile: str, api_key: str, run_i
             await pipeline.prepare()
             async for ev in pipeline.pump():
                 yield ev
+            if pipeline.terminal:
+                async for ev in _auto_title_events(db, conv, assistant, client):
+                    yield ev
         except HermesError as exc:
             assistant.status = "failed"
             conv.active_run_id = None

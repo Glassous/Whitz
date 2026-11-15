@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import get_current_user, get_owned_conversation
 from app.api.schemas import ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate
-from app.db.models import Conversation, User
+from app.db.models import Conversation, Message, User
 from app.db.session import get_db
+from app.services import titles
 from app.services.hermes import HermesClient, HermesError
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -83,6 +85,23 @@ async def rename_conversation(
         finally:
             await client.aclose()
     return conv
+
+
+@router.post("/{conversation_id}/title/generate")
+async def generate_conversation_title(
+    conv: Conversation = Depends(get_owned_conversation),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Message.content)
+        .where(Message.conversation_id == conv.id, Message.role == "user")
+        .order_by(Message.created_at)
+    )
+    messages = [text for text in result.scalars() if isinstance(text, str) and text.strip()]
+    if not messages:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "当前对话还没有可用的用户消息")
+    prompt = titles.build_user_messages_prompt(messages)
+    return EventSourceResponse(titles.title_events(prompt), ping=10)
 
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
