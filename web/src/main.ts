@@ -13,7 +13,7 @@ async function bootstrap() {
   app.use(pinia);
 
   // Resolve the session before the router performs its first navigation so
-  // route guards (adminOnly / requiresAuth) see a fresh user, not stale localStorage.
+  // route guards see a fresh user, not stale localStorage.
   const auth = useAuthStore();
   await auth.init();
 

@@ -95,47 +95,6 @@ export interface ConversationDetail extends Conversation {
   messages: Message[];
 }
 
-export interface AdminUser {
-  id: string;
-  email: string;
-  display_name: string;
-  role: "user" | "admin";
-  is_active: boolean;
-  hermes_profile: string;
-  created_at: string;
-}
-
-export interface AdminUserList {
-  items: AdminUser[];
-  total: number;
-  page: number;
-  page_size: number;
-}
-
-export interface AuditLog {
-  id: number;
-  created_at: string;
-  actor_user_id: string | null;
-  actor_email: string | null;
-  action: string;
-  target_type: string | null;
-  target_id: string | null;
-  outcome: string;
-  severity: string;
-  ip: string | null;
-  user_agent: string | null;
-  request_id: string | null;
-  session_id: string | null;
-  metadata: Record<string, unknown> | null;
-}
-
-export interface AuditLogList {
-  items: AuditLog[];
-  total: number;
-  page: number;
-  page_size: number;
-}
-
 export interface AgentStatus {
   ready: boolean;
   status: string;

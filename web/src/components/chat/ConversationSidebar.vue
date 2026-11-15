@@ -25,6 +25,7 @@ const emit = defineEmits<{
 
 const auth = useAuthStore();
 const router = useRouter();
+const adminUrl = import.meta.env.VITE_ADMIN_URL;
 
 const renameTarget = ref<Conversation | null>(null);
 const renameText = ref("");
@@ -290,16 +291,16 @@ async function logout() {
           </svg>
           设置
         </router-link>
-        <router-link
-          v-if="auth.isAdmin"
-          to="/admin"
+        <a
+          v-if="auth.isAdmin && adminUrl"
+          :href="adminUrl"
           class="focus-ring flex h-8 flex-1 items-center justify-center gap-1.5 rounded-lg text-[12px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
         >
           <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z" />
           </svg>
           管理
-        </router-link>
+        </a>
         <button
           class="focus-ring flex h-8 flex-1 items-center justify-center gap-1.5 rounded-lg text-[12px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
           @click="logout"
