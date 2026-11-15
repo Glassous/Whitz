@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: whitz-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-whitz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whitz_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-whitz}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whitz} -d ${POSTGRES_DB:-whitz}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "127.0.0.1:5434:5432"
+
+  hermes:
+    image: nousresearch/hermes-agent:stable
+    container_name: whitz-hermes
+    restart: unless-stopped
+    command: gateway run
+    environment:
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_KEY: ${HERMES_API_SERVER_KEY}
+      GATEWAY_MULTIPLEX_PROFILES: "true"
+      HERMES_UID: "1000"
+      HERMES_GID: "1000"
+    volumes:
+      - hermes_data:/opt/data
+    ports:
+      - "127.0.0.1:8642:8642"
+    mem_limit: 2g
+
+  server:
+    build: ./server
+    container_name: whitz-server
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-whitz}:${POSTGRES_PASSWORD:-whitz_dev_password}@postgres:5432/${POSTGRES_DB:-whitz}
+      JWT_SECRET: ${JWT_SECRET}
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL: ${LLM_MODEL}
+      HERMES_BASE_URL: http://hermes:8642
+      HERMES_DATA_DIR: /hermes-data
+      HERMES_API_SERVER_KEY: ${HERMES_API_SERVER_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - hermes_data:/hermes-data
+      - ./server/app:/app/app:ro
+      - ./server/alembic:/app/alembic:ro
+    ports:
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hermes:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  hermes_data:
