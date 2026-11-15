@@ -148,3 +148,31 @@ async def test_me_returns_user(register, client):
     resp = await client.get("/api/users/me", headers=auth_header(data["access_token"]))
     assert resp.status_code == 200
     assert resp.json()["email"] == "me@test.local"
+
+
+async def test_refresh_from_cookie(register, client):
+    data = await register(email="cookie@test.local")
+    assert data["refresh_expires_in"] == 15 * 86400
+    # No body: the HttpOnly cookie set at registration is used.
+    resp = await client.post("/api/auth/refresh", json={})
+    assert resp.status_code == 200
+    assert resp.json()["access_token"]
+    # Logout also works from the cookie alone and revokes the whole session.
+    logout = await client.post("/api/auth/logout", json={})
+    assert logout.status_code == 204
+    reuse = await client.post("/api/auth/refresh", json={})
+    assert reuse.status_code == 401
+
+
+async def test_password_change_invalidates_access_token(register, client):
+    data = await register(email="rotate@test.local", password="Passw0rd!")
+    change = await client.put(
+        "/api/users/me/password",
+        json={"old_password": "Passw0rd!", "new_password": "NewPassw0rd!"},
+        headers=auth_header(data["access_token"]),
+    )
+    assert change.status_code == 204
+    stale = await client.get("/api/users/me", headers=auth_header(data["access_token"]))
+    assert stale.status_code == 401
+    reuse = await client.post("/api/auth/refresh", json={"refresh_token": data["refresh_token"]})
+    assert reuse.status_code == 401

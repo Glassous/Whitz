@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -25,7 +25,7 @@ class LoginRequest(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str | None = None
 
 
 class ResetPasswordRequest(BaseModel):
@@ -50,6 +50,8 @@ class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+    expires_in: int
+    refresh_expires_in: int
     user: UserOut
 
 
@@ -116,6 +118,16 @@ class ConversationDetail(ConversationOut):
 
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
+
+
+class ChatTicketRequest(BaseModel):
+    action: Literal["send", "reconnect", "stop", "approval", "clarify"]
+    nonce: str = Field(min_length=8, max_length=64)
+
+
+class ChatTicketOut(BaseModel):
+    ticket: str
+    expires_in: int
 
 
 class ApprovalRequest(BaseModel):

@@ -60,8 +60,10 @@ export async function* streamSSE(
   path: string,
   body: unknown,
   signal?: AbortSignal,
+  extraHeaders: Record<string, string> = {},
 ): AsyncGenerator<SSEEvent> {
   const headers: Record<string, string> = {
+    ...extraHeaders,
     "Content-Type": "application/json",
     Accept: "text/event-stream",
   };
@@ -93,8 +95,12 @@ export async function* streamSSE(
   yield* readSSE(resp.body);
 }
 
-export async function* streamSSEGet(path: string, signal?: AbortSignal): AsyncGenerator<SSEEvent> {
-  const headers: Record<string, string> = { Accept: "text/event-stream" };
+export async function* streamSSEGet(
+  path: string,
+  signal?: AbortSignal,
+  extraHeaders: Record<string, string> = {},
+): AsyncGenerator<SSEEvent> {
+  const headers: Record<string, string> = { ...extraHeaders, Accept: "text/event-stream" };
   const token = getAccessToken();
   if (token) headers["Authorization"] = "Bearer " + token;
   let resp = await fetch("/api" + path, { method: "GET", headers, signal });

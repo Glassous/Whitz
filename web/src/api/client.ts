@@ -1,32 +1,35 @@
 import type { AuthResponse } from "../types";
 
-const ACCESS_KEY = "whitz_access";
-const REFRESH_KEY = "whitz_refresh";
 const USER_KEY = "whitz_user";
-
 const BASE = "/api";
 
-export function getAccessToken(): string | null {
-  return localStorage.getItem(ACCESS_KEY);
-}
+// The access token stays in memory; the refresh token lives in an HttpOnly cookie.
+let accessToken: string | null = null;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let lastRefreshAt = 0;
 
-export function getRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_KEY);
+export function getAccessToken(): string | null {
+  return accessToken;
 }
 
 export function setSession(auth: AuthResponse): void {
-  localStorage.setItem(ACCESS_KEY, auth.access_token);
-  localStorage.setItem(REFRESH_KEY, auth.refresh_token);
+  accessToken = auth.access_token;
+  lastRefreshAt = Date.now();
   localStorage.setItem(USER_KEY, JSON.stringify(auth.user));
+  scheduleAutoRefresh(auth.expires_in);
 }
 
 export function updateAccessToken(token: string): void {
-  localStorage.setItem(ACCESS_KEY, token);
+  accessToken = token;
 }
 
 export function clearSession(): void {
-  localStorage.removeItem(ACCESS_KEY);
-  localStorage.removeItem(REFRESH_KEY);
+  accessToken = null;
+  lastRefreshAt = 0;
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
   localStorage.removeItem(USER_KEY);
 }
 
@@ -38,6 +41,19 @@ export function readStoredUser(): AuthResponse["user"] | null {
   } catch {
     return null;
   }
+}
+
+export function hasStoredSession(): boolean {
+  return readStoredUser() !== null;
+}
+
+function scheduleAutoRefresh(expiresIn?: number): void {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  const ttlMs = (expiresIn && expiresIn > 0 ? expiresIn : 15 * 60) * 1000;
+  const delay = Math.max(30_000, ttlMs - 60_000);
+  refreshTimer = setTimeout(() => {
+    void refreshOnce();
+  }, delay);
 }
 
 let unauthorizedHandler: (() => void) | null = null;
@@ -67,15 +83,23 @@ async function parseBody(resp: Response): Promise<unknown> {
 
 let refreshPromise: Promise<boolean> | null = null;
 
+async function callRefresh(): Promise<Response> {
+  return fetch(BASE + "/auth/refresh", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+}
+
 async function doRefresh(): Promise<boolean> {
-  const refresh = getRefreshToken();
-  if (!refresh) return false;
   try {
-    const resp = await fetch(BASE + "/auth/refresh", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refresh }),
-    });
+    let resp = await callRefresh();
+    if (resp.status === 401) {
+      // Another tab may have rotated the cookie a moment ago; retry once with the fresh cookie.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      resp = await callRefresh();
+    }
     if (!resp.ok) return false;
     const auth = (await resp.json()) as AuthResponse;
     setSession(auth);
@@ -98,14 +122,23 @@ export function tryRefresh(): Promise<boolean> {
   return refreshOnce();
 }
 
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && accessToken && Date.now() - lastRefreshAt > 5 * 60_000) {
+      void refreshOnce();
+    }
+  });
+}
+
 export interface RequestOptions {
   body?: unknown;
   signal?: AbortSignal;
   raw?: boolean;
+  headers?: Record<string, string>;
 }
 
 export async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...(opts.headers ?? {}) };
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
   const token = getAccessToken();
   if (token) headers["Authorization"] = "Bearer " + token;
@@ -113,17 +146,19 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
   let resp = await fetch(BASE + path, {
     method,
     headers,
+    credentials: "include",
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     signal: opts.signal,
   });
 
-  if (resp.status === 401 && getRefreshToken()) {
+  if (resp.status === 401 && !path.startsWith("/auth/")) {
     const ok = await refreshOnce();
     if (ok) {
       const retryHeaders = { ...headers, Authorization: "Bearer " + getAccessToken() };
       resp = await fetch(BASE + path, {
         method,
         headers: retryHeaders,
+        credentials: "include",
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
         signal: opts.signal,
       });
@@ -143,6 +178,19 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
   if (opts.raw) return resp as unknown as T;
   if (resp.status === 204) return undefined as unknown as T;
   return (await parseBody(resp)) as T;
+}
+
+export async function revokeSession(): Promise<void> {
+  try {
+    await fetch(BASE + "/auth/logout", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+  } catch {
+    /* ignore */
+  }
 }
 
 export const api = {

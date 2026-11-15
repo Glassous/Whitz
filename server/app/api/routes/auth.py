@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -29,7 +29,7 @@ from app.core.security import (
 )
 from app.db.models import RefreshToken, SecurityQuestion, User
 from app.db.session import get_db
-from app.services import provisioning
+from app.services import audit, provisioning
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -37,26 +37,97 @@ MAX_RESET_ATTEMPTS = 5
 RESET_LOCK_MINUTES = 15
 
 
-async def issue_tokens(db: AsyncSession, user: User) -> TokenResponse:
+async def issue_tokens(
+    db: AsyncSession,
+    user: User,
+    request: Request,
+    response: Response,
+    *,
+    session_id: uuid.UUID | None = None,
+    family_id: uuid.UUID | None = None,
+) -> TokenResponse:
     settings = get_settings()
+    now = datetime.now(timezone.utc)
+    session_id = session_id or uuid.uuid4()
+    family_id = family_id or session_id
     refresh = generate_refresh_token()
     db.add(
         RefreshToken(
             user_id=user.id,
             token_hash=hash_refresh_token(refresh),
-            expires_at=datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_ttl_days),
+            session_id=session_id,
+            family_id=family_id,
+            user_agent=_user_agent(request),
+            client_ip=_client_ip(request),
+            last_used_at=now,
+            expires_at=now + timedelta(days=settings.jwt_refresh_ttl_days),
         )
     )
     await db.commit()
+    _set_refresh_cookie(response, refresh)
     return TokenResponse(
-        access_token=create_access_token(user.id),
+        access_token=create_access_token(user.id, session_id, user.token_version or 0),
         refresh_token=refresh,
+        expires_in=settings.jwt_access_ttl_minutes * 60,
+        refresh_expires_in=settings.jwt_refresh_ttl_days * 86400,
         user=UserOut.model_validate(user),
     )
 
 
+def _client_ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
+
+
+def _user_agent(request: Request) -> str | None:
+    ua = request.headers.get("user-agent")
+    return ua[:256] if ua else None
+
+
+def _set_refresh_cookie(response: Response, refresh: str) -> None:
+    settings = get_settings()
+    if not settings.auth_cookie_enabled:
+        return
+    response.set_cookie(
+        settings.auth_cookie_name,
+        refresh,
+        max_age=settings.jwt_refresh_ttl_days * 86400,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,  # type: ignore[arg-type]
+        path=settings.auth_cookie_path,
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    settings = get_settings()
+    if not settings.auth_cookie_enabled:
+        return
+    response.delete_cookie(settings.auth_cookie_name, path=settings.auth_cookie_path)
+
+
+def _submitted_refresh(body: RefreshRequest, request: Request) -> str | None:
+    return body.refresh_token or request.cookies.get(get_settings().auth_cookie_name)
+
+
+async def _revoke_family(db: AsyncSession, token: RefreshToken, now: datetime) -> None:
+    if token.family_id is not None:
+        await db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.family_id == token.family_id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=now)
+        )
+    elif token.revoked_at is None:
+        token.revoked_at = now
+    await db.commit()
+
+
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
+async def register(
+    body: RegisterRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
     email = body.email.lower()
     existing = await db.execute(select(User).where(User.email == email))
     if existing.scalar_one_or_none() is not None:
@@ -82,45 +153,136 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Agent 存储初始化失败: {exc}")
     await db.commit()
     await db.refresh(user)
-    return await issue_tokens(db, user)
+    tokens = await issue_tokens(db, user, request, response)
+    await audit.record("auth.register", actor=user, request=request, session_id=None)
+    return tokens
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
+async def login(
+    body: LoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
     result = await db.execute(select(User).where(User.email == body.email.lower()))
     user = result.scalar_one_or_none()
     if user is None or not verify_password(body.password, user.password_hash):
+        await audit.record(
+            "auth.login_failed",
+            actor=user.id if user else None,
+            actor_email=body.email.lower(),
+            outcome="failure",
+            severity="warning",
+            request=request,
+        )
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "邮箱或密码错误")
     if not user.is_active:
+        await audit.record(
+            "auth.login_blocked",
+            actor=user,
+            outcome="failure",
+            severity="warning",
+            request=request,
+        )
         raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已被禁用")
-    return await issue_tokens(db, user)
+    tokens = await issue_tokens(db, user, request, response)
+    await audit.record("auth.login", actor=user, request=request)
+    return tokens
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
-    token_hash = hash_refresh_token(body.refresh_token)
-    result = await db.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
+async def refresh(
+    body: RefreshRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    raw = _submitted_refresh(body, request)
+    if not raw:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "刷新令牌无效或已过期")
+    token_hash = hash_refresh_token(raw)
+    result = await db.execute(
+        select(RefreshToken).where(RefreshToken.token_hash == token_hash).with_for_update()
+    )
     token = result.scalar_one_or_none()
     now = datetime.now(timezone.utc)
-    if token is None or token.revoked_at is not None or token.expires_at < now:
+    if token is None or token.expires_at < now:
+        _clear_refresh_cookie(response)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "刷新令牌无效或已过期")
+    if token.revoked_at is not None:
+        settings = get_settings()
+        within_grace = (
+            token.rotated_at is not None
+            and (now - token.rotated_at).total_seconds() <= settings.auth_refresh_grace_seconds
+        )
+        if not within_grace:
+            await _revoke_family(db, token, now)
+        await audit.record(
+            "auth.refresh_reuse",
+            actor=token.user_id,
+            outcome="failure",
+            severity="warning",
+            request=request,
+            metadata={"within_grace": within_grace},
+        )
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "刷新令牌无效或已过期")
     user = await db.get(User, token.user_id)
     if user is None or not user.is_active:
+        _clear_refresh_cookie(response)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号不存在或已被禁用")
+
+    settings = get_settings()
+    session_id = token.session_id or token.id
+    family_id = token.family_id or token.id
+    new_refresh = generate_refresh_token()
     token.revoked_at = now
+    token.rotated_at = now
+    token.last_used_at = now
+    token.replaced_by_hash = hash_refresh_token(new_refresh)
+    db.add(
+        RefreshToken(
+            user_id=user.id,
+            token_hash=hash_refresh_token(new_refresh),
+            session_id=session_id,
+            family_id=family_id,
+            user_agent=_user_agent(request),
+            client_ip=_client_ip(request),
+            last_used_at=now,
+            expires_at=now + timedelta(days=settings.jwt_refresh_ttl_days),
+        )
+    )
     await db.commit()
-    return await issue_tokens(db, user)
+    _set_refresh_cookie(response, new_refresh)
+    return TokenResponse(
+        access_token=create_access_token(user.id, session_id, user.token_version or 0),
+        refresh_token=new_refresh,
+        expires_in=settings.jwt_access_ttl_minutes * 60,
+        refresh_expires_in=settings.jwt_refresh_ttl_days * 86400,
+        user=UserOut.model_validate(user),
+    )
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(body: RefreshRequest, db: AsyncSession = Depends(get_db)) -> None:
-    token_hash = hash_refresh_token(body.refresh_token)
-    await db.execute(
-        update(RefreshToken)
-        .where(RefreshToken.token_hash == token_hash, RefreshToken.revoked_at.is_(None))
-        .values(revoked_at=datetime.now(timezone.utc))
-    )
-    await db.commit()
+async def logout(
+    body: RefreshRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    raw = _submitted_refresh(body, request)
+    now = datetime.now(timezone.utc)
+    if raw:
+        result = await db.execute(
+            select(RefreshToken)
+            .where(RefreshToken.token_hash == hash_refresh_token(raw))
+            .with_for_update()
+        )
+        token = result.scalar_one_or_none()
+        if token is not None:
+            await _revoke_family(db, token, now)
+            await audit.record("auth.logout", actor=token.user_id, request=request)
+    _clear_refresh_cookie(response)
 
 
 @router.get("/security-questions", response_model=list[SecurityQuestionOut])
@@ -155,6 +317,13 @@ async def reset_password(
 
     now = datetime.now(timezone.utc)
     if user.reset_locked_until is not None and user.reset_locked_until > now:
+        await audit.record(
+            "auth.reset_locked",
+            actor=user,
+            outcome="failure",
+            severity="warning",
+            request=request,
+        )
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "失败次数过多，账号已临时锁定，请稍后再试")
 
     questions = sorted(user.security_questions, key=lambda q: q.position)
@@ -167,9 +336,17 @@ async def reset_password(
             user.reset_locked_until = now + timedelta(minutes=RESET_LOCK_MINUTES)
             user.reset_failed_attempts = 0
         await db.commit()
+        await audit.record(
+            "auth.reset_failed",
+            actor=user,
+            outcome="failure",
+            severity="warning",
+            request=request,
+        )
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "密保答案不正确")
 
     user.password_hash = hash_password(body.new_password)
+    user.token_version = (user.token_version or 0) + 1
     user.reset_failed_attempts = 0
     user.reset_locked_until = None
     await db.execute(
@@ -178,3 +355,4 @@ async def reset_password(
         .values(revoked_at=now)
     )
     await db.commit()
+    await audit.record("auth.password_reset", actor=user, request=request)

@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { api } from "../api/client";
+import { chatTicketHeaders } from "../api/chatTickets";
 import { streamSSE, streamSSEGet, type SSEEvent } from "../api/sse";
 import type { ConversationDetail, Message, PendingControl, Plan, PlanItem, ReasoningBlock } from "../types";
 import { useConversationsStore } from "./conversations";
@@ -406,20 +407,40 @@ export const useChatStore = defineStore("chat", () => {
     selectedTurnId.value = assistantId;
     streaming.value = true;
     controller = new AbortController();
-    await consume(streamSSE(`/conversations/${convId.value}/messages`, { content }, controller.signal));
+    try {
+      const headers = await chatTicketHeaders(convId.value, "send");
+      await consume(
+        streamSSE(`/conversations/${convId.value}/messages`, { content }, controller.signal, headers),
+      );
+    } catch (e: any) {
+      error.value = e?.message ?? "发送失败";
+      const a = assistant();
+      if (a && a.status === "streaming") a.status = "failed";
+      finishRun();
+    }
   }
 
   async function reconnect(runId: string) {
     if (!convId.value) return;
     streaming.value = true;
     controller = new AbortController();
-    await consume(streamSSEGet(`/conversations/${convId.value}/runs/${runId}/events`, controller.signal));
+    try {
+      const headers = await chatTicketHeaders(convId.value, "reconnect");
+      await consume(
+        streamSSEGet(`/conversations/${convId.value}/runs/${runId}/events`, controller.signal, headers),
+      );
+    } catch (e: any) {
+      error.value = e?.message ?? "连接中断";
+      streaming.value = false;
+      finishRun();
+    }
   }
 
   async function stop() {
     if (!convId.value) return;
     try {
-      await api.post(`/conversations/${convId.value}/stop`, {});
+      const headers = await chatTicketHeaders(convId.value, "stop");
+      await api.post(`/conversations/${convId.value}/stop`, {}, { headers });
     } catch (e: any) {
       error.value = e?.message ?? "停止失败";
     }
@@ -429,11 +450,16 @@ export const useChatStore = defineStore("chat", () => {
     if (!convId.value || !pendingControl.value) return;
     const c = pendingControl.value;
     try {
-      await api.post(`/conversations/${convId.value}/approval`, {
-        request_id: c.request_id,
-        execution_generation: c.execution_generation,
-        choice,
-      });
+      const headers = await chatTicketHeaders(convId.value, "approval");
+      await api.post(
+        `/conversations/${convId.value}/approval`,
+        {
+          request_id: c.request_id,
+          execution_generation: c.execution_generation,
+          choice,
+        },
+        { headers },
+      );
       pendingControl.value = null;
       const a = assistant();
       if (a) a.status = "streaming";
@@ -446,11 +472,16 @@ export const useChatStore = defineStore("chat", () => {
     if (!convId.value || !pendingControl.value) return;
     const c = pendingControl.value;
     try {
-      await api.post(`/conversations/${convId.value}/clarify`, {
-        request_id: c.request_id,
-        execution_generation: c.execution_generation,
-        answer,
-      });
+      const headers = await chatTicketHeaders(convId.value, "clarify");
+      await api.post(
+        `/conversations/${convId.value}/clarify`,
+        {
+          request_id: c.request_id,
+          execution_generation: c.execution_generation,
+          answer,
+        },
+        { headers },
+      );
       pendingControl.value = null;
       const a = assistant();
       if (a) a.status = "streaming";

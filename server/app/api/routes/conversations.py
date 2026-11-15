@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -10,7 +10,7 @@ from app.api.deps import get_current_user, get_owned_conversation
 from app.api.schemas import ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate
 from app.db.models import Conversation, Message, User
 from app.db.session import get_db
-from app.services import titles
+from app.services import audit, titles
 from app.services.hermes import HermesClient, HermesError
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -31,6 +31,7 @@ async def list_conversations(
 @router.post("", response_model=ConversationOut, status_code=status.HTTP_201_CREATED)
 async def create_conversation(
     body: ConversationCreate,
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Conversation:
@@ -48,6 +49,13 @@ async def create_conversation(
         pass
     finally:
         await client.aclose()
+    await audit.record(
+        "conversation.create",
+        actor=user,
+        target_type="conversation",
+        target_id=conv.id,
+        request=request,
+    )
     return conv
 
 
@@ -69,6 +77,7 @@ async def get_conversation(
 @router.patch("/{conversation_id}", response_model=ConversationOut)
 async def rename_conversation(
     body: ConversationUpdate,
+    request: Request,
     conv: Conversation = Depends(get_owned_conversation),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -84,6 +93,14 @@ async def rename_conversation(
             pass
         finally:
             await client.aclose()
+    await audit.record(
+        "conversation.rename",
+        actor=user,
+        target_type="conversation",
+        target_id=conv.id,
+        request=request,
+        metadata={"title": body.title},
+    )
     return conv
 
 
@@ -106,10 +123,12 @@ async def generate_conversation_title(
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_conversation(
+    request: Request,
     conv: Conversation = Depends(get_owned_conversation),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    conv_id = conv.id
     if conv.hermes_session_id:
         client = HermesClient(user.hermes_profile, user.hermes_api_key)
         try:
@@ -120,3 +139,10 @@ async def delete_conversation(
             await client.aclose()
     await db.delete(conv)
     await db.commit()
+    await audit.record(
+        "conversation.delete",
+        actor=user,
+        target_type="conversation",
+        target_id=conv_id,
+        request=request,
+    )

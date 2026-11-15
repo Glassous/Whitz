@@ -12,6 +12,8 @@ export interface AuthResponse {
   access_token: string;
   refresh_token: string;
   token_type: string;
+  expires_in?: number;
+  refresh_expires_in?: number;
   user: User;
 }
 
@@ -105,6 +107,30 @@ export interface AdminUser {
 
 export interface AdminUserList {
   items: AdminUser[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface AuditLog {
+  id: number;
+  created_at: string;
+  actor_user_id: string | null;
+  actor_email: string | null;
+  action: string;
+  target_type: string | null;
+  target_id: string | null;
+  outcome: string;
+  severity: string;
+  ip: string | null;
+  user_agent: string | null;
+  request_id: string | null;
+  session_id: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface AuditLogList {
+  items: AuditLog[];
   total: number;
   page: number;
   page_size: number;

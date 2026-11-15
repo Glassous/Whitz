@@ -126,7 +126,7 @@ def _content_value(value) -> str:
 
 async def complete_title(prompt: str) -> str:
     timeout = httpx.Timeout(20.0, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         resp = await client.post(_chat_url(), headers=_headers(), json=_payload(prompt, False))
         if resp.status_code >= 400:
             raise TitleServiceError(f"标题服务返回 {resp.status_code}")
@@ -142,7 +142,7 @@ async def complete_title(prompt: str) -> str:
 
 async def stream_title(prompt: str) -> AsyncIterator[str]:
     timeout = httpx.Timeout(30.0, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         async with client.stream("POST", _chat_url(), headers=_headers(), json=_payload(prompt, True)) as resp:
             if resp.status_code >= 400:
                 raise TitleServiceError(f"标题服务返回 {resp.status_code}")

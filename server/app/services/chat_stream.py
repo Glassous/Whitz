@@ -6,12 +6,13 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.db.models import Conversation, Message
 from app.db.session import SessionLocal
-from app.services import titles
+from app.services import titles, usage
 from app.services.hermes import HermesClient, HermesError
 
 logger = logging.getLogger("whitz.chat")
@@ -624,21 +625,50 @@ class ChatPipeline:
             return None
         return str(run.get("status") or ""), run
 
-    async def pump(self) -> AsyncIterator[dict]:
+    async def _abort_timeout(self) -> None:
+        self.terminal = True
+        self.assistant.content = "".join(self.buffer)
+        self.assistant.status = "failed"
         try:
-            async for name, payload in self.client.stream_run_events(self.run_id):
-                async for ev in self.handle(name, payload):
-                    yield ev
-                if self.terminal:
-                    break
+            await asyncio.wait_for(self.client.stop_run(self.run_id), timeout=10)
+        except (HermesError, asyncio.TimeoutError):
+            pass
+        await self._clear_active()
+        await self.db.commit()
+
+    async def pump(self) -> AsyncIterator[dict]:
+        settings = get_settings()
+        deadline = time.monotonic() + settings.run_max_seconds
+        timed_out = False
+        try:
+            async with asyncio.timeout(max(1.0, deadline - time.monotonic())):
+                async for name, payload in self.client.stream_run_events(self.run_id):
+                    async for ev in self.handle(name, payload):
+                        yield ev
+                    if self.terminal:
+                        break
+        except TimeoutError:
+            timed_out = True
         except HermesError as exc:
             if exc.status_code != 404:
                 raise
         if self.terminal:
             return
+        if timed_out:
+            await self._abort_timeout()
+            yield sse(
+                "run.failed",
+                {
+                    "error": "运行超过时长上限，已终止",
+                    "output": self.assistant.content,
+                    "plan": self.plan,
+                    "reasoning": self.reasoning or None,
+                },
+            )
+            return
 
         # Event replay expired or the stream closed early: reconcile via run status.
-        for _ in range(900):
+        while time.monotonic() < deadline:
             state = await self._run_state()
             if state is None:
                 self.assistant.status = "failed"
@@ -660,7 +690,16 @@ class ChatPipeline:
             yield sse("run.polling", {"run_id": self.run_id, "status": run_status})
             await asyncio.sleep(2)
 
-        yield sse("error", {"code": "run_timeout", "detail": "任务仍在后台执行，可稍后重新打开会话查看结果"})
+        await self._abort_timeout()
+        yield sse(
+            "run.failed",
+            {
+                "error": "运行超过时长上限，已终止",
+                "output": self.assistant.content,
+                "plan": self.plan,
+                "reasoning": self.reasoning or None,
+            },
+        )
 
 
 _title_inflight: set[uuid.UUID] = set()
@@ -721,12 +760,25 @@ async def _auto_title_events(
         _title_inflight.discard(conv.id)
 
 
-async def stream_chat(conv_id: uuid.UUID, profile: str, api_key: str, content: str) -> AsyncIterator[dict]:
+async def stream_chat(
+    conv_id: uuid.UUID, user_id: uuid.UUID, profile: str, api_key: str, content: str
+) -> AsyncIterator[dict]:
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
         if conv is None:
             yield sse("error", {"code": "not_found"})
             return
+        now = datetime.now(timezone.utc)
+        claimed = await db.execute(
+            update(Conversation)
+            .where(Conversation.id == conv_id, Conversation.active_run_id.is_(None))
+            .values(active_run_id="pending", active_run_status="starting", last_message_at=now)
+        )
+        await db.commit()
+        if not claimed.rowcount:
+            yield sse("error", {"code": "run_in_progress", "detail": "当前会话有进行中的任务"})
+            return
+        await db.refresh(conv)
         client = HermesClient(profile, api_key)
         assistant = None
         try:
@@ -753,6 +805,7 @@ async def stream_chat(conv_id: uuid.UUID, profile: str, api_key: str, content: s
             conv.plan = None
             conv.last_message_at = datetime.now(timezone.utc)
             await db.commit()
+            await usage.record_message(db, user_id)
             yield sse("message.created", {"user_message_id": str(user_msg.id), "assistant_message_id": str(assistant.id)})
 
             run_started = time.time() - 2
@@ -768,23 +821,26 @@ async def stream_chat(conv_id: uuid.UUID, profile: str, api_key: str, content: s
             await pipeline.prepare()
             async for ev in pipeline.pump():
                 yield ev
+            if pipeline.terminal and assistant.status == "completed":
+                tokens = usage.tokens_from_usage((assistant.tool_payload or {}).get("usage"))
+                await usage.record_tokens(db, user_id, tokens)
             if pipeline.terminal:
                 async for ev in _auto_title_events(db, conv, assistant, client):
                     yield ev
         except HermesError as exc:
             if assistant is not None:
                 assistant.status = "failed"
-                conv.active_run_id = None
-                conv.active_run_status = None
-                await db.commit()
+            conv.active_run_id = None
+            conv.active_run_status = None
+            await db.commit()
             yield sse("error", {"code": "hermes_error", "status": exc.status_code, "detail": exc.detail})
         except Exception as exc:
             logger.exception("chat stream failed")
             if assistant is not None:
                 assistant.status = "failed"
-                conv.active_run_id = None
-                conv.active_run_status = None
-                await db.commit()
+            conv.active_run_id = None
+            conv.active_run_status = None
+            await db.commit()
             yield sse("error", {"code": "internal_error", "detail": str(exc)})
         finally:
             await client.aclose()
@@ -800,18 +856,20 @@ async def stream_reconnect(conv_id: uuid.UUID, profile: str, api_key: str, run_i
             select(Message).where(Message.conversation_id == conv.id, Message.hermes_run_id == run_id, Message.role == "assistant")
         )
         assistant = result.scalars().first()
+        if assistant is None:
+            yield sse("error", {"code": "run_not_found", "detail": "未找到对应的运行记录"})
+            return
         client = HermesClient(profile, api_key)
         try:
-            if assistant is None:
-                assistant = Message(conversation_id=conv.id, role="assistant", content="", status="streaming", hermes_run_id=run_id)
-                db.add(assistant)
-                await db.commit()
             yield sse("run.reconnected", {"run_id": run_id, "assistant_message_id": str(assistant.id)})
             pipeline = ChatPipeline(db, client, conv, assistant, run_id)
             pipeline.buffer = [assistant.content or ""]
             await pipeline.prepare()
             async for ev in pipeline.pump():
                 yield ev
+            if pipeline.terminal and assistant.status == "completed":
+                tokens = usage.tokens_from_usage((assistant.tool_payload or {}).get("usage"))
+                await usage.record_tokens(db, conv.user_id, tokens)
             if pipeline.terminal:
                 async for ev in _auto_title_events(db, conv, assistant, client):
                     yield ev

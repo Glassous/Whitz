@@ -1,6 +1,14 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import { api, clearSession, getAccessToken, readStoredUser, setSession } from "../api/client";
+import {
+  api,
+  clearSession,
+  hasStoredSession,
+  readStoredUser,
+  revokeSession,
+  setSession,
+  tryRefresh,
+} from "../api/client";
 import type { AuthResponse, SecurityQuestionInput, User } from "../types";
 import { useConversationsStore } from "./conversations";
 import { useChatStore } from "./chat";
@@ -9,7 +17,7 @@ export const useAuthStore = defineStore("auth", () => {
   const user = ref<User | null>(readStoredUser());
   const ready = ref(false);
 
-  const isAuthenticated = computed(() => !!user.value && !!getAccessToken());
+  const isAuthenticated = computed(() => !!user.value);
   const isAdmin = computed(() => user.value?.role === "admin");
 
   function applySession(auth: AuthResponse) {
@@ -18,10 +26,16 @@ export const useAuthStore = defineStore("auth", () => {
   }
 
   async function init() {
-    if (getAccessToken() && user.value) {
-      try {
-        user.value = await api.get<User>("/users/me");
-      } catch {
+    if (hasStoredSession()) {
+      const refreshed = await tryRefresh();
+      if (refreshed) {
+        try {
+          user.value = await api.get<User>("/users/me");
+        } catch {
+          clearSession();
+          user.value = null;
+        }
+      } else {
         clearSession();
         user.value = null;
       }
@@ -52,14 +66,7 @@ export const useAuthStore = defineStore("auth", () => {
   }
 
   async function logout() {
-    const refresh = localStorage.getItem("whitz_refresh");
-    if (refresh) {
-      try {
-        await api.post("/auth/logout", { refresh_token: refresh });
-      } catch {
-        /* ignore */
-      }
-    }
+    await revokeSession();
     forceLogout();
   }
 

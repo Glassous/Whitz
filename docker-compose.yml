@@ -3,12 +3,35 @@ services:
     image: postgres:17-alpine
     container_name: whitz-postgres
     restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - max_connections=30
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - wal_buffers=4MB
+      - -c
+      - min_wal_size=128MB
+      - -c
+      - max_wal_size=512MB
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - random_page_cost=1.1
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-whitz}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whitz_dev_password}
       POSTGRES_DB: ${POSTGRES_DB:-whitz}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    shm_size: 128mb
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whitz} -d ${POSTGRES_DB:-whitz}"]
       interval: 5s
@@ -16,6 +39,52 @@ services:
       retries: 12
     ports:
       - "127.0.0.1:5434:5432"
+    mem_limit: 512m
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - whitz_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: whitz-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --auto-aof-rewrite-percentage
+      - "100"
+      - --auto-aof-rewrite-min-size
+      - 32mb
+      - --maxmemory
+      - 96mb
+      - --maxmemory-policy
+      - noeviction
+      - --save
+      - ""
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    mem_limit: 128m
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - whitz_net
 
   hermes:
     image: nousresearch/hermes-agent:stable
@@ -33,7 +102,14 @@ services:
       - hermes_data:/opt/data
     ports:
       - "127.0.0.1:8642:8642"
-    mem_limit: 2g
+    mem_limit: 1536m
+    memswap_limit: 2g
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - whitz_net
 
   server:
     build: ./server
@@ -41,8 +117,14 @@ services:
     restart: unless-stopped
     user: "1000:1000"
     environment:
+      APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-whitz}:${POSTGRES_PASSWORD:-whitz_dev_password}@postgres:5432/${POSTGRES_DB:-whitz}
+      REDIS_URL: redis://redis:6379/0
       JWT_SECRET: ${JWT_SECRET}
+      JWT_ACCESS_TTL_MINUTES: ${JWT_ACCESS_TTL_MINUTES:-15}
+      JWT_REFRESH_TTL_DAYS: ${JWT_REFRESH_TTL_DAYS:-15}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_MODEL: ${LLM_MODEL}
@@ -52,20 +134,50 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-2}
+      MAX_CONCURRENT_RUNS_PER_USER: ${MAX_CONCURRENT_RUNS_PER_USER:-1}
+      MAX_SSE_STREAMS: ${MAX_SSE_STREAMS:-6}
+      MAX_SSE_STREAMS_PER_USER: ${MAX_SSE_STREAMS_PER_USER:-2}
+      RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-900}
+      DAILY_MESSAGE_LIMIT: ${DAILY_MESSAGE_LIMIT:-100}
+      DAILY_TOKEN_LIMIT: ${DAILY_TOKEN_LIMIT:-100000}
+      CHAT_RATE_PER_MINUTE: ${CHAT_RATE_PER_MINUTE:-30}
+      STRICT_TICKET_IP: ${STRICT_TICKET_IP:-false}
+      AUDIT_ENABLED: ${AUDIT_ENABLED:-true}
       PYTHONDONTWRITEBYTECODE: "1"
     volumes:
       - hermes_data:/hermes-data
-      - ./server/app:/app/app:ro
-      - ./server/alembic:/app/alembic:ro
     ports:
       - "127.0.0.1:8001:8000"
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       hermes:
         condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
+    logging: *default-logging
+    networks:
+      - whitz_net
 
 volumes:
   postgres_data:
+  redis_data:
   hermes_data:
+
+networks:
+  whitz_net:
+    driver: bridge

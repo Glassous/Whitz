@@ -12,6 +12,7 @@ os.environ["LLM_BASE_URL"] = "http://llm.test/v1"
 os.environ["LLM_API_KEY"] = "sk-test"
 os.environ["LLM_MODEL"] = "test-model"
 os.environ["HERMES_API_SERVER_KEY"] = "test-gateway-key"
+os.environ["REDIS_URL"] = "memory://"
 
 import asyncpg
 import httpx
@@ -24,6 +25,7 @@ from app.core import ratelimit
 from app.db.models import Base
 from app.db.session import get_db
 from app.main import create_app
+from app.services import audit as audit_service
 
 PG = {"host": "localhost", "port": 5434, "user": "whitz", "password": "whitz_dev_password"}
 TEST_DB = "whitz_test"
@@ -76,9 +78,8 @@ async def engine():
     await _ensure_database()
     eng = create_async_engine(os.environ["DATABASE_URL"])
     async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(table.delete())
     yield eng
     await eng.dispose()
 
@@ -87,6 +88,7 @@ async def engine():
 async def app(engine, monkeypatch):
     monkeypatch.setattr(conversations_routes, "HermesClient", FakeHermesClient)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(audit_service, "SessionLocal", session_factory)
     application = create_app()
 
     async def _override_get_db():

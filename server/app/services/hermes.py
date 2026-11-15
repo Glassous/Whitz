@@ -24,14 +24,18 @@ class HermesClient:
         self._client = httpx.AsyncClient(
             base_url=self.base,
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=httpx.Timeout(30.0, read=None),
+            timeout=httpx.Timeout(60.0),
+            trust_env=False,
         )
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        resp = await self._client.request(method, path, **kwargs)
+        try:
+            resp = await self._client.request(method, path, **kwargs)
+        except httpx.HTTPError as exc:
+            raise HermesError(503, "agent_unreachable") from exc
         if resp.status_code >= 400:
             try:
                 detail = resp.json()
@@ -113,13 +117,18 @@ class HermesClient:
         ).json()
 
     async def stream_run_events(self, run_id: str) -> AsyncIterator[tuple[str, dict]]:
-        async with self._client.stream("GET", f"/v1/runs/{run_id}/events") as resp:
-            if resp.status_code >= 400:
-                await resp.aread()
-                try:
-                    detail = resp.json()
-                except Exception:
-                    detail = resp.text
-                raise HermesError(resp.status_code, detail)
-            async for event in iter_sse(resp):
-                yield event
+        try:
+            async with self._client.stream(
+                "GET", f"/v1/runs/{run_id}/events", timeout=httpx.Timeout(30.0, read=None)
+            ) as resp:
+                if resp.status_code >= 400:
+                    await resp.aread()
+                    try:
+                        detail = resp.json()
+                    except Exception:
+                        detail = resp.text
+                    raise HermesError(resp.status_code, detail)
+                async for event in iter_sse(resp):
+                    yield event
+        except httpx.HTTPError as exc:
+            raise HermesError(503, "agent_unreachable") from exc
