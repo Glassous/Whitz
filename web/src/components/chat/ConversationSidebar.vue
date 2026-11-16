@@ -301,21 +301,22 @@ function isRunning(c: Conversation): boolean {
 
     <!-- Brand header (fixed left padding so W never shifts) -->
     <div class="relative z-10 flex shrink-0 items-center justify-between px-3.5 pb-2 pt-3.5">
-      <div class="flex min-w-0 items-center gap-2.5">
+      <div class="flex min-w-0 items-center">
         <button
           type="button"
-          class="focus-ring relative flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] bg-primary text-primary-fg transition-transform duration-200 hover:scale-[1.03] active:scale-[0.98]"
+          class="focus-ring relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg transition-transform duration-200 hover:scale-[1.04] active:scale-[0.97]"
           title="Whitz"
+          aria-label="Whitz 新建对话"
           @click="create"
         >
-          <span class="text-[15px] font-bold tracking-tight">W</span>
+          <span class="brand-mark-tight h-[16px] w-[24px]" aria-hidden="true" />
         </button>
 
         <span
-          class="whitespace-nowrap text-[16.5px] font-semibold tracking-tight text-fg transition-opacity duration-200"
+          class="-ml-[7px] translate-y-[0.5px] select-none whitespace-nowrap text-[22px] font-semibold leading-none tracking-tight text-fg transition-opacity duration-200"
           :class="isRail ? 'pointer-events-none opacity-0' : 'opacity-100'"
         >
-          Whitz
+          hitz
         </span>
       </div>
 

@@ -239,16 +239,9 @@ onBeforeUnmount(() => {
           <div v-else v-scrollbar class="custom-scrollbar h-full overflow-y-auto">
             <div class="flex min-h-full flex-col items-center justify-center px-4 pb-4 pt-32 sm:px-6 sm:pt-40">
               <div class="w-full max-w-2xl text-center">
-                <div class="inline-flex items-center justify-center gap-3.5">
-                  <div
-                    class="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-primary text-primary-fg sm:h-11 sm:w-11"
-                  >
-                    <span class="text-[18px] font-semibold tracking-tight sm:text-[20px]">W</span>
-                  </div>
-                  <h1 class="text-[32px] font-semibold leading-10 tracking-tight text-fg sm:text-[38px] sm:leading-[44px]">
-                    {{ greeting }}<template v-if="userName">，{{ userName }}</template>
-                  </h1>
-                </div>
+                <h1 class="text-[32px] font-semibold leading-10 tracking-tight text-fg sm:text-[38px] sm:leading-[44px]">
+                  {{ greeting }}<template v-if="userName">，{{ userName }}</template>
+                </h1>
                 <p class="mx-auto mt-3.5 max-w-lg text-[16px] text-fg-muted sm:text-[17px]">
                   我可以帮你规划任务、联网检索、整理信息。今天想做点什么？
                 </p>

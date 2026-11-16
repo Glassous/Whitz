@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <style>
+    .whitz-mark {
+      fill: #1f1f1d;
+    }
+    @media (prefers-color-scheme: dark) {
+      .whitz-mark {
+        fill: #e6e5e0;
+      }
+    }
+  </style>
+  <path
+    class="whitz-mark"
+    d="M6.5 15H14.5L21.5 34.8L24.7 25.6L28.7 36.9L24.5 49H18.5L6.5 15Z"
+  />
+  <path
+    class="whitz-mark"
+    d="M27.5 15H35.5L42.5 34.8L49.5 15H57.5L45.5 49H39.5L27.5 15Z"
+  />
+</svg>
