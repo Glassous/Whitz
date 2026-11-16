@@ -64,10 +64,14 @@ async def _release(kind: str, user_id, member: str | None, ttl: int) -> None:
         logger.warning("%s slot release failed", kind, exc_info=True)
 
 
-async def acquire_run(user_id) -> str | None:
+async def acquire_run(user_id, per_user: int | None = None) -> str | None:
     settings = get_settings()
     return await _acquire(
-        "run", user_id, settings.max_concurrent_runs, settings.max_concurrent_runs_per_user, RUN_SLOT_TTL
+        "run",
+        user_id,
+        settings.max_concurrent_runs,
+        per_user or settings.max_concurrent_runs_per_user,
+        RUN_SLOT_TTL,
     )
 
 
@@ -86,8 +90,9 @@ async def release_sse(user_id, member: str | None) -> None:
     await _release("sse", user_id, member, SSE_SLOT_TTL)
 
 
-async def allow_chat(user_id) -> bool:
+async def allow_chat(user_id, per_minute: int | None = None) -> bool:
     settings = get_settings()
+    limit = per_minute or settings.chat_rate_per_minute
     window = int(time.time() // 60)
     key = f"rate:chat:{user_id}:{window}"
     try:
@@ -95,7 +100,7 @@ async def allow_chat(user_id) -> bool:
     except Exception:
         logger.warning("chat rate limiter backend unavailable", exc_info=True)
         return False
-    return count <= settings.chat_rate_per_minute
+    return count <= limit
 
 
 async def wrap_stream(inner, user_id, *, run_slot: str | None = None, sse_slot: str | None = None):

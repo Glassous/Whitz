@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,10 +15,29 @@ from app.api.schemas import (
 )
 from app.db.models import Conversation, Message, User
 from app.db.session import get_db
-from app.services import audit, chat_stream, chat_tickets, limits, usage
+from app.services import audit, chat_stream, chat_tickets, limits, membership
 from app.services.hermes import HermesClient, HermesError
 
 router = APIRouter(prefix="/api/conversations", tags=["chat"])
+
+
+def _reset_hint(status: dict) -> str:
+    windows = [status.get("weekly") or {}, status.get("five_hour") or {}]
+    candidates = [
+        (window["remaining"], window.get("reset_at"))
+        for window in windows
+        if window.get("remaining") is not None
+    ]
+    if not candidates:
+        return ""
+    reset_at = min(candidates, key=lambda item: item[0])[1]
+    if not reset_at:
+        return ""
+    try:
+        moment = datetime.fromisoformat(str(reset_at))
+    except ValueError:
+        return ""
+    return f"，额度将于 {moment.astimezone(timezone.utc).strftime('%m-%d %H:%M UTC')} 刷新"
 
 
 async def _client_for(user: User) -> HermesClient:
@@ -44,7 +65,8 @@ async def send_message(
     await chat_tickets.require(request, user.id, conv.id, "send")
     if conv.active_run_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "当前会话有进行中的任务，请先停止或等待完成")
-    if not await limits.allow_chat(user.id):
+    plan = membership.plan_for(membership.effective_tier(user))
+    if not await limits.allow_chat(user.id, plan.chat_per_minute):
         await audit.record(
             "chat.rate_limited",
             actor=user,
@@ -55,17 +77,22 @@ async def send_message(
             request=request,
         )
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "发送过于频繁，请稍后再试")
-    if await usage.quota_exceeded(db, user.id):
+    credits = await membership.status(db, user)
+    if credits["remaining"] <= 0:
         await audit.record(
-            "chat.quota_exceeded",
+            "chat.credits_exhausted",
             actor=user,
             target_type="conversation",
             target_id=conv.id,
             outcome="failure",
             severity="warning",
             request=request,
+            metadata={"tier": credits["tier"], "remaining": credits["remaining"]},
         )
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "今日用量已达上限，请明天再试")
+        raise HTTPException(
+            status.HTTP_402_PAYMENT_REQUIRED,
+            f"积分已用尽{_reset_hint(credits)}，升级 Plus / Pro 可获得更多积分",
+        )
     await audit.record(
         "chat.send",
         actor=user,
@@ -86,13 +113,18 @@ async def send_message(
     sse_slot = await limits.acquire_sse(user.id)
     if sse_slot is None:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "当前对话并发已满，请稍后再试")
-    run_slot = await limits.acquire_run(user.id)
+    run_slot = await limits.acquire_run(user.id, plan.max_runs_per_user)
     if run_slot is None:
         await limits.release_sse(user.id, sse_slot)
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "当前任务并发已满，请稍后再试")
 
     inner = chat_stream.stream_chat(
-        conv.id, user.id, user.hermes_profile, user.hermes_api_key, body.content
+        conv.id,
+        user.id,
+        user.hermes_profile,
+        user.hermes_api_key,
+        body.content,
+        max_seconds=plan.run_max_seconds,
     )
     return EventSourceResponse(
         limits.wrap_stream(inner, user.id, run_slot=run_slot, sse_slot=sse_slot), ping=10
@@ -110,7 +142,14 @@ async def reconnect_events(
     sse_slot = await limits.acquire_sse(user.id)
     if sse_slot is None:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "当前对话并发已满，请稍后再试")
-    inner = chat_stream.stream_reconnect(conv.id, user.hermes_profile, user.hermes_api_key, run_id)
+    plan = membership.plan_for(membership.effective_tier(user))
+    inner = chat_stream.stream_reconnect(
+        conv.id,
+        user.hermes_profile,
+        user.hermes_api_key,
+        run_id,
+        max_seconds=plan.run_max_seconds,
+    )
     return EventSourceResponse(
         limits.wrap_stream(inner, user.id, sse_slot=sse_slot), ping=10
     )

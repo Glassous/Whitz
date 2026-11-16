@@ -19,13 +19,33 @@ const stats = computed(() => {
   return [
     { label: "用户总数", value: o.users.total, hint: `活跃 ${o.users.active}` },
     { label: "今日消息", value: o.usage_today.messages, hint: `运行 ${o.usage_today.runs} 次` },
-    { label: "今日 Token", value: o.usage_today.tokens, hint: `上限 ${numberFormat.format(o.limits.daily_token_limit)}` },
+    { label: "今日 Token", value: o.usage_today.tokens, hint: `≈ ${o.credits_today.used} 积分` },
+    { label: "今日积分消耗", value: o.credits_today.used, hint: `1 积分 = ${numberFormat.format(o.credits_today.tokens_per_credit)} tokens` },
+    { label: "付费会员", value: o.membership.plus + o.membership.pro, hint: `Free ${o.membership.free}` },
     { label: "活跃任务", value: o.conversations.active_runs, hint: `会话 ${o.conversations.total}` },
     { label: "今日新增用户", value: o.users.new_today, hint: `管理员 ${o.users.admins}` },
     { label: "近 24h 失败操作", value: o.audit_24h.failures, hint: "审计日志" },
     { label: "近 24h 严重事件", value: o.audit_24h.critical, hint: "审计日志" },
   ];
 });
+
+const distribution = computed(() => {
+  const o = data.value;
+  if (!o) return [];
+  const total = Math.max(1, o.membership.free + o.membership.plus + o.membership.pro);
+  return (["free", "plus", "pro"] as const).map((tier) => ({
+    tier,
+    label: tier === "free" ? "Free" : tier === "plus" ? "Plus" : "Pro",
+    count: o.membership[tier],
+    width: `${Math.round((o.membership[tier] / total) * 100)}%`,
+    tone: tier === "pro" ? "bg-[#7C6BF0]" : tier === "plus" ? "bg-accent" : "bg-line-strong",
+  }));
+});
+
+function planCredits(weekly: number, fiveHour: number | null): string {
+  const fiveHourText = fiveHour === null ? "5 小时不限" : `5 小时 ${numberFormat.format(fiveHour)}`;
+  return `周 ${numberFormat.format(weekly)} · ${fiveHourText}`;
+}
 
 function fmt(value: number): string {
   return numberFormat.format(value);
@@ -125,27 +145,47 @@ onMounted(load);
         </section>
 
         <section class="rounded-2xl border border-line bg-canvas p-4">
-          <h2 class="text-[13.5px] font-medium text-fg">资源限制</h2>
-          <dl class="mt-3 space-y-2.5">
-            <div class="flex items-center justify-between gap-3">
-              <dt class="text-[12px] text-fg-muted">每日消息</dt>
-              <dd class="text-[12px] tabular-nums text-fg">{{ fmt(data.limits.daily_message_limit) }}</dd>
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="text-[13.5px] font-medium text-fg">会员套餐</h2>
+            <router-link
+              :to="{ name: 'invite-codes' }"
+              class="focus-ring flex items-center gap-1 rounded-md text-[12px] text-fg-muted transition-colors hover:text-fg"
+            >
+              生成邀请码
+              <Icon name="chevron-right" :size="13" />
+            </router-link>
+          </div>
+          <div class="mt-3 space-y-2">
+            <div v-for="p in data.plans" :key="p.tier" class="rounded-xl border border-line px-3 py-2.5">
+              <div class="flex items-center gap-2">
+                <BaseBadge :tone="p.tier === 'pro' ? 'brand' : p.tier === 'plus' ? 'blue' : 'gray'">
+                  {{ p.label }}
+                </BaseBadge>
+                <span class="ml-auto text-[11.5px] tabular-nums text-fg">
+                  {{ planCredits(p.weekly_credits, p.five_hour_credits) }}
+                </span>
+              </div>
+              <p class="mt-1 text-[11px] text-fg-faint">{{ p.summary }}</p>
             </div>
-            <div class="flex items-center justify-between gap-3">
-              <dt class="text-[12px] text-fg-muted">每日 Token</dt>
-              <dd class="text-[12px] tabular-nums text-fg">{{ fmt(data.limits.daily_token_limit) }}</dd>
+          </div>
+          <div class="mt-4 border-t border-line pt-3">
+            <h3 class="text-[12px] font-medium text-fg-muted">会员分布</h3>
+            <div class="mt-2 flex h-2 overflow-hidden rounded-full bg-surface">
+              <div v-for="d in distribution" :key="d.tier" :class="d.tone" :style="{ width: d.width }" />
             </div>
-            <div class="flex items-center justify-between gap-3">
-              <dt class="text-[12px] text-fg-muted">全局并发任务</dt>
-              <dd class="text-[12px] tabular-nums text-fg">{{ data.limits.max_concurrent_runs }}</dd>
+            <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+              <span
+                v-for="d in distribution"
+                :key="d.tier"
+                class="flex items-center gap-1.5 text-[11px] text-fg-muted"
+              >
+                <span class="h-1.5 w-1.5 rounded-full" :class="d.tone" />
+                {{ d.label }} {{ d.count }}
+              </span>
             </div>
-            <div class="flex items-center justify-between gap-3">
-              <dt class="text-[12px] text-fg-muted">单用户并发任务</dt>
-              <dd class="text-[12px] tabular-nums text-fg">{{ data.limits.max_concurrent_runs_per_user }}</dd>
-            </div>
-          </dl>
+          </div>
           <p class="mt-4 border-t border-line pt-3 text-[11px] leading-relaxed text-fg-faint">
-            限制由服务端环境变量控制，修改后重启 API 生效。
+            1 积分 = {{ numberFormat.format(data.credits_today.tokens_per_credit) }} tokens，额度按用户激活日滚动刷新。
           </p>
         </section>
       </div>

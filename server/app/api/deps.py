@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import decode_access_claims
 from app.db.models import User
 from app.db.session import get_db
+from app.services import membership
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -27,6 +28,7 @@ async def get_current_user(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号不存在或已被禁用")
     if claims.token_version is not None and claims.token_version != (user.token_version or 0):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录状态已失效，请重新登录")
+    await membership.normalize_expired(db, user)
     request.state.session_id = claims.session_id
     return user
 

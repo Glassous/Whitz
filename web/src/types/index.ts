@@ -1,3 +1,5 @@
+export type MembershipTier = "free" | "plus" | "pro";
+
 export interface User {
   id: string;
   email: string;
@@ -5,7 +7,41 @@ export interface User {
   role: "user" | "admin";
   is_active: boolean;
   persona: string;
+  membership_tier: MembershipTier;
+  membership_expires_at: string | null;
   created_at: string;
+}
+
+export interface CreditWindow {
+  limit: number | null;
+  used: number;
+  remaining: number | null;
+  reset_at: string;
+}
+
+export interface MembershipPlan {
+  tier: MembershipTier;
+  label: string;
+  weekly_credits: number;
+  five_hour_credits: number | null;
+  max_runs_per_user: number;
+  chat_per_minute: number;
+  run_max_seconds: number;
+  summary: string;
+}
+
+export interface CreditStatus {
+  tier: MembershipTier;
+  tier_label: string;
+  expires_at: string | null;
+  anchor_at: string;
+  tokens_per_credit: number;
+  weekly: CreditWindow;
+  five_hour: CreditWindow;
+  remaining: number;
+  overdrawn: boolean;
+  plan: MembershipPlan;
+  plans: MembershipPlan[];
 }
 
 export interface AuthResponse {

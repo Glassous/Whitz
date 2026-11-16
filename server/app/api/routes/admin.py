@@ -8,11 +8,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_admin
 from app.api.schemas import AdminUserOut, AdminUserUpdate
 from app.core.config import get_settings
-from app.db.models import AuditLog, Conversation, RefreshToken, UsageDaily, User
+from app.db.models import AuditLog, Conversation, CreditLedger, RefreshToken, UsageDaily, User
 from app.db.session import get_db
-from app.services import audit, provisioning
+from app.services import audit, membership, provisioning
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+
+
+async def _normalize_expired_members(db: AsyncSession) -> None:
+    """Bulk-demote lapsed memberships before rendering admin views."""
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        update(User)
+        .where(
+            User.membership_tier != membership.FREE,
+            User.membership_expires_at.is_not(None),
+            User.membership_expires_at <= now,
+        )
+        .values(membership_tier=membership.FREE, membership_expires_at=None, credit_anchor_at=now)
+    )
+    if result.rowcount:
+        await db.commit()
 
 
 @router.get("/overview")
@@ -36,6 +52,19 @@ async def overview(db: AsyncSession = Depends(get_db)) -> dict:
         )
     ).one()
 
+    await _normalize_expired_members(db)
+    tier_rows = await db.execute(select(User.membership_tier, func.count()).group_by(User.membership_tier))
+    tiers = {membership.FREE: 0, membership.PLUS: 0, membership.PRO: 0}
+    for tier, tier_count in tier_rows:
+        key = (tier or membership.FREE).lower()
+        if key in tiers:
+            tiers[key] = int(tier_count)
+
+    consumed = await db.scalar(
+        select(func.coalesce(func.sum(CreditLedger.tokens), 0)).where(
+            CreditLedger.created_at >= day_start, CreditLedger.kind == "consume"
+        )
+    )
     settings = get_settings()
     return {
         "users": {
@@ -62,9 +91,13 @@ async def overview(db: AsyncSession = Depends(get_db)) -> dict:
                 select(AuditLog).where(AuditLog.created_at >= since_24h, AuditLog.severity == "critical")
             ),
         },
+        "membership": tiers,
+        "credits_today": {
+            "used": round(-int(consumed or 0) / settings.tokens_per_credit, 1),
+            "tokens_per_credit": settings.tokens_per_credit,
+        },
+        "plans": membership.plans_payload(),
         "limits": {
-            "daily_message_limit": settings.daily_message_limit,
-            "daily_token_limit": settings.daily_token_limit,
             "max_concurrent_runs": settings.max_concurrent_runs,
             "max_concurrent_runs_per_user": settings.max_concurrent_runs_per_user,
         },
@@ -81,6 +114,7 @@ async def list_users(
     page_size: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    await _normalize_expired_members(db)
     stmt = select(User)
     if q:
         pattern = f"%{q.lower()}%"
@@ -94,12 +128,13 @@ async def list_users(
         stmt.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
     )
     users = result.scalars().all()
-    return {
-        "items": [AdminUserOut.model_validate(u) for u in users],
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-    }
+    summaries = await membership.batch_status(db, list(users))
+    items = []
+    for user in users:
+        payload = AdminUserOut.model_validate(user).model_dump()
+        payload["credits"] = summaries.get(user.id)
+        items.append(payload)
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/audit-logs")

@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import { streamSSE } from "../../api/sse";
 import type { Conversation } from "../../types";
 import { useAuthStore } from "../../stores/auth";
+import { useCreditsStore } from "../../stores/credits";
 import BaseButton from "../ui/BaseButton.vue";
 import BaseModal from "../ui/BaseModal.vue";
 import BaseInput from "../ui/BaseInput.vue";
@@ -24,8 +25,15 @@ const emit = defineEmits<{
 }>();
 
 const auth = useAuthStore();
+const credits = useCreditsStore();
 const router = useRouter();
 const adminUrl = import.meta.env.VITE_ADMIN_URL;
+
+const tierBadgeClass = computed(() => {
+  if (credits.tier === "pro") return "bg-[#7C6BF0]/15 text-[#6B5CE0]";
+  if (credits.tier === "plus") return "bg-accent-weak text-accent";
+  return "bg-surface text-fg-faint";
+});
 
 const renameTarget = ref<Conversation | null>(null);
 const renameText = ref("");
@@ -85,7 +93,10 @@ function closeMenu() {
   openMenuId.value = null;
 }
 
-onMounted(() => document.addEventListener("click", closeMenu));
+onMounted(() => {
+  document.addEventListener("click", closeMenu);
+  void credits.fetch();
+});
 onBeforeUnmount(() => {
   document.removeEventListener("click", closeMenu);
   stopTitleGeneration();
@@ -275,8 +286,22 @@ async function logout() {
           {{ initials }}
         </div>
         <div class="min-w-0 flex-1">
-          <p class="truncate text-[13px] font-medium text-fg">{{ auth.user?.display_name }}</p>
-          <p class="truncate text-[11px] text-fg-faint">{{ auth.user?.email }}</p>
+          <div class="flex items-center gap-1.5">
+            <p class="truncate text-[13px] font-medium text-fg">{{ auth.user?.display_name }}</p>
+            <span
+              class="shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-semibold leading-none"
+              :class="tierBadgeClass"
+            >
+              {{ credits.tierLabel }}
+            </span>
+          </div>
+          <p class="truncate text-[11px] text-fg-faint">
+            <template v-if="credits.status">
+              可用 {{ credits.remaining.toFixed(1) }} 积分
+              <span v-if="credits.overdrawn" class="text-danger">· 已超额</span>
+            </template>
+            <template v-else>{{ auth.user?.email }}</template>
+          </p>
         </div>
         <ThemeToggle />
       </div>

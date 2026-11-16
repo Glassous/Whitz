@@ -2,7 +2,8 @@
 import { computed, onMounted, ref } from "vue";
 import { api, readableError } from "../api/client";
 import { useAuthStore } from "../stores/auth";
-import type { AdminUser, AdminUserList } from "../types";
+import type { AdminUser, AdminUserList, CreditSummary, MembershipTier } from "../types";
+import UserAccessModals from "../components/UserAccessModals.vue";
 import BaseBadge from "../components/ui/BaseBadge.vue";
 import BaseButton from "../components/ui/BaseButton.vue";
 import BaseInput from "../components/ui/BaseInput.vue";
@@ -24,7 +25,38 @@ const pendingId = ref<string | null>(null);
 const disableTarget = ref<AdminUser | null>(null);
 const confirmLoading = ref(false);
 
+const memberTarget = ref<AdminUser | null>(null);
+const creditTarget = ref<AdminUser | null>(null);
+
 const totalPages = computed(() => (data.value ? Math.max(1, Math.ceil(data.value.total / pageSize)) : 1));
+
+function tierLabel(tier: MembershipTier): string {
+  return tier === "pro" ? "Pro" : tier === "plus" ? "Plus" : "Free";
+}
+
+function tierTone(tier: MembershipTier): "brand" | "blue" | "gray" {
+  return tier === "pro" ? "brand" : tier === "plus" ? "blue" : "gray";
+}
+
+function creditPercent(c: CreditSummary): number {
+  const limit = c.weekly_limit;
+  if (!limit) return 0;
+  return Math.max(0, Math.min(100, Math.round((c.remaining / limit) * 100)));
+}
+
+function creditTone(c: CreditSummary): string {
+  if (c.overdrawn) return "bg-danger";
+  const percent = creditPercent(c);
+  return percent <= 20 ? "bg-warning" : "bg-accent";
+}
+
+function openMembership(user: AdminUser) {
+  memberTarget.value = user;
+}
+
+function openCredits(user: AdminUser) {
+  creditTarget.value = user;
+}
 
 async function load() {
   loading.value = true;
@@ -131,11 +163,13 @@ onMounted(load);
     <p v-if="error" class="mb-3 rounded-xl bg-danger-weak px-3 py-2 text-[13px] text-danger">{{ error }}</p>
 
     <div class="overflow-x-auto rounded-2xl border border-line bg-canvas">
-      <table class="w-full min-w-[720px] text-sm">
+      <table class="w-full min-w-[980px] text-sm">
         <thead class="bg-surface text-left text-[11px] uppercase tracking-wide text-fg-faint">
           <tr>
             <th class="px-4 py-3 font-medium">用户</th>
             <th class="px-4 py-3 font-medium">角色</th>
+            <th class="px-4 py-3 font-medium">会员</th>
+            <th class="px-4 py-3 font-medium">积分</th>
             <th class="px-4 py-3 font-medium">状态</th>
             <th class="px-4 py-3 font-medium">注册时间</th>
             <th class="px-4 py-3 text-right font-medium">操作</th>
@@ -143,10 +177,10 @@ onMounted(load);
         </thead>
         <tbody class="divide-y divide-line">
           <tr v-if="loading">
-            <td colspan="5" class="px-4 py-12 text-center text-[13px] text-fg-faint">加载中…</td>
+            <td colspan="7" class="px-4 py-12 text-center text-[13px] text-fg-faint">加载中…</td>
           </tr>
           <tr v-else-if="!data?.items.length">
-            <td colspan="5" class="px-4 py-12 text-center text-[13px] text-fg-faint">没有匹配的用户</td>
+            <td colspan="7" class="px-4 py-12 text-center text-[13px] text-fg-faint">没有匹配的用户</td>
           </tr>
           <tr v-for="u in data?.items ?? []" :key="u.id" class="transition-colors hover:bg-surface">
             <td class="px-4 py-3">
@@ -166,22 +200,51 @@ onMounted(load);
               </select>
             </td>
             <td class="px-4 py-3">
+              <BaseBadge :tone="tierTone(u.membership_tier)">{{ tierLabel(u.membership_tier) }}</BaseBadge>
+              <p class="mt-0.5 whitespace-nowrap text-[11px] text-fg-faint">
+                {{ u.membership_expires_at ? "至 " + new Date(u.membership_expires_at).toLocaleDateString() : "—" }}
+              </p>
+            </td>
+            <td class="px-4 py-3">
+              <p class="text-[12px] tabular-nums text-fg">
+                {{ u.credits ? u.credits.remaining.toFixed(1) : "—" }}
+                <span class="text-[10.5px] text-fg-faint">积分</span>
+              </p>
+              <div v-if="u.credits" class="mt-1 h-1 w-20 overflow-hidden rounded-full bg-surface">
+                <div
+                  class="h-full rounded-full transition-[width] duration-300"
+                  :class="creditTone(u.credits)"
+                  :style="{ width: `${creditPercent(u.credits)}%` }"
+                />
+              </div>
+              <p v-if="u.credits" class="mt-0.5 text-[10.5px] tabular-nums text-fg-faint">
+                周 {{ u.credits.weekly_used }}/{{ u.credits.weekly_limit }}
+              </p>
+              <p v-if="u.credits" class="text-[10.5px] tabular-nums text-fg-faint">
+                5h {{ u.credits.five_hour_used }}/{{ u.credits.five_hour_limit ?? "∞" }}
+              </p>
+            </td>
+            <td class="px-4 py-3">
               <BaseBadge :tone="u.is_active ? 'green' : 'red'">{{ u.is_active ? "启用" : "禁用" }}</BaseBadge>
             </td>
             <td class="whitespace-nowrap px-4 py-3 text-[12px] tabular-nums text-fg-faint">
               {{ new Date(u.created_at).toLocaleDateString() }}
             </td>
             <td class="px-4 py-3 text-right">
-              <BaseButton
-                v-if="u.id !== auth.user?.id"
-                size="sm"
-                :variant="u.is_active ? 'danger' : 'primary'"
-                :loading="pendingId === u.id"
-                @click="u.is_active ? askDisable(u) : setActive(u, true)"
-              >
-                {{ u.is_active ? "禁用" : "启用" }}
-              </BaseButton>
-              <span v-else class="text-xs text-fg-faint">当前账号</span>
+              <div class="flex items-center justify-end gap-1 whitespace-nowrap">
+                <BaseButton size="sm" variant="ghost" @click="openMembership(u)">会员</BaseButton>
+                <BaseButton size="sm" variant="ghost" @click="openCredits(u)">积分</BaseButton>
+                <BaseButton
+                  v-if="u.id !== auth.user?.id"
+                  size="sm"
+                  :variant="u.is_active ? 'danger' : 'primary'"
+                  :loading="pendingId === u.id"
+                  @click="u.is_active ? askDisable(u) : setActive(u, true)"
+                >
+                  {{ u.is_active ? "禁用" : "启用" }}
+                </BaseButton>
+                <span v-else class="px-1 text-[11px] text-fg-faint">当前账号</span>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -211,5 +274,13 @@ onMounted(load);
         <BaseButton variant="danger" :loading="confirmLoading" @click="confirmDisable">确认禁用</BaseButton>
       </template>
     </BaseModal>
+
+    <UserAccessModals
+      :member-target="memberTarget"
+      :credit-target="creditTarget"
+      @close-member="memberTarget = null"
+      @close-credit="creditTarget = null"
+      @saved="load"
+    />
   </div>
 </template>

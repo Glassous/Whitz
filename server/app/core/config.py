@@ -27,9 +27,9 @@ class Settings(BaseSettings):
     max_sse_streams: int = 6
     max_sse_streams_per_user: int = 2
     run_max_seconds: int = 900
-    daily_message_limit: int = 100
-    daily_token_limit: int = 100000
     chat_rate_per_minute: int = 30
+    tokens_per_credit: int = 1000
+    membership_default_days: int = 30
     strict_ticket_ip: bool = False
     forwarded_allow_ips: str = "127.0.0.1"
     allowed_hosts: str = "*"

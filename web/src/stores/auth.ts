@@ -12,6 +12,7 @@ import {
 import type { AuthResponse, SecurityQuestionInput, User } from "../types";
 import { useConversationsStore } from "./conversations";
 import { useChatStore } from "./chat";
+import { useCreditsStore } from "./credits";
 
 export const useAuthStore = defineStore("auth", () => {
   const user = ref<User | null>(readStoredUser());
@@ -63,6 +64,7 @@ export const useAuthStore = defineStore("auth", () => {
     user.value = null;
     useConversationsStore().reset();
     useChatStore().reset();
+    useCreditsStore().reset();
   }
 
   async function logout() {

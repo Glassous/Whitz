@@ -70,6 +70,7 @@ class FakeHermesClient:
 def _reset_rate_limits():
     ratelimit.security_questions_limiter._hits.clear()
     ratelimit.reset_password_limiter._hits.clear()
+    ratelimit.redeem_limiter._hits.clear()
     yield
 
 

@@ -37,6 +37,11 @@ class User(Base):
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     reset_failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     reset_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    membership_tier: Mapped[str] = mapped_column(String(16), default="free", server_default="free")
+    membership_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    credit_anchor_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -99,6 +104,64 @@ class UsageDaily(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class CreditLedger(Base):
+    """Credit bookkeeping. ``tokens`` is signed: negative for consumption."""
+
+    __tablename__ = "credit_ledger"
+    __table_args__ = (
+        Index("ix_credit_ledger_user_created", "user_id", "created_at"),
+        Index("ix_credit_ledger_created_at", "created_at"),
+        UniqueConstraint("message_id", name="uq_credit_ledger_message"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    kind: Mapped[str] = mapped_column(String(16), default="consume")
+    tier: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class InviteCode(Base):
+    __tablename__ = "invite_codes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    tier: Mapped[str] = mapped_column(String(16), default="plus")
+    duration_days: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
+    max_uses: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    used_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class InviteRedemption(Base):
+    __tablename__ = "invite_redemptions"
+    __table_args__ = (
+        UniqueConstraint("code_id", "user_id", name="uq_invite_redemption_code_user"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("invite_codes.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    tier: Mapped[str] = mapped_column(String(16))
+    duration_days: Mapped[int] = mapped_column(Integer, default=30)
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class AuditLog(Base):

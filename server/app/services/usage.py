@@ -1,11 +1,9 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.db.models import UsageDaily
 
 
@@ -27,16 +25,6 @@ def tokens_from_usage(usage) -> int:
         if any(isinstance(v, (int, float)) for v in values):
             return max(0, sum(int(v) for v in values if isinstance(v, (int, float))))
     return 0
-
-
-async def quota_exceeded(db: AsyncSession, user_id: uuid.UUID) -> bool:
-    settings = get_settings()
-    row = await db.scalar(
-        select(UsageDaily).where(UsageDaily.user_id == user_id, UsageDaily.day == utc_day())
-    )
-    if row is None:
-        return False
-    return row.messages >= settings.daily_message_limit or row.tokens >= settings.daily_token_limit
 
 
 async def record_message(db: AsyncSession, user_id: uuid.UUID) -> None:

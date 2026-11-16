@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.models import Conversation, Message
 from app.db.session import SessionLocal
-from app.services import titles, usage
+from app.services import membership, titles, usage
 from app.services.hermes import HermesClient, HermesError
 
 logger = logging.getLogger("whitz.chat")
@@ -28,6 +28,22 @@ TERMINAL_STATUSES = {
 
 def sse(name: str, payload: dict) -> dict:
     return {"event": name, "data": json.dumps(payload, ensure_ascii=False)}
+
+
+async def _settle_usage(db: AsyncSession, user_id: uuid.UUID, assistant: Message) -> None:
+    """Record dashboard usage and deduct credits once per assistant message."""
+    tokens = usage.tokens_from_usage((assistant.tool_payload or {}).get("usage"))
+    if tokens > 0:
+        await usage.record_tokens(db, user_id, tokens)
+        await membership.settle(
+            db,
+            user_id,
+            tokens,
+            message_id=assistant.id,
+            conversation_id=assistant.conversation_id,
+        )
+    elif assistant.status == "completed":
+        logger.warning("run completed without token usage message=%s", assistant.id)
 
 
 def _normalize_item(item: dict) -> dict:
@@ -85,12 +101,14 @@ class ChatPipeline:
         assistant: Message,
         run_id: str,
         started_at: float | None = None,
+        max_seconds: int | None = None,
     ):
         self.db = db
         self.client = client
         self.conv = conv
         self.assistant = assistant
         self.run_id = run_id
+        self.max_seconds = max_seconds
         self.buffer: list[str] = []
         self.last_flush = time.monotonic()
         self.pending_tools: dict[str, list[Message]] = {}
@@ -601,13 +619,15 @@ class ChatPipeline:
             messages = await self._fetch_session()
             if messages is not None:
                 self._apply_session(messages)
-            if self.reasoning or self.plan:
-                extra = dict(self.assistant.tool_payload or {})
-                if self.reasoning:
-                    extra["reasoning"] = self.reasoning
-                if self.plan:
-                    extra["plan"] = self.plan
-                self.assistant.tool_payload = extra
+            extra = dict(self.assistant.tool_payload or {})
+            for key in ("usage", "runtime"):
+                if payload.get(key) is not None:
+                    extra[key] = payload.get(key)
+            if self.reasoning:
+                extra["reasoning"] = self.reasoning
+            if self.plan:
+                extra["plan"] = self.plan
+            self.assistant.tool_payload = extra
             await self._clear_active()
             await self.db.commit()
             yield sse(
@@ -638,7 +658,8 @@ class ChatPipeline:
 
     async def pump(self) -> AsyncIterator[dict]:
         settings = get_settings()
-        deadline = time.monotonic() + settings.run_max_seconds
+        max_seconds = self.max_seconds or settings.run_max_seconds
+        deadline = time.monotonic() + max_seconds
         timed_out = False
         try:
             async with asyncio.timeout(max(1.0, deadline - time.monotonic())):
@@ -761,7 +782,12 @@ async def _auto_title_events(
 
 
 async def stream_chat(
-    conv_id: uuid.UUID, user_id: uuid.UUID, profile: str, api_key: str, content: str
+    conv_id: uuid.UUID,
+    user_id: uuid.UUID,
+    profile: str,
+    api_key: str,
+    content: str,
+    max_seconds: int | None = None,
 ) -> AsyncIterator[dict]:
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
@@ -817,13 +843,14 @@ async def stream_chat(
             await db.commit()
             yield sse("run.started", {"run_id": run_id})
 
-            pipeline = ChatPipeline(db, client, conv, assistant, run_id, started_at=run_started)
+            pipeline = ChatPipeline(
+                db, client, conv, assistant, run_id, started_at=run_started, max_seconds=max_seconds
+            )
             await pipeline.prepare()
             async for ev in pipeline.pump():
                 yield ev
-            if pipeline.terminal and assistant.status == "completed":
-                tokens = usage.tokens_from_usage((assistant.tool_payload or {}).get("usage"))
-                await usage.record_tokens(db, user_id, tokens)
+            if pipeline.terminal:
+                await _settle_usage(db, user_id, assistant)
             if pipeline.terminal:
                 async for ev in _auto_title_events(db, conv, assistant, client):
                     yield ev
@@ -846,7 +873,13 @@ async def stream_chat(
             await client.aclose()
 
 
-async def stream_reconnect(conv_id: uuid.UUID, profile: str, api_key: str, run_id: str) -> AsyncIterator[dict]:
+async def stream_reconnect(
+    conv_id: uuid.UUID,
+    profile: str,
+    api_key: str,
+    run_id: str,
+    max_seconds: int | None = None,
+) -> AsyncIterator[dict]:
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
         if conv is None:
@@ -862,14 +895,13 @@ async def stream_reconnect(conv_id: uuid.UUID, profile: str, api_key: str, run_i
         client = HermesClient(profile, api_key)
         try:
             yield sse("run.reconnected", {"run_id": run_id, "assistant_message_id": str(assistant.id)})
-            pipeline = ChatPipeline(db, client, conv, assistant, run_id)
+            pipeline = ChatPipeline(db, client, conv, assistant, run_id, max_seconds=max_seconds)
             pipeline.buffer = [assistant.content or ""]
             await pipeline.prepare()
             async for ev in pipeline.pump():
                 yield ev
-            if pipeline.terminal and assistant.status == "completed":
-                tokens = usage.tokens_from_usage((assistant.tool_payload or {}).get("usage"))
-                await usage.record_tokens(db, conv.user_id, tokens)
+            if pipeline.terminal:
+                await _settle_usage(db, conv.user_id, assistant)
             if pipeline.terminal:
                 async for ev in _auto_title_events(db, conv, assistant, client):
                     yield ev

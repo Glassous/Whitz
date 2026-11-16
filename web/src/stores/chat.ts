@@ -9,6 +9,13 @@ import { useConversationsStore } from "./conversations";
 let seq = 0;
 const tempId = (prefix: string) => `${prefix}-${Date.now()}-${seq++}`;
 
+function apiErrorMessage(e: any, fallback: string): string {
+  const detail = e?.detail;
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object" && typeof detail.detail === "string") return detail.detail;
+  return e?.message ?? fallback;
+}
+
 export const useChatStore = defineStore("chat", () => {
   const convId = ref<string | null>(null);
   const messages = ref<Message[]>([]);
@@ -362,7 +369,7 @@ export const useChatStore = defineStore("chat", () => {
         aborted = true;
         return;
       }
-      error.value = e?.message ?? "连接中断";
+      error.value = apiErrorMessage(e, "连接中断");
       const a = assistant();
       if (a && a.status === "streaming") a.status = "failed";
       streaming.value = false;
@@ -413,7 +420,7 @@ export const useChatStore = defineStore("chat", () => {
         streamSSE(`/conversations/${convId.value}/messages`, { content }, controller.signal, headers),
       );
     } catch (e: any) {
-      error.value = e?.message ?? "发送失败";
+      error.value = apiErrorMessage(e, "发送失败");
       const a = assistant();
       if (a && a.status === "streaming") a.status = "failed";
       finishRun();
@@ -430,7 +437,7 @@ export const useChatStore = defineStore("chat", () => {
         streamSSEGet(`/conversations/${convId.value}/runs/${runId}/events`, controller.signal, headers),
       );
     } catch (e: any) {
-      error.value = e?.message ?? "连接中断";
+      error.value = apiErrorMessage(e, "连接中断");
       streaming.value = false;
       finishRun();
     }
@@ -442,7 +449,7 @@ export const useChatStore = defineStore("chat", () => {
       const headers = await chatTicketHeaders(convId.value, "stop");
       await api.post(`/conversations/${convId.value}/stop`, {}, { headers });
     } catch (e: any) {
-      error.value = e?.message ?? "停止失败";
+      error.value = apiErrorMessage(e, "停止失败");
     }
   }
 
@@ -464,7 +471,7 @@ export const useChatStore = defineStore("chat", () => {
       const a = assistant();
       if (a) a.status = "streaming";
     } catch (e: any) {
-      error.value = e?.message ?? "审批提交失败";
+      error.value = apiErrorMessage(e, "审批提交失败");
     }
   }
 
@@ -486,7 +493,7 @@ export const useChatStore = defineStore("chat", () => {
       const a = assistant();
       if (a) a.status = "streaming";
     } catch (e: any) {
-      error.value = e?.message ?? "提交失败";
+      error.value = apiErrorMessage(e, "提交失败");
     }
   }
 

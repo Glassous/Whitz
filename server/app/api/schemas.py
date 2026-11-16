@@ -43,6 +43,8 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
     persona: str
+    membership_tier: str
+    membership_expires_at: datetime | None
     created_at: datetime
 
 
@@ -142,9 +144,96 @@ class ClarifyRequest(BaseModel):
     answer: str = Field(min_length=1, max_length=4000)
 
 
+class CreditWindowOut(BaseModel):
+    limit: int | None
+    used: float
+    remaining: float | None
+    reset_at: str
+
+
+class MembershipPlanOut(BaseModel):
+    tier: str
+    label: str
+    weekly_credits: int
+    five_hour_credits: int | None
+    max_runs_per_user: int
+    chat_per_minute: int
+    run_max_seconds: int
+    summary: str
+
+
+class CreditStatusOut(BaseModel):
+    tier: str
+    tier_label: str
+    expires_at: str | None
+    anchor_at: str
+    tokens_per_credit: int
+    weekly: CreditWindowOut
+    five_hour: CreditWindowOut
+    remaining: float
+    overdrawn: bool
+    plan: MembershipPlanOut
+    plans: list[MembershipPlanOut]
+
+
+class RedeemRequest(BaseModel):
+    code: str = Field(min_length=4, max_length=32)
+
+
+class CreditSummaryOut(BaseModel):
+    tier: str
+    tier_label: str
+    expires_at: datetime | None = None
+    remaining: float
+    weekly_used: float
+    weekly_limit: int
+    five_hour_used: float
+    five_hour_limit: int | None
+    week_reset_at: str
+    five_hour_reset_at: str
+    overdrawn: bool
+
+
 class AdminUserUpdate(BaseModel):
     is_active: bool | None = None
     role: str | None = Field(default=None, pattern="^(user|admin)$")
+
+
+class AdminMembershipUpdate(BaseModel):
+    tier: str = Field(pattern="^(free|plus|pro)$")
+    expires_at: datetime | None = None
+
+
+class AdminCreditAdjust(BaseModel):
+    credits: int = Field(ge=-100000, le=100000)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class InviteCodeCreate(BaseModel):
+    tier: str = Field(pattern="^(plus|pro)$")
+    duration_days: int = Field(default=30, ge=1, le=365)
+    max_uses: int = Field(default=1, ge=1, le=1000)
+    expires_at: datetime | None = None
+    note: str | None = Field(default=None, max_length=200)
+
+
+class InviteCodeUpdate(BaseModel):
+    is_active: bool
+
+
+class InviteCodeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    code: str
+    tier: str
+    duration_days: int
+    max_uses: int
+    used_count: int
+    expires_at: datetime | None
+    note: str | None
+    is_active: bool
+    created_at: datetime
 
 
 class AdminUserOut(BaseModel):
@@ -156,4 +245,7 @@ class AdminUserOut(BaseModel):
     role: str
     is_active: bool
     hermes_profile: str
+    membership_tier: str
+    membership_expires_at: datetime | None
+    credits: CreditSummaryOut | None = None
     created_at: datetime

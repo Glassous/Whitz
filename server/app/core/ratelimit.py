@@ -23,3 +23,4 @@ class RateLimiter:
 
 security_questions_limiter = RateLimiter(max_attempts=10, window_seconds=3600)
 reset_password_limiter = RateLimiter(max_attempts=20, window_seconds=3600)
+redeem_limiter = RateLimiter(max_attempts=5, window_seconds=60)

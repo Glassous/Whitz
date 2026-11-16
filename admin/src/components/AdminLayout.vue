@@ -12,6 +12,7 @@ const router = useRouter();
 const nav = [
   { name: "overview", label: "概览", icon: "overview" },
   { name: "users", label: "用户", icon: "users" },
+  { name: "invite-codes", label: "邀请码", icon: "ticket" },
   { name: "audit", label: "审计日志", icon: "audit" },
 ] as const;
 
