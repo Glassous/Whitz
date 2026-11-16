@@ -19,9 +19,9 @@ const classes = computed(() => {
   const base =
     "focus-ring inline-flex select-none items-center justify-center gap-2 rounded-xl font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50";
   const sizes = {
-    sm: "h-8 px-3 text-[13px]",
-    md: "h-10 px-4 text-sm",
-    lg: "h-11 px-5 text-[15px]",
+    sm: "h-8.5 px-3 text-[13.5px]",
+    md: "h-10 px-4 text-[14.5px]",
+    lg: "h-11 px-5 text-[15.5px]",
   };
   const variants = {
     primary: "bg-primary text-primary-fg hover:bg-primary-hover",

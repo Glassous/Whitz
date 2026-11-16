@@ -14,6 +14,12 @@ import type { SecurityQuestionInput } from "../types";
 
 const auth = useAuthStore();
 const router = useRouter();
+const adminUrl = import.meta.env.VITE_ADMIN_URL;
+
+async function logout() {
+  await auth.logout();
+  await router.push("/login");
+}
 
 type Tab = "profile" | "membership" | "persona" | "password" | "security";
 const tab = ref<Tab>("profile");
@@ -123,16 +129,32 @@ async function saveSecurity() {
           <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
         </svg>
       </button>
-      <h1 class="text-[14px] font-medium text-fg">设置</h1>
-      <div class="ml-auto"><ThemeToggle /></div>
+      <h1 class="text-[16px] font-medium text-fg">设置</h1>
+      <div class="ml-auto flex items-center gap-1.5">
+        <a
+          v-if="auth.isAdmin && adminUrl"
+          :href="adminUrl"
+          class="focus-ring inline-flex h-8.5 items-center rounded-lg px-2.5 text-[13.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+        >
+          管理后台
+        </a>
+        <ThemeToggle />
+        <button
+          type="button"
+          class="focus-ring inline-flex h-8.5 items-center rounded-lg px-2.5 text-[13.5px] font-medium text-fg-muted transition-colors hover:bg-danger-weak hover:text-danger"
+          @click="logout"
+        >
+          退出登录
+        </button>
+      </div>
     </header>
 
     <div class="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-6 px-4 py-6 sm:flex-row sm:px-6">
-      <nav class="flex shrink-0 gap-1 overflow-x-auto no-scrollbar sm:w-48 sm:flex-col">
+      <nav class="flex shrink-0 gap-1 overflow-x-auto no-scrollbar sm:w-52 sm:flex-col">
         <button
           v-for="t in tabs"
           :key="t.key"
-          class="focus-ring h-9 shrink-0 rounded-lg px-3 text-left text-[13px] font-medium transition-colors"
+          class="focus-ring h-10 shrink-0 rounded-lg px-3.5 text-left text-[14.5px] font-medium transition-colors"
           :class="tab === t.key ? 'bg-surface text-fg' : 'text-fg-muted hover:bg-hover hover:text-fg'"
           @click="tab = t.key"
         >
@@ -143,21 +165,21 @@ async function saveSecurity() {
       <section class="min-w-0 flex-1">
         <div class="rounded-2xl border border-line bg-canvas p-5 sm:p-6">
           <div class="mb-5">
-            <h2 class="text-[15px] font-semibold text-fg">{{ activeMeta().title }}</h2>
-            <p class="mt-0.5 text-[13px] text-fg-muted">{{ activeMeta().desc }}</p>
+            <h2 class="text-[17px] font-semibold text-fg">{{ activeMeta().title }}</h2>
+            <p class="mt-0.5 text-[14px] text-fg-muted">{{ activeMeta().desc }}</p>
           </div>
 
           <div v-if="tab === 'profile'" class="space-y-5">
             <div>
-              <p class="mb-1.5 text-[13px] font-medium text-fg-muted">邮箱</p>
+              <p class="mb-1.5 text-[14px] font-medium text-fg-muted">邮箱</p>
               <div class="flex items-center gap-2 rounded-xl bg-surface px-3.5 py-2.5">
-                <span class="text-sm text-fg">{{ auth.user?.email }}</span>
+                <span class="text-[15px] text-fg">{{ auth.user?.email }}</span>
                 <BaseBadge v-if="auth.isAdmin" tone="brand">管理员</BaseBadge>
               </div>
             </div>
             <BaseInput v-model="displayName" label="昵称" />
-            <p v-if="profileMsg" class="text-[13px] text-success">{{ profileMsg }}</p>
-            <p v-if="profileErr" class="text-[13px] text-danger">{{ profileErr }}</p>
+            <p v-if="profileMsg" class="text-[14px] text-success">{{ profileMsg }}</p>
+            <p v-if="profileErr" class="text-[14px] text-danger">{{ profileErr }}</p>
             <BaseButton :loading="profileSaving" @click="saveProfile">保存资料</BaseButton>
           </div>
 
@@ -173,16 +195,16 @@ async function saveSecurity() {
             <BaseInput v-model="oldPassword" label="当前密码" type="password" autocomplete="current-password" />
             <BaseInput v-model="newPassword" label="新密码" type="password" placeholder="至少 8 位" autocomplete="new-password" />
             <BaseInput v-model="confirmPassword" label="确认新密码" type="password" autocomplete="new-password" />
-            <p v-if="pwdMsg" class="text-[13px] text-success">{{ pwdMsg }}</p>
-            <p v-if="pwdErr" class="text-[13px] text-danger">{{ pwdErr }}</p>
+            <p v-if="pwdMsg" class="text-[14px] text-success">{{ pwdMsg }}</p>
+            <p v-if="pwdErr" class="text-[14px] text-danger">{{ pwdErr }}</p>
             <BaseButton :loading="pwdSaving" @click="savePassword">修改密码</BaseButton>
           </div>
 
           <div v-else class="space-y-4">
             <SecurityQuestionsForm v-model="questions" />
             <BaseInput v-model="secPassword" label="当前密码（确认身份）" type="password" autocomplete="current-password" />
-            <p v-if="secMsg" class="text-[13px] text-success">{{ secMsg }}</p>
-            <p v-if="secErr" class="text-[13px] text-danger">{{ secErr }}</p>
+            <p v-if="secMsg" class="text-[14px] text-success">{{ secMsg }}</p>
+            <p v-if="secErr" class="text-[14px] text-danger">{{ secErr }}</p>
             <BaseButton :loading="secSaving" @click="saveSecurity">更新密保问题</BaseButton>
           </div>
         </div>

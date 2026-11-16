@@ -44,11 +44,11 @@ async function save() {
       placeholder="例如：你是一位严谨的法律顾问，回答时引用法条……留空则使用默认助理人设。"
     />
     <div class="flex items-center justify-between gap-3">
-      <p class="text-xs leading-relaxed text-fg-faint">人设会写入助理的 SOUL 文件，修改后对新建对话生效。</p>
-      <span class="shrink-0 text-[11px] tabular-nums text-fg-faint">{{ text.length }} / 4000</span>
+      <p class="text-[13px] leading-relaxed text-fg-faint">人设会写入助理的 SOUL 文件，修改后对新建对话生效。</p>
+      <span class="shrink-0 text-[12.5px] tabular-nums text-fg-faint">{{ text.length }} / 4000</span>
     </div>
-    <p v-if="message" class="text-[13px] text-success">{{ message }}</p>
-    <p v-if="error" class="text-[13px] text-danger">{{ error }}</p>
+    <p v-if="message" class="text-[14px] text-success">{{ message }}</p>
+    <p v-if="error" class="text-[14px] text-danger">{{ error }}</p>
     <BaseButton :loading="saving" @click="save">保存人设</BaseButton>
   </div>
 </template>

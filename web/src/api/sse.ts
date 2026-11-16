@@ -1,4 +1,4 @@
-import { ApiError, getAccessToken, tryRefresh } from "./client";
+import { ApiError, getAccessToken, handleUnauthorized, isAccessTokenExpiringSoon, tryRefresh } from "./client";
 
 export interface SSEEvent {
   event: string;
@@ -62,6 +62,9 @@ export async function* streamSSE(
   signal?: AbortSignal,
   extraHeaders: Record<string, string> = {},
 ): AsyncGenerator<SSEEvent> {
+  if (isAccessTokenExpiringSoon()) {
+    await tryRefresh();
+  }
   const headers: Record<string, string> = {
     ...extraHeaders,
     "Content-Type": "application/json",
@@ -73,13 +76,24 @@ export async function* streamSSE(
   let resp = await fetch("/api" + path, {
     method: "POST",
     headers,
+    credentials: "include",
     body: JSON.stringify(body),
     signal,
   });
 
-  if (resp.status === 401 && (await tryRefresh())) {
-    headers["Authorization"] = "Bearer " + getAccessToken();
-    resp = await fetch("/api" + path, { method: "POST", headers, body: JSON.stringify(body), signal });
+  if (resp.status === 401) {
+    if (await tryRefresh()) {
+      headers["Authorization"] = "Bearer " + getAccessToken();
+      resp = await fetch("/api" + path, {
+        method: "POST",
+        headers,
+        credentials: "include",
+        body: JSON.stringify(body),
+        signal,
+      });
+    } else {
+      handleUnauthorized();
+    }
   }
 
   if (!resp.ok || !resp.body) {
@@ -100,13 +114,20 @@ export async function* streamSSEGet(
   signal?: AbortSignal,
   extraHeaders: Record<string, string> = {},
 ): AsyncGenerator<SSEEvent> {
+  if (isAccessTokenExpiringSoon()) {
+    await tryRefresh();
+  }
   const headers: Record<string, string> = { ...extraHeaders, Accept: "text/event-stream" };
   const token = getAccessToken();
   if (token) headers["Authorization"] = "Bearer " + token;
-  let resp = await fetch("/api" + path, { method: "GET", headers, signal });
-  if (resp.status === 401 && (await tryRefresh())) {
-    headers["Authorization"] = "Bearer " + getAccessToken();
-    resp = await fetch("/api" + path, { method: "GET", headers, signal });
+  let resp = await fetch("/api" + path, { method: "GET", headers, credentials: "include", signal });
+  if (resp.status === 401) {
+    if (await tryRefresh()) {
+      headers["Authorization"] = "Bearer " + getAccessToken();
+      resp = await fetch("/api" + path, { method: "GET", headers, credentials: "include", signal });
+    } else {
+      handleUnauthorized();
+    }
   }
   if (!resp.ok || !resp.body) {
     throw new ApiError(resp.status, resp.statusText);

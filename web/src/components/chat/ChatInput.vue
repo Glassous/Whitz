@@ -33,7 +33,7 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div>
     <div
-      class="flex items-end gap-2 rounded-[26px] border border-line bg-surface px-2.5 py-2 transition-colors focus-within:border-line-strong"
+      class="flex items-end gap-2 rounded-[26px] bg-surface px-2.5 py-2 transition-colors focus-within:bg-hover/75"
     >
       <textarea
         ref="area"
@@ -49,7 +49,7 @@ function onKeydown(e: KeyboardEvent) {
       <button
         v-if="streaming"
         type="button"
-        class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-line bg-canvas text-fg transition-colors hover:bg-hover"
+        class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-canvas text-fg transition-colors hover:bg-hover"
         aria-label="停止生成"
         title="停止生成"
         @click="emit('stop')"

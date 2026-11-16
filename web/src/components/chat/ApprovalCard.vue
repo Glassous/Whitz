@@ -7,7 +7,7 @@ const emit = defineEmits<{ decide: ["once" | "deny"] }>();
 </script>
 
 <template>
-  <div class="animate-rise rounded-2xl border border-line bg-canvas p-4">
+  <div class="animate-rise rounded-2xl bg-surface p-4">
     <div class="flex gap-3">
       <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-warning-weak text-warning">
         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

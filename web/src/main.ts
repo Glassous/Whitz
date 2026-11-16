@@ -18,9 +18,33 @@ async function bootstrap() {
   await auth.init();
 
   setUnauthorizedHandler(() => {
-    useAuthStore().forceLogout();
-    void router.push({ name: "login" });
+    const store = useAuthStore();
+    store.forceLogout("expired");
+    if (router.currentRoute.value.name !== "login") {
+      const currentPath = router.currentRoute.value.fullPath;
+      void router.push({
+        name: "login",
+        query: currentPath && currentPath !== "/" ? { redirect: currentPath } : undefined,
+      });
+    }
   });
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", (event) => {
+      void useAuthStore().handleStorageSync(event, {
+        onLoggedOut: () => {
+          if (router.currentRoute.value.meta.requiresAuth) {
+            void router.push({ name: "login" });
+          }
+        },
+        onLoggedIn: () => {
+          if (router.currentRoute.value.meta.guestOnly) {
+            void router.push({ name: "chat" });
+          }
+        },
+      });
+    });
+  }
 
   app.use(router);
   await router.isReady();

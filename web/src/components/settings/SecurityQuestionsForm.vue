@@ -3,6 +3,8 @@ import { reactive, watch } from "vue";
 import BaseInput from "../ui/BaseInput.vue";
 import type { SecurityQuestionInput } from "../../types";
 
+withDefaults(defineProps<{ compact?: boolean }>(), { compact: false });
+
 const model = defineModel<SecurityQuestionInput[]>({ default: () => [] });
 
 const PRESETS = [
@@ -36,26 +38,42 @@ watch(
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div v-for="i in [0, 1]" :key="i" class="rounded-xl border border-line p-4">
-      <p class="mb-3 text-[13px] font-medium text-fg">密保问题 {{ i + 1 }}</p>
+  <div :class="compact ? 'space-y-2.5' : 'space-y-4'">
+    <div
+      v-for="i in [0, 1]"
+      :key="i"
+      class="rounded-xl border border-line bg-surface/40"
+      :class="compact ? 'p-3' : 'p-4'"
+    >
+      <div class="flex items-center justify-between" :class="compact ? 'mb-2' : 'mb-3'">
+        <p class="text-[14px] font-medium text-fg">密保问题 {{ i + 1 }}</p>
+        <span v-if="compact" class="text-[12px] text-fg-faint">必填</span>
+      </div>
       <label class="block">
-        <span class="mb-1.5 block text-[13px] text-fg-muted">问题</span>
+        <span v-if="!compact" class="mb-1.5 block text-[14px] text-fg-muted">问题</span>
         <select
           v-model="state.selections[i]"
-          class="focus-ring h-11 w-full rounded-xl border border-line bg-canvas px-3 text-sm text-fg transition-colors hover:border-line-strong"
+          class="focus-ring w-full rounded-xl border border-line bg-canvas px-3 text-[15px] text-fg transition-colors hover:border-line-strong"
+          :class="compact ? 'h-9.5' : 'h-11'"
         >
           <option v-for="p in PRESETS" :key="p" :value="p">{{ p }}</option>
           <option :value="CUSTOM">自定义问题…</option>
         </select>
       </label>
-      <div v-if="state.selections[i] === CUSTOM" class="mt-3">
-        <BaseInput v-model="state.custom[i]" placeholder="输入自定义问题" />
+      <div v-if="state.selections[i] === CUSTOM" :class="compact ? 'mt-2' : 'mt-3'">
+        <BaseInput v-model="state.custom[i]" :size="compact ? 'sm' : 'md'" placeholder="输入自定义问题" />
       </div>
-      <div class="mt-3">
-        <BaseInput v-model="state.answers[i]" label="答案" placeholder="请输入答案（牢记，用于找回密码）" />
+      <div :class="compact ? 'mt-2' : 'mt-3'">
+        <BaseInput
+          v-model="state.answers[i]"
+          :size="compact ? 'sm' : 'md'"
+          :label="compact ? undefined : '答案'"
+          :placeholder="compact ? '请输入密保答案（用于找回密码）' : '请输入答案（牢记，用于找回密码）'"
+        />
       </div>
     </div>
-    <p class="text-xs leading-relaxed text-fg-faint">答案将加密存储，用于找回密码。请确保两个问题不同且答案便于记忆。</p>
+    <p v-if="!compact" class="text-[13px] leading-relaxed text-fg-faint">
+      答案将加密存储，用于找回密码。请确保两个问题不同且答案便于记忆。
+    </p>
   </div>
 </template>

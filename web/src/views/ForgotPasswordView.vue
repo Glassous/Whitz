@@ -18,6 +18,10 @@ const loading = ref(false);
 
 async function loadQuestions() {
   error.value = null;
+  if (!email.value.trim()) {
+    error.value = "请输入注册邮箱";
+    return;
+  }
   loading.value = true;
   try {
     questions.value = await api.get<SecurityQuestion[]>(
@@ -34,6 +38,10 @@ async function loadQuestions() {
 
 async function resetPassword() {
   error.value = null;
+  if (answers.value.some((a) => !a.trim())) {
+    error.value = "请完整回答密保问题";
+    return;
+  }
   if (newPassword.value.length < 8) {
     error.value = "新密码至少 8 位";
     return;
@@ -59,22 +67,27 @@ async function resetPassword() {
 </script>
 
 <template>
-  <AuthLayout title="找回密码" subtitle="通过注册时设置的密保问题重置密码。">
-    <form v-if="step === 1" class="space-y-4" @submit.prevent="loadQuestions">
+  <AuthLayout title="找回密码" subtitle="通过注册时设置的密保问题重置密码">
+    <form v-if="step === 1" class="space-y-3.5" @submit.prevent="loadQuestions">
       <BaseInput v-model="email" label="注册邮箱" type="email" placeholder="you@example.com" autofocus />
       <FormError :message="error" />
       <BaseButton type="submit" size="lg" block :loading="loading">下一步</BaseButton>
     </form>
 
-    <form v-else-if="step === 2" class="space-y-4" @submit.prevent="resetPassword">
-      <div v-for="(q, i) in questions" :key="q.position" class="rounded-xl border border-line p-4">
-        <p class="mb-2.5 text-[13px] font-medium text-fg">{{ q.question }}</p>
-        <BaseInput v-model="answers[i]" placeholder="请输入答案" />
+    <form v-else-if="step === 2" class="space-y-2.5" @submit.prevent="resetPassword">
+      <div v-for="(q, i) in questions" :key="q.position" class="rounded-xl border border-line bg-surface/40 p-3">
+        <p class="mb-1.5 text-[12.5px] font-medium text-fg">{{ q.question }}</p>
+        <BaseInput v-model="answers[i]" size="sm" placeholder="请输入密保答案" />
       </div>
-      <BaseInput v-model="newPassword" label="新密码" type="password" placeholder="至少 8 位" />
-      <BaseInput v-model="confirm" label="确认新密码" type="password" placeholder="再次输入新密码" />
+      <div class="grid gap-2.5 sm:grid-cols-2">
+        <BaseInput v-model="newPassword" size="sm" label="新密码" type="password" placeholder="至少 8 位" />
+        <BaseInput v-model="confirm" size="sm" label="确认新密码" type="password" placeholder="再次输入" />
+      </div>
       <FormError :message="error" />
-      <BaseButton type="submit" size="lg" block :loading="loading">重置密码</BaseButton>
+      <div class="flex items-center gap-2.5 pt-1">
+        <BaseButton variant="secondary" size="lg" :disabled="loading" @click="step = 1">上一步</BaseButton>
+        <BaseButton type="submit" size="lg" class="flex-1" :loading="loading">重置密码</BaseButton>
+      </div>
     </form>
 
     <div v-else class="space-y-4 text-center">
@@ -88,7 +101,7 @@ async function resetPassword() {
     </div>
 
     <template #footer>
-      <router-link to="/login" class="hover:text-fg">返回登录</router-link>
+      <router-link to="/login" class="font-medium hover:text-fg">返回登录</router-link>
     </template>
   </AuthLayout>
 </template>

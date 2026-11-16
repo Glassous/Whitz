@@ -12,18 +12,60 @@ import ChatInput from "../components/chat/ChatInput.vue";
 import PlanPanel from "../components/chat/PlanPanel.vue";
 import ApprovalCard from "../components/chat/ApprovalCard.vue";
 import ClarifyCard from "../components/chat/ClarifyCard.vue";
-import ThemeToggle from "../components/ui/ThemeToggle.vue";
 
 const conversations = useConversationsStore();
 const chat = useChatStore();
 const auth = useAuthStore();
 const credits = useCreditsStore();
 
+const SIDEBAR_COLLAPSED_KEY = "whitz_sidebar_collapsed";
+
+function readCollapsedPref(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 const agent = ref<AgentStatus | null>(null);
 const showPlan = ref(true);
 const sidebarOpen = ref(false);
+const sidebarCollapsed = ref(readCollapsedPref());
 const mobileStepsOpen = ref(false);
 let pollTimer: number | null = null;
+
+function setSidebarCollapsed(next: boolean) {
+  sidebarCollapsed.value = next;
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+
+function toggleSidebarCollapsed() {
+  setSidebarCollapsed(!sidebarCollapsed.value);
+}
+
+function onSidebarToggleClick() {
+  if (window.innerWidth >= 768) {
+    toggleSidebarCollapsed();
+  } else {
+    sidebarOpen.value = true;
+  }
+}
+
+function onGlobalKeydown(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
+    e.preventDefault();
+    if (window.innerWidth >= 768) {
+      toggleSidebarCollapsed();
+    } else {
+      sidebarOpen.value = !sidebarOpen.value;
+    }
+  }
+}
 
 const SUGGESTIONS = [
   {
@@ -62,10 +104,6 @@ const greeting = computed(() => {
 });
 
 const userName = computed(() => auth.user?.display_name?.trim() ?? "");
-
-const statusText = computed(() =>
-  agent.value?.ready ? "在线" : agent.value?.status === "warming_up" ? "初始化中" : "离线",
-);
 
 async function loadAgent() {
   try {
@@ -150,6 +188,7 @@ watch(
 );
 
 onMounted(async () => {
+  window.addEventListener("keydown", onGlobalKeydown);
   void loadAgent();
   void credits.fetch();
   await conversations.fetchList();
@@ -158,6 +197,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onGlobalKeydown);
   if (pollTimer) window.clearTimeout(pollTimer);
   chat.abort();
 });
@@ -181,145 +221,139 @@ onBeforeUnmount(() => {
       :current-id="conversations.current?.id ?? null"
       :loading="conversations.loading"
       :open="sidebarOpen"
+      :collapsed="sidebarCollapsed"
       @select="onSelect"
       @create="createConversation"
       @rename="onRename"
       @delete="onDelete"
       @close="sidebarOpen = false"
+      @set-collapsed="setSidebarCollapsed"
     />
 
-    <main class="flex min-w-0 flex-1 flex-col">
-      <header class="flex h-14 shrink-0 items-center gap-2 border-b border-line px-3 sm:px-5">
-        <button
-          class="focus-ring -ml-1 flex h-9 w-9 items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-hover hover:text-fg md:hidden"
-          aria-label="打开侧栏"
-          @click="sidebarOpen = true"
-        >
-          <svg class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-            <path stroke-linecap="round" d="M4 6h16M4 12h16M4 18h16" />
-          </svg>
-        </button>
+    <main class="relative flex min-w-0 flex-1">
+      <!-- Floating sidebar toggle (two horizontal bars: top longer, bottom shorter) -->
+      <button
+        type="button"
+        class="focus-ring absolute left-3.5 top-3 z-30 flex h-8 w-8 items-center justify-center rounded-lg bg-canvas/75 text-fg-muted backdrop-blur-sm transition-colors hover:bg-hover hover:text-fg sm:left-4"
+        :aria-label="sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
+        :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
+        @click="onSidebarToggleClick"
+      >
+        <svg class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+          <path stroke-linecap="round" d="M4 8.5h16M4 15.5h10" />
+        </svg>
+      </button>
 
-        <div class="flex min-w-0 items-center gap-2.5">
-          <h1 class="truncate text-[14px] font-medium text-fg">
-            {{ conversations.current?.title ?? "新对话" }}
-          </h1>
-          <span class="hidden items-center gap-1.5 text-[11px] text-fg-faint sm:flex">
-            <span
-              class="h-1.5 w-1.5 rounded-full"
-              :class="
-                agent?.ready
-                  ? 'bg-success'
-                  : agent?.status === 'warming_up'
-                    ? 'animate-pulse bg-warning'
-                    : 'bg-line-strong'
-              "
-            />
-            {{ statusText }}
-          </span>
-        </div>
+      <!-- Fixed task panel toggle (top-right inside panel when expanded, same position when collapsed) -->
+      <button
+        type="button"
+        class="focus-ring absolute right-5 top-3 z-30 hidden h-8 w-8 items-center justify-center rounded-lg text-fg-muted backdrop-blur-sm transition-colors hover:bg-hover hover:text-fg lg:inline-flex"
+        :class="showPlan ? 'bg-sidebar/75' : 'bg-canvas/75'"
+        :aria-label="showPlan ? '收起任务面板' : '展开任务面板'"
+        :title="showPlan ? '收起任务面板' : '展开任务面板'"
+        @click="showPlan = !showPlan"
+      >
+        <svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v14H3zM15 5v14" />
+        </svg>
+      </button>
 
-        <div class="ml-auto flex items-center gap-1">
-          <button
-            class="focus-ring hidden h-8 items-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium transition-colors lg:inline-flex"
-            :class="showPlan ? 'bg-surface text-fg' : 'text-fg-muted hover:bg-hover hover:text-fg'"
-            @click="showPlan = !showPlan"
-          >
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v14H3zM15 5v14" />
-            </svg>
-            任务面板
-          </button>
-          <div class="md:hidden"><ThemeToggle /></div>
-        </div>
-      </header>
+      <div class="flex min-w-0 flex-1 flex-col">
+        <div class="relative min-h-0 flex-1">
+          <MessageList
+            v-if="chat.messages.length"
+            :key="chat.convId ?? 'draft'"
+            :messages="chat.messages"
+            @steps="onViewSteps"
+          />
 
-      <div class="flex min-h-0 flex-1">
-        <div class="flex min-w-0 flex-1 flex-col">
-          <div class="relative min-h-0 flex-1">
-            <MessageList
-              v-if="chat.messages.length"
-              :key="chat.convId ?? 'draft'"
-              :messages="chat.messages"
-              @steps="onViewSteps"
-            />
-
-            <div v-else class="h-full overflow-y-auto">
-              <div class="flex min-h-full flex-col items-center justify-center px-4 py-10 sm:px-6">
-                <div class="animate-rise w-full max-w-2xl text-center">
-                  <div class="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary text-primary-fg">
-                    <span class="text-lg font-semibold tracking-tight">W</span>
-                  </div>
-                  <h1 class="text-[26px] font-semibold tracking-tight text-fg sm:text-[30px]">
-                    {{ greeting }}<template v-if="userName">，{{ userName }}</template>
-                  </h1>
-                  <p class="mx-auto mt-2 max-w-md text-[14px] text-fg-muted">
-                    我可以帮你规划任务、联网检索、整理信息。今天想做点什么？
-                  </p>
-
-                  <div class="mt-8 grid gap-2 sm:grid-cols-2">
-                    <button
-                      v-for="s in SUGGESTIONS"
-                      :key="s.title"
-                      class="focus-ring group flex items-start gap-3 rounded-2xl border border-line bg-canvas p-3.5 text-left transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
-                      :disabled="!agent?.ready"
-                      @click="startWith(s.prompt)"
-                    >
-                      <span
-                        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface text-fg-muted transition-colors group-hover:bg-canvas group-hover:text-fg"
-                      >
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                          <path stroke-linecap="round" stroke-linejoin="round" :d="s.icon" />
-                        </svg>
-                      </span>
-                      <span class="min-w-0">
-                        <span class="block text-[13px] font-medium text-fg">{{ s.title }}</span>
-                        <span class="mt-0.5 block text-xs text-fg-faint">{{ s.desc }}</span>
-                      </span>
-                    </button>
-                  </div>
-
-                  <p v-if="!agent?.ready" class="mt-6 text-xs text-fg-faint">助理正在初始化，稍后即可开始对话…</p>
+          <div v-else class="h-full overflow-y-auto">
+            <div class="flex min-h-full flex-col items-center justify-center px-4 py-10 sm:px-6">
+              <div class="w-full max-w-2xl text-center">
+                <div class="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary text-primary-fg">
+                  <span class="text-lg font-semibold tracking-tight">W</span>
                 </div>
-              </div>
-            </div>
-          </div>
+                <h1 class="text-[26px] font-semibold tracking-tight text-fg sm:text-[30px]">
+                  {{ greeting }}<template v-if="userName">，{{ userName }}</template>
+                </h1>
+                <p class="mx-auto mt-2 max-w-md text-[14px] text-fg-muted">
+                  我可以帮你规划任务、联网检索、整理信息。今天想做点什么？
+                </p>
 
-          <div class="shrink-0 px-3 pb-3 pt-1 sm:px-6">
-            <div class="mx-auto w-full max-w-3xl space-y-3">
-              <ApprovalCard
-                v-if="chat.pendingControl?.kind === 'approval'"
-                :control="chat.pendingControl"
-                @decide="chat.approve"
-              />
-              <ClarifyCard
-                v-else-if="chat.pendingControl?.kind === 'clarify'"
-                :control="chat.pendingControl"
-                @submit="chat.clarify"
-              />
+                <div class="mt-8 grid gap-2 sm:grid-cols-2">
+                  <button
+                    v-for="s in SUGGESTIONS"
+                    :key="s.title"
+                    class="focus-ring group flex items-start gap-3 rounded-2xl bg-surface/75 p-3.5 text-left transition-colors hover:bg-hover disabled:cursor-not-allowed"
+                    :class="agent && !agent.ready ? 'opacity-50' : ''"
+                    :disabled="!agent?.ready"
+                    @click="startWith(s.prompt)"
+                  >
+                    <span
+                      class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-fg-muted transition-colors group-hover:text-fg"
+                    >
+                      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                        <path stroke-linecap="round" stroke-linejoin="round" :d="s.icon" />
+                      </svg>
+                    </span>
+                    <span class="min-w-0">
+                      <span class="block text-[13px] font-medium text-fg">{{ s.title }}</span>
+                      <span class="mt-0.5 block text-xs text-fg-faint">{{ s.desc }}</span>
+                    </span>
+                  </button>
+                </div>
 
-              <div v-if="chat.error" class="flex items-start gap-2 rounded-xl bg-danger-weak px-3 py-2 text-[13px] text-danger">
-                <span class="flex-1">{{ chat.error }}</span>
-                <router-link
-                  v-if="chat.error.includes('积分')"
-                  to="/settings"
-                  class="shrink-0 rounded-md bg-canvas px-2 py-0.5 text-[12px] font-medium text-accent transition-opacity hover:opacity-70"
+                <p
+                  class="mt-6 h-4 text-xs text-fg-faint transition-opacity duration-200"
+                  :class="agent && !agent.ready ? 'opacity-100' : 'pointer-events-none opacity-0'"
                 >
-                  查看会员
-                </router-link>
-                <button class="rounded p-0.5 transition-opacity hover:opacity-70" aria-label="关闭提示" @click="chat.error = null">
-                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-                  </svg>
-                </button>
+                  助理正在初始化，稍后即可开始对话…
+                </p>
               </div>
-
-              <ChatInput :streaming="chat.streaming" :disabled="!agent?.ready" @send="onSend" @stop="chat.stop" />
             </div>
           </div>
         </div>
 
-        <aside v-if="showPlan" class="hidden w-[320px] shrink-0 border-l border-line bg-sidebar lg:block">
+        <div class="shrink-0 px-3 pb-3 pt-1 sm:px-6">
+          <div class="mx-auto w-full max-w-3xl space-y-3">
+            <ApprovalCard
+              v-if="chat.pendingControl?.kind === 'approval'"
+              :control="chat.pendingControl"
+              @decide="chat.approve"
+            />
+            <ClarifyCard
+              v-else-if="chat.pendingControl?.kind === 'clarify'"
+              :control="chat.pendingControl"
+              @submit="chat.clarify"
+            />
+
+            <div v-if="chat.error" class="flex items-start gap-2 rounded-xl bg-danger-weak px-3 py-2 text-[13px] text-danger">
+              <span class="flex-1">{{ chat.error }}</span>
+              <router-link
+                v-if="chat.error.includes('积分')"
+                to="/settings"
+                class="shrink-0 rounded-md bg-canvas px-2 py-0.5 text-[12px] font-medium text-accent transition-opacity hover:opacity-70"
+              >
+                查看会员
+              </router-link>
+              <button class="rounded p-0.5 transition-opacity hover:opacity-70" aria-label="关闭提示" @click="chat.error = null">
+                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+
+            <ChatInput :streaming="chat.streaming" :disabled="!agent?.ready" @send="onSend" @stop="chat.stop" />
+          </div>
+        </div>
+      </div>
+
+      <aside
+        class="hidden h-full shrink-0 overflow-hidden bg-sidebar transition-[width,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] lg:block"
+        :class="showPlan ? 'w-[320px] opacity-100' : 'pointer-events-none w-0 opacity-0'"
+        :aria-hidden="!showPlan"
+      >
+        <div class="h-full w-[320px]">
           <PlanPanel
             :plan="chat.viewPlan"
             :reasoning="chat.viewReasoning"
@@ -328,22 +362,22 @@ onBeforeUnmount(() => {
             :running-tool="chat.viewRunningTool"
             :turn-key="chat.selectedTurn?.id ?? ''"
           />
-        </aside>
-      </div>
+        </div>
+      </aside>
     </main>
 
     <Transition
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0"
-      enter-to-class="opacity-100"
-      leave-active-class="transition duration-150 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
+      enter-active-class="transition duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
+      enter-from-class="opacity-0 [&>div:last-child]:translate-x-full"
+      enter-to-class="opacity-100 [&>div:last-child]:translate-x-0"
+      leave-active-class="transition duration-200 ease-in"
+      leave-from-class="opacity-100 [&>div:last-child]:translate-x-0"
+      leave-to-class="opacity-0 [&>div:last-child]:translate-x-full"
     >
       <div v-if="mobileStepsOpen" class="fixed inset-0 z-40 lg:hidden">
         <div class="absolute inset-0 bg-black/40" @click="mobileStepsOpen = false" />
-        <div class="absolute inset-y-0 right-0 flex w-[min(360px,90vw)] flex-col bg-sidebar shadow-2xl">
-          <div class="flex h-11 shrink-0 items-center justify-between border-b border-line pl-4 pr-2">
+        <div class="absolute inset-y-0 right-0 flex w-[min(360px,90vw)] flex-col bg-sidebar shadow-2xl transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]">
+          <div class="flex h-11 shrink-0 items-center justify-between pl-4 pr-2">
             <span class="text-[12px] font-medium text-fg">本轮步骤</span>
             <button
               type="button"

@@ -107,14 +107,14 @@ watch(
 
 <template>
   <div class="flex h-full flex-col">
-    <div class="flex items-center justify-between px-5 pb-3 pt-4">
+    <div class="flex items-center gap-2.5 px-5 pb-3 pt-4 lg:pr-14">
       <div class="flex items-center gap-2">
-        <svg class="h-4 w-4 text-fg-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+        <svg class="h-4.5 w-4.5 text-fg-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
         </svg>
-        <h3 class="text-[13px] font-semibold text-fg">任务面板</h3>
+        <h3 class="text-[15px] font-semibold text-fg">任务面板</h3>
       </div>
-      <span class="flex items-center gap-1.5 text-[11px] text-fg-faint">
+      <span class="flex items-center gap-1.5 text-[12.5px] text-fg-faint">
         <span
           class="h-1.5 w-1.5 rounded-full"
           :class="streaming ? 'animate-pulse bg-accent' : items.length && done === items.length ? 'bg-success' : 'bg-line-strong'"
@@ -125,13 +125,9 @@ watch(
 
     <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
       <section v-if="items.length && planningBlocks.length" class="mb-4">
-        <h4 class="mb-2 text-[12px] font-medium text-fg-muted">规划</h4>
-        <div class="space-y-2">
-          <div
-            v-for="(block, bi) in planningBlocks"
-            :key="bi"
-            :class="bi ? 'border-t border-line pt-2' : ''"
-          >
+        <h4 class="mb-2 text-[13.5px] font-medium text-fg-muted">规划</h4>
+        <div class="space-y-3">
+          <div v-for="(block, bi) in planningBlocks" :key="bi">
             <ReasoningEntry :block="block" />
           </div>
         </div>
@@ -139,8 +135,8 @@ watch(
 
       <section v-if="steps.length" class="mb-4">
         <div class="mb-2 flex items-center justify-between">
-          <h4 class="text-[12px] font-medium text-fg-muted">执行步骤</h4>
-          <span class="text-[11px] tabular-nums text-fg-faint">{{ done }} / {{ items.length }}</span>
+          <h4 class="text-[13.5px] font-medium text-fg-muted">执行步骤</h4>
+          <span class="text-[12.5px] tabular-nums text-fg-faint">{{ done }} / {{ items.length }}</span>
         </div>
         <div class="mb-3 h-1 overflow-hidden rounded-full bg-surface">
           <div class="h-full rounded-full bg-accent transition-all duration-500" :style="{ width: pct + '%' }" />
@@ -149,7 +145,7 @@ watch(
           <div
             v-for="step in steps"
             :key="stepKey(step)"
-            class="overflow-hidden rounded-xl border border-line bg-canvas"
+            class="overflow-hidden rounded-xl bg-canvas/75"
           >
             <button
               type="button"
@@ -171,9 +167,9 @@ watch(
               </span>
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-1.5">
-                  <span class="shrink-0 text-[10px] font-medium tabular-nums text-fg-faint">步骤 {{ step.index }}</span>
+                  <span class="shrink-0 text-[11.5px] font-medium tabular-nums text-fg-faint">步骤 {{ step.index }}</span>
                   <span
-                    class="truncate text-[13px] leading-snug"
+                    class="truncate text-[14px] leading-snug"
                     :class="
                       step.item.status === 'completed'
                         ? 'text-fg-faint'
@@ -185,13 +181,13 @@ watch(
                     {{ step.item.content }}
                   </span>
                 </div>
-                <span class="mt-0.5 flex items-center gap-1 text-[10px] text-fg-faint">
+                <span class="mt-0.5 flex items-center gap-1 text-[12px] text-fg-faint">
                   {{ statusOf(step.item.status) }}
                   <template v-if="!stepOpen(step) && stepMeta(step)"> · {{ stepMeta(step) }}</template>
                 </span>
               </div>
               <svg
-                class="mt-0.5 h-3 w-3 shrink-0 text-fg-faint transition-transform"
+                class="mt-1 h-3.5 w-3.5 shrink-0 text-fg-faint transition-transform"
                 :class="stepOpen(step) ? 'rotate-90' : ''"
                 viewBox="0 0 24 24"
                 fill="none"
@@ -204,7 +200,7 @@ watch(
 
             <div
               v-if="stepOpen(step) && step.blocks.length"
-              class="space-y-2 border-t border-line/70 px-3 py-2.5"
+              class="space-y-2 px-3 pb-2.5 pt-0.5"
             >
               <ReasoningEntry v-for="(block, bi) in step.blocks" :key="bi" :block="block" />
             </div>
@@ -213,24 +209,24 @@ watch(
       </section>
 
       <section v-if="items.length && summaryBlocks.length" class="mb-4">
-        <h4 class="mb-2 text-[12px] font-medium text-fg-muted">总结</h4>
+        <h4 class="mb-2 text-[13.5px] font-medium text-fg-muted">总结</h4>
         <div class="space-y-2">
           <ReasoningEntry v-for="(block, bi) in summaryBlocks" :key="bi" :block="block" />
         </div>
       </section>
 
       <section v-if="looseBlocks.length" class="mb-4">
-        <h4 class="mb-2 text-[12px] font-medium text-fg-muted">
+        <h4 class="mb-2 text-[13.5px] font-medium text-fg-muted">
           {{ items.length ? "其他记录" : "思考与执行" }}
         </h4>
-        <div class="space-y-2">
-          <div v-for="(block, bi) in looseBlocks" :key="bi" :class="bi ? 'border-t border-line pt-2' : ''">
+        <div class="space-y-3">
+          <div v-for="(block, bi) in looseBlocks" :key="bi">
             <ReasoningEntry :block="block" />
           </div>
         </div>
       </section>
 
-      <div v-if="runningTool && streaming" class="mt-1 rounded-lg bg-surface px-3 py-2 text-[11px] text-fg-muted">
+      <div v-if="runningTool && streaming" class="mt-1 rounded-lg bg-surface px-3 py-2 text-[12.5px] text-fg-muted">
         正在调用 <span class="font-medium text-fg">{{ runningTool }}</span>
       </div>
 
@@ -240,7 +236,7 @@ watch(
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
           </svg>
         </div>
-        <p class="text-xs leading-relaxed text-fg-faint">
+        <p class="text-[13.5px] leading-relaxed text-fg-faint">
           暂无运行详情。<br />助理处理多步骤任务时，这里会按步骤显示思考与工具调用。
         </p>
       </div>

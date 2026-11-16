@@ -51,7 +51,7 @@ onMounted(async () => {
 
 <template>
   <div ref="container" class="h-full overflow-y-auto">
-    <div class="mx-auto w-full max-w-3xl space-y-5 px-4 pb-8 pt-6 sm:px-6 sm:pt-8">
+    <div class="mx-auto w-full max-w-3xl space-y-5 px-4 pb-8 pt-14 sm:px-6">
       <MessageBubble v-for="m in visibleMessages" :key="m.id" :message="m" @steps="emit('steps', m.id)" />
     </div>
   </div>

@@ -3,13 +3,39 @@ import type { AuthResponse } from "../types";
 const USER_KEY = "whitz_user";
 const BASE = "/api";
 
+export type RefreshResult = "ok" | "unauthorized" | "error";
+
 // The access token stays in memory; the refresh token lives in an HttpOnly cookie.
 let accessToken: string | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let lastRefreshAt = 0;
 
+function parseJwtExpMs(token: string): number | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const pad = base64.length % 4 === 0 ? "" : "=".repeat(4 - (base64.length % 4));
+    const json = JSON.parse(atob(base64 + pad)) as { exp?: unknown };
+    return typeof json.exp === "number" ? json.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isAccessTokenExpiringSoon(bufferMs = 30_000): boolean {
+  if (!accessToken) return true;
+  const expMs = parseJwtExpMs(accessToken);
+  if (expMs === null) return false;
+  return Date.now() >= expMs - bufferMs;
+}
+
 export function getAccessToken(): string | null {
   return accessToken;
+}
+
+export function getUserStorageKey(): string {
+  return USER_KEY;
 }
 
 export function setSession(auth: AuthResponse): void {
@@ -61,6 +87,11 @@ export function setUnauthorizedHandler(fn: () => void): void {
   unauthorizedHandler = fn;
 }
 
+export function handleUnauthorized(): void {
+  clearSession();
+  unauthorizedHandler?.();
+}
+
 export class ApiError extends Error {
   status: number;
   detail: unknown;
@@ -81,7 +112,7 @@ async function parseBody(resp: Response): Promise<unknown> {
   }
 }
 
-let refreshPromise: Promise<boolean> | null = null;
+let refreshPromise: Promise<RefreshResult> | null = null;
 
 async function callRefresh(): Promise<Response> {
   return fetch(BASE + "/auth/refresh", {
@@ -92,7 +123,7 @@ async function callRefresh(): Promise<Response> {
   });
 }
 
-async function doRefresh(): Promise<boolean> {
+async function doRefresh(): Promise<RefreshResult> {
   try {
     let resp = await callRefresh();
     if (resp.status === 401) {
@@ -100,16 +131,17 @@ async function doRefresh(): Promise<boolean> {
       await new Promise((resolve) => setTimeout(resolve, 300));
       resp = await callRefresh();
     }
-    if (!resp.ok) return false;
+    if (resp.status === 401 || resp.status === 403) return "unauthorized";
+    if (!resp.ok) return "error";
     const auth = (await resp.json()) as AuthResponse;
     setSession(auth);
-    return true;
+    return "ok";
   } catch {
-    return false;
+    return "error";
   }
 }
 
-function refreshOnce(): Promise<boolean> {
+function refreshOnce(): Promise<RefreshResult> {
   if (!refreshPromise) {
     refreshPromise = doRefresh().finally(() => {
       refreshPromise = null;
@@ -118,13 +150,21 @@ function refreshOnce(): Promise<boolean> {
   return refreshPromise;
 }
 
-export function tryRefresh(): Promise<boolean> {
+export function tryRefreshDetail(): Promise<RefreshResult> {
   return refreshOnce();
+}
+
+export async function tryRefresh(): Promise<boolean> {
+  return (await refreshOnce()) === "ok";
 }
 
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && accessToken && Date.now() - lastRefreshAt > 5 * 60_000) {
+    if (
+      document.visibilityState === "visible" &&
+      accessToken &&
+      (isAccessTokenExpiringSoon(90_000) || Date.now() - lastRefreshAt > 5 * 60_000)
+    ) {
       void refreshOnce();
     }
   });
@@ -138,6 +178,11 @@ export interface RequestOptions {
 }
 
 export async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+  const isAuthPath = path.startsWith("/auth/");
+  if (!isAuthPath && (accessToken || hasStoredSession()) && isAccessTokenExpiringSoon()) {
+    await refreshOnce();
+  }
+
   const headers: Record<string, string> = { ...(opts.headers ?? {}) };
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
   const token = getAccessToken();
@@ -151,9 +196,9 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
     signal: opts.signal,
   });
 
-  if (resp.status === 401 && !path.startsWith("/auth/")) {
-    const ok = await refreshOnce();
-    if (ok) {
+  if (resp.status === 401 && !isAuthPath) {
+    const res = await refreshOnce();
+    if (res === "ok") {
       const retryHeaders = { ...headers, Authorization: "Bearer " + getAccessToken() };
       resp = await fetch(BASE + path, {
         method,
@@ -165,9 +210,8 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
     }
   }
 
-  if (resp.status === 401) {
-    clearSession();
-    unauthorizedHandler?.();
+  if (resp.status === 401 && !isAuthPath) {
+    handleUnauthorized();
     throw new ApiError(401, "登录已过期，请重新登录");
   }
 

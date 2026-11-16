@@ -19,6 +19,10 @@ router.beforeEach((to) => {
     return { name: "login", query: { redirect: to.fullPath } };
   }
   if (to.meta.guestOnly && auth.isAuthenticated) {
+    const rawRedirect = typeof to.query.redirect === "string" ? to.query.redirect : "";
+    if (rawRedirect.startsWith("/") && !rawRedirect.startsWith("//")) {
+      return rawRedirect;
+    }
     return { name: "chat" };
   }
   return true;

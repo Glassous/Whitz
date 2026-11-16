@@ -175,10 +175,10 @@ function prettyResult(tool: ReasoningTool): string {
 
 <template>
   <div class="space-y-1.5">
-    <div v-if="block.content" class="rounded-md bg-surface/60 px-2 py-1.5">
-      <p class="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-fg-faint">过程回复</p>
+    <div v-if="block.content" class="rounded-md bg-surface/60 px-2.5 py-2">
+      <p class="mb-0.5 text-[11.5px] font-medium uppercase tracking-wide text-fg-faint">过程回复</p>
       <p
-        class="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-fg-muted"
+        class="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg-muted"
         :class="!contentOpen && longContent ? 'line-clamp-3' : ''"
       >
         {{ block.content }}
@@ -186,7 +186,7 @@ function prettyResult(tool: ReasoningTool): string {
       <button
         v-if="longContent"
         type="button"
-        class="mt-0.5 text-[11px] text-accent transition-opacity hover:opacity-70"
+        class="mt-0.5 text-[12.5px] text-accent transition-opacity hover:opacity-70"
         @click="contentOpen = !contentOpen"
       >
         {{ contentOpen ? "收起" : "展开全文" }}
@@ -195,7 +195,7 @@ function prettyResult(tool: ReasoningTool): string {
 
     <div v-if="block.text">
       <p
-        class="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-fg-muted"
+        class="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg-muted"
         :class="!textOpen && longText ? 'line-clamp-3' : ''"
       >
         {{ block.text }}
@@ -203,36 +203,36 @@ function prettyResult(tool: ReasoningTool): string {
       <button
         v-if="longText"
         type="button"
-        class="mt-0.5 text-[11px] text-accent transition-opacity hover:opacity-70"
+        class="mt-0.5 text-[12.5px] text-accent transition-opacity hover:opacity-70"
         @click="textOpen = !textOpen"
       >
         {{ textOpen ? "收起" : "展开全文" }}
       </button>
     </div>
 
-    <div v-if="block.tools?.length" class="space-y-1">
+    <div v-if="block.tools?.length" class="space-y-1.5">
       <div
         v-for="(tool, ti) in block.tools"
         :key="ti"
-        class="overflow-hidden rounded-lg border border-line/70 bg-canvas"
+        class="overflow-hidden rounded-lg bg-surface/65"
       >
         <button
           type="button"
-          class="flex w-full items-center gap-1.5 px-2 py-1.5 text-left"
+          class="flex w-full items-center gap-1.5 px-2.5 py-2 text-left"
           :aria-expanded="openTools.has(ti)"
           @click="toggleTool(ti)"
         >
-          <svg class="h-3 w-3 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <svg class="h-3.5 w-3.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
             <path
               stroke-linecap="round"
               stroke-linejoin="round"
               d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.3 2.3-2.1-2.1 2.4-2.2z"
             />
           </svg>
-          <span class="shrink-0 text-[11px] font-medium text-fg-muted">{{ toolLabel(tool) }}</span>
-          <span class="min-w-0 flex-1 truncate text-[11px] text-fg-faint">{{ toolSummary(tool) }}</span>
+          <span class="shrink-0 text-[12.5px] font-medium text-fg-muted">{{ toolLabel(tool) }}</span>
+          <span class="min-w-0 flex-1 truncate text-[12.5px] text-fg-faint">{{ toolSummary(tool) }}</span>
           <svg
-            class="h-3 w-3 shrink-0 text-fg-faint transition-transform"
+            class="h-3.5 w-3.5 shrink-0 text-fg-faint transition-transform"
             :class="openTools.has(ti) ? 'rotate-90' : ''"
             viewBox="0 0 24 24"
             fill="none"
@@ -243,45 +243,45 @@ function prettyResult(tool: ReasoningTool): string {
           </svg>
         </button>
 
-        <div v-if="!openTools.has(ti) && collapsedTitles(tool).length" class="space-y-0.5 px-2.5 pb-1.5">
+        <div v-if="!openTools.has(ti) && collapsedTitles(tool).length" class="space-y-0.5 px-2.5 pb-2">
           <p
             v-for="(title, ci) in collapsedTitles(tool)"
             :key="ci"
-            class="truncate text-[11px] leading-relaxed text-fg-faint"
+            class="truncate text-[12.5px] leading-relaxed text-fg-faint"
           >
             · {{ title }}
           </p>
         </div>
 
-        <div v-if="openTools.has(ti)" class="space-y-1.5 border-t border-line/70 px-2.5 py-2">
+        <div v-if="openTools.has(ti)" class="space-y-1.5 px-2.5 pb-2.5 pt-1">
           <template v-if="isWeb(tool)">
-            <p v-if="webQuery(tool)" class="text-[11px] text-fg-faint">搜索：{{ webQuery(tool) }}</p>
+            <p v-if="webQuery(tool)" class="text-[12.5px] text-fg-faint">搜索：{{ webQuery(tool) }}</p>
             <div v-for="(item, ii) in webItems(tool)" :key="ii" class="space-y-0.5">
-              <p class="text-[11px] font-medium leading-snug text-fg-muted">{{ item.title || item.url }}</p>
+              <p class="text-[12.5px] font-medium leading-snug text-fg-muted">{{ item.title || item.url }}</p>
               <a
                 v-if="item.url"
                 :href="item.url"
                 target="_blank"
                 rel="noopener noreferrer"
-                class="block truncate text-[10px] text-accent hover:underline"
+                class="block truncate text-[11.5px] text-accent hover:underline"
               >
                 {{ item.url }}
               </a>
               <p
                 v-if="item.snippet"
-                class="line-clamp-4 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-fg-faint"
+                class="line-clamp-4 whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-fg-faint"
               >
                 {{ item.snippet }}
               </p>
             </div>
-            <p v-if="!webItems(tool).length" class="text-[11px] text-fg-faint">暂无结果详情</p>
+            <p v-if="!webItems(tool).length" class="text-[12.5px] text-fg-faint">暂无结果详情</p>
           </template>
 
           <template v-else-if="tool.name === 'todo_list'">
             <p
               v-for="(change, ci) in todoChanges(tool)"
               :key="ci"
-              class="text-[11px] leading-relaxed text-fg-faint"
+              class="text-[12.5px] leading-relaxed text-fg-faint"
             >
               · {{ change }}
             </p>
@@ -289,12 +289,12 @@ function prettyResult(tool: ReasoningTool): string {
 
           <template v-else>
             <div v-if="prettyArgs(tool)">
-              <p class="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-fg-faint">参数</p>
-              <pre class="max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-surface/60 p-1.5 text-[10px] leading-relaxed text-fg-faint">{{ prettyArgs(tool) }}</pre>
+              <p class="mb-0.5 text-[11.5px] font-medium uppercase tracking-wide text-fg-faint">参数</p>
+              <pre class="max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-surface/60 p-1.5 text-[11.5px] leading-relaxed text-fg-faint">{{ prettyArgs(tool) }}</pre>
             </div>
             <div v-if="prettyResult(tool)">
-              <p class="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-fg-faint">结果</p>
-              <pre class="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-surface/60 p-1.5 text-[10px] leading-relaxed text-fg-faint">{{ prettyResult(tool) }}</pre>
+              <p class="mb-0.5 text-[11.5px] font-medium uppercase tracking-wide text-fg-faint">结果</p>
+              <pre class="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-surface/60 p-1.5 text-[11.5px] leading-relaxed text-fg-faint">{{ prettyResult(tool) }}</pre>
             </div>
           </template>
         </div>

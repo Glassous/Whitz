@@ -50,11 +50,11 @@ const stepsCount = computed(() => {
     <div class="min-w-0 flex-1 pt-0.5">
       <button
         type="button"
-        class="mb-2 inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors"
+        class="mb-2 inline-flex max-w-full items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] transition-colors"
         :class="
           isCurrent
-            ? 'border-accent/45 bg-accent-weak/50 text-accent'
-            : 'border-line bg-canvas/60 text-fg-faint hover:border-line-strong hover:text-fg-muted'
+            ? 'bg-accent-weak/75 text-accent'
+            : 'bg-surface/75 text-fg-faint hover:bg-surface hover:text-fg-muted'
         "
         :aria-pressed="isCurrent"
         @click="emit('steps')"

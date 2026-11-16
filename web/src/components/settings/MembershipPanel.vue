@@ -77,9 +77,9 @@ onMounted(() => {
     <div class="rounded-2xl border p-4" :class="tierTone">
       <div class="flex items-start justify-between gap-4">
         <div>
-          <p class="text-[11px] uppercase tracking-wide opacity-70">会员档位</p>
-          <p class="mt-1 text-[22px] font-semibold leading-none">{{ credits.tierLabel }}</p>
-          <p class="mt-1.5 text-[12px]">
+          <p class="text-[12.5px] uppercase tracking-wide opacity-70">会员档位</p>
+          <p class="mt-1 text-[24px] font-semibold leading-none">{{ credits.tierLabel }}</p>
+          <p class="mt-1.5 text-[13.5px]">
             {{
               credits.tier === "free"
                 ? "免费额度按周与 5 小时滚动刷新"
@@ -88,25 +88,25 @@ onMounted(() => {
           </p>
         </div>
         <div class="text-right">
-          <p class="text-[11px] uppercase tracking-wide opacity-70">还剩</p>
-          <p class="mt-1 text-[22px] font-semibold leading-none tabular-nums">
+          <p class="text-[12.5px] uppercase tracking-wide opacity-70">还剩</p>
+          <p class="mt-1 text-[24px] font-semibold leading-none tabular-nums">
             {{ availablePercent === null ? "—" : `${availablePercent}%` }}
           </p>
-          <p class="mt-1.5 text-[11px] opacity-80">额度按滚动窗口恢复</p>
+          <p class="mt-1.5 text-[12.5px] opacity-80">额度按滚动窗口恢复</p>
         </div>
       </div>
-      <p v-if="credits.overdrawn" class="mt-3 rounded-lg bg-danger-weak px-2.5 py-1.5 text-[12px] text-danger">
+      <p v-if="credits.overdrawn" class="mt-3 rounded-lg bg-danger-weak px-2.5 py-1.5 text-[13px] text-danger">
         额度已用完，将在 {{ fmtDateTime(credits.nextResetAt) }} 刷新后恢复。
       </p>
     </div>
 
-    <p v-if="credits.error" class="rounded-xl bg-danger-weak px-3 py-2 text-[12px] text-danger">
+    <p v-if="credits.error" class="rounded-xl bg-danger-weak px-3 py-2 text-[13px] text-danger">
       {{ credits.error }}
     </p>
 
     <div class="space-y-4 rounded-2xl border border-line bg-canvas p-4">
       <div>
-        <div class="flex items-center justify-between text-[12px]">
+        <div class="flex items-center justify-between text-[13.5px]">
           <span class="text-fg-muted">本周剩余</span>
           <span class="tabular-nums text-fg">
             {{ credits.status?.weekly.limit ? `${credits.weeklyPercent}%` : "不限" }}
@@ -119,9 +119,9 @@ onMounted(() => {
             :class="progressClass(credits.weeklyPercent)"
             :style="{ width: `${credits.weeklyPercent}%` }"
           />
-          <div v-else class="h-full w-full rounded-full bg-gradient-to-r from-accent/60 to-[#7C6BF0]/60" />
+          <div v-else class="h-full w-full rounded-full bg-fg/65" />
         </div>
-        <p class="mt-1.5 text-[11px] text-fg-faint">
+        <p class="mt-1.5 text-[12.5px] text-fg-faint">
           {{
             credits.status?.weekly.limit
               ? `下次刷新 ${fmtDateTime(credits.status?.weekly.reset_at ?? null)}`
@@ -130,7 +130,7 @@ onMounted(() => {
         </p>
       </div>
       <div v-if="credits.status && credits.tier !== 'pro'">
-        <div class="flex items-center justify-between text-[12px]">
+        <div class="flex items-center justify-between text-[13.5px]">
           <span class="text-fg-muted">5 小时剩余</span>
           <span class="tabular-nums text-fg">{{ credits.fiveHourPercent }}%</span>
         </div>
@@ -141,7 +141,7 @@ onMounted(() => {
             :style="{ width: `${credits.fiveHourPercent}%` }"
           />
         </div>
-        <p class="mt-1.5 text-[11px] text-fg-faint">
+        <p class="mt-1.5 text-[12.5px] text-fg-faint">
           下次刷新 {{ fmtDateTime(credits.status?.five_hour.reset_at ?? null) }}
         </p>
       </div>
@@ -155,26 +155,26 @@ onMounted(() => {
         :class="p.tier === credits.tier ? 'border-accent bg-accent-weak/40' : 'border-line'"
       >
         <div class="flex items-center justify-between">
-          <p class="text-[13px] font-semibold text-fg">{{ p.label }}</p>
-          <span v-if="p.tier === credits.tier" class="text-[10px] font-medium text-accent">当前</span>
+          <p class="text-[14.5px] font-semibold text-fg">{{ p.label }}</p>
+          <span v-if="p.tier === credits.tier" class="text-[11.5px] font-medium text-accent">当前</span>
         </div>
-        <p class="mt-2 text-[12px] font-medium leading-relaxed text-fg-muted">
+        <p class="mt-2 text-[13px] font-medium leading-relaxed text-fg-muted">
           {{ planTagline(p.tier) }}
         </p>
       </div>
     </div>
 
     <div class="rounded-2xl border border-line bg-canvas p-4">
-      <h3 class="text-[13px] font-semibold text-fg">兑换邀请码</h3>
-      <p class="mt-0.5 text-[12px] text-fg-muted">输入管理员提供的兑换码，升级或续期会员。</p>
+      <h3 class="text-[14.5px] font-semibold text-fg">兑换邀请码</h3>
+      <p class="mt-0.5 text-[13px] text-fg-muted">输入管理员提供的兑换码，升级或续期会员。</p>
       <div class="mt-3 flex flex-col gap-2 sm:flex-row">
         <div class="flex-1">
           <BaseInput v-model="redeemCode" placeholder="WZ-XXXX-XXXX-XXXX-XXXX" />
         </div>
         <BaseButton :loading="redeeming" @click="redeem">兑换</BaseButton>
       </div>
-      <p v-if="redeemErr" class="mt-2 text-[12px] text-danger">{{ redeemErr }}</p>
-      <p v-if="redeemMsg" class="mt-2 text-[12px] text-success">{{ redeemMsg }}</p>
+      <p v-if="redeemErr" class="mt-2 text-[13px] text-danger">{{ redeemErr }}</p>
+      <p v-if="redeemMsg" class="mt-2 text-[13px] text-success">{{ redeemMsg }}</p>
     </div>
   </div>
 </template>
