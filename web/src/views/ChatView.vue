@@ -29,7 +29,7 @@ function readCollapsedPref(): boolean {
 }
 
 const agent = ref<AgentStatus | null>(null);
-const showPlan = ref(true);
+const showPlan = ref(false);
 const sidebarOpen = ref(false);
 const sidebarCollapsed = ref(readCollapsedPref());
 const mobileStepsOpen = ref(false);
@@ -125,6 +125,7 @@ function createConversation() {
   chat.abort();
   conversations.clearCurrent();
   chat.reset();
+  showPlan.value = false;
 }
 
 async function onSelect(id: string) {
@@ -133,6 +134,7 @@ async function onSelect(id: string) {
   if (id === conversations.current?.id) return;
   chat.abort();
   await openConversation(id);
+  showPlan.value = true;
 }
 
 async function onRename(id: string, title: string) {
@@ -146,8 +148,10 @@ async function onDelete(id: string) {
     chat.reset();
     if (conversations.conversations.length) {
       await openConversation(conversations.conversations[0].id);
+      showPlan.value = true;
     } else {
       conversations.clearCurrent();
+      showPlan.value = false;
     }
   }
 }
@@ -180,6 +184,9 @@ function onViewSteps(id: string) {
 watch(
   () => chat.streaming,
   (val, old) => {
+    if (val && !old) {
+      showPlan.value = true;
+    }
     if (old && !val) {
       void conversations.fetchList();
       void credits.fetch();
@@ -231,34 +238,43 @@ onBeforeUnmount(() => {
     />
 
     <main class="relative flex min-w-0 flex-1">
-      <!-- Floating sidebar toggle (two horizontal bars: top longer, bottom shorter) -->
-      <button
-        type="button"
-        class="focus-ring absolute left-3.5 top-3 z-30 flex h-8 w-8 items-center justify-center rounded-lg bg-canvas/75 text-fg-muted backdrop-blur-sm transition-colors hover:bg-hover hover:text-fg sm:left-4"
-        :aria-label="sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
-        :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
-        @click="onSidebarToggleClick"
-      >
-        <svg class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-          <path stroke-linecap="round" d="M4 8.5h16M4 15.5h10" />
-        </svg>
-      </button>
-
       <!-- Fixed task panel toggle (top-right inside panel when expanded, same position when collapsed) -->
       <button
         type="button"
-        class="focus-ring absolute right-5 top-3 z-30 hidden h-8 w-8 items-center justify-center rounded-lg text-fg-muted backdrop-blur-sm transition-colors hover:bg-hover hover:text-fg lg:inline-flex"
-        :class="showPlan ? 'bg-sidebar/75' : 'bg-canvas/75'"
+        class="focus-ring absolute right-3.5 top-3.5 z-30 hidden h-10 w-10 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg lg:inline-flex"
         :aria-label="showPlan ? '收起任务面板' : '展开任务面板'"
         :title="showPlan ? '收起任务面板' : '展开任务面板'"
         @click="showPlan = !showPlan"
       >
-        <svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+        <svg class="h-[21px] w-[21px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
           <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v14H3zM15 5v14" />
         </svg>
       </button>
 
-      <div class="flex min-w-0 flex-1 flex-col">
+      <div class="relative flex min-w-0 flex-1 flex-col">
+        <!-- Progressive blur top zone + floating sidebar toggle & conversation title -->
+        <div class="progressive-blur-top pointer-events-none absolute inset-x-0 top-0 z-20 h-20" />
+        <div
+          class="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center gap-2.5 px-3.5 pt-3.5"
+          :class="showPlan ? 'pr-4' : 'lg:pr-16'"
+        >
+          <button
+            type="button"
+            class="focus-ring pointer-events-auto flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
+            :aria-label="sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
+            :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
+            @click="onSidebarToggleClick"
+          >
+            <svg class="h-[22px] w-[22px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3">
+              <path stroke-linecap="round" d="M4 8.5h16M4 15.5h10" />
+            </svg>
+          </button>
+
+          <h1 class="min-w-0 truncate text-[15.5px] font-semibold text-fg">
+            {{ conversations.current?.title ?? "新对话" }}
+          </h1>
+        </div>
+
         <div class="relative min-h-0 flex-1">
           <MessageList
             v-if="chat.messages.length"
@@ -268,7 +284,7 @@ onBeforeUnmount(() => {
           />
 
           <div v-else class="h-full overflow-y-auto">
-            <div class="flex min-h-full flex-col items-center justify-center px-4 py-10 sm:px-6">
+            <div class="flex min-h-full flex-col items-center justify-center px-4 pb-10 pt-20 sm:px-6">
               <div class="w-full max-w-2xl text-center">
                 <div class="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary text-primary-fg">
                   <span class="text-lg font-semibold tracking-tight">W</span>

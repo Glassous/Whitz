@@ -107,20 +107,8 @@ watch(
 
 <template>
   <div class="flex h-full flex-col">
-    <div class="flex items-center gap-2.5 px-5 pb-3 pt-4 lg:pr-14">
-      <div class="flex items-center gap-2">
-        <svg class="h-4.5 w-4.5 text-fg-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
-        </svg>
-        <h3 class="text-[15px] font-semibold text-fg">任务面板</h3>
-      </div>
-      <span class="flex items-center gap-1.5 text-[12.5px] text-fg-faint">
-        <span
-          class="h-1.5 w-1.5 rounded-full"
-          :class="streaming ? 'animate-pulse bg-accent' : items.length && done === items.length ? 'bg-success' : 'bg-line-strong'"
-        />
-        {{ streaming ? (currentStep ? "执行中" : items.length && done === items.length ? "整理结果中" : "思考中") : items.length && done === items.length ? "已完成" : "待命" }}
-      </span>
+    <div class="flex shrink-0 items-center px-5 pb-2 pt-3.5 lg:pr-14">
+      <h3 class="flex h-10 items-center text-[15.5px] font-semibold text-fg">任务面板</h3>
     </div>
 
     <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
@@ -230,12 +218,7 @@ watch(
         正在调用 <span class="font-medium text-fg">{{ runningTool }}</span>
       </div>
 
-      <div v-if="!hasContent && !currentStep" class="flex flex-col items-center px-4 py-12 text-center">
-        <div class="mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-surface text-fg-faint">
-          <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
-          </svg>
-        </div>
+      <div v-if="!hasContent && !currentStep" class="flex min-h-full items-center justify-center px-4 text-center">
         <p class="text-[13.5px] leading-relaxed text-fg-faint">
           暂无运行详情。<br />助理处理多步骤任务时，这里会按步骤显示思考与工具调用。
         </p>
