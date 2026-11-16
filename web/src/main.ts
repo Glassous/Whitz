@@ -4,6 +4,7 @@ import App from "./App.vue";
 import router from "./router";
 import { setUnauthorizedHandler } from "./api/client";
 import { useAuthStore } from "./stores/auth";
+import { vScrollbar } from "./lib/scrollbar";
 import "./styles/main.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -11,6 +12,7 @@ async function bootstrap() {
   const app = createApp(App);
   const pinia = createPinia();
   app.use(pinia);
+  app.directive("scrollbar", vScrollbar);
 
   // Resolve the session before the router performs its first navigation so
   // route guards see a fresh user, not stale localStorage.

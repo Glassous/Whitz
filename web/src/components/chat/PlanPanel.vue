@@ -111,7 +111,7 @@ watch(
       <h3 class="flex h-10 items-center text-[15.5px] font-semibold text-fg">任务面板</h3>
     </div>
 
-    <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
+    <div ref="scrollEl" v-scrollbar class="custom-scrollbar min-h-0 flex-1 overflow-y-auto pl-4 pr-1.5 pb-4">
       <section v-if="items.length && planningBlocks.length" class="mb-4">
         <h4 class="mb-2 text-[13.5px] font-medium text-fg-muted">规划</h4>
         <div class="space-y-3">

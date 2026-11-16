@@ -399,7 +399,7 @@ function isRunning(c: Conversation): boolean {
     </div>
 
     <!-- Conversation list (hidden when collapsed) -->
-    <nav class="relative z-10 flex-1 overflow-y-auto px-3 pb-3 no-scrollbar">
+    <nav v-scrollbar class="custom-scrollbar relative z-10 flex-1 overflow-y-auto pl-3 pr-1 pb-3">
       <template v-if="!isRail">
         <!-- Loading skeleton -->
         <div v-if="loading && !conversations.length" class="space-y-2 py-3 px-1">
@@ -419,16 +419,10 @@ function isRunning(c: Conversation): boolean {
               class="group/item relative flex items-center rounded-xl pr-1 transition-colors duration-150"
               :class="c.id === currentId ? 'bg-hover/90 dark:bg-active' : 'hover:bg-hover/65'"
             >
-              <span
-                v-if="c.id === currentId"
-                class="absolute left-1 top-1/2 h-4.5 w-[3px] -translate-y-1/2 rounded-full bg-accent"
-              />
               <button
                 type="button"
-                class="focus-ring flex h-10 min-w-0 flex-1 items-center gap-2 rounded-xl pr-1 text-left text-[14px] transition-colors"
-                :class="[
-                  c.id === currentId ? 'pl-3 font-medium text-fg' : 'pl-2.5 text-fg-muted hover:text-fg',
-                ]"
+                class="focus-ring flex h-10 min-w-0 flex-1 items-center gap-2 rounded-xl pl-3 pr-1 text-left text-[14px] transition-colors"
+                :class="c.id === currentId ? 'font-medium text-fg' : 'text-fg-muted hover:text-fg'"
                 @click="select(c.id)"
               >
                 <span

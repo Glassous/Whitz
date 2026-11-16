@@ -122,8 +122,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="container" class="h-full overflow-y-auto">
-    <div ref="wrapper" class="relative mx-auto flex w-full max-w-3xl flex-col gap-5 px-4 pt-[88px] sm:px-6">
+  <div ref="container" v-scrollbar class="custom-scrollbar h-full overflow-y-auto">
+    <div ref="wrapper" class="relative mx-auto flex w-full max-w-4xl flex-col gap-5 px-4 pt-[88px] sm:px-6">
       <div
         v-for="(m, idx) in visibleMessages"
         :key="m.id"

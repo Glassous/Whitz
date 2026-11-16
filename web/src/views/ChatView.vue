@@ -283,7 +283,7 @@ onBeforeUnmount(() => {
             @steps="onViewSteps"
           />
 
-          <div v-else class="h-full overflow-y-auto">
+          <div v-else v-scrollbar class="custom-scrollbar h-full overflow-y-auto">
             <div class="flex min-h-full flex-col items-center justify-center px-4 pb-10 pt-20 sm:px-6">
               <div class="w-full max-w-2xl text-center">
                 <div class="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary text-primary-fg">
@@ -331,7 +331,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="shrink-0 px-3 pb-3 pt-1 sm:px-6">
-          <div class="mx-auto w-full max-w-3xl space-y-3">
+          <div class="mx-auto w-full max-w-4xl space-y-3">
             <ApprovalCard
               v-if="chat.pendingControl?.kind === 'approval'"
               :control="chat.pendingControl"
