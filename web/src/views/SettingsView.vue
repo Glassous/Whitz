@@ -19,7 +19,7 @@ type Tab = "profile" | "membership" | "persona" | "password" | "security";
 const tab = ref<Tab>("profile");
 const tabs: { key: Tab; label: string; title: string; desc: string }[] = [
   { key: "profile", label: "个人资料", title: "个人资料", desc: "更新你的昵称与公开信息。" },
-  { key: "membership", label: "会员与积分", title: "会员与积分", desc: "查看额度用量、刷新时间并兑换邀请码。" },
+  { key: "membership", label: "会员与积分", title: "会员与积分", desc: "查看额度剩余、刷新时间并兑换邀请码。" },
   { key: "persona", label: "助理人设", title: "助理人设", desc: "定制助理的语气、角色与回答方式。" },
   { key: "password", label: "修改密码", title: "修改密码", desc: "修改后其他设备的登录将失效。" },
   { key: "security", label: "密保问题", title: "密保问题", desc: "用于忘记密码时验证身份。" },

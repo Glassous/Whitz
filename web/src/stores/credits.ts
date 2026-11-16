@@ -27,7 +27,7 @@ export const useCreditsStore = defineStore("credits", () => {
     const current = status.value;
     if (!current) return null;
     const resets = [current.weekly.reset_at];
-    if (current.five_hour.remaining !== null) resets.push(current.five_hour.reset_at);
+    if (current.tier !== "pro") resets.push(current.five_hour.reset_at);
     return resets.reduce((a, b) => (new Date(a).getTime() <= new Date(b).getTime() ? a : b));
   });
 

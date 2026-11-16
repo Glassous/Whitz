@@ -35,6 +35,12 @@ const tierBadgeClass = computed(() => {
   return "bg-surface text-fg-faint";
 });
 
+function quotaTone(percent: number): string {
+  if (percent <= 15) return "bg-danger";
+  if (percent <= 35) return "bg-warning";
+  return "bg-accent";
+}
+
 const renameTarget = ref<Conversation | null>(null);
 const renameText = ref("");
 const renameError = ref<string | null>(null);
@@ -295,16 +301,39 @@ async function logout() {
               {{ credits.tierLabel }}
             </span>
           </div>
-          <p class="truncate text-[11px] text-fg-faint">
-            <template v-if="credits.status">
-              可用 {{ credits.remaining.toFixed(1) }} 积分
-              <span v-if="credits.overdrawn" class="text-danger">· 已超额</span>
-            </template>
-            <template v-else>{{ auth.user?.email }}</template>
-          </p>
+          <p class="truncate text-[11px] text-fg-faint">{{ auth.user?.email }}</p>
         </div>
         <ThemeToggle />
       </div>
+
+      <div v-if="credits.status" class="px-2 pb-1 pt-0.5">
+        <div class="flex items-center justify-between text-[10.5px] text-fg-faint">
+          <span>本周剩余</span>
+          <span class="tabular-nums">{{ credits.weeklyPercent }}%</span>
+        </div>
+        <div class="mt-1 h-1 overflow-hidden rounded-full bg-surface">
+          <div
+            class="h-full rounded-full transition-[width] duration-500"
+            :class="quotaTone(credits.weeklyPercent)"
+            :style="{ width: `${credits.weeklyPercent}%` }"
+          />
+        </div>
+        <template v-if="credits.tier !== 'pro'">
+          <div class="mt-1.5 flex items-center justify-between text-[10.5px] text-fg-faint">
+            <span>5 小时剩余</span>
+            <span class="tabular-nums">{{ credits.fiveHourPercent }}%</span>
+          </div>
+          <div class="mt-1 h-1 overflow-hidden rounded-full bg-surface">
+            <div
+              class="h-full rounded-full transition-[width] duration-500"
+              :class="quotaTone(credits.fiveHourPercent)"
+              :style="{ width: `${credits.fiveHourPercent}%` }"
+            />
+          </div>
+        </template>
+        <p v-if="credits.overdrawn" class="mt-1 text-[10.5px] text-danger">额度已用完</p>
+      </div>
+
       <div class="mt-0.5 flex items-center gap-0.5">
         <router-link
           to="/settings"

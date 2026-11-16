@@ -4,6 +4,7 @@ import { useAuthStore } from "../../stores/auth";
 import { useCreditsStore } from "../../stores/credits";
 import BaseInput from "../ui/BaseInput.vue";
 import BaseButton from "../ui/BaseButton.vue";
+import type { MembershipTier } from "../../types";
 
 const auth = useAuthStore();
 const credits = useCreditsStore();
@@ -27,10 +28,23 @@ function fmtDateTime(value: string | null): string {
   return value ? new Date(value).toLocaleString() : "—";
 }
 
+const availablePercent = computed(() => {
+  const current = credits.status;
+  if (!current) return null;
+  if (current.tier === "pro") return credits.weeklyPercent;
+  return Math.min(credits.weeklyPercent, credits.fiveHourPercent);
+});
+
 function progressClass(percent: number): string {
   if (percent <= 15) return "bg-danger";
   if (percent <= 35) return "bg-warning";
   return "bg-accent";
+}
+
+function planTagline(tier: MembershipTier): string {
+  if (tier === "pro") return "无 5 小时限制，可一次用完整周额度";
+  if (tier === "plus") return "更高的周额度，5 小时分段可用";
+  return "基础周额度，5 小时分段可用";
 }
 
 async function redeem() {
@@ -74,17 +88,15 @@ onMounted(() => {
           </p>
         </div>
         <div class="text-right">
-          <p class="text-[11px] uppercase tracking-wide opacity-70">当前可用积分</p>
+          <p class="text-[11px] uppercase tracking-wide opacity-70">还剩</p>
           <p class="mt-1 text-[22px] font-semibold leading-none tabular-nums">
-            {{ credits.status ? credits.remaining.toFixed(1) : "—" }}
+            {{ availablePercent === null ? "—" : `${availablePercent}%` }}
           </p>
-          <p class="mt-1.5 text-[11px] opacity-80">
-            1 积分 = {{ credits.status?.tokens_per_credit ?? 1000 }} tokens
-          </p>
+          <p class="mt-1.5 text-[11px] opacity-80">额度按滚动窗口恢复</p>
         </div>
       </div>
       <p v-if="credits.overdrawn" class="mt-3 rounded-lg bg-danger-weak px-2.5 py-1.5 text-[12px] text-danger">
-        积分已超额，将在 {{ fmtDateTime(credits.nextResetAt) }} 刷新后恢复。
+        额度已用完，将在 {{ fmtDateTime(credits.nextResetAt) }} 刷新后恢复。
       </p>
     </div>
 
@@ -95,9 +107,9 @@ onMounted(() => {
     <div class="space-y-4 rounded-2xl border border-line bg-canvas p-4">
       <div>
         <div class="flex items-center justify-between text-[12px]">
-          <span class="text-fg-muted">本周用量</span>
+          <span class="text-fg-muted">本周剩余</span>
           <span class="tabular-nums text-fg">
-            {{ credits.status?.weekly.used ?? 0 }} / {{ credits.status?.weekly.limit ?? "不限" }}
+            {{ credits.status?.weekly.limit ? `${credits.weeklyPercent}%` : "不限" }}
           </span>
         </div>
         <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-surface">
@@ -117,28 +129,20 @@ onMounted(() => {
           }}
         </p>
       </div>
-      <div>
+      <div v-if="credits.status && credits.tier !== 'pro'">
         <div class="flex items-center justify-between text-[12px]">
-          <span class="text-fg-muted">近 5 小时用量</span>
-          <span class="tabular-nums text-fg">
-            {{ credits.status?.five_hour.used ?? 0 }} / {{ credits.status?.five_hour.limit ?? "不限" }}
-          </span>
+          <span class="text-fg-muted">5 小时剩余</span>
+          <span class="tabular-nums text-fg">{{ credits.fiveHourPercent }}%</span>
         </div>
         <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-surface">
           <div
-            v-if="credits.status?.five_hour.limit"
             class="h-full rounded-full transition-[width] duration-500"
             :class="progressClass(credits.fiveHourPercent)"
             :style="{ width: `${credits.fiveHourPercent}%` }"
           />
-          <div v-else class="h-full w-full rounded-full bg-gradient-to-r from-accent/60 to-[#7C6BF0]/60" />
         </div>
         <p class="mt-1.5 text-[11px] text-fg-faint">
-          {{
-            credits.status?.five_hour.limit
-              ? `下次刷新 ${fmtDateTime(credits.status?.five_hour.reset_at ?? null)}`
-              : "Pro 无 5 小时限制，可直接使用整周额度"
-          }}
+          下次刷新 {{ fmtDateTime(credits.status?.five_hour.reset_at ?? null) }}
         </p>
       </div>
     </div>
@@ -154,12 +158,8 @@ onMounted(() => {
           <p class="text-[13px] font-semibold text-fg">{{ p.label }}</p>
           <span v-if="p.tier === credits.tier" class="text-[10px] font-medium text-accent">当前</span>
         </div>
-        <p class="mt-2 text-[16px] font-semibold tabular-nums text-fg">
-          {{ p.weekly_credits }}
-          <span class="text-[11px] font-normal text-fg-faint">积分/周</span>
-        </p>
-        <p class="mt-1 text-[11px] leading-relaxed text-fg-faint">
-          {{ p.five_hour_credits === null ? "5 小时不限量" : `5 小时最多 ${p.five_hour_credits} 积分` }}
+        <p class="mt-2 text-[12px] font-medium leading-relaxed text-fg-muted">
+          {{ planTagline(p.tier) }}
         </p>
       </div>
     </div>

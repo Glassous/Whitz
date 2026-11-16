@@ -59,9 +59,9 @@ async def test_status_and_exhaustion(register, db):
 
     info = await membership.status(db, user)
     assert info["tier"] == "free"
-    assert info["weekly"]["used"] == 150.0
-    assert info["five_hour"]["used"] == 150.0
-    assert info["remaining"] == -130.0
+    assert info["weekly"]["used"] == 30.0
+    assert info["five_hour"]["used"] == 30.0
+    assert info["remaining"] == -10.0
     assert info["overdrawn"] is True
     assert await membership.credit_exhausted(db, user) is True
 
@@ -72,11 +72,11 @@ async def test_admin_grant_extends_quota(register, db):
     assert user is not None
     db.add(CreditLedger(user_id=user.id, tokens=-15_000, kind="consume"))
     await db.commit()
-    assert (await membership.status(db, user))["remaining"] == 5.0
+    assert (await membership.status(db, user))["remaining"] == 17.0
 
     await membership.adjust(db, user, 20, note="test grant")
     info = await membership.status(db, user)
-    assert info["remaining"] == 25.0
+    assert info["remaining"] == 37.0
     assert info["weekly"]["used"] == 0.0
     assert info["five_hour"]["used"] == 0.0
 
@@ -104,7 +104,7 @@ async def test_credits_endpoint(register, client):
     assert body["tier_label"] == "Free"
     assert body["weekly"]["limit"] == 100
     assert body["five_hour"]["limit"] == 20
-    assert body["tokens_per_credit"] == 1000
+    assert body["tokens_per_credit"] == 5000
     assert body["remaining"] == 20.0
     assert body["overdrawn"] is False
     assert [plan["tier"] for plan in body["plans"]] == ["free", "plus", "pro"]

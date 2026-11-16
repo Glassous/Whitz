@@ -13,7 +13,7 @@ async def test_admin_overview(admin, register, client):
     assert body["limits"]["max_concurrent_runs"] > 0
     assert [plan["tier"] for plan in body["plans"]] == ["free", "plus", "pro"]
     assert body["membership"]["free"] >= 2
-    assert body["credits_today"]["tokens_per_credit"] == 1000
+    assert body["credits_today"]["tokens_per_credit"] == 5000
     assert body["generated_at"]
 
 
