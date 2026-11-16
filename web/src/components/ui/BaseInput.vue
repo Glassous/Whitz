@@ -11,8 +11,10 @@ const props = withDefaults(
     autocomplete?: string;
     autofocus?: boolean;
     size?: "sm" | "md";
+    rounded?: "xl" | "2xl" | "full";
+    soft?: boolean;
   }>(),
-  { type: "text", disabled: false, autofocus: false, size: "md" },
+  { type: "text", disabled: false, autofocus: false, size: "md", rounded: "xl", soft: false },
 );
 
 const model = defineModel<string>({ default: "" });
@@ -37,11 +39,13 @@ onMounted(() => {
         :placeholder="placeholder"
         :disabled="disabled"
         :autocomplete="autocomplete"
-        class="focus-ring w-full rounded-xl border bg-canvas text-[15px] text-fg transition-colors placeholder:text-fg-faint hover:border-line-strong disabled:opacity-60"
+        class="focus-ring w-full border text-[15px] text-fg transition-colors placeholder:text-fg-faint disabled:opacity-60"
         :class="[
           size === 'sm' ? 'h-9.5' : 'h-11',
-          error ? 'border-danger' : 'border-line',
-          $slots.suffix ? 'pl-3.5 pr-11' : 'px-3.5',
+          rounded === 'full' ? 'rounded-full' : rounded === '2xl' ? 'rounded-2xl' : 'rounded-xl',
+          soft ? 'border-transparent bg-surface focus:bg-hover/75' : 'bg-canvas hover:border-line-strong',
+          error ? 'border-danger' : soft ? '' : 'border-line',
+          $slots.suffix ? 'pl-4 pr-12' : 'px-3.5',
         ]"
       />
       <div v-if="$slots.suffix" class="absolute inset-y-0 right-1.5 flex items-center">

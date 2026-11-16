@@ -3,21 +3,23 @@ import { computed } from "vue";
 
 const props = withDefaults(
   defineProps<{
-    variant?: "primary" | "secondary" | "ghost" | "danger";
+    variant?: "primary" | "secondary" | "soft" | "ghost" | "danger";
     size?: "sm" | "md" | "lg";
+    rounded?: "xl" | "2xl" | "full";
     loading?: boolean;
     disabled?: boolean;
     type?: "button" | "submit";
     block?: boolean;
   }>(),
-  { variant: "primary", size: "md", loading: false, disabled: false, type: "button", block: false },
+  { variant: "primary", size: "md", rounded: "xl", loading: false, disabled: false, type: "button", block: false },
 );
 
 defineEmits<{ click: [MouseEvent] }>();
 
 const classes = computed(() => {
+  const radius = props.rounded === "full" ? "rounded-full" : props.rounded === "2xl" ? "rounded-2xl" : "rounded-xl";
   const base =
-    "focus-ring inline-flex select-none items-center justify-center gap-2 rounded-xl font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50";
+    `focus-ring inline-flex select-none items-center justify-center gap-2 ${radius} font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50`;
   const sizes = {
     sm: "h-8.5 px-3 text-[13.5px]",
     md: "h-10 px-4 text-[14.5px]",
@@ -26,6 +28,7 @@ const classes = computed(() => {
   const variants = {
     primary: "bg-primary text-primary-fg hover:bg-primary-hover",
     secondary: "border border-line bg-canvas text-fg hover:bg-hover",
+    soft: "bg-surface text-fg hover:bg-hover",
     ghost: "text-fg-muted hover:bg-hover hover:text-fg",
     danger: "bg-danger-solid text-white hover:opacity-90",
   };

@@ -712,43 +712,47 @@ function isRunning(c: Conversation): boolean {
       <BaseInput
         v-model="renameText"
         label="标题"
+        rounded="full"
+        soft
         :disabled="renameGenerating"
         :error="renameError"
         :placeholder="renameGenerating ? '正在生成标题…' : ''"
         @keydown.enter="confirmRename"
       >
-        <template #label-action>
+        <template #suffix>
           <button
             type="button"
-            class="focus-ring inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-accent transition-opacity hover:opacity-70 disabled:cursor-not-allowed disabled:opacity-50"
+            class="focus-ring flex h-8.5 w-8.5 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+            :class="renameGenerating ? 'animate-pulse text-fg' : ''"
             :disabled="renameGenerating"
+            :aria-label="renameGenerating ? '正在生成标题' : 'AI 生成标题'"
+            :title="renameGenerating ? '正在生成标题…' : 'AI 生成标题'"
             @click="generateRenameTitle"
           >
-            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
               <path
                 stroke-linecap="round"
                 stroke-linejoin="round"
                 d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3zM18.5 14l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"
               />
             </svg>
-            {{ renameGenerating ? "生成中…" : "AI 生成" }}
           </button>
         </template>
       </BaseInput>
       <template #footer>
-        <BaseButton variant="secondary" @click="closeRename">取消</BaseButton>
-        <BaseButton :disabled="renameGenerating" @click="confirmRename">保存</BaseButton>
+        <BaseButton variant="soft" rounded="full" @click="closeRename">取消</BaseButton>
+        <BaseButton rounded="full" :disabled="renameGenerating" @click="confirmRename">保存</BaseButton>
       </template>
     </BaseModal>
 
     <!-- Delete Modal -->
     <BaseModal :open="!!deleteTarget" title="删除对话" @close="deleteTarget = null">
-      <p class="text-sm leading-relaxed text-fg-muted">
+      <p class="text-[15px] leading-relaxed text-fg-muted">
         确定删除「<span class="font-medium text-fg">{{ deleteTarget?.title }}</span>」吗？此操作不可撤销。
       </p>
       <template #footer>
-        <BaseButton variant="secondary" @click="deleteTarget = null">取消</BaseButton>
-        <BaseButton variant="danger" @click="confirmDelete">删除</BaseButton>
+        <BaseButton variant="soft" rounded="full" @click="deleteTarget = null">取消</BaseButton>
+        <BaseButton variant="danger" rounded="full" @click="confirmDelete">删除</BaseButton>
       </template>
     </BaseModal>
   </aside>

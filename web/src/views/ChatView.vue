@@ -18,30 +18,15 @@ const chat = useChatStore();
 const auth = useAuthStore();
 const credits = useCreditsStore();
 
-const SIDEBAR_COLLAPSED_KEY = "whitz_sidebar_collapsed";
-
-function readCollapsedPref(): boolean {
-  try {
-    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
 const agent = ref<AgentStatus | null>(null);
 const showPlan = ref(false);
 const sidebarOpen = ref(false);
-const sidebarCollapsed = ref(readCollapsedPref());
+const sidebarCollapsed = ref(false);
 const mobileStepsOpen = ref(false);
 let pollTimer: number | null = null;
 
 function setSidebarCollapsed(next: boolean) {
   sidebarCollapsed.value = next;
-  try {
-    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0");
-  } catch {
-    /* ignore */
-  }
 }
 
 function toggleSidebarCollapsed() {
@@ -66,33 +51,6 @@ function onGlobalKeydown(e: KeyboardEvent) {
     }
   }
 }
-
-const SUGGESTIONS = [
-  {
-    title: "制定一周学习计划",
-    desc: "先规划步骤，再逐步执行",
-    prompt: "帮我制定一份一周学习计划，并给出每天的具体安排。",
-    icon: "M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z",
-  },
-  {
-    title: "调研一个主题",
-    desc: "联网检索并汇总关键信息",
-    prompt: "帮我调研一下最近一年 AI Agent 领域的重要进展，并给出总结。",
-    icon: "M21 21l-4.3-4.3M11 19a8 8 0 100-16 8 8 0 000 16z",
-  },
-  {
-    title: "整理零散想法",
-    desc: "梳理成结构化方案",
-    prompt: "我有一些零散的想法，想请你帮我梳理成一个结构化的方案。",
-    icon: "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3zM19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z",
-  },
-  {
-    title: "写一段文案",
-    desc: "起草并润色文字",
-    prompt: "帮我写一段介绍个人 AI 助理产品的文案，风格简洁专业。",
-    icon: "M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z",
-  },
-];
 
 const greeting = computed(() => {
   const h = new Date().getHours();
@@ -168,11 +126,6 @@ async function onSend(content: string) {
   } catch (e: any) {
     chat.error = e?.detail?.detail ?? e?.message ?? "无法开始对话，请稍后重试";
   }
-}
-
-function startWith(text: string) {
-  if (!agent.value?.ready || chat.streaming) return;
-  void onSend(text);
 }
 
 function onViewSteps(id: string) {
@@ -284,43 +237,24 @@ onBeforeUnmount(() => {
           />
 
           <div v-else v-scrollbar class="custom-scrollbar h-full overflow-y-auto">
-            <div class="flex min-h-full flex-col items-center justify-center px-4 pb-10 pt-20 sm:px-6">
+            <div class="flex min-h-full flex-col items-center justify-center px-4 pb-4 pt-32 sm:px-6 sm:pt-40">
               <div class="w-full max-w-2xl text-center">
-                <div class="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary text-primary-fg">
-                  <span class="text-lg font-semibold tracking-tight">W</span>
+                <div class="inline-flex items-center justify-center gap-3.5">
+                  <div
+                    class="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-primary text-primary-fg sm:h-11 sm:w-11"
+                  >
+                    <span class="text-[18px] font-semibold tracking-tight sm:text-[20px]">W</span>
+                  </div>
+                  <h1 class="text-[32px] font-semibold leading-10 tracking-tight text-fg sm:text-[38px] sm:leading-[44px]">
+                    {{ greeting }}<template v-if="userName">，{{ userName }}</template>
+                  </h1>
                 </div>
-                <h1 class="text-[26px] font-semibold tracking-tight text-fg sm:text-[30px]">
-                  {{ greeting }}<template v-if="userName">，{{ userName }}</template>
-                </h1>
-                <p class="mx-auto mt-2 max-w-md text-[14px] text-fg-muted">
+                <p class="mx-auto mt-3.5 max-w-lg text-[16px] text-fg-muted sm:text-[17px]">
                   我可以帮你规划任务、联网检索、整理信息。今天想做点什么？
                 </p>
 
-                <div class="mt-8 grid gap-2 sm:grid-cols-2">
-                  <button
-                    v-for="s in SUGGESTIONS"
-                    :key="s.title"
-                    class="focus-ring group flex items-start gap-3 rounded-2xl bg-surface/75 p-3.5 text-left transition-colors hover:bg-hover disabled:cursor-not-allowed"
-                    :class="agent && !agent.ready ? 'opacity-50' : ''"
-                    :disabled="!agent?.ready"
-                    @click="startWith(s.prompt)"
-                  >
-                    <span
-                      class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-fg-muted transition-colors group-hover:text-fg"
-                    >
-                      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                        <path stroke-linecap="round" stroke-linejoin="round" :d="s.icon" />
-                      </svg>
-                    </span>
-                    <span class="min-w-0">
-                      <span class="block text-[13px] font-medium text-fg">{{ s.title }}</span>
-                      <span class="mt-0.5 block text-xs text-fg-faint">{{ s.desc }}</span>
-                    </span>
-                  </button>
-                </div>
-
                 <p
-                  class="mt-6 h-4 text-xs text-fg-faint transition-opacity duration-200"
+                  class="mt-5 h-4 text-[13.5px] text-fg-faint transition-opacity duration-200"
                   :class="agent && !agent.ready ? 'opacity-100' : 'pointer-events-none opacity-0'"
                 >
                   助理正在初始化，稍后即可开始对话…
@@ -330,7 +264,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="shrink-0 px-3 pb-3 pt-1 sm:px-6">
+        <div class="shrink-0 px-3 pb-4 pt-1 sm:px-6 sm:pb-5">
           <div class="mx-auto w-full max-w-4xl space-y-3">
             <ApprovalCard
               v-if="chat.pendingControl?.kind === 'approval'"

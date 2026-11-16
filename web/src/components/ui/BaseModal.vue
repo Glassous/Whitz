@@ -25,23 +25,23 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKeydown));
       <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
         <div class="absolute inset-0 bg-black/40 backdrop-blur-[2px] dark:bg-black/60" @click="emit('close')" />
         <div
-          class="animate-rise relative z-10 w-full overflow-hidden rounded-2xl border border-line bg-canvas shadow-2xl"
+          class="animate-rise relative z-10 w-full overflow-hidden rounded-[28px] bg-canvas shadow-2xl dark:bg-[#161615]"
           :style="{ maxWidth: width ?? '32rem', boxShadow: 'var(--shadow)' }"
         >
-          <div v-if="title" class="flex items-center justify-between border-b border-line px-5 py-4">
-            <h3 class="text-[15px] font-semibold text-fg">{{ title }}</h3>
+          <div v-if="title" class="flex items-center justify-between px-6 pb-2 pt-5">
+            <h3 class="text-[17px] font-semibold text-fg">{{ title }}</h3>
             <button
-              class="focus-ring -mr-1 rounded-lg p-1.5 text-fg-faint transition-colors hover:bg-hover hover:text-fg"
+              class="focus-ring -mr-1.5 flex h-9 w-9 items-center justify-center rounded-full text-fg-faint transition-colors hover:bg-hover hover:text-fg"
               aria-label="关闭"
               @click="emit('close')"
             >
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
               </svg>
             </button>
           </div>
-          <div class="px-5 py-4"><slot /></div>
-          <div v-if="$slots.footer" class="flex justify-end gap-2 border-t border-line px-5 py-4">
+          <div class="px-6 py-3"><slot /></div>
+          <div v-if="$slots.footer" class="flex justify-end gap-2.5 px-6 pb-6 pt-3">
             <slot name="footer" />
           </div>
         </div>
