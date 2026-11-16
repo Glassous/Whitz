@@ -3,8 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, wa
 import type { Message } from "../../types";
 import MessageBubble from "./MessageBubble.vue";
 
-const props = defineProps<{ messages: Message[] }>();
-const emit = defineEmits<{ steps: [id: string] }>();
+const props = defineProps<{ messages: Message[]; focusMessageId?: string | null }>();
+const emit = defineEmits<{ steps: [id: string]; "focus-handled": [] }>();
 
 const TOP_CLEARANCE = 88;
 const MIN_BOTTOM_GAP = 32;
@@ -13,8 +13,10 @@ const container = ref<HTMLElement | null>(null);
 const wrapper = ref<HTMLElement | null>(null);
 const itemRefs = ref<(HTMLElement | null)[]>([]);
 const spacerHeight = ref(MIN_BOTTOM_GAP);
+const highlightedId = ref<string | null>(null);
 
 let resizeObserver: ResizeObserver | null = null;
+let highlightTimer: number | null = null;
 
 const visibleMessages = computed(() => props.messages.filter((m) => m.role !== "tool"));
 
@@ -73,6 +75,35 @@ async function scrollToLatestTurnTop() {
   measured.el.scrollTop = Math.max(0, measured.targetTop - TOP_CLEARANCE);
 }
 
+async function scrollToMessage(id: string) {
+  await nextTick();
+  measureLatestTurn();
+  await nextTick();
+  const el = container.value;
+  const idx = visibleMessages.value.findIndex((m) => m.id === id);
+  const targetEl = idx >= 0 ? itemRefs.value[idx] : null;
+  if (!el || !targetEl) {
+    await scrollToLatestTurnTop();
+    return;
+  }
+  const neededBelow = Math.max(0, el.clientHeight - TOP_CLEARANCE);
+  const lastEl = itemRefs.value[visibleMessages.value.length - 1];
+  const contentFromTarget = lastEl ? Math.max(0, lastEl.offsetTop + lastEl.offsetHeight - targetEl.offsetTop) : 0;
+  const minSpacerForTarget = Math.max(MIN_BOTTOM_GAP, neededBelow - contentFromTarget);
+  if (minSpacerForTarget > spacerHeight.value) {
+    spacerHeight.value = minSpacerForTarget;
+    await nextTick();
+  }
+  el.scrollTop = Math.max(0, targetEl.offsetTop - TOP_CLEARANCE);
+  highlightedId.value = id;
+  if (highlightTimer) window.clearTimeout(highlightTimer);
+  highlightTimer = window.setTimeout(() => {
+    highlightedId.value = null;
+    highlightTimer = null;
+  }, 1800);
+  emit("focus-handled");
+}
+
 const scrollSignature = () => {
   const last = visibleMessages.value[visibleMessages.value.length - 1];
   return `${visibleMessages.value.length}:${last?.content.length ?? 0}:${last?.status ?? ""}`;
@@ -104,8 +135,19 @@ watch(
   },
 );
 
+watch(
+  () => props.focusMessageId,
+  (id) => {
+    if (id) void scrollToMessage(id);
+  },
+);
+
 onMounted(async () => {
-  await scrollToLatestTurnTop();
+  if (props.focusMessageId) {
+    await scrollToMessage(props.focusMessageId);
+  } else {
+    await scrollToLatestTurnTop();
+  }
   if (typeof ResizeObserver !== "undefined") {
     resizeObserver = new ResizeObserver(() => {
       measureLatestTurn();
@@ -118,6 +160,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   resizeObserver = null;
+  if (highlightTimer) window.clearTimeout(highlightTimer);
 });
 </script>
 
@@ -128,6 +171,8 @@ onBeforeUnmount(() => {
         v-for="(m, idx) in visibleMessages"
         :key="m.id"
         :ref="(el) => setItemRef(idx, el as HTMLElement | null)"
+        class="-mx-2 rounded-2xl px-2 py-1 transition-colors duration-700"
+        :class="highlightedId === m.id ? 'bg-accent-weak/75' : ''"
       >
         <MessageBubble :message="m" @steps="emit('steps', m.id)" />
       </div>

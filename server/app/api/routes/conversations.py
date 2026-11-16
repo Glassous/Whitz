@@ -1,13 +1,20 @@
+import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import get_current_user, get_owned_conversation
-from app.api.schemas import ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate
+from app.api.schemas import (
+    ConversationCreate,
+    ConversationDetail,
+    ConversationOut,
+    ConversationSearchHit,
+    ConversationUpdate,
+)
 from app.db.models import Conversation, Message, User
 from app.db.session import get_db
 from app.services import audit, titles
@@ -26,6 +33,111 @@ async def list_conversations(
         .order_by(Conversation.last_message_at.desc().nullslast(), Conversation.created_at.desc())
     )
     return list(result.scalars().all())
+
+
+def _escape_like(term: str) -> str:
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _build_snippet(text: str, query: str, before_chars: int = 36, after_chars: int = 76) -> str:
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    if not collapsed:
+        return ""
+    idx = collapsed.lower().find(query.lower())
+    if idx < 0:
+        return collapsed[: before_chars + after_chars] + ("…" if len(collapsed) > before_chars + after_chars else "")
+    start = max(0, idx - before_chars)
+    end = min(len(collapsed), idx + len(query) + after_chars)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(collapsed) else ""
+    return f"{prefix}{collapsed[start:end]}{suffix}"
+
+
+@router.get("/search", response_model=list[ConversationSearchHit])
+async def search_conversations(
+    q: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(default=30, ge=1, le=50),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ConversationSearchHit]:
+    term = q.strip()
+    if not term:
+        return []
+    pattern = f"%{_escape_like(term)}%"
+
+    msg_rows = (
+        await db.execute(
+            select(Message, Conversation.title)
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(
+                Conversation.user_id == user.id,
+                Message.role.in_(("user", "assistant")),
+                Message.content.ilike(pattern, escape="\\"),
+            )
+            .order_by(Message.created_at.desc())
+            .limit(limit * 3)
+        )
+    ).all()
+
+    hits: list[ConversationSearchHit] = []
+    per_conv_counts: dict[uuid.UUID, int] = {}
+    matched_conv_ids: set[uuid.UUID] = set()
+
+    for msg, conv_title in msg_rows:
+        cnt = per_conv_counts.get(msg.conversation_id, 0)
+        if cnt >= 3:
+            continue
+        snippet = _build_snippet(msg.content, term)
+        if not snippet:
+            continue
+        per_conv_counts[msg.conversation_id] = cnt + 1
+        matched_conv_ids.add(msg.conversation_id)
+        hits.append(
+            ConversationSearchHit(
+                conversation_id=msg.conversation_id,
+                conversation_title=conv_title,
+                message_id=msg.id,
+                role=msg.role,
+                snippet=snippet,
+                match_in="message",
+                created_at=msg.created_at,
+            )
+        )
+        if len(hits) >= limit:
+            break
+
+    if len(hits) < limit:
+        title_convs = (
+            await db.execute(
+                select(Conversation)
+                .where(
+                    Conversation.user_id == user.id,
+                    Conversation.title.ilike(pattern, escape="\\"),
+                )
+                .order_by(Conversation.last_message_at.desc().nullslast(), Conversation.created_at.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+
+        for conv in title_convs:
+            if conv.id in matched_conv_ids:
+                continue
+            hits.append(
+                ConversationSearchHit(
+                    conversation_id=conv.id,
+                    conversation_title=conv.title,
+                    message_id=None,
+                    role=None,
+                    snippet="",
+                    match_in="title",
+                    created_at=conv.last_message_at or conv.updated_at or conv.created_at,
+                )
+            )
+            if len(hits) >= limit:
+                break
+
+    hits.sort(key=lambda h: h.created_at, reverse=True)
+    return hits[:limit]
 
 
 @router.post("", response_model=ConversationOut, status_code=status.HTTP_201_CREATED)

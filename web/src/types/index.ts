@@ -85,6 +85,16 @@ export interface Conversation {
   last_message_at: string | null;
 }
 
+export interface ConversationSearchHit {
+  conversation_id: string;
+  conversation_title: string;
+  message_id: string | null;
+  role: "user" | "assistant" | null;
+  snippet: string;
+  match_in: "title" | "message";
+  created_at: string;
+}
+
 export type MessageRole = "user" | "assistant" | "tool";
 export type MessageStatus = "streaming" | "completed" | "failed" | "cancelled" | "running" | "waiting";
 

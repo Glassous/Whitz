@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { streamSSE } from "../../api/sse";
 import type { Conversation } from "../../types";
 import { useAuthStore } from "../../stores/auth";
@@ -23,7 +23,7 @@ const emit = defineEmits<{
   rename: [string, string];
   delete: [string];
   close: [];
-  "set-collapsed": [boolean];
+  "open-search": [];
 }>();
 
 const auth = useAuthStore();
@@ -45,10 +45,6 @@ function onMediaChange(e: MediaQueryListEvent) {
 }
 
 const isRail = computed(() => Boolean(props.collapsed && isDesktop.value));
-
-// Search filter
-const searchQuery = ref("");
-const searchInputRef = ref<HTMLInputElement | null>(null);
 
 // Quick card popover (opened by clicking avatar)
 const quickCardOpen = ref(false);
@@ -104,15 +100,11 @@ function hideTooltip() {
   tooltip.value = null;
 }
 
-async function focusSearch() {
+function openSearch() {
   hideTooltip();
-  if (isRail.value) {
-    emit("set-collapsed", false);
-    await nextTick();
-    setTimeout(() => searchInputRef.value?.focus(), 220);
-  } else {
-    searchInputRef.value?.focus();
-  }
+  quickCardOpen.value = false;
+  emit("open-search");
+  emit("close");
 }
 
 const tierBadgeClass = computed(() => {
@@ -150,11 +142,7 @@ function timestamp(c: Conversation): number {
 }
 
 const sortedConversations = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase();
-  const list = q
-    ? props.conversations.filter((c) => c.title.toLowerCase().includes(q))
-    : props.conversations;
-  return [...list].sort((a, b) => timestamp(b) - timestamp(a));
+  return [...props.conversations].sort((a, b) => timestamp(b) - timestamp(a));
 });
 
 const initials = computed(() => {
@@ -363,40 +351,34 @@ function isRunning(c: Conversation): boolean {
         </span>
       </button>
 
-      <!-- Search input (expanded) / Search trigger (collapsed) -->
-      <div
-        class="group/search flex h-10.5 w-full items-center overflow-hidden rounded-xl transition-colors"
-        :class="isRail ? 'cursor-pointer hover:bg-hover/80' : 'bg-hover/55 focus-within:bg-hover/85'"
-        @mouseenter="isRail && showTooltip($event, '搜索对话', '展开并筛选历史记录')"
+      <!-- Search CTA (borderless, no background, opens central search modal) -->
+      <button
+        type="button"
+        class="focus-ring group/search flex h-10.5 w-full items-center overflow-hidden rounded-xl text-[14.5px] font-semibold text-fg/85 transition-colors duration-150 hover:bg-hover/80 hover:text-fg"
+        aria-label="搜索对话"
+        @mouseenter="showTooltip($event, '搜索对话', '搜索标题与正文 (Ctrl+K)')"
         @mouseleave="hideTooltip"
-        @click="isRail && focusSearch()"
+        @click="openSearch"
       >
-        <span class="flex h-10.5 w-10 shrink-0 items-center justify-center text-fg-muted transition-colors group-hover/search:text-fg">
-          <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <span class="flex h-10.5 w-10 shrink-0 items-center justify-center">
+          <svg
+            class="h-5 w-5 text-fg-muted transition-colors group-hover/search:text-fg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+          >
             <circle cx="11" cy="11" r="7" />
             <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
           </svg>
         </span>
-        <input
-          v-show="!isRail"
-          ref="searchInputRef"
-          v-model="searchQuery"
-          type="text"
-          placeholder="搜索历史对话…"
-          class="min-w-0 flex-1 bg-transparent pr-2 text-[14px] text-fg outline-none placeholder:text-fg-faint"
-        />
-        <button
-          v-if="!isRail && searchQuery"
-          type="button"
-          class="mr-2 rounded p-0.5 text-fg-faint transition-colors hover:text-fg"
-          aria-label="清空搜索"
-          @click.stop="searchQuery = ''"
+        <span
+          class="whitespace-nowrap pr-2.5 text-left transition-opacity duration-200"
+          :class="isRail ? 'pointer-events-none opacity-0' : 'opacity-100'"
         >
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-          </svg>
-        </button>
-      </div>
+          搜索对话
+        </span>
+      </button>
     </div>
 
     <!-- Conversation list (hidden when collapsed) -->
@@ -476,13 +458,6 @@ function isRunning(c: Conversation): boolean {
               </div>
             </div>
           </div>
-
-          <p
-            v-if="!loading && conversations.length && !sortedConversations.length"
-            class="px-3 py-8 text-center text-[13px] leading-relaxed text-fg-faint"
-          >
-            未找到匹配「{{ searchQuery }}」的对话
-          </p>
 
           <p
             v-if="!loading && !conversations.length"

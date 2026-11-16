@@ -12,6 +12,7 @@ import ChatInput from "../components/chat/ChatInput.vue";
 import PlanPanel from "../components/chat/PlanPanel.vue";
 import ApprovalCard from "../components/chat/ApprovalCard.vue";
 import ClarifyCard from "../components/chat/ClarifyCard.vue";
+import SearchModal from "../components/chat/SearchModal.vue";
 
 const conversations = useConversationsStore();
 const chat = useChatStore();
@@ -23,6 +24,8 @@ const showPlan = ref(false);
 const sidebarOpen = ref(false);
 const sidebarCollapsed = ref(false);
 const mobileStepsOpen = ref(false);
+const searchOpen = ref(false);
+const focusMessageId = ref<string | null>(null);
 let pollTimer: number | null = null;
 
 function setSidebarCollapsed(next: boolean) {
@@ -49,6 +52,9 @@ function onGlobalKeydown(e: KeyboardEvent) {
     } else {
       sidebarOpen.value = !sidebarOpen.value;
     }
+  } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    searchOpen.value = !searchOpen.value;
   }
 }
 
@@ -89,10 +95,22 @@ function createConversation() {
 async function onSelect(id: string) {
   sidebarOpen.value = false;
   mobileStepsOpen.value = false;
+  focusMessageId.value = null;
   if (id === conversations.current?.id) return;
   chat.abort();
   await openConversation(id);
   showPlan.value = true;
+}
+
+async function onSelectFromSearch(conversationId: string, messageId: string | null) {
+  sidebarOpen.value = false;
+  mobileStepsOpen.value = false;
+  if (conversationId !== conversations.current?.id) {
+    chat.abort();
+    await openConversation(conversationId);
+  }
+  showPlan.value = true;
+  focusMessageId.value = messageId;
 }
 
 async function onRename(id: string, title: string) {
@@ -187,7 +205,7 @@ onBeforeUnmount(() => {
       @rename="onRename"
       @delete="onDelete"
       @close="sidebarOpen = false"
-      @set-collapsed="setSidebarCollapsed"
+      @open-search="searchOpen = true"
     />
 
     <main class="relative flex min-w-0 flex-1">
@@ -233,7 +251,9 @@ onBeforeUnmount(() => {
             v-if="chat.messages.length"
             :key="chat.convId ?? 'draft'"
             :messages="chat.messages"
+            :focus-message-id="focusMessageId"
             @steps="onViewSteps"
+            @focus-handled="focusMessageId = null"
           />
 
           <div v-else v-scrollbar class="custom-scrollbar h-full overflow-y-auto">
@@ -346,5 +366,11 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </Transition>
+    <SearchModal
+      :open="searchOpen"
+      :conversations="conversations.conversations"
+      @close="searchOpen = false"
+      @select="onSelectFromSearch"
+    />
   </div>
 </template>

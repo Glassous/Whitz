@@ -1,6 +1,6 @@
 import uuid
 
-from app.db.models import User
+from app.db.models import Message, User
 from app.services import provisioning
 from tests.conftest import auth_header
 
@@ -130,3 +130,78 @@ async def test_admin_promote_user(admin, register, client):
     # promoted user can now access admin endpoint
     access = await client.get("/api/admin/users", headers=auth_header(data["access_token"]))
     assert access.status_code == 200
+
+
+async def test_conversation_search(register, client, db):
+    a = await register(email="search-a@test.local")
+    b = await register(email="search-b@test.local")
+    conv1 = await _create_conv(client, a["access_token"], title="架构讨论")
+    conv2 = await _create_conv(client, a["access_token"], title="Python 性能优化清单")
+    conv_b = await _create_conv(client, b["access_token"], title="他人隐私")
+
+    long_prefix = "这是一段很长的背景说明文字，用于测试搜索正文返回前后文摘要的截断效果。" * 2
+    long_suffix = "后续补充了更多细节内容，确保关键词后面的上下文也能完整展示出来。" * 3
+    db.add_all(
+        [
+            Message(
+                conversation_id=uuid.UUID(conv1["id"]),
+                role="user",
+                content=f"{long_prefix}这里提到了异步队列与 Redis 缓存策略，{long_suffix}",
+            ),
+            Message(
+                conversation_id=uuid.UUID(conv1["id"]),
+                role="tool",
+                content="Redis internal tool payload should be ignored",
+            ),
+            Message(
+                conversation_id=uuid.UUID(conv2["id"]),
+                role="assistant",
+                content="可以使用 cProfile 分析热点函数，包含 100% 实测数据。",
+            ),
+            Message(
+                conversation_id=uuid.UUID(conv_b["id"]),
+                role="user",
+                content="他人对话中的 Redis 关键词不应泄露",
+            ),
+        ]
+    )
+    await db.commit()
+
+    # Body search returns message hit with context snippet and ignores tool messages & other users
+    r1 = await client.get(
+        "/api/conversations/search",
+        params={"q": "Redis"},
+        headers=auth_header(a["access_token"]),
+    )
+    assert r1.status_code == 200, r1.text
+    hits1 = r1.json()
+    assert len(hits1) == 1
+    assert hits1[0]["conversation_id"] == conv1["id"]
+    assert hits1[0]["match_in"] == "message"
+    assert hits1[0]["role"] == "user"
+    assert "Redis" in hits1[0]["snippet"]
+    assert hits1[0]["snippet"].startswith("…") and hits1[0]["snippet"].endswith("…")
+
+    # Title match when body does not match
+    r2 = await client.get(
+        "/api/conversations/search",
+        params={"q": "性能优化"},
+        headers=auth_header(a["access_token"]),
+    )
+    assert r2.status_code == 200
+    hits2 = r2.json()
+    assert len(hits2) == 1
+    assert hits2[0]["conversation_id"] == conv2["id"]
+    assert hits2[0]["match_in"] == "title"
+    assert hits2[0]["snippet"] == ""
+
+    # Wildcard escaping: literal '%' only matches message containing '%'
+    r3 = await client.get(
+        "/api/conversations/search",
+        params={"q": "100%"},
+        headers=auth_header(a["access_token"]),
+    )
+    assert r3.status_code == 200
+    hits3 = r3.json()
+    assert len(hits3) == 1
+    assert hits3[0]["conversation_id"] == conv2["id"]

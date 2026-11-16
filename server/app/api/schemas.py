@@ -118,6 +118,16 @@ class ConversationDetail(ConversationOut):
     messages: list[MessageOut]
 
 
+class ConversationSearchHit(BaseModel):
+    conversation_id: uuid.UUID
+    conversation_title: str
+    message_id: uuid.UUID | None = None
+    role: str | None = None
+    snippet: str
+    match_in: Literal["title", "message"]
+    created_at: datetime
+
+
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
 
