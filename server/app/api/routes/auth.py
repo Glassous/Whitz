@@ -3,38 +3,40 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.api.schemas import (
+    EmailCodeLoginRequest,
+    EmailCodeRequest,
+    EmailCodeResponse,
     LoginRequest,
     RefreshRequest,
     RegisterRequest,
     ResetPasswordRequest,
-    SecurityQuestionOut,
     TokenResponse,
     UserOut,
 )
 from app.core.config import get_settings
-from app.core.ratelimit import reset_password_limiter, security_questions_limiter
+from app.core.ratelimit import (
+    email_code_addr_limiter,
+    email_code_ip_limiter,
+    login_code_limiter,
+    reset_password_limiter,
+)
 from app.core.security import (
     create_access_token,
     generate_hermes_key,
     generate_refresh_token,
-    hash_answer,
     hash_password,
     hash_refresh_token,
-    verify_answer,
     verify_password,
 )
-from app.db.models import RefreshToken, SecurityQuestion, User
+from app.db.models import RefreshToken, User
 from app.db.session import get_db
-from app.services import audit, provisioning
+from app.services import audit, email as email_service, provisioning
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-
-MAX_RESET_ATTEMPTS = 5
-RESET_LOCK_MINUTES = 15
 
 
 async def issue_tokens(
@@ -121,6 +123,63 @@ async def _revoke_family(db: AsyncSession, token: RefreshToken, now: datetime) -
     await db.commit()
 
 
+@router.post("/email-code", response_model=EmailCodeResponse)
+async def send_email_code(
+    body: EmailCodeRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> EmailCodeResponse:
+    email = body.email.strip().lower()
+    client_ip = _client_ip(request) or "unknown"
+    if not email_code_ip_limiter.allow(client_ip):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试")
+    if not email_code_addr_limiter.allow(email):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "该邮箱请求验证码过于频繁，请稍后再试")
+
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+
+    if body.purpose == "register":
+        if user is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已注册")
+    else:
+        if user is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "该邮箱未注册")
+        if not user.is_active:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已被禁用")
+
+    try:
+        sent = await email_service.send_verification_code(body.purpose, email)
+    except email_service.EmailCooldownError as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
+    except email_service.EmailNotConfiguredError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    except email_service.EmailDeliveryError as exc:
+        await audit.record(
+            "auth.email_code_failed",
+            actor=user,
+            actor_email=email,
+            outcome="failure",
+            severity="warning",
+            request=request,
+            metadata={"purpose": body.purpose},
+        )
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+    await audit.record(
+        "auth.email_code_sent",
+        actor=user,
+        actor_email=email,
+        request=request,
+        metadata={"purpose": body.purpose},
+    )
+    return EmailCodeResponse(
+        message="验证码已发送，请查收邮箱",
+        expires_in=sent.expires_in,
+        cooldown=sent.cooldown,
+    )
+
+
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 async def register(
     body: RegisterRequest,
@@ -128,30 +187,45 @@ async def register(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
-    email = body.email.lower()
+    email = body.email.strip().lower()
     existing = await db.execute(select(User).where(User.email == email))
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已注册")
 
+    try:
+        await email_service.verify_email_code("register", email, body.code, consume=False)
+    except email_service.InvalidEmailCodeError as exc:
+        await audit.record(
+            "auth.register_code_failed",
+            actor_email=email,
+            outcome="failure",
+            severity="warning",
+            request=request,
+        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
     profile = f"u{uuid.uuid4().hex}"
     api_key = generate_hermes_key()
+    now = datetime.now(timezone.utc)
     user = User(
         email=email,
         password_hash=hash_password(body.password),
         display_name=body.display_name.strip(),
         hermes_profile=profile,
         hermes_api_key=api_key,
+        email_verified_at=now,
     )
-    for position, q in enumerate(body.security_questions):
-        user.security_questions.append(
-            SecurityQuestion(question=q.question.strip(), answer_hash=hash_answer(q.answer), position=position)
-        )
     db.add(user)
     try:
         provisioning.provision_profile(profile, api_key)
     except OSError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Agent 存储初始化失败: {exc}")
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已注册") from exc
+    await email_service.consume_verification_code("register", email)
     await db.refresh(user)
     tokens = await issue_tokens(db, user, request, response)
     await audit.record("auth.register", actor=user, request=request, session_id=None)
@@ -165,13 +239,14 @@ async def login(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
-    result = await db.execute(select(User).where(User.email == body.email.lower()))
+    email = body.email.strip().lower()
+    result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
     if user is None or not verify_password(body.password, user.password_hash):
         await audit.record(
             "auth.login_failed",
             actor=user.id if user else None,
-            actor_email=body.email.lower(),
+            actor_email=email,
             outcome="failure",
             severity="warning",
             request=request,
@@ -188,6 +263,63 @@ async def login(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已被禁用")
     tokens = await issue_tokens(db, user, request, response)
     await audit.record("auth.login", actor=user, request=request)
+    return tokens
+
+
+@router.post("/login/code", response_model=TokenResponse)
+async def login_with_code(
+    body: EmailCodeLoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    email = body.email.strip().lower()
+    client_ip = _client_ip(request) or "unknown"
+    if not login_code_limiter.allow(f"{client_ip}:{email}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试")
+
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+    if user is None:
+        await audit.record(
+            "auth.login_failed",
+            actor_email=email,
+            outcome="failure",
+            severity="warning",
+            request=request,
+            metadata={"method": "email_code"},
+        )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "该邮箱未注册")
+    if not user.is_active:
+        await audit.record(
+            "auth.login_blocked",
+            actor=user,
+            outcome="failure",
+            severity="warning",
+            request=request,
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已被禁用")
+
+    try:
+        await email_service.verify_email_code("login", email, body.code, consume=True)
+    except email_service.InvalidEmailCodeError as exc:
+        await audit.record(
+            "auth.login_failed",
+            actor=user,
+            outcome="failure",
+            severity="warning",
+            request=request,
+            metadata={"method": "email_code"},
+        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    if user.email_verified_at is None:
+        user.email_verified_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(user)
+
+    tokens = await issue_tokens(db, user, request, response)
+    await audit.record("auth.login", actor=user, request=request, metadata={"method": "email_code"})
     return tokens
 
 
@@ -285,57 +417,25 @@ async def logout(
     _clear_refresh_cookie(response)
 
 
-@router.get("/security-questions", response_model=list[SecurityQuestionOut])
-async def get_security_questions(
-    email: str, request: Request, db: AsyncSession = Depends(get_db)
-) -> list[SecurityQuestionOut]:
-    client_ip = request.client.host if request.client else "unknown"
-    if not security_questions_limiter.allow(f"{client_ip}:{email.lower()}"):
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试")
-    result = await db.execute(
-        select(User).where(User.email == email.lower()).options(selectinload(User.security_questions))
-    )
-    user = result.scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "该邮箱未注册")
-    return [SecurityQuestionOut(position=q.position, question=q.question) for q in user.security_questions]
-
-
 @router.post("/reset-password", status_code=status.HTTP_204_NO_CONTENT)
 async def reset_password(
     body: ResetPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)
 ) -> None:
-    client_ip = request.client.host if request.client else "unknown"
-    if not reset_password_limiter.allow(f"{client_ip}:{body.email.lower()}"):
+    email = body.email.strip().lower()
+    client_ip = _client_ip(request) or "unknown"
+    if not reset_password_limiter.allow(f"{client_ip}:{email}"):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试")
-    result = await db.execute(
-        select(User).where(User.email == body.email.lower()).options(selectinload(User.security_questions))
-    )
+
+    result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "该邮箱未注册")
+    if not user.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已被禁用")
 
-    now = datetime.now(timezone.utc)
-    if user.reset_locked_until is not None and user.reset_locked_until > now:
-        await audit.record(
-            "auth.reset_locked",
-            actor=user,
-            outcome="failure",
-            severity="warning",
-            request=request,
-        )
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "失败次数过多，账号已临时锁定，请稍后再试")
-
-    questions = sorted(user.security_questions, key=lambda q: q.position)
-    answers_ok = len(questions) == len(body.answers) and all(
-        verify_answer(answer, q.answer_hash) for answer, q in zip(body.answers, questions)
-    )
-    if not answers_ok:
-        user.reset_failed_attempts += 1
-        if user.reset_failed_attempts >= MAX_RESET_ATTEMPTS:
-            user.reset_locked_until = now + timedelta(minutes=RESET_LOCK_MINUTES)
-            user.reset_failed_attempts = 0
-        await db.commit()
+    try:
+        await email_service.verify_email_code("reset_password", email, body.code, consume=True)
+    except email_service.InvalidEmailCodeError as exc:
         await audit.record(
             "auth.reset_failed",
             actor=user,
@@ -343,12 +443,13 @@ async def reset_password(
             severity="warning",
             request=request,
         )
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "密保答案不正确")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
+    now = datetime.now(timezone.utc)
     user.password_hash = hash_password(body.new_password)
     user.token_version = (user.token_version or 0) + 1
-    user.reset_failed_attempts = 0
-    user.reset_locked_until = None
+    if user.email_verified_at is None:
+        user.email_verified_at = now
     await db.execute(
         update(RefreshToken)
         .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))

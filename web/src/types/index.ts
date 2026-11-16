@@ -7,6 +7,7 @@ export interface User {
   role: "user" | "admin";
   is_active: boolean;
   persona: string;
+  email_verified_at?: string | null;
   membership_tier: MembershipTier;
   membership_expires_at: string | null;
   created_at: string;
@@ -53,14 +54,12 @@ export interface AuthResponse {
   user: User;
 }
 
-export interface SecurityQuestion {
-  position: number;
-  question: string;
-}
+export type EmailCodePurpose = "register" | "login" | "reset_password";
 
-export interface SecurityQuestionInput {
-  question: string;
-  answer: string;
+export interface EmailCodeResponse {
+  message: string;
+  expires_in: number;
+  cooldown: number;
 }
 
 export interface PlanItem {

@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     admin_password: str = ""
     cors_origins: str = "http://localhost:5173"
 
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "Whitz"
+    smtp_use_ssl: bool = True
+    smtp_use_tls: bool = False
+    smtp_timeout_seconds: float = 15.0
+
+    email_code_ttl_seconds: int = 600
+    email_code_cooldown_seconds: int = 60
+    email_code_max_attempts: int = 5
+
 
 @lru_cache
 def get_settings() -> Settings:

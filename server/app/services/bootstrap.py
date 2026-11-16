@@ -1,5 +1,6 @@
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,7 @@ async def ensure_admin(db: AsyncSession) -> None:
         role="admin",
         hermes_profile=profile,
         hermes_api_key=api_key,
+        email_verified_at=datetime.now(timezone.utc),
     )
     db.add(admin)
     await db.commit()

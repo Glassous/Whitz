@@ -10,12 +10,11 @@ from app.api.schemas import (
     RedeemRequest,
     UpdatePersonaRequest,
     UpdateProfileRequest,
-    UpdateSecurityQuestionsRequest,
     UserOut,
 )
 from app.core.ratelimit import redeem_limiter
-from app.core.security import hash_answer, hash_password, verify_password
-from app.db.models import RefreshToken, SecurityQuestion, User
+from app.core.security import hash_password, verify_password
+from app.db.models import RefreshToken, User
 from app.db.session import get_db
 from app.services import audit, membership, provisioning
 
@@ -120,35 +119,3 @@ async def update_persona(
     except OSError:
         pass
     return user
-
-
-@router.put("/me/security-questions", status_code=status.HTTP_204_NO_CONTENT)
-async def update_security_questions(
-    body: UpdateSecurityQuestionsRequest,
-    request: Request,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> None:
-    if not verify_password(body.password, user.password_hash):
-        await audit.record(
-            "user.security_questions_update_failed",
-            actor=user,
-            outcome="failure",
-            severity="warning",
-            request=request,
-        )
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "密码不正确")
-    for q in list(user.security_questions):
-        await db.delete(q)
-    await db.flush()
-    for position, q in enumerate(body.security_questions):
-        db.add(
-            SecurityQuestion(
-                user_id=user.id,
-                question=q.question.strip(),
-                answer_hash=hash_answer(q.answer),
-                position=position,
-            )
-        )
-    await db.commit()
-    await audit.record("user.security_questions_update", actor=user, request=request)

@@ -8,11 +8,8 @@ from app.core.security import (
     decode_access_token,
     generate_hermes_key,
     generate_refresh_token,
-    hash_answer,
     hash_password,
     hash_refresh_token,
-    normalize_answer,
-    verify_answer,
     verify_password,
 )
 
@@ -21,18 +18,6 @@ def test_password_roundtrip():
     h = hash_password("Sup3rSecret!")
     assert verify_password("Sup3rSecret!", h)
     assert not verify_password("wrong", h)
-
-
-def test_normalize_answer():
-    assert normalize_answer("  New   York ") == "new york"
-    assert normalize_answer("ALPHA") == "alpha"
-    assert normalize_answer("\t a  b \n") == "a b"
-
-
-def test_answer_verification_is_normalized():
-    h = hash_answer("New York")
-    assert verify_answer("  new   YORK ", h)
-    assert not verify_answer("boston", h)
 
 
 def test_access_token_roundtrip():

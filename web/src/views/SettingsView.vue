@@ -8,9 +8,7 @@ import BaseButton from "../components/ui/BaseButton.vue";
 import BaseBadge from "../components/ui/BaseBadge.vue";
 import ThemeToggle from "../components/ui/ThemeToggle.vue";
 import PersonaEditor from "../components/settings/PersonaEditor.vue";
-import SecurityQuestionsForm from "../components/settings/SecurityQuestionsForm.vue";
 import MembershipPanel from "../components/settings/MembershipPanel.vue";
-import type { SecurityQuestionInput } from "../types";
 
 const auth = useAuthStore();
 const router = useRouter();
@@ -21,14 +19,13 @@ async function logout() {
   await router.push("/login");
 }
 
-type Tab = "profile" | "membership" | "persona" | "password" | "security";
+type Tab = "profile" | "membership" | "persona" | "password";
 const tab = ref<Tab>("profile");
 const tabs: { key: Tab; label: string; title: string; desc: string }[] = [
   { key: "profile", label: "个人资料", title: "个人资料", desc: "更新你的昵称与公开信息。" },
   { key: "membership", label: "会员与积分", title: "会员与积分", desc: "查看额度剩余、刷新时间并兑换邀请码。" },
   { key: "persona", label: "助理人设", title: "助理人设", desc: "定制助理的语气、角色与回答方式。" },
   { key: "password", label: "修改密码", title: "修改密码", desc: "修改后其他设备的登录将失效。" },
-  { key: "security", label: "密保问题", title: "密保问题", desc: "用于忘记密码时验证身份。" },
 ];
 const activeMeta = () => tabs.find((t) => t.key === tab.value) ?? tabs[0];
 
@@ -79,40 +76,6 @@ async function savePassword() {
     pwdErr.value = e?.detail?.detail ?? "修改失败";
   } finally {
     pwdSaving.value = false;
-  }
-}
-
-// security questions
-const questions = ref<SecurityQuestionInput[]>([]);
-const secPassword = ref("");
-const secMsg = ref<string | null>(null);
-const secErr = ref<string | null>(null);
-const secSaving = ref(false);
-async function saveSecurity() {
-  secMsg.value = null;
-  secErr.value = null;
-  const qs = questions.value;
-  if (qs.length !== 2 || qs.some((q) => !q.question || !q.answer.trim())) {
-    secErr.value = "请完整设置两个密保问题与答案";
-    return;
-  }
-  if (qs[0].question === qs[1].question) {
-    secErr.value = "两个密保问题不能相同";
-    return;
-  }
-  if (!secPassword.value) {
-    secErr.value = "请输入当前密码以确认";
-    return;
-  }
-  secSaving.value = true;
-  try {
-    await api.put("/users/me/security-questions", { password: secPassword.value, security_questions: qs });
-    secPassword.value = "";
-    secMsg.value = "密保问题已更新";
-  } catch (e: any) {
-    secErr.value = e?.detail?.detail ?? "更新失败";
-  } finally {
-    secSaving.value = false;
   }
 }
 </script>
@@ -174,6 +137,7 @@ async function saveSecurity() {
               <p class="mb-1.5 text-[14px] font-medium text-fg-muted">邮箱</p>
               <div class="flex items-center gap-2 rounded-xl bg-surface px-3.5 py-2.5">
                 <span class="text-[15px] text-fg">{{ auth.user?.email }}</span>
+                <BaseBadge v-if="auth.user?.email_verified_at" tone="green">已验证</BaseBadge>
                 <BaseBadge v-if="auth.isAdmin" tone="brand">管理员</BaseBadge>
               </div>
             </div>
@@ -198,14 +162,6 @@ async function saveSecurity() {
             <p v-if="pwdMsg" class="text-[14px] text-success">{{ pwdMsg }}</p>
             <p v-if="pwdErr" class="text-[14px] text-danger">{{ pwdErr }}</p>
             <BaseButton :loading="pwdSaving" @click="savePassword">修改密码</BaseButton>
-          </div>
-
-          <div v-else class="space-y-4">
-            <SecurityQuestionsForm v-model="questions" />
-            <BaseInput v-model="secPassword" label="当前密码（确认身份）" type="password" autocomplete="current-password" />
-            <p v-if="secMsg" class="text-[14px] text-success">{{ secMsg }}</p>
-            <p v-if="secErr" class="text-[14px] text-danger">{{ secErr }}</p>
-            <BaseButton :loading="secSaving" @click="saveSecurity">更新密保问题</BaseButton>
           </div>
         </div>
       </section>

@@ -1,5 +1,4 @@
 import hashlib
-import re
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -28,21 +27,6 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, password_hash: str) -> bool:
     try:
         return _hasher.verify(password_hash, password)
-    except VerifyMismatchError:
-        return False
-
-
-def normalize_answer(answer: str) -> str:
-    return re.sub(r"\s+", " ", answer.strip().lower())
-
-
-def hash_answer(answer: str) -> str:
-    return _hasher.hash(normalize_answer(answer))
-
-
-def verify_answer(answer: str, answer_hash: str) -> bool:
-    try:
-        return _hasher.verify(answer_hash, normalize_answer(answer))
     except VerifyMismatchError:
         return False
 

@@ -4,24 +4,38 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-EmailStr = Annotated[str, StringConstraints(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", max_length=320)]
+EmailStr = Annotated[
+    str, StringConstraints(strip_whitespace=True, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", max_length=320)
+]
+EmailCodePurpose = Literal["register", "login", "reset_password"]
 
 
-class SecurityQuestionIn(BaseModel):
-    question: str = Field(min_length=2, max_length=200)
-    answer: str = Field(min_length=1, max_length=200)
+class EmailCodeRequest(BaseModel):
+    email: EmailStr
+    purpose: EmailCodePurpose
+
+
+class EmailCodeResponse(BaseModel):
+    message: str
+    expires_in: int
+    cooldown: int
 
 
 class RegisterRequest(BaseModel):
     email: EmailStr
+    code: str = Field(min_length=4, max_length=12)
     password: str = Field(min_length=8, max_length=128)
     display_name: str = Field(min_length=1, max_length=80)
-    security_questions: list[SecurityQuestionIn] = Field(min_length=2, max_length=2)
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class EmailCodeLoginRequest(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=4, max_length=12)
 
 
 class RefreshRequest(BaseModel):
@@ -30,7 +44,7 @@ class RefreshRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     email: EmailStr
-    answers: list[str] = Field(min_length=2, max_length=2)
+    code: str = Field(min_length=4, max_length=12)
     new_password: str = Field(min_length=8, max_length=128)
 
 
@@ -43,6 +57,7 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
     persona: str
+    email_verified_at: datetime | None = None
     membership_tier: str
     membership_expires_at: datetime | None
     created_at: datetime
@@ -57,11 +72,6 @@ class TokenResponse(BaseModel):
     user: UserOut
 
 
-class SecurityQuestionOut(BaseModel):
-    position: int
-    question: str
-
-
 class UpdateProfileRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
 
@@ -73,11 +83,6 @@ class ChangePasswordRequest(BaseModel):
 
 class UpdatePersonaRequest(BaseModel):
     persona: str = Field(max_length=4000)
-
-
-class UpdateSecurityQuestionsRequest(BaseModel):
-    password: str
-    security_questions: list[SecurityQuestionIn] = Field(min_length=2, max_length=2)
 
 
 class ConversationCreate(BaseModel):

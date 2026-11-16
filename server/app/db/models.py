@@ -35,8 +35,7 @@ class User(Base):
     hermes_profile: Mapped[str] = mapped_column(String(64), unique=True)
     hermes_api_key: Mapped[str] = mapped_column(String(128))
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    reset_failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
-    reset_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     membership_tier: Mapped[str] = mapped_column(String(16), default="free", server_default="free")
     membership_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     credit_anchor_at: Mapped[datetime] = mapped_column(
@@ -47,28 +46,12 @@ class User(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    security_questions: Mapped[list["SecurityQuestion"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan", order_by="SecurityQuestion.position"
-    )
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     conversations: Mapped[list["Conversation"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
-
-
-class SecurityQuestion(Base):
-    __tablename__ = "security_questions"
-    __table_args__ = (UniqueConstraint("user_id", "position", name="uq_security_question_position"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    question: Mapped[str] = mapped_column(String(200))
-    answer_hash: Mapped[str] = mapped_column(String(255))
-    position: Mapped[int] = mapped_column(Integer)
-
-    user: Mapped[User] = relationship(back_populates="security_questions")
 
 
 class RefreshToken(Base):

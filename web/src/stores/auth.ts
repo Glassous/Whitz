@@ -11,7 +11,7 @@ import {
   setSession,
   tryRefreshDetail,
 } from "../api/client";
-import type { AuthResponse, SecurityQuestionInput, User } from "../types";
+import type { AuthResponse, User } from "../types";
 import { useConversationsStore } from "./conversations";
 import { useChatStore } from "./chat";
 import { useCreditsStore } from "./credits";
@@ -118,11 +118,16 @@ export const useAuthStore = defineStore("auth", () => {
     applySession(auth);
   }
 
+  async function loginWithCode(email: string, code: string) {
+    const auth = await api.post<AuthResponse>("/auth/login/code", { email, code });
+    applySession(auth);
+  }
+
   async function register(payload: {
     email: string;
+    code: string;
     password: string;
     display_name: string;
-    security_questions: SecurityQuestionInput[];
   }) {
     const auth = await api.post<AuthResponse>("/auth/register", payload);
     applySession(auth);
@@ -181,6 +186,7 @@ export const useAuthStore = defineStore("auth", () => {
     clearLogoutNotice,
     init,
     login,
+    loginWithCode,
     register,
     logout,
     forceLogout,

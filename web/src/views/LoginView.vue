@@ -5,36 +5,67 @@ import AuthLayout from "../components/AuthLayout.vue";
 import BaseInput from "../components/ui/BaseInput.vue";
 import BaseButton from "../components/ui/BaseButton.vue";
 import FormError from "../components/ui/FormError.vue";
+import { extractErrorMessage, isValidEmail, useEmailCode } from "../composables/useEmailCode";
 import { useAuthStore } from "../stores/auth";
 
 const auth = useAuthStore();
 const router = useRouter();
 const route = useRoute();
 
+type LoginMode = "password" | "code";
+const mode = ref<LoginMode>("password");
 const email = ref("");
 const password = ref("");
+const code = ref("");
 const showPassword = ref(false);
 const error = ref<string | null>(null);
 const loading = ref(false);
 
-watch([email, password], () => {
+const { sending, cooldown, notice, sendCode, clearNotice } = useEmailCode("login");
+
+watch([mode, email, password, code], () => {
   if (error.value) error.value = null;
 });
 
+watch(mode, () => {
+  clearNotice();
+});
+
+async function handleSendCode() {
+  error.value = null;
+  const res = await sendCode(email.value);
+  if (!res.ok && res.error) {
+    error.value = res.error;
+  }
+}
+
 async function submit() {
   error.value = null;
-  if (!email.value.trim() || !password.value) {
-    error.value = "请输入邮箱和密码";
+  const trimmedEmail = email.value.trim();
+  if (!trimmedEmail || !isValidEmail(trimmedEmail)) {
+    error.value = "请输入有效的邮箱地址";
+    return;
+  }
+  if (mode.value === "password" && !password.value) {
+    error.value = "请输入登录密码";
+    return;
+  }
+  if (mode.value === "code" && !code.value.trim()) {
+    error.value = "请输入邮箱验证码";
     return;
   }
   loading.value = true;
   try {
-    await auth.login(email.value.trim(), password.value);
+    if (mode.value === "password") {
+      await auth.login(trimmedEmail, password.value);
+    } else {
+      await auth.loginWithCode(trimmedEmail, code.value.trim());
+    }
     const rawRedirect = typeof route.query.redirect === "string" ? route.query.redirect : "/";
     const redirect = rawRedirect.startsWith("/") && !rawRedirect.startsWith("//") ? rawRedirect : "/";
     await router.push(redirect);
-  } catch (e: any) {
-    error.value = e?.detail?.detail ?? e?.message ?? "登录失败";
+  } catch (e: unknown) {
+    error.value = extractErrorMessage(e, "登录失败");
   } finally {
     loading.value = false;
   }
@@ -97,6 +128,27 @@ async function submit() {
       </div>
     </Transition>
 
+    <div class="mb-4 flex items-center gap-4 border-b border-line text-[13px]">
+      <button
+        type="button"
+        class="focus-ring relative pb-2 font-medium transition-colors"
+        :class="mode === 'password' ? 'text-fg' : 'text-fg-muted hover:text-fg'"
+        @click="mode = 'password'"
+      >
+        密码登录
+        <span v-if="mode === 'password'" class="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-accent" />
+      </button>
+      <button
+        type="button"
+        class="focus-ring relative pb-2 font-medium transition-colors"
+        :class="mode === 'code' ? 'text-fg' : 'text-fg-muted hover:text-fg'"
+        @click="mode = 'code'"
+      >
+        邮箱验证码登录
+        <span v-if="mode === 'code'" class="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-accent" />
+      </button>
+    </div>
+
     <form class="space-y-3.5" @submit.prevent="submit">
       <BaseInput
         v-model="email"
@@ -108,6 +160,7 @@ async function submit() {
       />
 
       <BaseInput
+        v-if="mode === 'password'"
         v-model="password"
         label="密码"
         :type="showPassword ? 'text' : 'password'"
@@ -158,6 +211,33 @@ async function submit() {
           </button>
         </template>
       </BaseInput>
+
+      <div v-else class="space-y-2">
+        <div class="flex items-end gap-2">
+          <div class="min-w-0 flex-1">
+            <BaseInput
+              v-model="code"
+              label="邮箱验证码"
+              placeholder="6 位数字验证码"
+              autocomplete="one-time-code"
+            />
+          </div>
+          <BaseButton
+            type="button"
+            variant="secondary"
+            size="lg"
+            class="shrink-0"
+            :loading="sending"
+            :disabled="cooldown > 0"
+            @click="handleSendCode"
+          >
+            {{ cooldown > 0 ? `${cooldown}s 后重发` : "发送验证码" }}
+          </BaseButton>
+        </div>
+        <p v-if="notice" class="rounded-lg bg-success-weak/75 px-3 py-1.5 text-[12px] text-success">
+          {{ notice }}
+        </p>
+      </div>
 
       <FormError :message="error" />
 

@@ -21,11 +21,12 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api.routes import conversations as conversations_routes
-from app.core import ratelimit
+from app.core import ratelimit, redis as redis_mod
 from app.db.models import Base
 from app.db.session import get_db
 from app.main import create_app
 from app.services import audit as audit_service
+from app.services import email as email_service
 
 PG = {"host": "localhost", "port": 5434, "user": "whitz", "password": "whitz_dev_password"}
 TEST_DB = "whitz_test"
@@ -43,6 +44,11 @@ async def _ensure_database() -> None:
             await conn.execute(f'CREATE DATABASE "{TEST_DB}"')
     finally:
         await conn.close()
+    test_conn = await asyncpg.connect(database=TEST_DB, **PG)
+    try:
+        await test_conn.execute("DROP TABLE IF EXISTS security_questions CASCADE")
+    finally:
+        await test_conn.close()
     _db_ready = True
 
 
@@ -68,10 +74,36 @@ class FakeHermesClient:
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limits():
-    ratelimit.security_questions_limiter._hits.clear()
+    ratelimit.email_code_ip_limiter._hits.clear()
+    ratelimit.email_code_addr_limiter._hits.clear()
     ratelimit.reset_password_limiter._hits.clear()
+    ratelimit.login_code_limiter._hits.clear()
     ratelimit.redeem_limiter._hits.clear()
+    if isinstance(redis_mod._redis, redis_mod.MemoryRedis):
+        redis_mod._redis._data.clear()
     yield
+
+
+@pytest.fixture(autouse=True)
+def sent_emails(monkeypatch):
+    import re
+
+    outbox: list[dict[str, str]] = []
+
+    async def _fake_send_email(to_email: str, subject: str, text_body: str, html_body: str) -> None:
+        match = re.search(r"验证码：(\d{6})", text_body)
+        outbox.append(
+            {
+                "to": to_email,
+                "subject": subject,
+                "text": text_body,
+                "html": html_body,
+                "code": match.group(1) if match else "",
+            }
+        )
+
+    monkeypatch.setattr(email_service, "send_email", _fake_send_email)
+    return outbox
 
 
 @pytest_asyncio.fixture
@@ -119,25 +151,25 @@ def auth_header(token: str) -> dict:
 
 
 @pytest.fixture
-def register(client):
+def register(client, sent_emails):
     async def _register(
         email: str = "user@test.local",
         password: str = "Passw0rd!",
         display_name: str = "Tester",
-        questions: list | None = None,
     ) -> dict:
-        if questions is None:
-            questions = [
-                {"question": "第一所小学？", "answer": "alpha"},
-                {"question": "母亲姓名？", "answer": "beta"},
-            ]
+        code_resp = await client.post(
+            "/api/auth/email-code",
+            json={"email": email, "purpose": "register"},
+        )
+        assert code_resp.status_code == 200, code_resp.text
+        code = sent_emails[-1]["code"]
         resp = await client.post(
             "/api/auth/register",
             json={
                 "email": email,
+                "code": code,
                 "password": password,
                 "display_name": display_name,
-                "security_questions": questions,
             },
         )
         assert resp.status_code == 201, resp.text
