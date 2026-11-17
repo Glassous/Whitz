@@ -1,7 +1,9 @@
 name: Deploy Server
 
-# 流程：GitHub Runner 构建镜像 → docker save + gzip → SCP 直传服务器2 → docker load + up
-# 不依赖任何镜像仓库；服务器2 只做 load，绝不执行 build
+# 流程：GitHub Runner 构建镜像 → 推送国内仓库（默认阿里云 ACR）→ 服务器2 从国内源拉取
+# 关键点：registry 是分层增量传输，每次部署只上传变化的层（几 MB），
+#         而不是像 docker save 那样每次全量 100MB+ 穿越国际链路。
+# 服务器2 永远不执行 docker build
 
 on:
   push:
@@ -17,20 +19,25 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  LOCAL_IMAGE: whitz-server
-  LOCAL_ARCHIVE: server-image.tar.gz
-  REMOTE_ARCHIVE: /tmp/whitz-server.tar.gz
+  # 主仓库地址：阿里云 ACR 个人版（实例专属域名，不是通用 registry.cn-*.aliyuncs.com）
+  # 换源只需设置仓库变量 IMAGE_REGISTRY / IMAGE_REPO，Secret 名不变
+  REGISTRY: ${{ vars.IMAGE_REGISTRY || 'crpi-m0whm1exhoe5bb6c.cn-guangzhou.personal.cr.aliyuncs.com' }}
+  IMAGE: ${{ vars.IMAGE_REPO || 'crpi-m0whm1exhoe5bb6c.cn-guangzhou.personal.cr.aliyuncs.com/whitz/server' }}
+  # 备份仓库（GitHub 内网推送只需几秒，国内拉取慢，仅兜底）
+  IMAGE_GHCR: ghcr.io/glassous/whitz-server
   REMOTE_DIR: /opt/whitz
   COMPOSE_FILE: docker-compose.prod.yml
   PROJECT: whitz
 
 jobs:
-  build-and-deploy:
-    name: Build & Deploy
+  build:
+    name: Build & Push Image
     runs-on: ubuntu-latest
-    environment: production
     permissions:
       contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,39 +49,45 @@ jobs:
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image
+      - name: Login image registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Login GHCR (backup)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
         uses: docker/build-push-action@v6
         with:
           context: ./server
           file: ./server/Dockerfile
-          load: true
-          push: false
-          tags: ${{ env.LOCAL_IMAGE }}:${{ steps.meta.outputs.tag }}
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE_GHCR }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE_GHCR }}:latest
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Export & compress
-        run: |
-          set -euo pipefail
-          docker image inspect "$LOCAL_IMAGE:${{ steps.meta.outputs.tag }}" >/dev/null
-          docker save "$LOCAL_IMAGE:${{ steps.meta.outputs.tag }}" | gzip -1 > "$LOCAL_ARCHIVE"
-          ls -lh "$LOCAL_ARCHIVE"
-          echo "size=$(du -m "$LOCAL_ARCHIVE" | cut -f1)MB"
-
-      - name: Upload image to server2
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER2_HOST }}
-          username: ${{ secrets.SERVER2_USER }}
-          key: ${{ secrets.SERVER2_SSH_KEY }}
-          port: ${{ secrets.SERVER2_PORT || 22 }}
-          source: ${{ env.LOCAL_ARCHIVE }}
-          target: /tmp
-          overwrite: true
-          timeout: 300s
+  deploy:
+    name: Pull & Restart on Server2
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Upload compose file
         uses: appleboy/scp-action@v0.1.7
@@ -88,13 +101,13 @@ jobs:
           overwrite: true
           timeout: 60s
 
-      - name: Load & restart
+      - name: Pull image & restart
         uses: appleboy/ssh-action@v1.2.0
         env:
-          TAG: ${{ steps.meta.outputs.tag }}
-          IMAGE: ${{ env.LOCAL_IMAGE }}:${{ steps.meta.outputs.tag }}
-          REPO: ${{ env.LOCAL_IMAGE }}
-          ARCHIVE: ${{ env.REMOTE_ARCHIVE }}
+          IMAGE: ${{ env.IMAGE }}:${{ needs.build.outputs.tag }}
+          REGISTRY: ${{ env.REGISTRY }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
           REMOTE_DIR: ${{ env.REMOTE_DIR }}
           COMPOSE_FILE: ${{ env.COMPOSE_FILE }}
           PROJECT: ${{ env.PROJECT }}
@@ -104,7 +117,7 @@ jobs:
           key: ${{ secrets.SERVER2_SSH_KEY }}
           port: ${{ secrets.SERVER2_PORT || 22 }}
           command_timeout: 15m
-          envs: TAG,IMAGE,REPO,ARCHIVE,REMOTE_DIR,COMPOSE_FILE,PROJECT
+          envs: IMAGE,REGISTRY,REGISTRY_USER,REGISTRY_PASSWORD,REMOTE_DIR,COMPOSE_FILE,PROJECT
           script: |
             set -euo pipefail
             cd "$REMOTE_DIR"
@@ -116,12 +129,10 @@ jobs:
               exit 1
             fi
 
-            test -f "$ARCHIVE" || { echo "镜像包未上传成功：$ARCHIVE"; exit 1; }
-            echo "loading $ARCHIVE"
-            gunzip -c "$ARCHIVE" | docker load
-            rm -f "$ARCHIVE"
-
+            echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
             export WHITZ_SERVER_IMAGE="$IMAGE"
+
+            docker compose -p "$PROJECT" -f "$COMPOSE_FILE" pull server
             docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --remove-orphans
 
             ok=0
@@ -141,10 +152,5 @@ jobs:
               exit 1
             fi
 
-            # 清理旧的 sha tag（保留本次与 latest），旧镜像层共享，不会影响运行中的容器
-            docker images "$REPO" --format '{{.Tag}}' \
-              | grep -vE "^(${TAG}|latest)$" \
-              | xargs -r -I{} docker rmi "$REPO:{}" >/dev/null 2>&1 || true
             docker image prune -f --filter "dangling=true" >/dev/null 2>&1 || true
-
             echo "server deployed: $IMAGE @ $(date -u +%FT%TZ)"
