@@ -1,0 +1,99 @@
+name: Deploy Admin
+
+# 流程：GitHub Runner 构建 → 打包 → SCP 到服务器1 → 解包到 1Panel 站点的 dist 目录
+# 服务器1 上只做文件替换，不执行任何 npm / 构建命令
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "admin/**"
+      - ".github/workflows/deploy-admin.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-admin
+  cancel-in-progress: true
+
+env:
+  TARGET_DIR: /opt/1panel/www/sites/whitzadmin.vodyanitsa.top/index/dist
+  LOCAL_ARCHIVE: whitz-admin-dist.tgz
+  REMOTE_ARCHIVE: /tmp/whitz-admin-dist.tgz
+  NODE_VERSION: "22"
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy Admin
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+
+      - name: Install dependencies
+        working-directory: admin
+        run: npm ci
+
+      - name: Build
+        working-directory: admin
+        run: npm run build
+
+      - name: Pack dist
+        run: |
+          set -euo pipefail
+          test -f admin/dist/index.html
+          tar -czf "$LOCAL_ARCHIVE" -C admin/dist .
+          ls -lh "$LOCAL_ARCHIVE"
+
+      - name: Upload archive to server1
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER1_HOST }}
+          username: ${{ secrets.SERVER1_USER }}
+          key: ${{ secrets.SERVER1_SSH_KEY }}
+          port: ${{ secrets.SERVER1_PORT || 22 }}
+          source: ${{ env.LOCAL_ARCHIVE }}
+          target: /tmp
+          overwrite: true
+          timeout: 60s
+
+      - name: Swap files on server1
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          TARGET_DIR: ${{ env.TARGET_DIR }}
+          ARCHIVE: ${{ env.REMOTE_ARCHIVE }}
+        with:
+          host: ${{ secrets.SERVER1_HOST }}
+          username: ${{ secrets.SERVER1_USER }}
+          key: ${{ secrets.SERVER1_SSH_KEY }}
+          port: ${{ secrets.SERVER1_PORT || 22 }}
+          command_timeout: 5m
+          envs: TARGET_DIR,ARCHIVE
+          script: |
+            set -euo pipefail
+            # 非 root 用户自动加 sudo（需免密）
+            run() { if [ "$(id -u)" = "0" ]; then "$@"; else sudo -n "$@"; fi; }
+
+            run mkdir -p "$TARGET_DIR"
+            run rm -rf "$TARGET_DIR.new"
+            run mkdir -p "$TARGET_DIR.new"
+            run tar -xzf "$ARCHIVE" -C "$TARGET_DIR.new"
+
+            # 有 rsync 时增量同步并清理旧 hash 资源；否则整目录替换
+            if command -v rsync >/dev/null 2>&1; then
+              run rsync -a --delete "$TARGET_DIR.new"/ "$TARGET_DIR"/
+            else
+              run find "$TARGET_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+              run cp -a "$TARGET_DIR.new"/. "$TARGET_DIR"/
+            fi
+            run rm -rf "$TARGET_DIR.new" "$ARCHIVE"
+
+            echo "admin deployed: $(date -u +%FT%TZ)"
+            run ls -la "$TARGET_DIR" | head -n 15 || true

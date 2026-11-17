@@ -1,0 +1,215 @@
+# 生产环境编排（服务器2）：只拉取 CI 构建好的镜像，不在服务器上构建
+# 用法：cd /opt/whitz && docker compose -f docker-compose.prod.yml up -d
+# 依赖宿主机 .env（同目录），镜像 tag 由 GitHub Actions 通过 WHITZ_SERVER_IMAGE 注入
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: whitz-postgres
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - max_connections=30
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - wal_buffers=4MB
+      - -c
+      - min_wal_size=128MB
+      - -c
+      - max_wal_size=512MB
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - random_page_cost=1.1
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-whitz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whitz_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-whitz}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    shm_size: 128mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whitz} -d ${POSTGRES_DB:-whitz}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "127.0.0.1:5434:5432"
+    mem_limit: 512m
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - whitz_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: whitz-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --auto-aof-rewrite-percentage
+      - "100"
+      - --auto-aof-rewrite-min-size
+      - 32mb
+      - --maxmemory
+      - 96mb
+      - --maxmemory-policy
+      - noeviction
+      - --save
+      - ""
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    mem_limit: 128m
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - whitz_net
+
+  hermes:
+    image: nousresearch/hermes-agent:stable
+    container_name: whitz-hermes
+    restart: unless-stopped
+    command: gateway run
+    environment:
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_KEY: ${HERMES_API_SERVER_KEY}
+      GATEWAY_MULTIPLEX_PROFILES: "true"
+      HERMES_UID: "1000"
+      HERMES_GID: "1000"
+    volumes:
+      - hermes_data:/opt/data
+    ports:
+      - "127.0.0.1:8642:8642"
+    mem_limit: 1536m
+    memswap_limit: 2g
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - whitz_net
+
+  server:
+    # 镜像由 GitHub Actions 构建并推送到 GHCR，服务器只负责 pull
+    image: ${WHITZ_SERVER_IMAGE:-ghcr.io/glassous/whitz-server:latest}
+    container_name: whitz-server
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-whitz}:${POSTGRES_PASSWORD:-whitz_dev_password}@postgres:5432/${POSTGRES_DB:-whitz}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ACCESS_TTL_MINUTES: ${JWT_ACCESS_TTL_MINUTES:-15}
+      JWT_REFRESH_TTL_DAYS: ${JWT_REFRESH_TTL_DAYS:-15}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL: ${LLM_MODEL}
+      LLM_SUPPORTS_VISION: ${LLM_SUPPORTS_VISION:-true}
+      HERMES_BASE_URL: http://hermes:8642
+      HERMES_DATA_DIR: /hermes-data
+      HERMES_API_SERVER_KEY: ${HERMES_API_SERVER_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}
+      SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-2}
+      MAX_CONCURRENT_RUNS_PER_USER: ${MAX_CONCURRENT_RUNS_PER_USER:-1}
+      MAX_SSE_STREAMS: ${MAX_SSE_STREAMS:-6}
+      MAX_SSE_STREAMS_PER_USER: ${MAX_SSE_STREAMS_PER_USER:-2}
+      RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-900}
+      CHAT_RATE_PER_MINUTE: ${CHAT_RATE_PER_MINUTE:-30}
+      TOKENS_PER_CREDIT: ${TOKENS_PER_CREDIT:-5000}
+      MEMBERSHIP_DEFAULT_DAYS: ${MEMBERSHIP_DEFAULT_DAYS:-30}
+      STRICT_TICKET_IP: ${STRICT_TICKET_IP:-false}
+      AUDIT_ENABLED: ${AUDIT_ENABLED:-true}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Whitz}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-true}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-15}
+      EMAIL_CODE_TTL_SECONDS: ${EMAIL_CODE_TTL_SECONDS:-600}
+      EMAIL_CODE_COOLDOWN_SECONDS: ${EMAIL_CODE_COOLDOWN_SECONDS:-60}
+      EMAIL_CODE_MAX_ATTEMPTS: ${EMAIL_CODE_MAX_ATTEMPTS:-5}
+      COS_SECRET_ID: ${COS_SECRET_ID:-}
+      COS_SECRET_KEY: ${COS_SECRET_KEY:-}
+      COS_BUCKET: ${COS_BUCKET:-}
+      COS_REGION: ${COS_REGION:-}
+      COS_PUBLIC_HOST: ${COS_PUBLIC_HOST:-}
+      COS_KEY_PREFIX: ${COS_KEY_PREFIX:-whitz/uploads}
+      COS_USE_STS: ${COS_USE_STS:-false}
+      COS_STS_DURATION_SECONDS: ${COS_STS_DURATION_SECONDS:-900}
+      COS_UPLOAD_EXPIRES_SECONDS: ${COS_UPLOAD_EXPIRES_SECONDS:-600}
+      COS_DOWNLOAD_EXPIRES_SECONDS: ${COS_DOWNLOAD_EXPIRES_SECONDS:-300}
+      FILE_MAX_SIZE_MB: ${FILE_MAX_SIZE_MB:-20}
+      MAX_FILES_PER_CONVERSATION: ${MAX_FILES_PER_CONVERSATION:-20}
+      INTERNAL_MCP_BASE_URL: ${INTERNAL_MCP_BASE_URL:-http://server:8000}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - hermes_data:/hermes-data
+    ports:
+      # 1Panel 的 OpenResty 若不在 host 网络，把 SERVER_BIND_IP 改成宿主机内网 IP
+      # （例如 172.17.0.1）或 docker0 网关地址
+      - "${SERVER_BIND_IP:-127.0.0.1}:${SERVER_PORT:-8001}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      hermes:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
+    logging: *default-logging
+    networks:
+      - whitz_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  hermes_data:
+
+networks:
+  whitz_net:
+    driver: bridge
