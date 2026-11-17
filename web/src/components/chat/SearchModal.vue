@@ -14,6 +14,7 @@ const emit = defineEmits<{
 }>();
 
 const query = ref("");
+const dialogRef = ref<HTMLDialogElement | null>(null);
 const inputRef = ref<HTMLInputElement | null>(null);
 const loading = ref(false);
 const error = ref<string | null>(null);
@@ -22,10 +23,11 @@ const activeIndex = ref(0);
 
 let debounceTimer: number | null = null;
 let requestSeq = 0;
+let pressedOutside = false;
 
 const recentConversations = computed(() => {
-  return [...props.conversations]
-    .sort((a, b) => {
+  return props.conversations
+    .toSorted((a, b) => {
       const ta = new Date(a.last_message_at ?? a.updated_at ?? a.created_at).getTime();
       const tb = new Date(b.last_message_at ?? b.updated_at ?? b.created_at).getTime();
       return tb - ta;
@@ -114,17 +116,22 @@ async function runSearch(raw: string) {
 watch(
   () => props.open,
   async (val) => {
+    const dialog = dialogRef.value;
     if (val) {
       query.value = "";
       hits.value = [];
       error.value = null;
       loading.value = false;
       activeIndex.value = 0;
+      if (dialog && !dialog.open) dialog.showModal();
       await nextTick();
       inputRef.value?.focus();
-    } else if (debounceTimer) {
-      window.clearTimeout(debounceTimer);
-      debounceTimer = null;
+    } else {
+      if (dialog?.open) dialog.close();
+      if (debounceTimer) {
+        window.clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
     }
   },
 );
@@ -177,43 +184,58 @@ function onInputKeydown(e: KeyboardEvent) {
   }
 }
 
-function onGlobalKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape" && props.open) {
-    e.preventDefault();
-    emit("close");
-  }
+function onCancel(e: Event) {
+  e.preventDefault();
+  emit("close");
 }
 
-onMounted(() => document.addEventListener("keydown", onGlobalKeydown));
+function onNativeClose() {
+  if (props.open) emit("close");
+}
+
+function isOutside(e: PointerEvent, dialog: HTMLDialogElement): boolean {
+  const r = dialog.getBoundingClientRect();
+  return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+}
+
+function onPointerdown(e: PointerEvent) {
+  const dialog = dialogRef.value;
+  if (!dialog || "closedBy" in HTMLDialogElement.prototype) return;
+  pressedOutside = isOutside(e, dialog);
+}
+
+function onPointerup(e: PointerEvent) {
+  const dialog = dialogRef.value;
+  if (!dialog || "closedBy" in HTMLDialogElement.prototype) return;
+  if (pressedOutside && isOutside(e, dialog)) emit("close");
+  pressedOutside = false;
+}
+
+onMounted(() => {
+  if (props.open && dialogRef.value && !dialogRef.value.open) {
+    dialogRef.value.showModal();
+  }
+});
 onBeforeUnmount(() => {
-  document.removeEventListener("keydown", onGlobalKeydown);
   if (debounceTimer) window.clearTimeout(debounceTimer);
 });
 </script>
 
 <template>
-  <Teleport to="body">
-    <Transition
-      enter-active-class="transition duration-150 ease-out"
-      enter-from-class="opacity-0"
-      enter-to-class="opacity-100"
-      leave-active-class="transition duration-100 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
+  <dialog
+    ref="dialogRef"
+    class="whitz-dialog mt-[10vh] w-full max-w-2xl sm:mt-[12vh]"
+    closedby="any"
+    aria-label="搜索对话"
+    @cancel="onCancel"
+    @close="onNativeClose"
+    @pointerdown="onPointerdown"
+    @pointerup="onPointerup"
+  >
+    <div
+      class="flex w-full flex-col overflow-hidden rounded-[28px] bg-canvas shadow-2xl dark:bg-[#161615]"
+      style="box-shadow: var(--shadow)"
     >
-      <div
-        v-if="open"
-        class="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[10vh] sm:pt-[12vh]"
-        role="dialog"
-        aria-modal="true"
-        aria-label="搜索对话"
-      >
-        <div class="absolute inset-0 bg-black/40 backdrop-blur-[2px] dark:bg-black/60" @click="emit('close')" />
-
-        <div
-          class="animate-rise relative z-10 flex w-full max-w-2xl flex-col overflow-hidden rounded-[28px] bg-canvas shadow-2xl dark:bg-[#161615]"
-          style="box-shadow: var(--shadow)"
-        >
           <!-- Top search input (borderless, large radius) -->
           <div class="flex items-center gap-3 px-5 pb-3 pt-4">
             <svg
@@ -346,7 +368,5 @@ onBeforeUnmount(() => {
             </template>
           </div>
         </div>
-      </div>
-    </Transition>
-  </Teleport>
+  </dialog>
 </template>

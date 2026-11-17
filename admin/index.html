@@ -4,17 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="robots" content="noindex, nofollow" />
-    <title>Whitz · 管理后台</title>
     <script>
       (function () {
         try {
           var saved = localStorage.getItem("whitz_theme");
-          var dark = saved ? saved === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var meta = document.querySelector('meta[name="color-scheme"]');
+          if (meta) {
+            meta.content = saved === "light" || saved === "dark" ? saved : "light dark";
+          }
+          var dark =
+            saved === "dark" ||
+            ((!saved || saved === "system") && window.matchMedia("(prefers-color-scheme: dark)").matches);
           if (dark) document.documentElement.classList.add("dark");
         } catch (e) {}
       })();
     </script>
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Whitz · 管理后台</title>
   </head>
   <body>
     <div id="app"></div>

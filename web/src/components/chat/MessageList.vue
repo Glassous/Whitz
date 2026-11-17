@@ -172,7 +172,10 @@ onBeforeUnmount(() => {
         :key="m.id"
         :ref="(el) => setItemRef(idx, el as HTMLElement | null)"
         class="-mx-2 rounded-2xl px-2 py-1 transition-colors duration-700"
-        :class="highlightedId === m.id ? 'bg-accent-weak/75' : ''"
+        :class="[
+          highlightedId === m.id ? 'bg-accent-weak/75' : '',
+          idx < visibleMessages.length - 6 ? 'message-deferred' : '',
+        ]"
       >
         <MessageBubble :message="m" @steps="emit('steps', m.id)" />
       </div>

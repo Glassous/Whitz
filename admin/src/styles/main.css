@@ -7,7 +7,14 @@
 /* ------------------------------------------------------------------ */
 
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
+
+  &:has(> head > meta[name="color-scheme"][content="dark"]) {
+    color-scheme: dark;
+  }
+  &:has(> head > meta[name="color-scheme"][content="light"]) {
+    color-scheme: light;
+  }
 
   --canvas: #ffffff;
   --sidebar: #f7f7f8;
@@ -44,8 +51,6 @@
 }
 
 .dark {
-  color-scheme: dark;
-
   --canvas: #212121;
   --sidebar: #171717;
   --surface: #2b2b2b;
@@ -198,4 +203,182 @@ body {
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* ------------------------------------------------------------------ */
+/* Native <dialog> top-layer & animations                              */
+/* ------------------------------------------------------------------ */
+
+@layer components {
+  dialog.whitz-dialog {
+    margin: auto;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    max-width: calc(100vw - 2rem);
+    max-height: calc(100dvh - 2rem);
+    overflow: visible;
+    opacity: 0;
+    transition-property: opacity, transform, display, overlay;
+    transition-duration: 0.18s;
+    transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+    transition-behavior: allow-discrete;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  dialog.whitz-dialog {
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+dialog.whitz-dialog[open]:where(:not([data-closing])) {
+  opacity: 1;
+
+  @starting-style {
+    opacity: 0;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    transform: translateY(0) scale(1);
+
+    @starting-style {
+      transform: translateY(8px) scale(0.98);
+    }
+  }
+}
+
+dialog.whitz-dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog.whitz-dialog::backdrop {
+  background-color: rgb(0 0 0 / 0);
+  backdrop-filter: blur(2px);
+  overflow: hidden;
+  overscroll-behavior: contain;
+  transition-property: background-color, display, overlay;
+  transition-duration: 0.18s;
+  transition-timing-function: ease-out;
+  transition-behavior: allow-discrete;
+}
+
+dialog.whitz-dialog[open]:where(:not([data-closing]))::backdrop {
+  background-color: rgb(0 0 0 / 0.4);
+
+  @starting-style {
+    background-color: rgb(0 0 0 / 0);
+  }
+}
+
+.dark dialog.whitz-dialog[open]:where(:not([data-closing]))::backdrop {
+  background-color: rgb(0 0 0 / 0.6);
+
+  @starting-style {
+    background-color: rgb(0 0 0 / 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  dialog.whitz-dialog,
+  dialog.whitz-dialog::backdrop {
+    transition-duration: 0.08s;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive accessible data tables                                   */
+/* ------------------------------------------------------------------ */
+
+.table-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  max-block-size: min(72dvh, 720px);
+  container-type: inline-size;
+}
+
+.table-wrapper table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.table-wrapper thead {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 1;
+}
+
+@container (width < 640px) {
+  .table-wrapper table,
+  .table-wrapper thead,
+  .table-wrapper tbody,
+  .table-wrapper tr,
+  .table-wrapper th,
+  .table-wrapper td {
+    display: block;
+    min-width: 0;
+  }
+
+  .table-wrapper thead {
+    display: none;
+  }
+
+  .table-wrapper tbody tr {
+    padding: 0.75rem 1rem;
+  }
+
+  .table-wrapper tbody td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.35rem 0;
+    text-align: right;
+  }
+
+  .table-wrapper tbody td[colspan] {
+    display: block;
+    text-align: center;
+    padding: 2.5rem 1rem;
+  }
+
+  .table-wrapper tbody td[data-label]::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--fg-faint);
+    text-align: left;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Customizable <select> (progressive enhancement)                     */
+/* ------------------------------------------------------------------ */
+
+@supports (appearance: base-select) {
+  .modern-select,
+  .modern-select::picker(select) {
+    appearance: base-select;
+  }
+
+  .modern-select::picker(select) {
+    border: 1px solid var(--line);
+    border-radius: 0.75rem;
+    background: var(--canvas);
+    color: var(--fg);
+    padding: 0.25rem;
+    box-shadow: var(--shadow);
+  }
+
+  .modern-select option {
+    border-radius: 0.5rem;
+    padding: 0.35rem 0.6rem;
+  }
+
+  .modern-select option:hover,
+  .modern-select option:checked {
+    background: var(--hover);
+  }
 }

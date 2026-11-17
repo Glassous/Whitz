@@ -72,7 +72,7 @@ onMounted(load);
       </div>
       <select
         v-model="severity"
-        class="focus-ring h-11 rounded-xl border border-line bg-canvas px-3 text-[13px] text-fg"
+        class="modern-select focus-ring h-11 rounded-xl border border-line bg-canvas px-3 text-[13px] text-fg"
         @change="search"
       >
         <option value="">全部级别</option>
@@ -82,7 +82,7 @@ onMounted(load);
       </select>
       <select
         v-model="outcome"
-        class="focus-ring h-11 rounded-xl border border-line bg-canvas px-3 text-[13px] text-fg"
+        class="modern-select focus-ring h-11 rounded-xl border border-line bg-canvas px-3 text-[13px] text-fg"
         @change="search"
       >
         <option value="">全部结果</option>
@@ -99,7 +99,7 @@ onMounted(load);
 
     <p v-if="error" class="mb-3 rounded-xl bg-danger-weak px-3 py-2 text-[13px] text-danger">{{ error }}</p>
 
-    <div class="overflow-x-auto rounded-2xl border border-line bg-canvas">
+    <div tabindex="0" role="region" aria-label="审计日志" class="table-wrapper focus-ring rounded-2xl border border-line bg-canvas">
       <table class="w-full min-w-[820px] text-sm">
         <thead class="bg-surface text-left text-[11px] uppercase tracking-wide text-fg-faint">
           <tr>
@@ -120,30 +120,32 @@ onMounted(load);
             <td colspan="7" class="px-4 py-12 text-center text-[13px] text-fg-faint">暂无审计记录</td>
           </tr>
           <tr v-for="row in data?.items ?? []" :key="row.id" class="transition-colors hover:bg-surface">
-            <td class="whitespace-nowrap px-4 py-3 text-[12px] tabular-nums text-fg-faint">
+            <td data-label="时间" class="whitespace-nowrap px-4 py-3 text-[12px] tabular-nums text-fg-faint">
               {{ fmtTime(row.created_at) }}
             </td>
-            <td class="max-w-[180px] truncate px-4 py-3 text-[12px] text-fg-muted">
+            <td data-label="操作者" class="max-w-[180px] truncate px-4 py-3 text-[12px] text-fg-muted">
               {{ row.actor_email ?? "—" }}
             </td>
-            <td class="px-4 py-3">
-              <p class="font-mono text-[12px] text-fg">{{ row.action }}</p>
-              <p v-if="row.target_type" class="mt-0.5 text-[10.5px] text-fg-faint">
-                {{ row.target_type }} · {{ row.target_id ?? "—" }}
-              </p>
+            <td data-label="动作" class="px-4 py-3">
+              <div>
+                <p class="font-mono text-[12px] text-fg">{{ row.action }}</p>
+                <p v-if="row.target_type" class="mt-0.5 text-[10.5px] text-fg-faint">
+                  {{ row.target_type }} · {{ row.target_id ?? "—" }}
+                </p>
+              </div>
             </td>
-            <td class="px-4 py-3">
+            <td data-label="结果" class="px-4 py-3">
               <BaseBadge :tone="row.outcome === 'success' ? 'green' : 'red'">
                 {{ row.outcome === "success" ? "成功" : "失败" }}
               </BaseBadge>
             </td>
-            <td class="px-4 py-3">
+            <td data-label="级别" class="px-4 py-3">
               <BaseBadge :tone="severityTone(row)">{{ severityLabel(row) }}</BaseBadge>
             </td>
-            <td class="whitespace-nowrap px-4 py-3 text-[12px] tabular-nums text-fg-faint">
+            <td data-label="IP" class="whitespace-nowrap px-4 py-3 text-[12px] tabular-nums text-fg-faint">
               {{ row.ip ?? "—" }}
             </td>
-            <td class="px-4 py-3 text-right">
+            <td data-label="详情" class="px-4 py-3 text-right">
               <BaseButton size="sm" variant="ghost" @click="selected = row">查看</BaseButton>
             </td>
           </tr>

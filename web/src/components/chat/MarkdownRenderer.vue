@@ -1,10 +1,18 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { onMounted, ref, watch } from "vue";
 import MarkdownIt from "markdown-it";
-import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 
 const props = defineProps<{ content: string }>();
+
+const containerRef = ref<HTMLElement | null>(null);
+let domPurifyPromise: Promise<typeof import("dompurify").default> | undefined;
+let renderSeq = 0;
+
+function loadDOMPurify() {
+  domPurifyPromise ??= import("dompurify").then((mod) => mod.default ?? mod);
+  return domPurifyPromise;
+}
 
 const md: MarkdownIt = new MarkdownIt({
   html: false,
@@ -22,16 +30,35 @@ const md: MarkdownIt = new MarkdownIt({
   },
 });
 
-DOMPurify.addHook("afterSanitizeAttributes", (node) => {
-  if (node.tagName === "A") {
-    node.setAttribute("target", "_blank");
-    node.setAttribute("rel", "noopener noreferrer");
+async function renderContent() {
+  const el = containerRef.value;
+  if (!el) return;
+  const seq = ++renderSeq;
+  const rendered = md.render(props.content ?? "");
+
+  if ("setHTML" in Element.prototype) {
+    (el as HTMLElement & { setHTML: (html: string) => void }).setHTML(rendered);
+  } else {
+    const DOMPurify = await loadDOMPurify();
+    if (seq !== renderSeq) return;
+    el.innerHTML = DOMPurify.sanitize(rendered, { USE_PROFILES: { html: true } });
   }
+
+  for (const anchor of el.querySelectorAll("a")) {
+    anchor.setAttribute("target", "_blank");
+    anchor.setAttribute("rel", "noopener noreferrer");
+  }
+}
+
+watch(() => props.content, () => {
+  void renderContent();
 });
 
-const html = computed(() => DOMPurify.sanitize(md.render(props.content ?? ""), { USE_PROFILES: { html: true } }));
+onMounted(() => {
+  void renderContent();
+});
 </script>
 
 <template>
-  <div class="markdown-body" v-html="html" />
+  <div ref="containerRef" class="markdown-body" />
 </template>

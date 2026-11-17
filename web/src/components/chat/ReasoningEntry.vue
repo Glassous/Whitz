@@ -177,12 +177,11 @@ function prettyResult(tool: ReasoningTool): string {
   <div class="space-y-1.5">
     <div v-if="block.content" class="rounded-md bg-surface/60 px-2.5 py-2">
       <p class="mb-0.5 text-[11.5px] font-medium uppercase tracking-wide text-fg-faint">过程回复</p>
-      <p
-        class="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg-muted"
-        :class="!contentOpen && longContent ? 'line-clamp-3' : ''"
-      >
-        {{ block.content }}
-      </p>
+      <div :class="longContent ? ['clamp-expandable', { 'is-expanded': contentOpen }] : ''">
+        <p class="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg-muted">
+          {{ block.content }}
+        </p>
+      </div>
       <button
         v-if="longContent"
         type="button"
@@ -194,12 +193,11 @@ function prettyResult(tool: ReasoningTool): string {
     </div>
 
     <div v-if="block.text">
-      <p
-        class="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg-muted"
-        :class="!textOpen && longText ? 'line-clamp-3' : ''"
-      >
-        {{ block.text }}
-      </p>
+      <div :class="longText ? ['clamp-expandable', { 'is-expanded': textOpen }] : ''">
+        <p class="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg-muted">
+          {{ block.text }}
+        </p>
+      </div>
       <button
         v-if="longText"
         type="button"
@@ -216,44 +214,33 @@ function prettyResult(tool: ReasoningTool): string {
         :key="ti"
         class="overflow-hidden rounded-lg bg-surface/65"
       >
-        <button
-          type="button"
-          class="flex w-full items-center gap-1.5 px-2.5 py-2 text-left"
-          :aria-expanded="openTools.has(ti)"
-          @click="toggleTool(ti)"
-        >
-          <svg class="h-3.5 w-3.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-            <path
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.3 2.3-2.1-2.1 2.4-2.2z"
-            />
-          </svg>
-          <span class="shrink-0 text-[12.5px] font-medium text-fg-muted">{{ toolLabel(tool) }}</span>
-          <span class="min-w-0 flex-1 truncate text-[12.5px] text-fg-faint">{{ toolSummary(tool) }}</span>
-          <svg
-            class="h-3.5 w-3.5 shrink-0 text-fg-faint transition-transform"
-            :class="openTools.has(ti) ? 'rotate-90' : ''"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
+        <details :open="openTools.has(ti)" class="disclosure-card">
+          <summary
+            class="focus-ring flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-2 text-left"
+            @click.prevent="toggleTool(ti)"
           >
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-          </svg>
-        </button>
+            <svg class="h-3.5 w-3.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.3 2.3-2.1-2.1 2.4-2.2z"
+              />
+            </svg>
+            <span class="shrink-0 text-[12.5px] font-medium text-fg-muted">{{ toolLabel(tool) }}</span>
+            <span class="min-w-0 flex-1 truncate text-[12.5px] text-fg-faint">{{ toolSummary(tool) }}</span>
+            <svg
+              class="h-3.5 w-3.5 shrink-0 text-fg-faint transition-transform duration-200"
+              :class="openTools.has(ti) ? 'rotate-90' : ''"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
+            </svg>
+          </summary>
 
-        <div v-if="!openTools.has(ti) && collapsedTitles(tool).length" class="space-y-0.5 px-2.5 pb-2">
-          <p
-            v-for="(title, ci) in collapsedTitles(tool)"
-            :key="ci"
-            class="truncate text-[12.5px] leading-relaxed text-fg-faint"
-          >
-            · {{ title }}
-          </p>
-        </div>
-
-        <div v-if="openTools.has(ti)" class="space-y-1.5 px-2.5 pb-2.5 pt-1">
+          <div class="space-y-1.5 px-2.5 pb-2.5 pt-1">
           <template v-if="isWeb(tool)">
             <p v-if="webQuery(tool)" class="text-[12.5px] text-fg-faint">搜索：{{ webQuery(tool) }}</p>
             <div v-for="(item, ii) in webItems(tool)" :key="ii" class="space-y-0.5">
@@ -297,6 +284,19 @@ function prettyResult(tool: ReasoningTool): string {
               <pre class="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-surface/60 p-1.5 text-[11.5px] leading-relaxed text-fg-faint">{{ prettyResult(tool) }}</pre>
             </div>
           </template>
+          </div>
+        </details>
+
+        <div v-if="collapsedTitles(tool).length" class="collapse-panel" :class="{ 'is-open': !openTools.has(ti) }">
+          <div class="space-y-0.5 px-2.5 pb-2">
+            <p
+              v-for="(title, ci) in collapsedTitles(tool)"
+              :key="ci"
+              class="truncate text-[12.5px] leading-relaxed text-fg-faint"
+            >
+              · {{ title }}
+            </p>
+          </div>
         </div>
       </div>
     </div>

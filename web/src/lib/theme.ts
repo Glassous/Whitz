@@ -34,6 +34,10 @@ function apply(pref: ThemePreference) {
   const resolved = resolveTheme(pref);
   theme.value = resolved;
   document.documentElement.classList.toggle("dark", resolved === "dark");
+  const meta = document.querySelector('meta[name="color-scheme"]');
+  if (meta) {
+    meta.setAttribute("content", pref === "system" ? "light dark" : pref);
+  }
 }
 
 apply(preference.value);
@@ -43,6 +47,13 @@ if (typeof window !== "undefined") {
   mq.addEventListener("change", () => {
     if (preference.value === "system") {
       apply("system");
+    }
+  });
+  window.addEventListener("storage", (e) => {
+    if (e.key === KEY) {
+      const next = readPreference();
+      preference.value = next;
+      apply(next);
     }
   });
 }

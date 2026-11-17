@@ -1,46 +1,28 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { nextTick, onMounted, ref, watch } from "vue";
 
 const props = defineProps<{ streaming: boolean; disabled?: boolean }>();
 const emit = defineEmits<{ send: [string]; stop: [] }>();
 
-const MIN_HEIGHT = 34;
 const NORMAL_MAX_HEIGHT = 160;
 
 const text = ref("");
 const area = ref<HTMLTextAreaElement | null>(null);
-const mirror = ref<HTMLTextAreaElement | null>(null);
-const textareaHeight = ref(MIN_HEIGHT);
 const canExpand = ref(false);
 const expanded = ref(false);
 
-let resizeObserver: ResizeObserver | null = null;
-
-function getExpandedMaxHeight(): number {
-  if (typeof window === "undefined") return 380;
-  return Math.min(440, Math.max(240, Math.round(window.innerHeight * 0.5)));
-}
-
-function updateHeight() {
-  const el = mirror.value;
+function updateExpandState() {
+  const el = area.value;
   if (!el) return;
-  const contentHeight = Math.max(MIN_HEIGHT, el.scrollHeight);
-  canExpand.value = contentHeight > NORMAL_MAX_HEIGHT;
+  canExpand.value = el.scrollHeight > NORMAL_MAX_HEIGHT;
   if (!canExpand.value && expanded.value) {
     expanded.value = false;
-  }
-  if (expanded.value) {
-    const expandedMax = getExpandedMaxHeight();
-    textareaHeight.value = Math.min(Math.max(contentHeight, 260), expandedMax);
-  } else {
-    textareaHeight.value = Math.min(contentHeight, NORMAL_MAX_HEIGHT);
   }
 }
 
 function toggleExpand() {
   if (!canExpand.value && !expanded.value) return;
   expanded.value = !expanded.value;
-  updateHeight();
   area.value?.focus();
 }
 
@@ -51,7 +33,7 @@ function submit() {
   text.value = "";
   expanded.value = false;
   canExpand.value = false;
-  void nextTick(updateHeight);
+  void nextTick(updateExpandState);
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -62,22 +44,11 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 watch(text, () => {
-  void nextTick(updateHeight);
+  void nextTick(updateExpandState);
 });
 
 onMounted(() => {
-  void nextTick(updateHeight);
-  if (typeof ResizeObserver !== "undefined" && mirror.value) {
-    resizeObserver = new ResizeObserver(() => {
-      updateHeight();
-    });
-    resizeObserver.observe(mirror.value);
-  }
-});
-
-onBeforeUnmount(() => {
-  resizeObserver?.disconnect();
-  resizeObserver = null;
+  void nextTick(updateExpandState);
 });
 </script>
 
@@ -86,16 +57,8 @@ onBeforeUnmount(() => {
     <div
       class="flex flex-col rounded-[26px] bg-surface px-3.5 pb-2.5 pt-3 transition-colors focus-within:bg-hover/70"
     >
-      <!-- Row 1: Smooth auto-resizing textarea + offscreen measurement mirror -->
+      <!-- Row 1: Native field-sizing: content auto-resizing textarea -->
       <div class="relative">
-        <textarea
-          ref="mirror"
-          tabindex="-1"
-          aria-hidden="true"
-          rows="1"
-          :value="text"
-          class="custom-scrollbar pointer-events-none invisible absolute left-0 top-0 -z-10 block w-full resize-none overflow-hidden px-1 py-0.5 text-[15px] leading-relaxed"
-        />
         <textarea
           ref="area"
           v-model="text"
@@ -103,8 +66,8 @@ onBeforeUnmount(() => {
           rows="1"
           :disabled="disabled"
           :placeholder="disabled ? '助理正在初始化，请稍候…' : '给 Whitz 发送消息…'"
-          class="custom-scrollbar block w-full resize-none bg-transparent px-1 py-0.5 text-[15px] leading-relaxed text-fg outline-none transition-[height] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] placeholder:text-fg-faint disabled:cursor-not-allowed"
-          :style="{ height: `${textareaHeight}px` }"
+          class="chat-textarea custom-scrollbar block resize-none bg-transparent px-1 py-0.5 text-[15px] leading-relaxed text-fg outline-none placeholder:text-fg-faint disabled:cursor-not-allowed"
+          :class="{ 'is-expanded': expanded }"
           @keydown="onKeydown"
         />
       </div>

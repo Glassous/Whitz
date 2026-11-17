@@ -142,7 +142,7 @@ function timestamp(c: Conversation): number {
 }
 
 const sortedConversations = computed(() => {
-  return [...props.conversations].sort((a, b) => timestamp(b) - timestamp(a));
+  return props.conversations.toSorted((a, b) => timestamp(b) - timestamp(a));
 });
 
 const initials = computed(() => {

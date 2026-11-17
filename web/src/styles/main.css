@@ -7,7 +7,15 @@
 /* ------------------------------------------------------------------ */
 
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
+  interpolate-size: allow-keywords;
+
+  &:has(> head > meta[name="color-scheme"][content="dark"]) {
+    color-scheme: dark;
+  }
+  &:has(> head > meta[name="color-scheme"][content="light"]) {
+    color-scheme: light;
+  }
 
   --canvas: #faf9f7;
   --sidebar: #f3f2ef;
@@ -44,8 +52,6 @@
 }
 
 .dark {
-  color-scheme: dark;
-
   --canvas: #0e0e0e;
   --sidebar: #090909;
   --surface: #181817;
@@ -392,4 +398,184 @@ body {
 .markdown-body input[type="checkbox"] {
   margin-right: 0.4em;
   accent-color: var(--accent);
+}
+
+/* ------------------------------------------------------------------ */
+/* Native <dialog> top-layer & animations                              */
+/* ------------------------------------------------------------------ */
+
+@layer components {
+  dialog.whitz-dialog {
+    margin: auto;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    max-width: calc(100vw - 2rem);
+    max-height: calc(100dvh - 2rem);
+    overflow: visible;
+    opacity: 0;
+    transition-property: opacity, transform, display, overlay;
+    transition-duration: 0.18s;
+    transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+    transition-behavior: allow-discrete;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  dialog.whitz-dialog {
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+dialog.whitz-dialog[open]:where(:not([data-closing])) {
+  opacity: 1;
+
+  @starting-style {
+    opacity: 0;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    transform: translateY(0) scale(1);
+
+    @starting-style {
+      transform: translateY(8px) scale(0.98);
+    }
+  }
+}
+
+dialog.whitz-dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog.whitz-dialog::backdrop {
+  background-color: rgb(0 0 0 / 0);
+  backdrop-filter: blur(2px);
+  overflow: hidden;
+  overscroll-behavior: contain;
+  transition-property: background-color, display, overlay;
+  transition-duration: 0.18s;
+  transition-timing-function: ease-out;
+  transition-behavior: allow-discrete;
+}
+
+dialog.whitz-dialog[open]:where(:not([data-closing]))::backdrop {
+  background-color: rgb(0 0 0 / 0.4);
+
+  @starting-style {
+    background-color: rgb(0 0 0 / 0);
+  }
+}
+
+.dark dialog.whitz-dialog[open]:where(:not([data-closing]))::backdrop {
+  background-color: rgb(0 0 0 / 0.6);
+
+  @starting-style {
+    background-color: rgb(0 0 0 / 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  dialog.whitz-dialog,
+  dialog.whitz-dialog::backdrop {
+    transition-duration: 0.08s;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Chat input auto-sizing & deferred off-screen message rendering      */
+/* ------------------------------------------------------------------ */
+
+.chat-textarea {
+  field-sizing: content;
+  width: 100%;
+  height: auto;
+  min-block-size: 34px;
+  max-block-size: 160px;
+  transition:
+    block-size 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    min-block-size 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    max-block-size 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chat-textarea.is-expanded {
+  min-block-size: 260px;
+  max-block-size: clamp(240px, 50dvh, 440px);
+}
+
+/* ------------------------------------------------------------------ */
+/* Smooth intrinsic-size disclosure & accordion animations             */
+/* ------------------------------------------------------------------ */
+
+details.disclosure-card > summary {
+  list-style: none;
+}
+details.disclosure-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.disclosure-card::details-content {
+  interpolate-size: allow-keywords;
+  overflow: clip;
+  contain: layout;
+}
+
+details.disclosure-card:not([open])::details-content {
+  block-size: 0;
+  opacity: 0;
+}
+
+details.disclosure-card[open]::details-content {
+  block-size: auto;
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  details.disclosure-card::details-content {
+    transition:
+      block-size 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 0.22s ease,
+      content-visibility 0.28s allow-discrete,
+      display 0.28s allow-discrete;
+  }
+}
+
+.collapse-panel {
+  interpolate-size: allow-keywords;
+  overflow: clip;
+  contain: layout;
+  block-size: 0;
+  opacity: 0;
+  transition:
+    block-size 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease;
+}
+
+.collapse-panel.is-open {
+  block-size: auto;
+  opacity: 1;
+}
+
+.clamp-expandable {
+  interpolate-size: allow-keywords;
+  overflow: hidden;
+  block-size: 4.9em;
+  transition: block-size 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.clamp-expandable.is-expanded {
+  block-size: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-textarea,
+  .collapse-panel,
+  .clamp-expandable {
+    transition: none !important;
+  }
+}
+
+.message-deferred {
+  content-visibility: auto;
+  contain-intrinsic-size: auto none auto 96px;
 }

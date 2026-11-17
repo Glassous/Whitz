@@ -37,7 +37,7 @@ export const useChatStore = defineStore("chat", () => {
   });
 
   const runningTool = computed(() => {
-    const row = [...messages.value].reverse().find((m) => m.role === "tool" && m.status === "running");
+    const row = messages.value.findLast((m) => m.role === "tool" && m.status === "running");
     return row?.tool_name ?? null;
   });
 
@@ -130,11 +130,11 @@ export const useChatStore = defineStore("chat", () => {
     convId.value = detail.id;
     messages.value = detail.messages.map((m) => ({ ...m }));
     plan.value = detail.plan;
-    const lastReasoned = [...detail.messages]
-      .reverse()
-      .find((m) => m.role === "assistant" && Array.isArray(m.tool_payload?.reasoning) && m.tool_payload.reasoning.length);
+    const lastReasoned = detail.messages.findLast(
+      (m) => m.role === "assistant" && Array.isArray(m.tool_payload?.reasoning) && m.tool_payload.reasoning.length,
+    );
     reasoning.value = normalizeReasoning(lastReasoned?.tool_payload?.reasoning);
-    const lastAssistant = [...detail.messages].reverse().find((m) => m.role === "assistant");
+    const lastAssistant = detail.messages.findLast((m) => m.role === "assistant");
     selectedTurnId.value = lastAssistant?.id ?? null;
     activeRunId.value = detail.active_run_id;
     pendingControl.value = null;
@@ -268,7 +268,9 @@ export const useChatStore = defineStore("chat", () => {
         break;
       }
       case "tool.completed": {
-        const row = findMessage(d.message_id) ?? [...messages.value].reverse().find((m) => m.role === "tool" && m.tool_name === d.tool && m.status === "running");
+        const row =
+          findMessage(d.message_id) ??
+          messages.value.findLast((m) => m.role === "tool" && m.tool_name === d.tool && m.status === "running");
         if (row) {
           row.tool_payload = {
             ...(row.tool_payload ?? {}),

@@ -130,16 +130,16 @@ watch(
           <div class="h-full rounded-full bg-accent transition-all duration-500" :style="{ width: pct + '%' }" />
         </div>
         <div class="space-y-2">
-          <div
+          <details
             v-for="step in steps"
             :key="stepKey(step)"
-            class="overflow-hidden rounded-xl bg-canvas/75"
+            :open="stepOpen(step) && step.blocks.length > 0"
+            class="disclosure-card overflow-hidden rounded-xl bg-canvas/75"
           >
-            <button
-              type="button"
-              class="flex w-full items-start gap-2 px-3 py-2.5 text-left"
-              :aria-expanded="stepOpen(step)"
-              @click="toggleStep(step)"
+            <summary
+              class="focus-ring flex w-full items-start gap-2 px-3 py-2.5 text-left"
+              :class="step.blocks.length ? 'cursor-pointer' : 'cursor-default'"
+              @click.prevent="toggleStep(step)"
             >
               <span class="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
                 <span v-if="step.item.status === 'in_progress'" class="text-accent"><Spinner :size="14" /></span>
@@ -175,7 +175,8 @@ watch(
                 </span>
               </div>
               <svg
-                class="mt-1 h-3.5 w-3.5 shrink-0 text-fg-faint transition-transform"
+                v-if="step.blocks.length"
+                class="mt-1 h-3.5 w-3.5 shrink-0 text-fg-faint transition-transform duration-200"
                 :class="stepOpen(step) ? 'rotate-90' : ''"
                 viewBox="0 0 24 24"
                 fill="none"
@@ -184,15 +185,12 @@ watch(
               >
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
               </svg>
-            </button>
+            </summary>
 
-            <div
-              v-if="stepOpen(step) && step.blocks.length"
-              class="space-y-2 px-3 pb-2.5 pt-0.5"
-            >
+            <div v-if="step.blocks.length" class="space-y-2 px-3 pb-2.5 pt-0.5">
               <ReasoningEntry v-for="(block, bi) in step.blocks" :key="bi" :block="block" />
             </div>
-          </div>
+          </details>
         </div>
       </section>
 
