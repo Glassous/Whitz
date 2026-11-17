@@ -82,22 +82,25 @@ jobs:
           envs: TARGET_DIR,ARCHIVE
           script: |
             set -euo pipefail
-            # 非 root 用户自动加 sudo（需免密）
-            run() { if [ "$(id -u)" = "0" ]; then "$@"; else sudo -n "$@"; fi; }
+            # 目标目录归 SSH 用户所有，不需要 sudo
+            if [ -d "$TARGET_DIR" ] && [ ! -w "$TARGET_DIR" ]; then
+              echo "$TARGET_DIR 不可写：chown -R $(id -un):$(id -gn) 站点 index 目录"
+              exit 1
+            fi
 
-            run mkdir -p "$TARGET_DIR"
-            run rm -rf "$TARGET_DIR.new"
-            run mkdir -p "$TARGET_DIR.new"
-            run tar -xzf "$ARCHIVE" -C "$TARGET_DIR.new"
+            mkdir -p "$TARGET_DIR"
+            rm -rf "$TARGET_DIR.new"
+            mkdir -p "$TARGET_DIR.new"
+            tar -xzf "$ARCHIVE" -C "$TARGET_DIR.new"
 
             # 有 rsync 时增量同步并清理旧 hash 资源；否则整目录替换
             if command -v rsync >/dev/null 2>&1; then
-              run rsync -a --delete "$TARGET_DIR.new"/ "$TARGET_DIR"/
+              rsync -a --delete "$TARGET_DIR.new"/ "$TARGET_DIR"/
             else
-              run find "$TARGET_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-              run cp -a "$TARGET_DIR.new"/. "$TARGET_DIR"/
+              find "$TARGET_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+              cp -a "$TARGET_DIR.new"/. "$TARGET_DIR"/
             fi
-            run rm -rf "$TARGET_DIR.new" "$ARCHIVE"
+            rm -rf "$TARGET_DIR.new" "$ARCHIVE"
 
             echo "web deployed: $(date -u +%FT%TZ)"
-            run ls -la "$TARGET_DIR" | head -n 15 || true
+            ls -la "$TARGET_DIR" | head -n 15 || true

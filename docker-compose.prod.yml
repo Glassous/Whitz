@@ -138,8 +138,9 @@ services:
       HERMES_API_SERVER_KEY: ${HERMES_API_SERVER_KEY}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
-      CORS_ORIGINS: ${CORS_ORIGINS:-}
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://whitz.fiacloud.top,https://whitzadmin.vodyanitsa.top}
+      # 反代域名必须在这里，127.0.0.1 供容器内健康检查使用
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-whitzapi.kamisato.top,127.0.0.1}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}
       SEARCH_API_KEY: ${SEARCH_API_KEY:-}
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-2}
