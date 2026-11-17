@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { useConversationsStore } from "../stores/conversations";
 import { useChatStore } from "../stores/chat";
 import { useAuthStore } from "../stores/auth";
@@ -14,10 +15,14 @@ import ApprovalCard from "../components/chat/ApprovalCard.vue";
 import ClarifyCard from "../components/chat/ClarifyCard.vue";
 import SearchModal from "../components/chat/SearchModal.vue";
 
+const route = useRoute();
+const router = useRouter();
 const conversations = useConversationsStore();
 const chat = useChatStore();
 const auth = useAuthStore();
 const credits = useCreditsStore();
+
+const routeConversationId = computed(() => (typeof route.params.id === "string" && route.params.id ? route.params.id : null));
 
 const agent = ref<AgentStatus | null>(null);
 const showPlan = ref(false);
@@ -80,9 +85,16 @@ async function loadAgent() {
   }
 }
 
-async function openConversation(id: string) {
-  const detail = await conversations.open(id);
-  chat.loadFromConversation(detail);
+async function openConversation(id: string): Promise<boolean> {
+  try {
+    const detail = await conversations.open(id);
+    chat.loadFromConversation(detail);
+    return true;
+  } catch {
+    conversations.clearCurrent();
+    chat.reset();
+    return false;
+  }
 }
 
 function createConversation() {
@@ -90,16 +102,29 @@ function createConversation() {
   conversations.clearCurrent();
   chat.reset();
   showPlan.value = false;
+  if (routeConversationId.value) {
+    void router.push({ name: "chat" });
+  }
 }
 
 async function onSelect(id: string) {
   sidebarOpen.value = false;
   mobileStepsOpen.value = false;
   focusMessageId.value = null;
-  if (id === conversations.current?.id) return;
+  if (id === conversations.current?.id) {
+    if (routeConversationId.value !== id) {
+      void router.push({ name: "chat-conversation", params: { id } });
+    }
+    return;
+  }
   chat.abort();
-  await openConversation(id);
-  showPlan.value = true;
+  const ok = await openConversation(id);
+  if (ok) {
+    showPlan.value = true;
+    if (routeConversationId.value !== id) {
+      void router.push({ name: "chat-conversation", params: { id } });
+    }
+  }
 }
 
 async function onSelectFromSearch(conversationId: string, messageId: string | null) {
@@ -107,7 +132,11 @@ async function onSelectFromSearch(conversationId: string, messageId: string | nu
   mobileStepsOpen.value = false;
   if (conversationId !== conversations.current?.id) {
     chat.abort();
-    await openConversation(conversationId);
+    const ok = await openConversation(conversationId);
+    if (!ok) return;
+  }
+  if (routeConversationId.value !== conversationId) {
+    void router.push({ name: "chat-conversation", params: { id: conversationId } });
   }
   showPlan.value = true;
   focusMessageId.value = messageId;
@@ -123,11 +152,18 @@ async function onDelete(id: string) {
   if (wasCurrent) {
     chat.reset();
     if (conversations.conversations.length) {
-      await openConversation(conversations.conversations[0].id);
-      showPlan.value = true;
+      const nextId = conversations.conversations[0].id;
+      const ok = await openConversation(nextId);
+      if (ok) {
+        showPlan.value = true;
+        void router.replace({ name: "chat-conversation", params: { id: nextId } });
+      } else {
+        void router.replace({ name: "chat" });
+      }
     } else {
       conversations.clearCurrent();
       showPlan.value = false;
+      void router.replace({ name: "chat" });
     }
   }
 }
@@ -138,6 +174,7 @@ async function onSend(content: string) {
     if (!conversations.current) {
       const conv = await conversations.create();
       await openConversation(conv.id);
+      void router.replace({ name: "chat-conversation", params: { id: conv.id } });
     }
     await chat.send(content);
     await conversations.fetchList();
@@ -165,13 +202,43 @@ watch(
   },
 );
 
+watch(routeConversationId, async (nextId) => {
+  if (nextId) {
+    if (nextId !== conversations.current?.id) {
+      chat.abort();
+      const ok = await openConversation(nextId);
+      if (ok) {
+        showPlan.value = true;
+      } else {
+        showPlan.value = false;
+        void router.replace({ name: "chat" });
+      }
+    }
+  } else if (conversations.current) {
+    chat.abort();
+    conversations.clearCurrent();
+    chat.reset();
+    showPlan.value = false;
+  }
+});
+
 onMounted(async () => {
   window.addEventListener("keydown", onGlobalKeydown);
   void loadAgent();
   void credits.fetch();
   await conversations.fetchList();
-  conversations.clearCurrent();
-  chat.reset();
+  if (routeConversationId.value) {
+    const ok = await openConversation(routeConversationId.value);
+    if (ok) {
+      showPlan.value = true;
+    } else {
+      showPlan.value = false;
+      void router.replace({ name: "chat" });
+    }
+  } else {
+    conversations.clearCurrent();
+    chat.reset();
+  }
 });
 
 onBeforeUnmount(() => {

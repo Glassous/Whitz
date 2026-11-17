@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api/client";
 import { useAuthStore } from "../stores/auth";
+import { useConversationsStore } from "../stores/conversations";
 import BaseInput from "../components/ui/BaseInput.vue";
 import BaseButton from "../components/ui/BaseButton.vue";
 import BaseBadge from "../components/ui/BaseBadge.vue";
@@ -11,8 +12,18 @@ import PersonaEditor from "../components/settings/PersonaEditor.vue";
 import MembershipPanel from "../components/settings/MembershipPanel.vue";
 
 const auth = useAuthStore();
+const conversations = useConversationsStore();
 const router = useRouter();
 const adminUrl = import.meta.env.VITE_ADMIN_URL;
+
+function goBack() {
+  const id = conversations.current?.id;
+  if (id) {
+    void router.push({ name: "chat-conversation", params: { id } });
+  } else {
+    void router.push({ name: "chat" });
+  }
+}
 
 async function logout() {
   await auth.logout();
@@ -86,7 +97,7 @@ async function savePassword() {
       <button
         class="focus-ring -ml-1 flex h-9 w-9 items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-hover hover:text-fg"
         aria-label="返回对话"
-        @click="router.push('/')"
+        @click="goBack"
       >
         <svg class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
           <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
