@@ -53,6 +53,31 @@ def test_sign_v5_deterministic_and_binds_headers():
     assert "q-header-list=content-length;content-type;host" in auth1
 
 
+def test_sign_v5_uses_decoded_utf8_uri_in_http_string():
+    import hashlib, hmac
+
+    key = "whitz/uploads/u/c/f/中文 报告(1).png"
+    headers = {"host": "whitz-test-1250000000.cos.ap-shanghai.myqcloud.com"}
+    auth, key_time = cos.sign_v5(
+        method="PUT",
+        key=key,
+        secret_id="AKIDtest123",
+        secret_key="SecretKeyTest456",
+        headers=headers,
+        start_ts=1700000000,
+        expires_seconds=600,
+    )
+    http_string = (
+        f"put\n/{key}\n\n"
+        f"host=whitz-test-1250000000.cos.ap-shanghai.myqcloud.com\n"
+    )
+    http_sha1 = hashlib.sha1(http_string.encode("utf-8")).hexdigest()
+    string_to_sign = f"sha1\n{key_time}\n{http_sha1}\n"
+    sign_key = hmac.new(b"SecretKeyTest456", key_time.encode("utf-8"), hashlib.sha1).hexdigest()
+    expected_sig = hmac.new(sign_key.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha1).hexdigest()
+    assert f"q-signature={expected_sig}" in auth
+
+
 @pytest.mark.asyncio
 async def test_presign_put_and_get_urls():
     s = _cos_settings()

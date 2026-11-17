@@ -101,7 +101,7 @@ def sign_v5(
     param_list = ";".join(param_keys)
     canonical_params = "&".join(f"{k}={_rfc3986_quote(norm_params[k])}" for k in param_keys)
 
-    uri_path = _encode_uri_path(key) if key else "/"
+    uri_path = "/" + key.lstrip("/") if key else "/"
     http_string = f"{method.lower()}\n{uri_path}\n{canonical_params}\n{canonical_headers}\n"
     http_sha1 = hashlib.sha1(http_string.encode("utf-8")).hexdigest()
     string_to_sign = f"sha1\n{sign_time}\n{http_sha1}\n"
