@@ -1,7 +1,7 @@
 name: Deploy Server
 
-# 流程：GitHub Runner 构建 Docker 镜像 → 推送 GHCR → 服务器2 只做 pull + up
-# 服务器2 永远不执行 docker build
+# 流程：GitHub Runner 构建镜像 → docker save + gzip → SCP 直传服务器2 → docker load + up
+# 不依赖任何镜像仓库；服务器2 只做 load，绝不执行 build
 
 on:
   push:
@@ -17,21 +17,20 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # 注意：镜像名必须全小写
-  IMAGE: ghcr.io/glassous/whitz-server
+  LOCAL_IMAGE: whitz-server
+  LOCAL_ARCHIVE: server-image.tar.gz
+  REMOTE_ARCHIVE: /tmp/whitz-server.tar.gz
   REMOTE_DIR: /opt/whitz
   COMPOSE_FILE: docker-compose.prod.yml
   PROJECT: whitz
 
 jobs:
-  build:
-    name: Build & Push Image
+  build-and-deploy:
+    name: Build & Deploy
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: read
-      packages: write
-    outputs:
-      tag: ${{ steps.meta.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,38 +42,41 @@ jobs:
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build & Push
+      - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: ./server
           file: ./server/Dockerfile
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
-            ${{ env.IMAGE }}:latest
+          load: true
+          push: false
+          tags: ${{ env.LOCAL_IMAGE }}:${{ steps.meta.outputs.tag }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy:
-    name: Pull & Restart on Server2
-    needs: build
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Export & compress
+        run: |
+          set -euo pipefail
+          docker image inspect "$LOCAL_IMAGE:${{ steps.meta.outputs.tag }}" >/dev/null
+          docker save "$LOCAL_IMAGE:${{ steps.meta.outputs.tag }}" | gzip -1 > "$LOCAL_ARCHIVE"
+          ls -lh "$LOCAL_ARCHIVE"
+          echo "size=$(du -m "$LOCAL_ARCHIVE" | cut -f1)MB"
 
-      - name: Upload compose file to server2
+      - name: Upload image to server2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER2_HOST }}
+          username: ${{ secrets.SERVER2_USER }}
+          key: ${{ secrets.SERVER2_SSH_KEY }}
+          port: ${{ secrets.SERVER2_PORT || 22 }}
+          source: ${{ env.LOCAL_ARCHIVE }}
+          target: /tmp
+          overwrite: true
+          timeout: 300s
+
+      - name: Upload compose file
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER2_HOST }}
@@ -86,22 +88,23 @@ jobs:
           overwrite: true
           timeout: 60s
 
-      - name: Pull image & restart
+      - name: Load & restart
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE: ${{ env.IMAGE }}:${{ needs.build.outputs.tag }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          IMAGE: ${{ env.LOCAL_IMAGE }}:${{ steps.meta.outputs.tag }}
+          REPO: ${{ env.LOCAL_IMAGE }}
+          ARCHIVE: ${{ env.REMOTE_ARCHIVE }}
           REMOTE_DIR: ${{ env.REMOTE_DIR }}
           COMPOSE_FILE: ${{ env.COMPOSE_FILE }}
           PROJECT: ${{ env.PROJECT }}
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SERVER2_HOST }}
           username: ${{ secrets.SERVER2_USER }}
           key: ${{ secrets.SERVER2_SSH_KEY }}
           port: ${{ secrets.SERVER2_PORT || 22 }}
           command_timeout: 15m
-          envs: IMAGE,REMOTE_DIR,COMPOSE_FILE,PROJECT,GHCR_USER,GHCR_TOKEN
+          envs: TAG,IMAGE,REPO,ARCHIVE,REMOTE_DIR,COMPOSE_FILE,PROJECT
           script: |
             set -euo pipefail
             cd "$REMOTE_DIR"
@@ -113,10 +116,12 @@ jobs:
               exit 1
             fi
 
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            export WHITZ_SERVER_IMAGE="$IMAGE"
+            test -f "$ARCHIVE" || { echo "镜像包未上传成功：$ARCHIVE"; exit 1; }
+            echo "loading $ARCHIVE"
+            gunzip -c "$ARCHIVE" | docker load
+            rm -f "$ARCHIVE"
 
-            docker compose -p "$PROJECT" -f "$COMPOSE_FILE" pull server
+            export WHITZ_SERVER_IMAGE="$IMAGE"
             docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --remove-orphans
 
             ok=0
@@ -136,5 +141,10 @@ jobs:
               exit 1
             fi
 
+            # 清理旧的 sha tag（保留本次与 latest），旧镜像层共享，不会影响运行中的容器
+            docker images "$REPO" --format '{{.Tag}}' \
+              | grep -vE "^(${TAG}|latest)$" \
+              | xargs -r -I{} docker rmi "$REPO:{}" >/dev/null 2>&1 || true
             docker image prune -f --filter "dangling=true" >/dev/null 2>&1 || true
+
             echo "server deployed: $IMAGE @ $(date -u +%FT%TZ)"

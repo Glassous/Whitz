@@ -3,7 +3,8 @@
 # 依赖宿主机 .env（同目录），镜像 tag 由 GitHub Actions 通过 WHITZ_SERVER_IMAGE 注入
 services:
   postgres:
-    image: postgres:17-alpine
+    # 拉不到时可换成镜像加速域名，例如 docker.m.daocloud.io/library/postgres:17-alpine
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
     container_name: whitz-postgres
     restart: unless-stopped
     command:
@@ -55,7 +56,7 @@ services:
       - whitz_net
 
   redis:
-    image: redis:7-alpine
+    image: ${REDIS_IMAGE:-redis:7-alpine}
     container_name: whitz-redis
     restart: unless-stopped
     command:
@@ -90,7 +91,7 @@ services:
       - whitz_net
 
   hermes:
-    image: nousresearch/hermes-agent:stable
+    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:stable}
     container_name: whitz-hermes
     restart: unless-stopped
     command: gateway run
@@ -115,8 +116,8 @@ services:
       - whitz_net
 
   server:
-    # 镜像由 GitHub Actions 构建并推送到 GHCR，服务器只负责 pull
-    image: ${WHITZ_SERVER_IMAGE:-ghcr.io/glassous/whitz-server:latest}
+    # 镜像由 GitHub Actions 构建后直传到服务器 docker load，tag 由部署脚本注入
+    image: ${WHITZ_SERVER_IMAGE:-whitz-server:latest}
     container_name: whitz-server
     restart: unless-stopped
     user: "1000:1000"
