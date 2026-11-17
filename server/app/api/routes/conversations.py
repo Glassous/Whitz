@@ -1,7 +1,7 @@
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -15,9 +15,9 @@ from app.api.schemas import (
     ConversationSearchHit,
     ConversationUpdate,
 )
-from app.db.models import Conversation, Message, User
+from app.db.models import Conversation, ConversationFile, Message, User
 from app.db.session import get_db
-from app.services import audit, titles
+from app.services import audit, cos, titles
 from app.services.hermes import HermesClient, HermesError
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -236,11 +236,21 @@ async def generate_conversation_title(
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_conversation(
     request: Request,
+    background_tasks: BackgroundTasks,
     conv: Conversation = Depends(get_owned_conversation),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     conv_id = conv.id
+    file_keys = list(
+        (
+            await db.execute(
+                select(ConversationFile.storage_key).where(ConversationFile.conversation_id == conv_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
     if conv.hermes_session_id:
         client = HermesClient(user.hermes_profile, user.hermes_api_key)
         try:
@@ -251,6 +261,8 @@ async def delete_conversation(
             await client.aclose()
     await db.delete(conv)
     await db.commit()
+    if file_keys:
+        background_tasks.add_task(cos.delete_objects, file_keys)
     await audit.record(
         "conversation.delete",
         actor=user,

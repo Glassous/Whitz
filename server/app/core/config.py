@@ -62,6 +62,34 @@ class Settings(BaseSettings):
     email_code_cooldown_seconds: int = 60
     email_code_max_attempts: int = 5
 
+    cos_secret_id: str = ""
+    cos_secret_key: str = ""
+    cos_bucket: str = ""
+    cos_region: str = ""
+    cos_public_host: str = ""
+    cos_key_prefix: str = "whitz/uploads"
+    cos_use_sts: bool = False
+    cos_sts_duration_seconds: int = 900
+    cos_upload_expires_seconds: int = 600
+    cos_download_expires_seconds: int = 300
+    file_max_size_mb: int = 20
+    max_files_per_conversation: int = 20
+
+    internal_mcp_base_url: str = "http://server:8000"
+
+    @property
+    def cos_configured(self) -> bool:
+        return bool(
+            self.cos_secret_id.strip()
+            and self.cos_secret_key.strip()
+            and self.cos_bucket.strip()
+            and self.cos_region.strip()
+        )
+
+    @property
+    def max_file_size_bytes(self) -> int:
+        return max(1, int(self.file_max_size_mb)) * 1024 * 1024
+
 
 @lru_cache
 def get_settings() -> Settings:

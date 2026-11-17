@@ -113,6 +113,45 @@ export interface ReasoningBlock {
   tools?: ReasoningTool[];
 }
 
+export type FileCategory = "document" | "spreadsheet" | "code" | "image";
+
+export interface ConversationFile {
+  id: string;
+  conversation_id: string;
+  filename: string;
+  ext: string;
+  mime_type: string;
+  category: FileCategory | string;
+  size_bytes: number;
+  status: "pending" | "ready" | "failed" | string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FileAttachmentMeta {
+  id: string;
+  filename: string;
+  ext: string;
+  category: string;
+  size_bytes: number;
+}
+
+export type UploadTaskStatus = "signing" | "uploading" | "completing" | "error";
+
+export interface UploadTask {
+  localId: string;
+  filename: string;
+  ext: string;
+  category: string;
+  sizeBytes: number;
+  progress: number;
+  status: UploadTaskStatus;
+  error?: string | null;
+  file?: File;
+}
+
+export type TaskPanelTab = "steps" | "files";
+
 export interface ToolPayload {
   args?: unknown;
   result?: unknown;
@@ -123,6 +162,7 @@ export interface ToolPayload {
   runtime?: unknown;
   reasoning?: ReasoningBlock[];
   plan?: Plan | null;
+  attachments?: FileAttachmentMeta[];
 }
 
 export interface Message {

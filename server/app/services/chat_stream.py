@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import Conversation, Message
+from app.db.models import Conversation, ConversationFile, Message
 from app.db.session import SessionLocal
 from app.services import membership, titles, usage
 from app.services.hermes import HermesClient, HermesError
@@ -781,12 +781,34 @@ async def _auto_title_events(
         _title_inflight.discard(conv.id)
 
 
+def _build_workspace_instructions(
+    conv_id: uuid.UUID,
+    workspace_files: list[ConversationFile],
+    attached_ids: set[uuid.UUID],
+) -> str | None:
+    if not workspace_files:
+        return None
+    lines = [
+        f"当前对话文件工作区（conversation_id: {conv_id}）共有 {len(workspace_files)} 个已就绪文件：",
+    ]
+    for f in workspace_files:
+        tag = " [本轮新附带]" if f.id in attached_ids else ""
+        lines.append(
+            f"- {f.filename}{tag} (file_id={f.id}, category={f.category}, mime={f.mime_type}, size={f.size_bytes} bytes)"
+        )
+    lines.append(
+        "若用户询问或需要处理以上任意文件，请调用 list_workspace_files / read_workspace_file / search_workspace_files 工具按需读取真实内容。"
+    )
+    return "\n".join(lines)
+
+
 async def stream_chat(
     conv_id: uuid.UUID,
     user_id: uuid.UUID,
     profile: str,
     api_key: str,
     content: str,
+    file_ids: list[uuid.UUID] | None = None,
     max_seconds: int | None = None,
 ) -> AsyncIterator[dict]:
     async with SessionLocal() as db:
@@ -813,10 +835,45 @@ async def stream_chat(
                 conv.hermes_session_id = str(session.get("id") or session.get("session_id") or "")
                 await db.commit()
 
+            workspace_files = list(
+                (
+                    await db.execute(
+                        select(ConversationFile)
+                        .where(
+                            ConversationFile.conversation_id == conv.id,
+                            ConversationFile.user_id == user_id,
+                            ConversationFile.status == "ready",
+                        )
+                        .order_by(ConversationFile.created_at.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            requested_ids = {fid for fid in (file_ids or [])}
+            attached_files = [f for f in workspace_files if f.id in requested_ids]
+            user_payload = (
+                {
+                    "attachments": [
+                        {
+                            "id": str(f.id),
+                            "filename": f.filename,
+                            "ext": f.ext,
+                            "category": f.category,
+                            "size_bytes": f.size_bytes,
+                        }
+                        for f in attached_files
+                    ]
+                }
+                if attached_files
+                else None
+            )
+
             user_msg = Message(
                 conversation_id=conv.id,
                 role="user",
                 content=content,
+                tool_payload=user_payload,
                 status="completed",
                 created_at=datetime.now(timezone.utc),
             )
@@ -834,8 +891,14 @@ async def stream_chat(
             await usage.record_message(db, user_id)
             yield sse("message.created", {"user_message_id": str(user_msg.id), "assistant_message_id": str(assistant.id)})
 
+            instructions = _build_workspace_instructions(conv.id, workspace_files, {f.id for f in attached_files})
             run_started = time.time() - 2
-            run = await client.create_run(content, conv.hermes_session_id, uuid.uuid4().hex)
+            run = await client.create_run(
+                content,
+                conv.hermes_session_id,
+                uuid.uuid4().hex,
+                instructions=instructions,
+            )
             run_id = str(run.get("run_id") or run.get("id"))
             conv.active_run_id = run_id
             conv.active_run_status = "running"

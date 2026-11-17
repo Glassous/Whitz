@@ -83,11 +83,21 @@ class HermesClient:
             return []
         return data
 
-    async def create_run(self, input_text: str, session_id: str, idempotency_key: str) -> dict:
+    async def create_run(
+        self,
+        input_text: str,
+        session_id: str,
+        idempotency_key: str,
+        *,
+        instructions: str | None = None,
+    ) -> dict:
+        payload: dict[str, Any] = {"input": input_text, "session_id": session_id}
+        if instructions:
+            payload["instructions"] = instructions
         resp = await self._request(
             "POST",
             "/v1/runs",
-            json={"input": input_text, "session_id": session_id},
+            json=payload,
             headers={"Idempotency-Key": idempotency_key},
         )
         return resp.json()

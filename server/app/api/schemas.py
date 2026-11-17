@@ -135,6 +135,50 @@ class ConversationSearchHit(BaseModel):
 
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
+    file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
+
+
+class FilePresignRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    mime_type: str = Field(default="", max_length=128)
+    size_bytes: int = Field(ge=1)
+
+
+class FilePresignOut(BaseModel):
+    file_id: uuid.UUID
+    filename: str
+    ext: str
+    category: str
+    mime_type: str
+    size_bytes: int
+    upload_url: str
+    method: str = "PUT"
+    headers: dict[str, str]
+    expires_in: int
+
+
+class FileCompleteRequest(BaseModel):
+    etag: str | None = Field(default=None, max_length=128)
+
+
+class ConversationFileOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    conversation_id: uuid.UUID
+    filename: str
+    ext: str
+    mime_type: str
+    category: str
+    size_bytes: int
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class FileDownloadUrlOut(BaseModel):
+    url: str
+    expires_in: int
 
 
 class ChatTicketRequest(BaseModel):

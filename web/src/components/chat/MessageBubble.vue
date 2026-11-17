@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref } from "vue";
 import type { Message } from "../../types";
 import { useChatStore } from "../../stores/chat";
+import { categoryLabel, formatFileSize } from "../../lib/fileTypes";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 
 const props = defineProps<{ message: Message }>();
@@ -67,6 +68,24 @@ const stepsCount = computed(() => {
 <template>
   <div v-if="message.role === 'user'" class="flex justify-end">
     <div class="group/user flex max-w-[85%] flex-col items-end sm:max-w-[75%]">
+      <div
+        v-if="message.tool_payload?.attachments?.length"
+        class="mb-1.5 flex flex-wrap justify-end gap-1.5"
+      >
+        <div
+          v-for="att in message.tool_payload.attachments"
+          :key="att.id"
+          class="inline-flex max-w-[220px] items-center gap-1.5 rounded-xl bg-surface px-2.5 py-1 text-[12px] text-fg-muted"
+          :title="`${att.filename} (${formatFileSize(att.size_bytes)})`"
+        >
+          <svg class="h-3.5 w-3.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M14 2v6h6" />
+          </svg>
+          <span class="truncate font-medium text-fg">{{ att.filename }}</span>
+          <span class="shrink-0 text-[11px] text-fg-faint">{{ categoryLabel(att.category, att.ext) }}</span>
+        </div>
+      </div>
       <div
         class="w-fit max-w-full whitespace-pre-wrap rounded-[22px] bg-surface px-4 py-2.5 text-[15px] leading-relaxed text-fg"
       >

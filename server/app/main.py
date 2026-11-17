@@ -1,13 +1,14 @@
 import logging
 import uuid as uuid_module
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.api.routes import admin, admin_membership, agent, auth, chat, conversations, users
+from app.api.routes import admin, admin_membership, agent, auth, chat, conversations, files, mcp, users
 from app.core.config import get_settings
 from app.core.redis import close_redis, get_redis
 from app.db.session import SessionLocal, engine
@@ -49,6 +50,9 @@ def create_app() -> FastAPI:
 
     allowed_hosts = [host.strip() for host in settings.allowed_hosts.split(",") if host.strip()]
     if allowed_hosts and allowed_hosts != ["*"]:
+        mcp_host = urlsplit(settings.internal_mcp_base_url).hostname
+        if mcp_host and mcp_host not in allowed_hosts:
+            allowed_hosts.append(mcp_host)
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     @app.middleware("http")
@@ -69,6 +73,8 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(admin_membership.router)
     app.include_router(conversations.router)
+    app.include_router(files.router)
+    app.include_router(mcp.router)
     app.include_router(chat.router)
     app.include_router(agent.router)
 

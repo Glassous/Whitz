@@ -5,8 +5,9 @@ import { useConversationsStore } from "../stores/conversations";
 import { useChatStore } from "../stores/chat";
 import { useAuthStore } from "../stores/auth";
 import { useCreditsStore } from "../stores/credits";
+import { useFilesStore } from "../stores/files";
 import { api } from "../api/client";
-import type { AgentStatus } from "../types";
+import type { AgentStatus, ConversationFile, TaskPanelTab } from "../types";
 import ConversationSidebar from "../components/chat/ConversationSidebar.vue";
 import MessageList from "../components/chat/MessageList.vue";
 import ChatInput from "../components/chat/ChatInput.vue";
@@ -21,11 +22,13 @@ const conversations = useConversationsStore();
 const chat = useChatStore();
 const auth = useAuthStore();
 const credits = useCreditsStore();
+const filesStore = useFilesStore();
 
 const routeConversationId = computed(() => (typeof route.params.id === "string" && route.params.id ? route.params.id : null));
 
 const agent = ref<AgentStatus | null>(null);
 const showPlan = ref(false);
+const planTab = ref<TaskPanelTab>("steps");
 const sidebarOpen = ref(false);
 const sidebarCollapsed = ref(false);
 const mobileStepsOpen = ref(false);
@@ -39,6 +42,14 @@ function setSidebarCollapsed(next: boolean) {
 
 function toggleSidebarCollapsed() {
   setSidebarCollapsed(!sidebarCollapsed.value);
+}
+
+function onPlanToggleClick() {
+  if (window.innerWidth >= 1024) {
+    showPlan.value = !showPlan.value;
+  } else {
+    mobileStepsOpen.value = true;
+  }
 }
 
 function onSidebarToggleClick() {
@@ -89,10 +100,12 @@ async function openConversation(id: string): Promise<boolean> {
   try {
     const detail = await conversations.open(id);
     chat.loadFromConversation(detail);
+    void filesStore.load(id);
     return true;
   } catch {
     conversations.clearCurrent();
     chat.reset();
+    filesStore.reset();
     return false;
   }
 }
@@ -101,7 +114,9 @@ function createConversation() {
   chat.abort();
   conversations.clearCurrent();
   chat.reset();
+  filesStore.reset();
   showPlan.value = false;
+  planTab.value = "steps";
   if (routeConversationId.value) {
     void router.push({ name: "chat" });
   }
@@ -162,21 +177,60 @@ async function onDelete(id: string) {
       }
     } else {
       conversations.clearCurrent();
+      filesStore.reset();
       showPlan.value = false;
       void router.replace({ name: "chat" });
     }
   }
 }
 
-async function onSend(content: string) {
-  if (chat.streaming) return;
+async function ensureConversationId(): Promise<string> {
+  if (conversations.current?.id) return conversations.current.id;
+  const conv = await conversations.create();
+  await openConversation(conv.id);
+  void router.replace({ name: "chat-conversation", params: { id: conv.id } });
+  return conv.id;
+}
+
+async function onUploadFiles(fileList: FileList, dataTransfer?: DataTransfer | null, switchToFilesTab = false) {
+  if (!agent.value?.ready) return;
+  if (switchToFilesTab) {
+    showPlan.value = true;
+    planTab.value = "files";
+  }
+  const started = await filesStore.enqueueFiles(fileList, ensureConversationId, dataTransfer);
+  if (started && window.innerWidth >= 1024) {
+    showPlan.value = true;
+  }
+}
+
+async function onDeleteFile(fileId: string) {
   try {
-    if (!conversations.current) {
-      const conv = await conversations.create();
-      await openConversation(conv.id);
-      void router.replace({ name: "chat-conversation", params: { id: conv.id } });
+    await filesStore.removeFile(fileId);
+  } catch (e: any) {
+    filesStore.error = e?.detail?.detail ?? e?.message ?? "删除文件失败";
+  }
+}
+
+async function onDownloadFile(file: ConversationFile) {
+  try {
+    const url = await filesStore.getDownloadUrl(file.id, false);
+    if (url) {
+      window.open(url, "_blank", "noopener,noreferrer");
     }
-    await chat.send(content);
+  } catch (e: any) {
+    filesStore.error = e?.detail?.detail ?? e?.message ?? "获取下载链接失败";
+  }
+}
+
+async function onSend(content: string) {
+  if (chat.streaming || filesStore.hasActiveUploads) return;
+  try {
+    await ensureConversationId();
+    const attached = filesStore.attachedFiles;
+    filesStore.consumeAttachedIds();
+    planTab.value = "steps";
+    await chat.send(content, attached);
     await conversations.fetchList();
   } catch (e: any) {
     chat.error = e?.detail?.detail ?? e?.message ?? "无法开始对话，请稍后重试";
@@ -185,6 +239,7 @@ async function onSend(content: string) {
 
 function onViewSteps(id: string) {
   chat.selectTurn(id);
+  planTab.value = "steps";
   showPlan.value = true;
   if (window.innerWidth < 1024) mobileStepsOpen.value = true;
 }
@@ -218,6 +273,7 @@ watch(routeConversationId, async (nextId) => {
     chat.abort();
     conversations.clearCurrent();
     chat.reset();
+    filesStore.reset();
     showPlan.value = false;
   }
 });
@@ -279,14 +335,19 @@ onBeforeUnmount(() => {
       <!-- Fixed task panel toggle (top-right inside panel when expanded, same position when collapsed) -->
       <button
         type="button"
-        class="focus-ring absolute right-3.5 top-3.5 z-30 hidden h-10 w-10 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg lg:inline-flex"
+        class="focus-ring absolute right-3.5 top-3.5 z-30 inline-flex h-10 w-10 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
         :aria-label="showPlan ? '收起任务面板' : '展开任务面板'"
         :title="showPlan ? '收起任务面板' : '展开任务面板'"
-        @click="showPlan = !showPlan"
+        @click="onPlanToggleClick"
       >
         <svg class="h-[21px] w-[21px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
           <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v14H3zM15 5v14" />
         </svg>
+        <span
+          v-if="filesStore.fileCount > 0 && !showPlan"
+          class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-accent"
+          aria-hidden="true"
+        />
       </button>
 
       <div class="relative flex min-w-0 flex-1 flex-col">
@@ -294,7 +355,7 @@ onBeforeUnmount(() => {
         <div class="progressive-blur-top pointer-events-none absolute inset-x-0 top-0 z-20 h-20" />
         <div
           class="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center gap-2.5 px-3.5 pt-3.5"
-          :class="showPlan ? 'pr-4' : 'lg:pr-16'"
+          :class="showPlan ? 'pr-16 lg:pr-4' : 'pr-16'"
         >
           <button
             type="button"
@@ -375,6 +436,24 @@ onBeforeUnmount(() => {
               leave-from-class="translate-y-0 opacity-100"
               leave-to-class="-translate-y-1 opacity-0"
             >
+              <div v-if="filesStore.error" class="flex items-start gap-2 rounded-xl bg-danger-weak px-3 py-2 text-[13px] text-danger">
+                <span class="flex-1">{{ filesStore.error }}</span>
+                <button class="rounded p-0.5 transition-opacity hover:opacity-70" aria-label="关闭文件提示" @click="filesStore.clearError()">
+                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
+                  </svg>
+                </button>
+              </div>
+            </Transition>
+
+            <Transition
+              enter-active-class="transition duration-200 ease-out"
+              enter-from-class="-translate-y-1 opacity-0"
+              enter-to-class="translate-y-0 opacity-100"
+              leave-active-class="transition duration-150 ease-in"
+              leave-from-class="translate-y-0 opacity-100"
+              leave-to-class="-translate-y-1 opacity-0"
+            >
               <div v-if="chat.error" class="flex items-start gap-2 rounded-xl bg-danger-weak px-3 py-2 text-[13px] text-danger">
                 <span class="flex-1">{{ chat.error }}</span>
                 <router-link
@@ -392,7 +471,19 @@ onBeforeUnmount(() => {
               </div>
             </Transition>
 
-            <ChatInput :streaming="chat.streaming" :disabled="!agent?.ready" @send="onSend" @stop="chat.stop" />
+            <ChatInput
+              :streaming="chat.streaming"
+              :disabled="!agent?.ready"
+              :uploading="filesStore.hasActiveUploads"
+              :uploads="filesStore.uploads"
+              :attached-files="filesStore.attachedFiles"
+              @send="onSend"
+              @stop="chat.stop"
+              @upload="(files, dt) => onUploadFiles(files, dt, false)"
+              @cancel-upload="filesStore.cancelUpload"
+              @dismiss-upload="filesStore.dismissUpload"
+              @detach-file="filesStore.detachFile"
+            />
           </div>
         </div>
       </div>
@@ -404,12 +495,22 @@ onBeforeUnmount(() => {
       >
         <div class="h-full w-[320px]">
           <PlanPanel
+            v-model:active-tab="planTab"
             :plan="chat.viewPlan"
             :reasoning="chat.viewReasoning"
             :streaming="chat.viewStreaming"
             :current-step="chat.viewCurrentStep"
             :running-tool="chat.viewRunningTool"
             :turn-key="chat.selectedTurn?.id ?? ''"
+            :files="filesStore.files"
+            :uploads="filesStore.uploads"
+            :files-loading="filesStore.loading"
+            :upload-disabled="!agent?.ready"
+            @upload="(files, dt) => onUploadFiles(files, dt, true)"
+            @cancel-upload="filesStore.cancelUpload"
+            @dismiss-upload="filesStore.dismissUpload"
+            @delete-file="onDeleteFile"
+            @download-file="onDownloadFile"
           />
         </div>
       </aside>
@@ -427,11 +528,11 @@ onBeforeUnmount(() => {
         <div class="absolute inset-0 bg-black/40" @click="mobileStepsOpen = false" />
         <div class="absolute inset-y-0 right-0 flex w-[min(360px,90vw)] flex-col bg-sidebar shadow-2xl transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]">
           <div class="flex h-11 shrink-0 items-center justify-between pl-4 pr-2">
-            <span class="text-[12px] font-medium text-fg">本轮步骤</span>
+            <span class="text-[12px] font-medium text-fg">任务面板</span>
             <button
               type="button"
               class="flex h-8 w-8 items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-hover hover:text-fg"
-              aria-label="关闭步骤面板"
+              aria-label="关闭任务面板"
               @click="mobileStepsOpen = false"
             >
               <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -441,12 +542,22 @@ onBeforeUnmount(() => {
           </div>
           <div class="min-h-0 flex-1">
             <PlanPanel
+              v-model:active-tab="planTab"
               :plan="chat.viewPlan"
               :reasoning="chat.viewReasoning"
               :streaming="chat.viewStreaming"
               :current-step="chat.viewCurrentStep"
               :running-tool="chat.viewRunningTool"
               :turn-key="chat.selectedTurn?.id ?? ''"
+              :files="filesStore.files"
+              :uploads="filesStore.uploads"
+              :files-loading="filesStore.loading"
+              :upload-disabled="!agent?.ready"
+              @upload="(files, dt) => onUploadFiles(files, dt, true)"
+              @cancel-upload="filesStore.cancelUpload"
+              @dismiss-upload="filesStore.dismissUpload"
+              @delete-file="onDeleteFile"
+              @download-file="onDownloadFile"
             />
           </div>
         </div>

@@ -43,7 +43,7 @@ async def reconcile_profiles(db: AsyncSession) -> None:
     result = await db.execute(select(User))
     for user in result.scalars().all():
         try:
-            provisioning.sync_profile_config(user.hermes_profile)
+            provisioning.sync_profile_config(user.hermes_profile, api_key=user.hermes_api_key)
             provisioning.set_parked(user.hermes_profile, parked=not user.is_active)
         except OSError as exc:
             logger.warning("同步 profile %s 失败: %s", user.hermes_profile, exc)

@@ -3,7 +3,15 @@ import { computed, ref } from "vue";
 import { api } from "../api/client";
 import { chatTicketHeaders } from "../api/chatTickets";
 import { streamSSE, streamSSEGet, type SSEEvent } from "../api/sse";
-import type { ConversationDetail, Message, PendingControl, Plan, PlanItem, ReasoningBlock } from "../types";
+import type {
+  ConversationDetail,
+  ConversationFile,
+  Message,
+  PendingControl,
+  Plan,
+  PlanItem,
+  ReasoningBlock,
+} from "../types";
 import { useConversationsStore } from "./conversations";
 
 let seq = 0;
@@ -385,19 +393,30 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
-  async function send(content: string) {
+  async function send(content: string, attachedFiles: ConversationFile[] = []) {
     if (!convId.value || streaming.value) return;
     error.value = null;
     reasoning.value = [];
     plan.value = null;
     const userId = tempId("temp-user");
     const assistantId = tempId("temp-assistant");
+    const fileIds = attachedFiles.map((f) => f.id);
     messages.value.push({
       id: userId,
       role: "user",
       content,
       tool_name: null,
-      tool_payload: null,
+      tool_payload: attachedFiles.length
+        ? {
+            attachments: attachedFiles.map((f) => ({
+              id: f.id,
+              filename: f.filename,
+              ext: f.ext,
+              category: f.category,
+              size_bytes: f.size_bytes,
+            })),
+          }
+        : null,
       status: "completed",
       hermes_run_id: null,
       created_at: new Date().toISOString(),
@@ -419,7 +438,12 @@ export const useChatStore = defineStore("chat", () => {
     try {
       const headers = await chatTicketHeaders(convId.value, "send");
       await consume(
-        streamSSE(`/conversations/${convId.value}/messages`, { content }, controller.signal, headers),
+        streamSSE(
+          `/conversations/${convId.value}/messages`,
+          fileIds.length ? { content, file_ids: fileIds } : { content },
+          controller.signal,
+          headers,
+        ),
       );
     } catch (e: any) {
       error.value = apiErrorMessage(e, "发送失败");

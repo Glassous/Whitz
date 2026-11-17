@@ -192,6 +192,39 @@ class Conversation(Base):
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation", cascade="all, delete-orphan", order_by="Message.created_at"
     )
+    files: Mapped[list["ConversationFile"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan", order_by="ConversationFile.created_at"
+    )
+
+
+class ConversationFile(Base):
+    __tablename__ = "conversation_files"
+    __table_args__ = (
+        Index("ix_conversation_files_conv_created", "conversation_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    filename: Mapped[str] = mapped_column(String(255))
+    ext: Mapped[str] = mapped_column(String(24))
+    mime_type: Mapped[str] = mapped_column(String(128))
+    category: Mapped[str] = mapped_column(String(24))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    storage_key: Mapped[str] = mapped_column(String(512), unique=True)
+    etag: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", server_default="pending")
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    conversation: Mapped[Conversation] = relationship(back_populates="files")
 
 
 class Message(Base):

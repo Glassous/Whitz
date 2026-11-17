@@ -45,6 +45,9 @@ def test_provision_writes_three_files():
     assert "API_SERVER_KEY=key-abc" in (d / ".env").read_text(encoding="utf-8")
     cfg = yaml.safe_load((d / "config.yaml").read_text(encoding="utf-8"))
     assert cfg["platform_toolsets"]["api_server"] == provisioning.TOOLSETS
+    assert "whitz_files" in cfg["mcp_servers"]
+    assert cfg["mcp_servers"]["whitz_files"]["headers"]["Authorization"] == "Bearer key-abc"
+    assert cfg["mcp_servers"]["whitz_files"]["headers"]["X-Whitz-Profile"] == profile
     assert "自定义" in (d / "SOUL.md").read_text(encoding="utf-8")
 
 

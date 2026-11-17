@@ -99,7 +99,7 @@ async def send_message(
         target_type="conversation",
         target_id=conv.id,
         request=request,
-        metadata={"content_length": len(body.content)},
+        metadata={"content_length": len(body.content), "file_count": len(body.file_ids)},
     )
 
     client = await _client_for(user)
@@ -124,6 +124,7 @@ async def send_message(
         user.hermes_profile,
         user.hermes_api_key,
         body.content,
+        file_ids=body.file_ids,
         max_seconds=plan.run_max_seconds,
     )
     return EventSourceResponse(

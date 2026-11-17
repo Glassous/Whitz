@@ -579,3 +579,76 @@ details.disclosure-card[open]::details-content {
   content-visibility: auto;
   contain-intrinsic-size: auto none auto 96px;
 }
+
+/* ------------------------------------------------------------------ */
+/* Native <progress> styling for direct COS uploads                    */
+/* ------------------------------------------------------------------ */
+
+progress.upload-progress {
+  appearance: none;
+  border: 0 solid;
+  overflow: clip;
+  container-type: inline-size;
+  --progress-bar-radius: 9999px;
+  --progress-bar-indeterminate-size: 32%;
+  --progress-bar-indeterminate-animation-duration: 1.4s;
+  border-radius: var(--progress-bar-radius);
+  background: var(--line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  progress.upload-progress {
+    --progress-bar-indeterminate-animation-duration: 8s;
+  }
+}
+
+progress.upload-progress::-webkit-progress-bar {
+  background: transparent;
+}
+
+progress.upload-progress::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: var(--progress-bar-radius);
+  transition: inline-size 0.2s ease;
+  animation: var(--progress-bar-animation, revert-rule);
+}
+
+progress.upload-progress::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: var(--progress-bar-radius);
+  transition: inline-size 0.2s ease;
+  animation: var(--progress-bar-animation, revert-rule);
+}
+
+progress.upload-progress:indeterminate {
+  --progress-bar-animation: progress-bar-indeterminate var(--progress-bar-indeterminate-animation-duration) infinite linear;
+}
+
+@keyframes progress-bar-indeterminate {
+  from,
+  to {
+    inline-size: var(--progress-bar-indeterminate-size);
+    margin-right: auto;
+  }
+  from {
+    translate: -100%;
+  }
+  to {
+    translate: 100cqi;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Accessible tab indicator (non-color shape via border-block-end)     */
+/* ------------------------------------------------------------------ */
+
+.panel-tab {
+  position: relative;
+}
+
+.panel-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  border-block-end: 2px solid var(--accent);
+}

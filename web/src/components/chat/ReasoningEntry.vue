@@ -33,12 +33,19 @@ const STATUS_LABELS: Record<string, string> = {
 
 const TOOL_LABELS: Record<string, string> = {
   todo_list: "更新任务清单",
+  tool_search: "检索工具",
   tool_describe: "查看工具说明",
   skill_view: "查看技能",
   web_search: "联网搜索",
   web_extract: "读取网页",
   memory: "记忆",
   skill: "技能",
+  list_workspace_files: "查看工作区文件",
+  read_workspace_file: "读取工作区文件",
+  search_workspace_files: "检索工作区文件",
+  mcp__whitz_files__list_workspace_files: "查看工作区文件",
+  mcp__whitz_files__read_workspace_file: "读取工作区文件",
+  mcp__whitz_files__search_workspace_files: "检索工作区文件",
 };
 
 interface WebItem {
