@@ -1,8 +1,7 @@
 name: Deploy Server
 
-# 流程：GitHub Runner 构建镜像 → 推送国内仓库（默认阿里云 ACR）→ 服务器2 从国内源拉取
-# 关键点：registry 是分层增量传输，每次部署只上传变化的层（几 MB），
-#         而不是像 docker save 那样每次全量 100MB+ 穿越国际链路。
+# 流程：GitHub Runner 构建镜像 → 推国内仓库（默认阿里云 ACR 公网地址，可自动降级 GHCR）→ 服务器2 pull + up
+# registry 是分层增量传输，每次只上传变化的层（几 MB），不是 docker save 那种每次全量。
 # 服务器2 永远不执行 docker build
 
 on:
@@ -19,11 +18,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # 主仓库地址：阿里云 ACR 个人版（实例专属域名，不是通用 registry.cn-*.aliyuncs.com）
-  # 换源只需设置仓库变量 IMAGE_REGISTRY / IMAGE_REPO，Secret 名不变
-  REGISTRY: ${{ vars.IMAGE_REGISTRY || 'crpi-m0whm1exhoe5bb6c.cn-guangzhou.personal.cr.aliyuncs.com' }}
-  IMAGE: ${{ vars.IMAGE_REPO || 'crpi-m0whm1exhoe5bb6c.cn-guangzhou.personal.cr.aliyuncs.com/whitz/server' }}
-  # 备份仓库（GitHub 内网推送只需几秒，国内拉取慢，仅兜底）
+  # 阿里云 ACR 个人版「公网地址」（不要用 -vpc 那个，那是阿里云 VPC 内网域名）
+  # 换源可通过仓库变量覆盖，Secret 名不变
+  REGISTRY: ${{ vars.IMAGE_REGISTRY || 'crpi-m8whm1ehxoe5b6bc.cn-guangzhou.personal.cr.aliyuncs.com' }}
+  IMAGE: ${{ vars.IMAGE_REPO || 'crpi-m8whm1ehxoe5b6bc.cn-guangzhou.personal.cr.aliyuncs.com/whitz/server' }}
+  # 备份仓库：GitHub Runner 推送只需几秒
   IMAGE_GHCR: ghcr.io/glassous/whitz-server
   REMOTE_DIR: /opt/whitz
   COMPOSE_FILE: docker-compose.prod.yml
@@ -38,6 +37,7 @@ jobs:
       packages: write
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
+      image: ${{ steps.pick.outputs.image }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,24 +46,49 @@ jobs:
         id: meta
         run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      # ACR 个人版域名在境外可能解析不到，先探测，避免整条流水线卡死
+      - name: Probe registry DNS
+        id: probe
+        run: |
+          set -uo pipefail
+          if getent hosts "$REGISTRY" >/dev/null 2>&1; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "registry $REGISTRY 可解析"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::$REGISTRY 在 GitHub Runner 上无法解析，本次自动降级为只推 GHCR"
+          fi
+
+      - name: Pick deploy image
+        id: pick
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.probe.outputs.ok }}" = "true" ]; then
+            echo "image=$IMAGE:${{ steps.meta.outputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=$IMAGE_GHCR:${{ steps.meta.outputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login image registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
-
-      - name: Login GHCR (backup)
+      - name: Login GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & Push
+      - name: Login ACR
+        if: ${{ steps.probe.outputs.ok == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build & Push (ACR + GHCR)
+        if: ${{ steps.probe.outputs.ok == 'true' }}
         uses: docker/build-push-action@v6
         with:
           context: ./server
@@ -80,11 +105,30 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build & Push (GHCR only)
+        if: ${{ steps.probe.outputs.ok != 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          file: ./server/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_GHCR }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE_GHCR }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   deploy:
     name: Pull & Restart on Server2
     needs: build
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -104,20 +148,21 @@ jobs:
       - name: Pull image & restart
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE: ${{ env.IMAGE }}:${{ needs.build.outputs.tag }}
-          REGISTRY: ${{ env.REGISTRY }}
-          REGISTRY_USER: ${{ secrets.REGISTRY_USERNAME }}
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          IMAGE: ${{ needs.build.outputs.image }}
           REMOTE_DIR: ${{ env.REMOTE_DIR }}
           COMPOSE_FILE: ${{ env.COMPOSE_FILE }}
           PROJECT: ${{ env.PROJECT }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SERVER2_HOST }}
           username: ${{ secrets.SERVER2_USER }}
           key: ${{ secrets.SERVER2_SSH_KEY }}
           port: ${{ secrets.SERVER2_PORT || 22 }}
-          command_timeout: 15m
-          envs: IMAGE,REGISTRY,REGISTRY_USER,REGISTRY_PASSWORD,REMOTE_DIR,COMPOSE_FILE,PROJECT
+          command_timeout: 30m
+          envs: IMAGE,REMOTE_DIR,COMPOSE_FILE,PROJECT,REGISTRY_USER,REGISTRY_PASSWORD,GHCR_USER,GHCR_TOKEN
           script: |
             set -euo pipefail
             cd "$REMOTE_DIR"
@@ -129,9 +174,16 @@ jobs:
               exit 1
             fi
 
-            echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
-            export WHITZ_SERVER_IMAGE="$IMAGE"
+            REGISTRY="${IMAGE%%/*}"
+            if [ "$REGISTRY" = "ghcr.io" ]; then
+              echo "using GHCR (fallback)"
+              echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            else
+              echo "using $REGISTRY"
+              echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+            fi
 
+            export WHITZ_SERVER_IMAGE="$IMAGE"
             docker compose -p "$PROJECT" -f "$COMPOSE_FILE" pull server
             docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --remove-orphans
 

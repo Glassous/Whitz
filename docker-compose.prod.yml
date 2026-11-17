@@ -116,8 +116,8 @@ services:
       - whitz_net
 
   server:
-    # 镜像由 GitHub Actions 构建后直传到服务器 docker load，tag 由部署脚本注入
-    image: ${WHITZ_SERVER_IMAGE:-whitz-server:latest}
+    # 镜像由 GitHub Actions 构建并推送 GHCR，部署脚本注入具体 tag
+    image: ${WHITZ_SERVER_IMAGE:-ghcr.io/glassous/whitz-server:latest}
     container_name: whitz-server
     restart: unless-stopped
     user: "1000:1000"
