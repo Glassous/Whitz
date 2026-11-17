@@ -94,6 +94,10 @@ jobs:
           context: ./server
           file: ./server/Dockerfile
           push: true
+          # ACR 个人版不接受 BuildKit 生成的 attestation（OCI empty descriptor），必须关闭
+          provenance: false
+          sbom: false
+          platforms: linux/amd64
           tags: |
             ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
             ${{ env.IMAGE }}:latest
@@ -112,6 +116,9 @@ jobs:
           context: ./server
           file: ./server/Dockerfile
           push: true
+          provenance: false
+          sbom: false
+          platforms: linux/amd64
           tags: |
             ${{ env.IMAGE_GHCR }}:${{ steps.meta.outputs.tag }}
             ${{ env.IMAGE_GHCR }}:latest
