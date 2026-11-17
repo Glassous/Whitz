@@ -25,6 +25,8 @@ def test_config_model_block():
     assert cfg["model"]["provider"] == "custom"
     assert cfg["model"]["default"] == "test-model"
     assert cfg["model"]["base_url"] == "http://llm.test/v1"
+    assert cfg["model"]["supports_vision"] is True
+    assert cfg["agent"]["image_input_mode"] == "native"
     assert cfg["approvals"]["mode"] == "smart"
 
 

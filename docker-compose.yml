@@ -128,6 +128,7 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_MODEL: ${LLM_MODEL}
+      LLM_SUPPORTS_VISION: ${LLM_SUPPORTS_VISION:-true}
       HERMES_BASE_URL: http://hermes:8642
       HERMES_DATA_DIR: /hermes-data
       HERMES_API_SERVER_KEY: ${HERMES_API_SERVER_KEY}

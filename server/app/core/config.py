@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
+    llm_supports_vision: bool = True
     search_api_key: str = ""
 
     hermes_base_url: str = "http://localhost:8642"

@@ -46,10 +46,15 @@ def build_config(profile: str | None = None, api_key: str | None = None) -> dict
             "provider": "custom",
             "base_url": s.llm_base_url,
             "api_key": s.llm_api_key,
+            "supports_vision": bool(s.llm_supports_vision),
         },
         "platform_toolsets": {"api_server": list(TOOLSETS)},
         "approvals": {"mode": "smart"},
-        "agent": {"max_turns": 60, "disabled_toolsets": list(DISABLED_TOOLSETS)},
+        "agent": {
+            "max_turns": 60,
+            "disabled_toolsets": list(DISABLED_TOOLSETS),
+            "image_input_mode": "native" if s.llm_supports_vision else "auto",
+        },
     }
     if profile and api_key:
         mcp_base = (s.internal_mcp_base_url or "http://server:8000").strip().rstrip("/")

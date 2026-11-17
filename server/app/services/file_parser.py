@@ -11,7 +11,7 @@ from pypdf import PdfReader
 from app.services.file_types import IMAGE_EXTENSIONS
 
 DEFAULT_MAX_CHARS = 12_000
-MAX_IMAGE_EMBED_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_EMBED_BYTES = 20 * 1024 * 1024
 
 
 class FileParseError(ValueError):
