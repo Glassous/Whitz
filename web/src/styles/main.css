@@ -252,6 +252,20 @@ body {
   -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.85) 38%, rgba(0, 0, 0, 0.35) 70%, transparent 100%);
 }
 
+.progressive-blur-bottom {
+  background: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--canvas) 78%, transparent) 0%,
+    color-mix(in srgb, var(--canvas) 48%, transparent) 42%,
+    color-mix(in srgb, var(--canvas) 16%, transparent) 74%,
+    transparent 100%
+  );
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.55) 36%, rgba(0, 0, 0, 0.18) 68%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.55) 36%, rgba(0, 0, 0, 0.18) 68%, transparent 100%);
+}
+
 @keyframes rise {
   from {
     opacity: 0;
@@ -490,7 +504,7 @@ dialog.whitz-dialog[open]:where(:not([data-closing]))::backdrop {
   field-sizing: content;
   width: 100%;
   height: auto;
-  min-block-size: 34px;
+  min-block-size: 36px;
   max-block-size: 160px;
   transition:
     block-size 0.25s cubic-bezier(0.22, 1, 0.36, 1),

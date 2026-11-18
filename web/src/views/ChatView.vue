@@ -404,7 +404,7 @@ onBeforeUnmount(() => {
           />
 
           <div v-else v-scrollbar class="custom-scrollbar h-full overflow-y-auto">
-            <div class="flex min-h-full flex-col items-center justify-center px-4 pb-4 pt-32 sm:px-6 sm:pt-40">
+            <div class="flex min-h-full flex-col items-center justify-center px-4 pb-32 pt-32 sm:px-6 sm:pt-40">
               <div class="w-full max-w-2xl text-center">
                 <h1 class="text-[32px] font-semibold leading-10 tracking-tight text-fg sm:text-[38px] sm:leading-[44px]">
                   {{ greeting }}<template v-if="userName">，{{ userName }}</template>
@@ -424,8 +424,9 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="shrink-0 px-3 pb-4 pt-1 sm:px-6 sm:pb-5">
-          <div class="mx-auto w-full max-w-4xl space-y-3">
+        <div class="progressive-blur-bottom pointer-events-none absolute inset-x-0 bottom-0 z-10 h-24 sm:h-28" />
+        <div class="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-transparent px-3 pb-4 pt-2 sm:px-6 sm:pb-5">
+          <div class="pointer-events-auto mx-auto w-full max-w-4xl space-y-3">
             <Transition
               mode="out-in"
               enter-active-class="transition duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]"

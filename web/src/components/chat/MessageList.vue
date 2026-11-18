@@ -7,7 +7,7 @@ const props = defineProps<{ messages: Message[]; focusMessageId?: string | null 
 const emit = defineEmits<{ steps: [id: string]; "focus-handled": [] }>();
 
 const TOP_CLEARANCE = 88;
-const MIN_BOTTOM_GAP = 32;
+const MIN_BOTTOM_GAP = 148;
 
 const container = ref<HTMLElement | null>(null);
 const wrapper = ref<HTMLElement | null>(null);

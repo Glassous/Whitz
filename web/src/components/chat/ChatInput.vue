@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ACCEPT_ATTR, SUPPORTED_TYPES_SUMMARY, categoryLabel, formatFileSize, validateDragItems } from "../../lib/fileTypes";
 import type { ConversationFile, UploadTask } from "../../types";
 
@@ -139,12 +139,33 @@ function uploadLabel(u: UploadTask): string {
   return "上传失败";
 }
 
+const isWideInput = ref(typeof window !== "undefined" ? window.innerWidth >= 640 : true);
+let smQuery: MediaQueryList | null = null;
+function onSmChange(e: MediaQueryListEvent) {
+  isWideInput.value = e.matches;
+}
+
+const inputPlaceholder = computed(() => {
+  if (props.disabled) return "助理正在初始化，请稍候…";
+  if (props.uploading) return isWideInput.value ? "文件正在直传 COS，上传完成后即可发送…" : "文件上传中…";
+  return isWideInput.value ? "给 Whitz 发送消息，或拖拽文件到此处上传…" : "给 Whitz 发送消息";
+});
+
 watch(text, () => {
   void nextTick(updateExpandState);
 });
 
 onMounted(() => {
+  if (typeof window !== "undefined") {
+    smQuery = window.matchMedia("(min-width: 640px)");
+    isWideInput.value = smQuery.matches;
+    smQuery.addEventListener("change", onSmChange);
+  }
   void nextTick(updateExpandState);
+});
+
+onBeforeUnmount(() => {
+  smQuery?.removeEventListener("change", onSmChange);
 });
 </script>
 
@@ -168,7 +189,7 @@ onMounted(() => {
     <span class="sr-only" role="status" aria-live="polite">{{ uploadStatusAnnouncement }}</span>
 
     <div
-      class="relative flex flex-col rounded-[26px] bg-surface px-3.5 pb-2.5 pt-3 transition-colors focus-within:bg-hover/70"
+      class="relative flex flex-col rounded-[24px] bg-surface p-2 shadow-sm transition-colors focus-within:bg-hover sm:rounded-[26px] sm:px-3.5 sm:pb-2.5 sm:pt-3"
       :class="isDragging ? (dragValid ? 'ring-2 ring-accent/60' : 'ring-2 ring-danger/70') : ''"
     >
       <!-- Uploading & newly attached chips -->
@@ -231,33 +252,28 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- Row 1: Native field-sizing: content auto-resizing textarea -->
-      <div class="relative">
-        <textarea
-          ref="area"
-          v-model="text"
-          v-scrollbar
-          rows="1"
-          :disabled="disabled"
-          :placeholder="
-            disabled
-              ? '助理正在初始化，请稍候…'
-              : uploading
-                ? '文件正在直传 COS，上传完成后即可发送…'
-                : '给 Whitz 发送消息，或拖拽文件到此处上传…'
-          "
-          class="chat-textarea custom-scrollbar block resize-none bg-transparent px-1 py-0.5 text-[15px] leading-relaxed text-fg outline-none placeholder:text-fg-faint disabled:cursor-not-allowed"
-          :class="{ 'is-expanded': expanded }"
-          @keydown="onKeydown"
-        />
-      </div>
+      <!-- Mobile: single row [upload | textarea | expand-above-send]; Desktop (sm+): 2 rows -->
+      <div class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-end gap-x-1.5 sm:grid-cols-[1fr_auto] sm:grid-rows-[auto_auto] sm:gap-y-2">
+        <!-- Textarea (middle on mobile, top full-span on desktop) -->
+        <div class="relative col-start-2 row-start-1 flex min-w-0 items-center sm:col-span-2 sm:col-start-1 sm:row-start-1">
+          <textarea
+            ref="area"
+            v-model="text"
+            v-scrollbar
+            rows="1"
+            :disabled="disabled"
+            :placeholder="inputPlaceholder"
+            class="chat-textarea custom-scrollbar block resize-none bg-transparent px-1 py-1.5 text-[15px] leading-6 text-fg outline-none placeholder:text-fg-faint disabled:cursor-not-allowed sm:py-0.5 sm:leading-relaxed"
+            :class="{ 'is-expanded': expanded }"
+            @keydown="onKeydown"
+          />
+        </div>
 
-      <!-- Row 2: Action bar (left upload button + right expand/collapse & send/stop) -->
-      <div class="mt-2 flex items-center justify-between gap-2">
-        <div class="flex items-center gap-2">
+        <!-- Left upload button (bottom-left on both mobile & desktop) -->
+        <div class="col-start-1 row-start-1 flex items-center gap-2 self-end sm:col-start-1 sm:row-start-2 sm:self-center">
           <button
             type="button"
-            class="focus-ring flex h-9 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+            class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:gap-1.5 sm:px-2.5 sm:text-[13px] sm:font-medium"
             :disabled="disabled"
             aria-label="上传文件到对话工作区"
             :title="`上传文件到当前对话工作区（${SUPPORTED_TYPES_SUMMARY}）`"
@@ -273,12 +289,13 @@ onMounted(() => {
             <span class="hidden sm:inline">上传文件</span>
           </button>
 
-          <span v-if="sendLockedByUpload" class="text-[12px] text-fg-faint">
+          <span v-if="sendLockedByUpload" class="hidden text-[12px] text-fg-faint sm:inline">
             上传中，完成后可发送…
           </span>
         </div>
 
-        <div class="flex items-center gap-1.5">
+        <!-- Right actions (vertical stack on mobile with expand above send, horizontal on desktop) -->
+        <div class="col-start-3 row-start-1 flex flex-col items-center justify-end gap-1.5 self-stretch sm:col-start-2 sm:row-start-2 sm:flex-row sm:self-center">
           <Transition
             enter-active-class="transition duration-150 ease-out"
             enter-from-class="scale-75 opacity-0"
