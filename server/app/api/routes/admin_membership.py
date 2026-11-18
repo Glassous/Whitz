@@ -12,9 +12,10 @@ from app.api.schemas import (
     InviteCodeCreate,
     InviteCodeOut,
     InviteCodeUpdate,
+    InviteRedemptionOut,
 )
 from app.core.config import get_settings
-from app.db.models import InviteCode, User
+from app.db.models import InviteCode, InviteRedemption, User
 from app.db.session import get_db
 from app.services import audit, membership
 
@@ -122,6 +123,37 @@ async def update_invite_code(
         metadata={"suffix": row.code[-4:]},
     )
     return row
+
+
+@router.get("/invite-codes/{code_id}/redemptions", response_model=list[InviteRedemptionOut])
+async def list_invite_code_redemptions(
+    code_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> list[InviteRedemptionOut]:
+    code = await db.get(InviteCode, code_id)
+    if code is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "邀请码不存在")
+    rows = (
+        await db.execute(
+            select(InviteRedemption, User.email)
+            .outerjoin(User, InviteRedemption.user_id == User.id)
+            .where(InviteRedemption.code_id == code_id)
+            .order_by(InviteRedemption.redeemed_at.desc())
+        )
+    ).all()
+    return [
+        InviteRedemptionOut(
+            id=redemption.id,
+            code_id=redemption.code_id,
+            code=code.code,
+            user_id=redemption.user_id,
+            user_email=user_email,
+            tier=redemption.tier,
+            duration_days=redemption.duration_days,
+            redeemed_at=redemption.redeemed_at,
+        )
+        for redemption, user_email in rows
+    ]
 
 
 @router.patch("/users/{user_id}/membership")
