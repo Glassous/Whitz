@@ -16,7 +16,7 @@ const DEFAULTS: AppConfig = {
   apiBase: "https://whitzapi.kamisato.top/api",
   devApiBase: "http://localhost:8001/api",
   appOrigin: "app://whitz",
-  updateFeed: "https://whitz.fiacloud.top/desktop",
+  updateFeed: "",
   hermesInstallTag: "",
   workModeDefault: true,
   requestTimeoutMs: 30000,

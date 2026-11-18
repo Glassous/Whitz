@@ -1,3 +1,4 @@
+@import "tailwindcss";
 @import "../../../web/src/styles/main.css";
 @source "../";
 @source "../../../web/src";
@@ -25,8 +26,15 @@
   padding-right: 148px;
 }
 
-.desktop-main {
-  padding-top: 40px;
+/* The web views size themselves with viewport units, which would overflow the
+   embedded desktop content area by the height of the title bar. Inside the
+   desktop shell they must fill the parent flex box instead. */
+.desktop-shell .h-dvh {
+  height: 100%;
+}
+
+.desktop-shell .min-h-dvh {
+  min-height: 100%;
 }
 
 .work-glow {

@@ -26,7 +26,7 @@ async function toggleOffline() {
 </script>
 
 <template>
-  <header class="desktop-titlebar app-drag fixed inset-x-0 top-0 z-50 flex items-center gap-4 border-b border-line/70 bg-canvas/80 px-4 backdrop-blur-xl">
+  <header class="desktop-titlebar app-drag relative z-50 flex shrink-0 items-center gap-4 border-b border-line/70 bg-canvas/80 px-4 backdrop-blur-xl">
     <div class="no-drag flex items-center gap-2.5">
       <span class="brand-mark h-4 w-4 text-fg" aria-hidden="true"></span>
       <span class="text-[13px] font-semibold tracking-tight text-fg">Whitz</span>

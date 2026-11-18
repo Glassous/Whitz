@@ -6,8 +6,6 @@ import { createAppRouter, type CreateRouterOptions } from "./router";
 import { setUnauthorizedHandler } from "./api/client";
 import { useAuthStore } from "./stores/auth";
 import { vScrollbar } from "./lib/scrollbar";
-import "./styles/main.css";
-import "highlight.js/styles/github-dark.css";
 
 export interface BootstrapOptions {
   root?: Component;

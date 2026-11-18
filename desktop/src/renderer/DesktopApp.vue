@@ -7,7 +7,7 @@ import UpdateBanner from "./components/shell/UpdateBanner.vue";
   <div class="flex h-full flex-col overflow-hidden bg-canvas text-fg">
     <TitleBar />
     <UpdateBanner />
-    <main class="desktop-main min-h-0 flex-1 overflow-hidden">
+    <main class="min-h-0 flex-1 overflow-hidden">
       <router-view />
     </main>
   </div>

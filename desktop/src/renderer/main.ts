@@ -1,4 +1,5 @@
 import "./styles.css";
+import "highlight.js/styles/github-dark.css";
 
 function applyTheme() {
   try {
@@ -32,6 +33,7 @@ import { useRuntimeStore } from "./stores/runtime";
 import { useWorkStore } from "./stores/work";
 
 async function start() {
+  document.documentElement.classList.add("desktop-shell");
   applyTheme();
   const api = window.whitzDesktop;
   if (!api) {
