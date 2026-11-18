@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { api, readableError } from "../api/client";
-import type { InviteCode, InviteCodeList } from "../types";
+import type { InviteCode, InviteCodeList, InviteRedemption } from "../types";
 import InviteCodeForm from "../components/InviteCodeForm.vue";
 import BaseBadge from "../components/ui/BaseBadge.vue";
 import BaseButton from "../components/ui/BaseButton.vue";
@@ -19,6 +19,14 @@ const error = ref<string | null>(null);
 const copiedId = ref<string | null>(null);
 const disableTarget = ref<InviteCode | null>(null);
 const disableLoading = ref(false);
+const enablingId = ref<string | null>(null);
+
+const redemptionsTarget = ref<InviteCode | null>(null);
+const redemptions = ref<InviteRedemption[]>([]);
+const redemptionsLoading = ref(false);
+const redemptionsError = ref<string | null>(null);
+let redemptionsSeq = 0;
+
 let copyTimer: number | null = null;
 
 const totalPages = computed(() => (data.value ? Math.max(1, Math.ceil(data.value.total / pageSize)) : 1));
@@ -90,6 +98,58 @@ async function confirmDisable() {
   } finally {
     disableLoading.value = false;
   }
+}
+
+async function enableCode(row: InviteCode) {
+  enablingId.value = row.id;
+  error.value = null;
+  try {
+    await api.patch(`/admin/invite-codes/${row.id}`, { is_active: true });
+    await load();
+  } catch (e: unknown) {
+    error.value = readableError(e);
+  } finally {
+    enablingId.value = null;
+  }
+}
+
+function tierLabel(tier: string): string {
+  const lower = tier.toLowerCase();
+  if (lower === "pro") return "Pro";
+  if (lower === "plus") return "Plus";
+  return "Free";
+}
+
+function tierTone(tier: string): "brand" | "blue" | "gray" {
+  const lower = tier.toLowerCase();
+  if (lower === "pro") return "brand";
+  if (lower === "plus") return "blue";
+  return "gray";
+}
+
+async function openRedemptions(row: InviteCode) {
+  const seq = ++redemptionsSeq;
+  redemptionsTarget.value = row;
+  redemptions.value = [];
+  redemptionsError.value = null;
+  redemptionsLoading.value = true;
+  try {
+    const res = await api.get<InviteRedemption[]>(`/admin/invite-codes/${row.id}/redemptions`);
+    if (seq !== redemptionsSeq) return;
+    redemptions.value = res;
+  } catch (e: unknown) {
+    if (seq !== redemptionsSeq) return;
+    redemptionsError.value = readableError(e);
+  } finally {
+    if (seq === redemptionsSeq) redemptionsLoading.value = false;
+  }
+}
+
+function closeRedemptions() {
+  redemptionsSeq += 1;
+  redemptionsTarget.value = null;
+  redemptions.value = [];
+  redemptionsError.value = null;
 }
 
 onMounted(load);
@@ -183,15 +243,26 @@ onBeforeUnmount(() => {
                   <BaseBadge :tone="statusOf(row).tone">{{ statusOf(row).label }}</BaseBadge>
                 </td>
                 <td class="px-4 py-3 text-right">
-                  <BaseButton
-                    v-if="row.is_active"
-                    size="sm"
-                    variant="secondary"
-                    @click="disableTarget = row"
-                  >
-                    停用
-                  </BaseButton>
-                  <span v-else class="text-[11px] text-fg-faint">已停用</span>
+                  <div class="flex items-center justify-end gap-1.5 whitespace-nowrap">
+                    <BaseButton size="sm" variant="ghost" @click="openRedemptions(row)">兑换明细</BaseButton>
+                    <BaseButton
+                      v-if="row.is_active"
+                      size="sm"
+                      variant="secondary"
+                      @click="disableTarget = row"
+                    >
+                      停用
+                    </BaseButton>
+                    <BaseButton
+                      v-else
+                      size="sm"
+                      variant="primary"
+                      :loading="enablingId === row.id"
+                      @click="enableCode(row)"
+                    >
+                      重新启用
+                    </BaseButton>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -221,6 +292,61 @@ onBeforeUnmount(() => {
       <template #footer>
         <BaseButton variant="secondary" @click="disableTarget = null">取消</BaseButton>
         <BaseButton variant="danger" :loading="disableLoading" @click="confirmDisable">确认停用</BaseButton>
+      </template>
+    </BaseModal>
+
+    <BaseModal
+      :open="!!redemptionsTarget"
+      :title="redemptionsTarget ? `兑换明细 · ${redemptionsTarget.code}` : '兑换明细'"
+      width="40rem"
+      @close="closeRedemptions"
+    >
+      <div v-if="redemptionsTarget" class="space-y-3">
+        <div class="flex flex-wrap items-center gap-2 rounded-xl bg-surface px-3 py-2 text-[12px] text-fg-muted">
+          <BaseBadge :tone="tierTone(redemptionsTarget.tier)">{{ tierLabel(redemptionsTarget.tier) }}</BaseBadge>
+          <span>时长 {{ redemptionsTarget.duration_days }} 天</span>
+          <span class="ml-auto tabular-nums">
+            已使用 {{ redemptionsTarget.used_count }} / {{ redemptionsTarget.max_uses }}
+          </span>
+        </div>
+
+        <p v-if="redemptionsError" class="rounded-xl bg-danger-weak px-3 py-2 text-[12.5px] text-danger">
+          {{ redemptionsError }}
+        </p>
+
+        <div class="overflow-x-auto rounded-xl border border-line">
+          <table class="w-full min-w-[440px] text-left text-[12.5px]">
+            <thead class="bg-surface text-[11px] uppercase tracking-wide text-fg-faint">
+              <tr>
+                <th class="px-3 py-2.5 font-medium">用户邮箱</th>
+                <th class="px-3 py-2.5 font-medium">档位</th>
+                <th class="px-3 py-2.5 font-medium">时长</th>
+                <th class="px-3 py-2.5 font-medium">兑换时间</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-line">
+              <tr v-if="redemptionsLoading">
+                <td colspan="4" class="px-3 py-10 text-center text-fg-faint">加载兑换记录中…</td>
+              </tr>
+              <tr v-else-if="!redemptions.length">
+                <td colspan="4" class="px-3 py-10 text-center text-fg-faint">该邀请码暂无兑换记录</td>
+              </tr>
+              <tr v-for="r in redemptions" :key="r.id" class="hover:bg-surface/60">
+                <td class="px-3 py-2.5 text-fg">{{ r.user_email ?? r.user_id }}</td>
+                <td class="px-3 py-2.5">
+                  <BaseBadge :tone="tierTone(r.tier)">{{ tierLabel(r.tier) }}</BaseBadge>
+                </td>
+                <td class="px-3 py-2.5 tabular-nums text-fg-muted">{{ r.duration_days }} 天</td>
+                <td class="whitespace-nowrap px-3 py-2.5 tabular-nums text-fg-faint">
+                  {{ new Date(r.redeemed_at).toLocaleString() }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <template #footer>
+        <BaseButton variant="secondary" @click="closeRedemptions">关闭</BaseButton>
       </template>
     </BaseModal>
   </div>

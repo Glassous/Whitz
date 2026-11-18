@@ -144,3 +144,169 @@ export interface Overview {
   };
   generated_at: string;
 }
+
+export interface AdminAnalyticsDay {
+  day: string;
+  messages: number;
+  tokens: number;
+  credits: number;
+  runs: number;
+  new_users: number;
+  active_users: number;
+}
+
+export interface AdminAnalyticsTopUser {
+  user_id: string;
+  email: string;
+  display_name: string;
+  membership_tier: MembershipTier;
+  messages: number;
+  tokens: number;
+  credits: number;
+  runs: number;
+}
+
+export interface AdminAnalyticsFileStats {
+  total_files: number;
+  total_bytes: number;
+  global_files: number;
+  assistant_files: number;
+  pending_files: number;
+}
+
+export interface AdminAnalyticsSummary {
+  total_messages: number;
+  total_tokens: number;
+  total_credits: number;
+  total_runs: number;
+  total_new_users: number;
+  active_users: number;
+  [key: string]: number;
+}
+
+export interface AdminAnalytics {
+  days: number;
+  start_day: string;
+  end_day: string;
+  tokens_per_credit: number;
+  daily: AdminAnalyticsDay[];
+  top_users: AdminAnalyticsTopUser[];
+  membership_distribution: Record<string, number>;
+  file_stats: AdminAnalyticsFileStats;
+  summary: AdminAnalyticsSummary;
+  generated_at?: string;
+}
+
+export interface AdminMonitorServices {
+  postgres: boolean;
+  redis: boolean;
+  hermes: boolean;
+  cos_configured: boolean;
+  smtp_configured: boolean;
+}
+
+export interface AdminActiveRun {
+  conversation_id: string;
+  title: string;
+  user_id: string;
+  user_email: string;
+  user_display_name: string;
+  active_run_id: string;
+  active_run_status: string | null;
+  last_message_at: string | null;
+  duration_seconds: number;
+  is_stalled: boolean;
+}
+
+export interface AdminFailureSpike {
+  action: string;
+  count: number;
+  latest_at: string;
+}
+
+export interface AdminFailingActor {
+  actor_email: string | null;
+  count: number;
+  latest_action: string;
+}
+
+export interface AdminFailedMessage {
+  message_id: string;
+  conversation_id: string;
+  user_email: string;
+  status: string;
+  created_at: string;
+}
+
+export interface AdminMonitor {
+  services: AdminMonitorServices;
+  active_runs: AdminActiveRun[];
+  failure_spikes_24h: AdminFailureSpike[];
+  top_failing_actors_24h: AdminFailingActor[];
+  recent_failed_messages: AdminFailedMessage[];
+  generated_at?: string;
+}
+
+export interface UserSession {
+  session_id: string;
+  user_agent: string | null;
+  client_ip: string | null;
+  last_used_at: string | null;
+  created_at: string;
+  expires_at: string;
+  is_current?: boolean;
+}
+
+export interface AdminLedgerItem {
+  id: number;
+  user_id: string;
+  created_at: string;
+  tokens: number;
+  credits: number;
+  kind: "consume" | "adjust" | string;
+  tier: string | null;
+  conversation_id: string | null;
+  message_id: string | null;
+  actor_user_id: string | null;
+  actor_email: string | null;
+  note: string | null;
+}
+
+export interface AdminLedgerList {
+  items: AdminLedgerItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface InviteRedemption {
+  id: string;
+  code_id: string;
+  code: string | null;
+  user_id: string;
+  user_email: string | null;
+  tier: MembershipTier | string;
+  duration_days: number;
+  redeemed_at: string;
+}
+
+export interface AdminUserDetail extends AdminUser {
+  persona: string;
+  email_verified_at: string | null;
+  credit_anchor_at: string | null;
+  updated_at: string | null;
+  profile_context_enabled: boolean;
+  profile_context_consented_at: string | null;
+  memory_enabled: boolean;
+  memory_consented_at: string | null;
+  memory_require_confirm: boolean;
+  conversation_count: number;
+  message_count: number;
+  file_count: number;
+  total_tokens: number;
+  total_messages: number;
+  total_runs: number;
+  active_sessions: UserSession[];
+  recent_ledger: AdminLedgerItem[];
+  invite_redemptions: InviteRedemption[];
+}

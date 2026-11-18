@@ -11,7 +11,13 @@ type IconName =
   | "refresh"
   | "shield"
   | "chevron-left"
-  | "chevron-right";
+  | "chevron-right"
+  | "close"
+  | "activity"
+  | "alert"
+  | "file"
+  | "device"
+  | "stop";
 
 const props = withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 18 });
 
@@ -26,6 +32,12 @@ const paths: Record<IconName, string> = {
   shield: "M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z",
   "chevron-left": "M15 18l-6-6 6-6",
   "chevron-right": "M9 18l6-6-6-6",
+  close: "M6 6l12 12M18 6L6 18",
+  activity: "M22 12h-4l-3 9L9 3l-3 9H2",
+  alert: "M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z",
+  file: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6",
+  device: "M4 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM2 20h20M12 16v4",
+  stop: "M12 22a10 10 0 100-20 10 10 0 000 20zM9 9h6v6H9z",
 };
 
 const d = computed(() => paths[props.name]);

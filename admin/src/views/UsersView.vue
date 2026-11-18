@@ -4,6 +4,7 @@ import { api, readableError } from "../api/client";
 import { useAuthStore } from "../stores/auth";
 import type { AdminUser, AdminUserList, CreditSummary, MembershipTier } from "../types";
 import UserAccessModals from "../components/UserAccessModals.vue";
+import UserDetailDrawer from "../components/UserDetailDrawer.vue";
 import BaseBadge from "../components/ui/BaseBadge.vue";
 import BaseButton from "../components/ui/BaseButton.vue";
 import BaseInput from "../components/ui/BaseInput.vue";
@@ -27,6 +28,8 @@ const confirmLoading = ref(false);
 
 const memberTarget = ref<AdminUser | null>(null);
 const creditTarget = ref<AdminUser | null>(null);
+const detailUserId = ref<string | null>(null);
+const drawerRefreshKey = ref(0);
 
 const totalPages = computed(() => (data.value ? Math.max(1, Math.ceil(data.value.total / pageSize)) : 1));
 
@@ -56,6 +59,15 @@ function openMembership(user: AdminUser) {
 
 function openCredits(user: AdminUser) {
   creditTarget.value = user;
+}
+
+function openDetail(user: AdminUser) {
+  detailUserId.value = user.id;
+}
+
+function handleAccessSaved() {
+  drawerRefreshKey.value += 1;
+  void load();
 }
 
 async function load() {
@@ -238,6 +250,7 @@ onMounted(load);
             </td>
             <td data-label="操作" class="px-4 py-3 text-right">
               <div class="flex items-center justify-end gap-1 whitespace-nowrap">
+                <BaseButton size="sm" variant="secondary" @click="openDetail(u)">详情</BaseButton>
                 <BaseButton size="sm" variant="ghost" @click="openMembership(u)">会员</BaseButton>
                 <BaseButton size="sm" variant="ghost" @click="openCredits(u)">积分</BaseButton>
                 <BaseButton
@@ -281,12 +294,20 @@ onMounted(load);
       </template>
     </BaseModal>
 
+    <UserDetailDrawer
+      :user-id="detailUserId"
+      :refresh-key="drawerRefreshKey"
+      @close="detailUserId = null"
+      @edit-membership="openMembership"
+      @edit-credits="openCredits"
+    />
+
     <UserAccessModals
       :member-target="memberTarget"
       :credit-target="creditTarget"
       @close-member="memberTarget = null"
       @close-credit="creditTarget = null"
-      @saved="load"
+      @saved="handleAccessSaved"
     />
   </div>
 </template>
