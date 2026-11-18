@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.models import Conversation, ConversationFile, User
-from app.services import cos, file_parser
+from app.services import cos, file_parser, file_types
+
+MAX_WRITE_FILE_BYTES = 2 * 1024 * 1024
+WRITABLE_TEXT_EXTENSIONS = frozenset(
+    ext
+    for ext, (cat, _) in file_types.ALLOWED_FILE_TYPES.items()
+    if cat in ("code", "document", "spreadsheet") and ext not in (".pdf", ".docx", ".xlsx")
+)
 
 MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "list_workspace_files",
         "description": (
-            "列出当前对话工作区中已上传并就绪的文件清单（包含 file_id、文件名、分类、MIME 类型和大小）。"
+            "列出当前对话工作区中已上传并就绪的文件清单（包含 file_id、文件名、分类、MIME 类型、大小与作用域 scope）。"
+            "默认同时包含用户的全局共享文件（scope='global'）。"
             "在用户提及已上传文件、附件、资料或需要确认当前工作区有哪些文件时调用。"
         ),
         "inputSchema": {
@@ -24,7 +34,12 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "conversation_id": {
                     "type": "string",
                     "description": "当前对话的 UUID（从系统上下文中的 conversation_id 获取）",
-                }
+                },
+                "include_global": {
+                    "type": "boolean",
+                    "description": "是否同时列出用户的全局共享文件（默认 true）",
+                    "default": True,
+                },
             },
             "required": ["conversation_id"],
         },
@@ -32,7 +47,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "read_workspace_file",
         "description": (
-            "按 file_id 读取当前对话工作区中的文件内容。支持文本/代码/CSV/JSON/YAML（按行分页）、"
+            "按 file_id 读取当前对话工作区或用户全局共享文件的内容。支持文本/代码/CSV/JSON/YAML（按行分页）、"
             "PDF（按页分页）、Word DOCX（按段/表格行分页）、Excel XLSX（按工作表与行分页），"
             "以及 PNG/JPG/WebP/GIF 图片。"
         ),
@@ -70,7 +85,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "search_workspace_files",
         "description": (
-            "在当前对话工作区的文本、PDF、DOCX、XLSX 文件中按关键词检索，返回匹配行号/页码/工作表位置与片段，"
+            "在当前对话工作区及用户全局共享的文本、PDF、DOCX、XLSX 文件中按关键词检索，返回匹配行号/页码/工作表位置与片段，"
             "便于定位大文件里的关键章节。"
         ),
         "inputSchema": {
@@ -84,6 +99,27 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["conversation_id", "query"],
+        },
+    },
+    {
+        "name": "write_workspace_file",
+        "description": (
+            "向当前对话工作区写入文本类产物文件（支持 Markdown、HTML、CSS、JS/TS、Python、JSON、CSV、YAML、XML、SQL、TXT 等），"
+            "单文件最大 2 MB。写入成功后用户可在任务面板直接预览或下载。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "conversation_id": {"type": "string", "description": "当前对话的 UUID"},
+                "filename": {"type": "string", "description": "要写入的文件名（例如 report.md、index.html、summary.csv）"},
+                "content": {"type": "string", "description": "UTF-8 文本文件内容"},
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "若当前对话已存在同名文件是否覆盖（默认 true）",
+                    "default": True,
+                },
+            },
+            "required": ["conversation_id", "filename", "content"],
         },
     },
 ]
@@ -113,12 +149,9 @@ async def _owned_ready_file(
     except (TypeError, ValueError):
         return None
     row = await db.get(ConversationFile, file_uuid)
-    if (
-        row is None
-        or row.conversation_id != conv.id
-        or row.user_id != user.id
-        or row.status != "ready"
-    ):
+    if row is None or row.user_id != user.id or row.status != "ready":
+        return None
+    if row.conversation_id != conv.id and not row.is_global:
         return None
     return row
 
@@ -136,12 +169,23 @@ async def call_tool(
         return _text_result("错误：对话不存在或无权访问该对话的工作区。", is_error=True)
 
     if name == "list_workspace_files":
+        include_global = args.get("include_global")
+        want_global = True if include_global is None else bool(include_global)
+        if want_global:
+            condition = or_(
+                ConversationFile.conversation_id == conv.id,
+                ConversationFile.is_global.is_(True),
+            )
+        else:
+            condition = ConversationFile.conversation_id == conv.id
+
         rows = (
             await db.execute(
                 select(ConversationFile)
                 .where(
-                    ConversationFile.conversation_id == conv.id,
+                    ConversationFile.user_id == user.id,
                     ConversationFile.status == "ready",
+                    condition,
                 )
                 .order_by(ConversationFile.created_at.asc())
             )
@@ -158,6 +202,9 @@ async def call_tool(
                         "category": r.category,
                         "mime_type": r.mime_type,
                         "size_bytes": r.size_bytes,
+                        "source": r.source,
+                        "is_global": r.is_global,
+                        "scope": "conversation" if r.conversation_id == conv.id else "global",
                         "created_at": r.created_at.isoformat(),
                     }
                     for r in rows
@@ -171,7 +218,7 @@ async def call_tool(
     if name == "read_workspace_file":
         file_row = await _owned_ready_file(db, user, conv, str(args.get("file_id") or ""))
         if file_row is None:
-            return _text_result("错误：指定文件不存在、未就绪或不属于当前对话。", is_error=True)
+            return _text_result("错误：指定文件不存在、未就绪或无权在当前对话访问。", is_error=True)
         try:
             raw = await cos.get_object_bytes(
                 file_row.storage_key,
@@ -233,7 +280,7 @@ async def call_tool(
         if target_id:
             file_row = await _owned_ready_file(db, user, conv, str(target_id))
             if file_row is None:
-                return _text_result("错误：指定文件不存在、未就绪或不属于当前对话。", is_error=True)
+                return _text_result("错误：指定文件不存在、未就绪或无权在当前对话访问。", is_error=True)
             targets = [file_row]
         else:
             targets = list(
@@ -241,8 +288,12 @@ async def call_tool(
                     await db.execute(
                         select(ConversationFile)
                         .where(
-                            ConversationFile.conversation_id == conv.id,
+                            ConversationFile.user_id == user.id,
                             ConversationFile.status == "ready",
+                            or_(
+                                ConversationFile.conversation_id == conv.id,
+                                ConversationFile.is_global.is_(True),
+                            ),
                         )
                         .order_by(ConversationFile.created_at.asc())
                     )
@@ -268,9 +319,141 @@ async def call_tool(
                     {
                         "file_id": str(row.id),
                         "filename": row.filename,
+                        "scope": "conversation" if row.conversation_id == conv.id else "global",
                         "hits": hits,
                     }
                 )
         return _text_result({"query": query, "matched_files": matches})
+
+    if name == "write_workspace_file":
+        if not settings.cos_configured:
+            return _text_result("错误：对象存储 COS 尚未配置，无法写入工作区文件。", is_error=True)
+
+        filename = file_types.sanitize_filename(str(args.get("filename") or ""))
+        if not filename:
+            return _text_result("错误：filename 不能为空。", is_error=True)
+        _, ext = os.path.splitext(filename)
+        ext = ext.lower()
+        if ext not in WRITABLE_TEXT_EXTENSIONS:
+            return _text_result(
+                f"错误：不支持写入扩展名 {ext or '无扩展名'}。仅允许安全文本/代码/数据格式（如 .md, .html, .txt, .json, .csv, .py, .ts 等）。",
+                is_error=True,
+            )
+
+        raw_content = args.get("content")
+        if not isinstance(raw_content, str):
+            return _text_result("错误：content 必须是字符串。", is_error=True)
+        raw_bytes = raw_content.encode("utf-8")
+        if not raw_bytes:
+            return _text_result("错误：文件内容不能为空。", is_error=True)
+        if len(raw_bytes) > MAX_WRITE_FILE_BYTES:
+            return _text_result("错误：写入文件大小超过 2 MB 上限。", is_error=True)
+
+        category, mime_type = file_types.ALLOWED_FILE_TYPES[ext]
+        overwrite = True if args.get("overwrite") is None else bool(args.get("overwrite"))
+
+        existing = (
+            await db.execute(
+                select(ConversationFile)
+                .where(
+                    ConversationFile.conversation_id == conv.id,
+                    ConversationFile.user_id == user.id,
+                    ConversationFile.filename == filename,
+                    ConversationFile.status == "ready",
+                )
+                .order_by(ConversationFile.created_at.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+
+        if existing is not None and not overwrite:
+            return _text_result(f"错误：工作区中已存在文件 {filename}，若需覆盖请设置 overwrite=true。", is_error=True)
+
+        if existing is not None:
+            try:
+                etag = await cos.put_object_bytes(
+                    existing.storage_key,
+                    raw_bytes,
+                    mime_type,
+                    settings=settings,
+                )
+            except cos.CosError as exc:
+                return _text_result(f"写入文件失败: {exc}", is_error=True)
+            existing.ext = ext
+            existing.mime_type = mime_type
+            existing.category = category
+            existing.size_bytes = len(raw_bytes)
+            existing.etag = etag
+            existing.source = "assistant"
+            existing.message_id = None
+            existing.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(existing)
+            return _text_result(
+                {
+                    "status": "updated",
+                    "file_id": str(existing.id),
+                    "conversation_id": str(conv.id),
+                    "filename": existing.filename,
+                    "ext": existing.ext,
+                    "category": existing.category,
+                    "mime_type": existing.mime_type,
+                    "size_bytes": existing.size_bytes,
+                    "source": existing.source,
+                }
+            )
+
+        existing_count = await db.scalar(
+            select(func.count())
+            .select_from(ConversationFile)
+            .where(
+                ConversationFile.conversation_id == conv.id,
+                ConversationFile.status.in_(("ready", "pending")),
+            )
+        )
+        if int(existing_count or 0) >= max(settings.max_files_per_conversation, 20):
+            return _text_result(
+                f"错误：当前对话文件数量已达上限（{settings.max_files_per_conversation} 个），请先清理部分文件。",
+                is_error=True,
+            )
+
+        file_id = uuid.uuid4()
+        storage_key = cos.build_storage_key(user.id, conv.id, file_id, filename, settings=settings)
+        try:
+            etag = await cos.put_object_bytes(storage_key, raw_bytes, mime_type, settings=settings)
+        except cos.CosError as exc:
+            return _text_result(f"写入文件失败: {exc}", is_error=True)
+
+        row = ConversationFile(
+            id=file_id,
+            conversation_id=conv.id,
+            user_id=user.id,
+            filename=filename,
+            ext=ext,
+            mime_type=mime_type,
+            category=category,
+            size_bytes=len(raw_bytes),
+            storage_key=storage_key,
+            etag=etag,
+            status="ready",
+            source="assistant",
+            is_global=False,
+        )
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+        return _text_result(
+            {
+                "status": "created",
+                "file_id": str(row.id),
+                "conversation_id": str(conv.id),
+                "filename": row.filename,
+                "ext": row.ext,
+                "category": row.category,
+                "mime_type": row.mime_type,
+                "size_bytes": row.size_bytes,
+                "source": row.source,
+            }
+        )
 
     return _text_result(f"未知工具: {name}", is_error=True)

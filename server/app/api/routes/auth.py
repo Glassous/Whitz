@@ -131,9 +131,9 @@ async def send_email_code(
 ) -> EmailCodeResponse:
     email = body.email.strip().lower()
     client_ip = _client_ip(request) or "unknown"
-    if not email_code_ip_limiter.allow(client_ip):
+    if not await email_code_ip_limiter.allow(client_ip):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试")
-    if not email_code_addr_limiter.allow(email):
+    if not await email_code_addr_limiter.allow(email):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "该邮箱请求验证码过于频繁，请稍后再试")
 
     result = await db.execute(select(User).where(User.email == email))
@@ -286,7 +286,7 @@ async def login_with_code(
 ) -> TokenResponse:
     email = body.email.strip().lower()
     client_ip = _client_ip(request) or "unknown"
-    if not login_code_limiter.allow(f"{client_ip}:{email}"):
+    if not await login_code_limiter.allow(f"{client_ip}:{email}"):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试")
 
     result = await db.execute(select(User).where(User.email == email))
@@ -434,7 +434,7 @@ async def reset_password(
 ) -> None:
     email = body.email.strip().lower()
     client_ip = _client_ip(request) or "unknown"
-    if not reset_password_limiter.allow(f"{client_ip}:{email}"):
+    if not await reset_password_limiter.allow(f"{client_ip}:{email}"):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试")
 
     result = await db.execute(select(User).where(User.email == email))

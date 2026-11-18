@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -11,6 +12,7 @@ from app.api.schemas import (
     ChatTicketOut,
     ChatTicketRequest,
     ClarifyRequest,
+    EditMessageRequest,
     SendMessageRequest,
 )
 from app.db.models import Conversation, Message, User
@@ -21,8 +23,8 @@ from app.services.hermes import HermesClient, HermesError
 router = APIRouter(prefix="/api/conversations", tags=["chat"])
 
 
-def _reset_hint(status: dict) -> str:
-    windows = [status.get("weekly") or {}, status.get("five_hour") or {}]
+def _reset_hint(status_info: dict) -> str:
+    windows = [status_info.get("weekly") or {}, status_info.get("five_hour") or {}]
     candidates = [
         (window["remaining"], window.get("reset_at"))
         for window in windows
@@ -44,27 +46,19 @@ async def _client_for(user: User) -> HermesClient:
     return HermesClient(user.hermes_profile, user.hermes_api_key)
 
 
-@router.post("/{conversation_id}/tickets", response_model=ChatTicketOut)
-async def create_ticket(
-    body: ChatTicketRequest,
+async def _preflight_chat_turn(
     request: Request,
-    conv: Conversation = Depends(get_owned_conversation),
-    user: User = Depends(get_current_user),
-) -> dict:
-    return await chat_tickets.issue(user.id, conv.id, body.action, body.nonce, chat_tickets.client_ip(request))
-
-
-@router.post("/{conversation_id}/messages")
-async def send_message(
-    body: SendMessageRequest,
-    request: Request,
-    conv: Conversation = Depends(get_owned_conversation),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    conv: Conversation,
+    user: User,
+    db: AsyncSession,
+    *,
+    audit_action: str,
+    audit_metadata: dict,
 ):
     await chat_tickets.require(request, user.id, conv.id, "send")
     if conv.active_run_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "当前会话有进行中的任务，请先停止或等待完成")
+
     plan = membership.plan_for(membership.effective_tier(user))
     if not await limits.allow_chat(user.id, plan.chat_per_minute):
         await audit.record(
@@ -77,6 +71,7 @@ async def send_message(
             request=request,
         )
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "发送过于频繁，请稍后再试")
+
     credits = await membership.status(db, user)
     if credits["remaining"] <= 0:
         await audit.record(
@@ -93,13 +88,14 @@ async def send_message(
             status.HTTP_402_PAYMENT_REQUIRED,
             f"积分已用尽{_reset_hint(credits)}，升级 Plus / Pro 可获得更多积分",
         )
+
     await audit.record(
-        "chat.send",
+        audit_action,
         actor=user,
         target_type="conversation",
         target_id=conv.id,
         request=request,
-        metadata={"content_length": len(body.content), "file_count": len(body.file_ids)},
+        metadata=audit_metadata,
     )
 
     client = await _client_for(user)
@@ -118,6 +114,39 @@ async def send_message(
         await limits.release_sse(user.id, sse_slot)
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "当前任务并发已满，请稍后再试")
 
+    return plan, sse_slot, run_slot
+
+
+@router.post("/{conversation_id}/tickets", response_model=ChatTicketOut)
+async def create_ticket(
+    body: ChatTicketRequest,
+    request: Request,
+    conv: Conversation = Depends(get_owned_conversation),
+    user: User = Depends(get_current_user),
+) -> dict:
+    return await chat_tickets.issue(user.id, conv.id, body.action, body.nonce, chat_tickets.client_ip(request))
+
+
+@router.post("/{conversation_id}/messages")
+async def send_message(
+    body: SendMessageRequest,
+    request: Request,
+    conv: Conversation = Depends(get_owned_conversation),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    plan, sse_slot, run_slot = await _preflight_chat_turn(
+        request,
+        conv,
+        user,
+        db,
+        audit_action="chat.send",
+        audit_metadata={
+            "content_length": len(body.content),
+            "file_count": len(body.file_ids),
+            "skill_count": len(body.skill_names),
+        },
+    )
     inner = chat_stream.stream_chat(
         conv.id,
         user.id,
@@ -125,6 +154,93 @@ async def send_message(
         user.hermes_api_key,
         body.content,
         file_ids=body.file_ids,
+        skill_names=body.skill_names,
+        max_seconds=plan.run_max_seconds,
+    )
+    return EventSourceResponse(
+        limits.wrap_stream(inner, user.id, run_slot=run_slot, sse_slot=sse_slot), ping=10
+    )
+
+
+@router.post("/{conversation_id}/messages/{message_id}/regenerate")
+async def regenerate_message(
+    message_id: uuid.UUID,
+    request: Request,
+    conv: Conversation = Depends(get_owned_conversation),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rows = list(
+        (await db.execute(select(Message).where(Message.conversation_id == conv.id))).scalars().all()
+    )
+    ordered = chat_stream.sort_messages(rows)
+    target_idx = next((idx for idx, m in enumerate(ordered) if m.id == message_id), None)
+    if target_idx is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "消息不存在")
+    if ordered[target_idx].role != "assistant":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "仅支持重新生成助手回复")
+    has_user_before = any(m.role == "user" for m in ordered[:target_idx])
+    if not has_user_before:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "未找到对应的用户消息")
+
+    plan, sse_slot, run_slot = await _preflight_chat_turn(
+        request,
+        conv,
+        user,
+        db,
+        audit_action="chat.regenerate",
+        audit_metadata={"target_message_id": str(message_id)},
+    )
+    inner = chat_stream.stream_regenerate(
+        conv.id,
+        user.id,
+        user.hermes_profile,
+        user.hermes_api_key,
+        message_id,
+        max_seconds=plan.run_max_seconds,
+    )
+    return EventSourceResponse(
+        limits.wrap_stream(inner, user.id, run_slot=run_slot, sse_slot=sse_slot), ping=10
+    )
+
+
+@router.post("/{conversation_id}/messages/{message_id}/edit")
+async def edit_and_resend_message(
+    message_id: uuid.UUID,
+    body: EditMessageRequest,
+    request: Request,
+    conv: Conversation = Depends(get_owned_conversation),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    target = await db.get(Message, message_id)
+    if target is None or target.conversation_id != conv.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "消息不存在")
+    if target.role != "user":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "仅支持编辑用户消息并重发")
+
+    plan, sse_slot, run_slot = await _preflight_chat_turn(
+        request,
+        conv,
+        user,
+        db,
+        audit_action="chat.edit",
+        audit_metadata={
+            "target_message_id": str(message_id),
+            "content_length": len(body.content),
+            "file_count": len(body.file_ids),
+            "skill_count": len(body.skill_names),
+        },
+    )
+    inner = chat_stream.stream_edit(
+        conv.id,
+        user.id,
+        user.hermes_profile,
+        user.hermes_api_key,
+        message_id,
+        body.content,
+        file_ids=body.file_ids,
+        skill_names=body.skill_names,
         max_seconds=plan.run_max_seconds,
     )
     return EventSourceResponse(

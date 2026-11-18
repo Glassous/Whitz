@@ -1,8 +1,9 @@
 import re
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sse_starlette.sse import EventSourceResponse
@@ -30,7 +31,12 @@ async def list_conversations(
     result = await db.execute(
         select(Conversation)
         .where(Conversation.user_id == user.id)
-        .order_by(Conversation.last_message_at.desc().nullslast(), Conversation.created_at.desc())
+        .order_by(
+            Conversation.is_pinned.desc(),
+            Conversation.pinned_at.desc().nullslast(),
+            Conversation.last_message_at.desc().nullslast(),
+            Conversation.created_at.desc(),
+        )
     )
     return list(result.scalars().all())
 
@@ -194,25 +200,53 @@ async def rename_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Conversation:
-    conv.title = body.title
-    await db.commit()
-    await db.refresh(conv)
-    if conv.hermes_session_id:
+    title_changed = False
+    pin_changed = False
+
+    if body.title is not None:
+        cleaned = body.title.strip()
+        if not cleaned:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "对话标题不能为空")
+        if cleaned != conv.title:
+            conv.title = cleaned
+            title_changed = True
+
+    if body.is_pinned is not None and body.is_pinned != conv.is_pinned:
+        conv.is_pinned = body.is_pinned
+        conv.pinned_at = datetime.now(timezone.utc) if body.is_pinned else None
+        pin_changed = True
+
+    if title_changed or pin_changed:
+        await db.commit()
+        await db.refresh(conv)
+
+    if title_changed and conv.hermes_session_id:
         client = HermesClient(user.hermes_profile, user.hermes_api_key)
         try:
-            await client.patch_session(conv.hermes_session_id, body.title)
+            await client.patch_session(conv.hermes_session_id, conv.title)
         except HermesError:
             pass
         finally:
             await client.aclose()
-    await audit.record(
-        "conversation.rename",
-        actor=user,
-        target_type="conversation",
-        target_id=conv.id,
-        request=request,
-        metadata={"title": body.title},
-    )
+
+    if title_changed:
+        await audit.record(
+            "conversation.rename",
+            actor=user,
+            target_type="conversation",
+            target_id=conv.id,
+            request=request,
+            metadata={"title": conv.title},
+        )
+    if pin_changed:
+        await audit.record(
+            "conversation.pin",
+            actor=user,
+            target_type="conversation",
+            target_id=conv.id,
+            request=request,
+            metadata={"is_pinned": conv.is_pinned},
+        )
     return conv
 
 
@@ -242,15 +276,19 @@ async def delete_conversation(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     conv_id = conv.id
-    file_keys = list(
+    non_global_files = list(
         (
             await db.execute(
-                select(ConversationFile.storage_key).where(ConversationFile.conversation_id == conv_id)
+                select(ConversationFile).where(
+                    ConversationFile.conversation_id == conv_id,
+                    ConversationFile.is_global.is_(False),
+                )
             )
         )
         .scalars()
         .all()
     )
+    file_keys = [f.storage_key for f in non_global_files if f.storage_key]
     if conv.hermes_session_id:
         client = HermesClient(user.hermes_profile, user.hermes_api_key)
         try:
@@ -259,6 +297,15 @@ async def delete_conversation(
             pass
         finally:
             await client.aclose()
+
+    await db.execute(
+        update(ConversationFile)
+        .where(ConversationFile.conversation_id == conv_id, ConversationFile.is_global.is_(True))
+        .values(conversation_id=None)
+    )
+    for row in non_global_files:
+        await db.delete(row)
+
     await db.delete(conv)
     await db.commit()
     if file_keys:

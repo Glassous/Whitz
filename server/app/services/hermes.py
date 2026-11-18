@@ -57,6 +57,15 @@ class HermesClient:
     async def toolsets(self) -> list:
         return (await self._request("GET", "/v1/toolsets")).json()
 
+    async def skills(self) -> list:
+        data = (await self._request("GET", "/v1/skills")).json()
+        if isinstance(data, dict):
+            for key in ("skills", "data", "items"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+            return []
+        return data if isinstance(data, list) else []
+
     async def create_session(self, title: str = "新对话") -> dict:
         # Hermes enforces unique session titles per profile, so keep the display title
         # in Postgres and create the Hermes-side session under a unique variant.
@@ -90,10 +99,13 @@ class HermesClient:
         idempotency_key: str,
         *,
         instructions: str | None = None,
+        conversation_history: list[dict[str, str]] | None = None,
     ) -> dict:
         payload: dict[str, Any] = {"input": input_text, "session_id": session_id}
         if instructions:
             payload["instructions"] = instructions
+        if conversation_history:
+            payload["conversation_history"] = conversation_history
         resp = await self._request(
             "POST",
             "/v1/runs",

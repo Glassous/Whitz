@@ -5,14 +5,17 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.schemas import ConversationFileOut
 from app.core.config import get_settings
-from app.db.models import Conversation, ConversationFile, Message
+from app.core.redis import get_redis
+from app.db.models import Conversation, ConversationFile, Message, User
 from app.db.session import SessionLocal
-from app.services import membership, titles, usage
+from app.services import cos, membership, memory_service, provisioning, skills_service, titles, usage
 from app.services.hermes import HermesClient, HermesError
 
 logger = logging.getLogger("whitz.chat")
@@ -24,10 +27,29 @@ TERMINAL_STATUSES = {
     "cancelled": "run.cancelled",
     "interrupted": "run.interrupted",
 }
+ROLE_ORDER = {"user": 0, "assistant": 1, "tool": 2}
 
 
 def sse(name: str, payload: dict) -> dict:
     return {"event": name, "data": json.dumps(payload, ensure_ascii=False)}
+
+
+def sort_messages(messages: list[Message]) -> list[Message]:
+    return sorted(messages, key=lambda m: (m.created_at, ROLE_ORDER.get(m.role, 3), str(m.id)))
+
+
+def _history_from_messages(messages: list[Message]) -> list[dict[str, str]]:
+    history: list[dict[str, str]] = []
+    for msg in messages:
+        if msg.role not in ("user", "assistant"):
+            continue
+        text = (msg.content or "").strip()
+        if not text:
+            continue
+        if msg.role == "assistant" and msg.status in ("failed", "cancelled", "streaming", "waiting"):
+            continue
+        history.append({"role": msg.role, "content": msg.content})
+    return history
 
 
 async def _settle_usage(db: AsyncSession, user_id: uuid.UUID, assistant: Message) -> None:
@@ -92,6 +114,34 @@ def parse_todos(preview) -> list[dict] | None:
     return None
 
 
+def _is_write_workspace_tool(tool_name: str) -> bool:
+    cleaned = (tool_name or "").strip().lower()
+    return cleaned == "write_workspace_file" or cleaned.endswith("write_workspace_file")
+
+
+def _extract_artifact_file_id(preview: Any) -> uuid.UUID | None:
+    obj: Any = None
+    if isinstance(preview, dict):
+        obj = preview
+    elif isinstance(preview, str):
+        raw = ChatPipeline._unwrap_tool_result(preview)
+        start = raw.find("{")
+        if start >= 0:
+            try:
+                obj = json.loads(raw[start:])
+            except (json.JSONDecodeError, ValueError):
+                obj = None
+    if not isinstance(obj, dict):
+        return None
+    raw_id = obj.get("file_id") or obj.get("id")
+    if not raw_id:
+        return None
+    try:
+        return uuid.UUID(str(raw_id))
+    except (TypeError, ValueError):
+        return None
+
+
 class ChatPipeline:
     def __init__(
         self,
@@ -120,6 +170,23 @@ class ChatPipeline:
                 self.plan = stored_plan
         stored = (assistant.tool_payload or {}).get("reasoning")
         self.reasoning: list[dict] = [b for b in stored if isinstance(b, dict)] if isinstance(stored, list) else []
+        stored_artifacts = (assistant.tool_payload or {}).get("artifacts")
+        self.artifacts: list[dict] = (
+            [dict(a) for a in stored_artifacts if isinstance(a, dict)]
+            if isinstance(stored_artifacts, list)
+            else []
+        )
+        for art in self.artifacts:
+            fid = art.get("id") or art.get("file_id")
+            if fid:
+                fid_str = str(fid)
+                art.setdefault("id", fid_str)
+                art.setdefault("file_id", fid_str)
+        self.seen_artifact_ids: set[str] = {
+            str(a.get("id") or a.get("file_id"))
+            for a in self.artifacts
+            if a.get("id") or a.get("file_id")
+        }
         self.native_reasoning = False
         self.terminal = False
         if started_at is not None:
@@ -128,6 +195,11 @@ class ChatPipeline:
             self.started_at = assistant.created_at.timestamp() - 5
         else:
             self.started_at = 0.0
+        self.run_started_dt = (
+            datetime.fromtimestamp(self.started_at, tz=timezone.utc)
+            if self.started_at
+            else datetime.now(timezone.utc) - timedelta(seconds=5)
+        )
 
     @staticmethod
     def _tool_key(tool: str, args) -> str:
@@ -159,9 +231,91 @@ class ChatPipeline:
                 payload["reasoning"] = self.reasoning
             if self.plan:
                 payload["plan"] = self.plan
+            if self.artifacts:
+                payload["artifacts"] = self.artifacts
             self.assistant.tool_payload = payload
             await self.db.commit()
             self.last_flush = now
+
+    async def _collect_new_artifacts(self, target_file_id: uuid.UUID | None = None) -> list[dict]:
+        conditions = [
+            and_(
+                ConversationFile.message_id.is_(None),
+                or_(
+                    ConversationFile.created_at >= self.run_started_dt,
+                    ConversationFile.updated_at >= self.run_started_dt,
+                ),
+            )
+        ]
+        if target_file_id is not None:
+            conditions.append(ConversationFile.id == target_file_id)
+
+        rows = (
+            await self.db.execute(
+                select(ConversationFile)
+                .where(
+                    ConversationFile.conversation_id == self.conv.id,
+                    ConversationFile.user_id == self.conv.user_id,
+                    ConversationFile.source == "assistant",
+                    ConversationFile.status == "ready",
+                    or_(*conditions),
+                )
+                .order_by(ConversationFile.created_at.asc())
+            )
+        ).scalars().all()
+
+        settings = get_settings()
+        emitted: list[dict] = []
+        changed = False
+        for row in rows:
+            fid_str = str(row.id)
+            if row.message_id is None:
+                row.message_id = self.assistant.id
+                changed = True
+            if fid_str in self.seen_artifact_ids:
+                continue
+            self.seen_artifact_ids.add(fid_str)
+            meta = {
+                "id": fid_str,
+                "file_id": fid_str,
+                "conversation_id": str(row.conversation_id) if row.conversation_id else str(self.conv.id),
+                "filename": row.filename,
+                "ext": row.ext,
+                "category": row.category,
+                "mime_type": row.mime_type,
+                "size_bytes": row.size_bytes,
+                "source": row.source,
+                "is_global": bool(row.is_global),
+                "message_id": str(row.message_id) if row.message_id else str(self.assistant.id),
+            }
+            self.artifacts.append(meta)
+            changed = True
+
+            event_payload = dict(meta)
+            file_out = ConversationFileOut.model_validate(row).model_dump(mode="json")
+            if settings.cos_configured and row.storage_key:
+                try:
+                    urls = cos.presign_preview_urls(row.storage_key, row.filename, row.category, settings=settings)
+                    expires_iso = (
+                        datetime.now(timezone.utc) + timedelta(seconds=urls["expires_in"])
+                    ).isoformat()
+                    event_payload["preview_url"] = urls["preview_url"]
+                    event_payload["thumb_url"] = urls["thumb_url"]
+                    event_payload["preview_expires_at"] = expires_iso
+                    file_out["preview_url"] = urls["preview_url"]
+                    file_out["thumb_url"] = urls["thumb_url"]
+                    file_out["preview_expires_at"] = expires_iso
+                except cos.CosError:
+                    pass
+            event_payload["file"] = file_out
+            emitted.append(event_payload)
+
+        if changed:
+            payload = dict(self.assistant.tool_payload or {})
+            payload["artifacts"] = self.artifacts
+            self.assistant.tool_payload = payload
+            await self.db.commit()
+        return emitted
 
     def _current_step(self) -> dict | None:
         items = (self.plan or {}).get("items") or []
@@ -293,13 +447,15 @@ class ChatPipeline:
         return cls._clip(raw, 1200)
 
     async def _persist_reasoning(self) -> None:
-        if not self.reasoning and not self.plan:
+        if not self.reasoning and not self.plan and not self.artifacts:
             return
         payload = dict(self.assistant.tool_payload or {})
         if self.reasoning:
             payload["reasoning"] = self.reasoning
         if self.plan:
             payload["plan"] = self.plan
+        if self.artifacts:
+            payload["artifacts"] = self.artifacts
         self.assistant.tool_payload = payload
         await self.db.commit()
 
@@ -557,8 +713,13 @@ class ChatPipeline:
                 await self.db.commit()
             yield sse(
                 "tool.completed",
-                {"tool": tool, "preview": preview, "error": error, "duration": duration,
-                 "message_id": str(row.id) if row else None},
+                {
+                    "tool": tool,
+                    "preview": preview,
+                    "error": error,
+                    "duration": duration,
+                    "message_id": str(row.id) if row else None,
+                },
             )
             if tool == "todo_list":
                 items = parse_todos(preview)
@@ -567,6 +728,10 @@ class ChatPipeline:
                     self.conv.plan = self.plan
                     await self.db.commit()
                     yield sse("plan.updated", self.plan)
+            if not error and _is_write_workspace_tool(tool):
+                parsed_fid = _extract_artifact_file_id(preview)
+                for art in await self._collect_new_artifacts(parsed_fid):
+                    yield sse("workspace.file_created", art)
             async for ev in self._sync_session():
                 yield ev
 
@@ -577,12 +742,19 @@ class ChatPipeline:
             await self.db.commit()
             yield sse(
                 name,
-                {"request_id": request_id, "execution_generation": generation,
-                 "tool": payload.get("tool"), "preview": payload.get("preview"), "detail": payload},
+                {
+                    "request_id": request_id,
+                    "execution_generation": generation,
+                    "tool": payload.get("tool"),
+                    "preview": payload.get("preview"),
+                    "detail": payload,
+                },
             )
 
         elif name == "run.completed":
             self.terminal = True
+            for art in await self._collect_new_artifacts():
+                yield sse("workspace.file_created", art)
             output = payload.get("output")
             self.assistant.content = output if output else "".join(self.buffer)
             self.assistant.status = "completed"
@@ -595,6 +767,8 @@ class ChatPipeline:
                 extra["reasoning"] = self.reasoning
             if self.plan:
                 extra["plan"] = self.plan
+            if self.artifacts:
+                extra["artifacts"] = self.artifacts
             self.assistant.tool_payload = extra
             self.conv.plan = self.plan
             await self._clear_active()
@@ -606,6 +780,7 @@ class ChatPipeline:
                     "usage": payload.get("usage"),
                     "plan": self.plan,
                     "reasoning": self.reasoning or None,
+                    "artifacts": self.artifacts or None,
                 },
             )
 
@@ -627,6 +802,8 @@ class ChatPipeline:
                 extra["reasoning"] = self.reasoning
             if self.plan:
                 extra["plan"] = self.plan
+            if self.artifacts:
+                extra["artifacts"] = self.artifacts
             self.assistant.tool_payload = extra
             await self._clear_active()
             await self.db.commit()
@@ -723,9 +900,6 @@ class ChatPipeline:
         )
 
 
-_title_inflight: set[uuid.UUID] = set()
-
-
 async def _auto_title_events(
     db: AsyncSession,
     conv: Conversation,
@@ -735,7 +909,7 @@ async def _auto_title_events(
     if conv.title != "新对话" or assistant is None or assistant.status != "completed":
         return
     content = (assistant.content or "").strip()
-    if not content or conv.id in _title_inflight:
+    if not content:
         return
     first_assistant = (
         await db.execute(
@@ -758,7 +932,11 @@ async def _auto_title_events(
     if user_msg is None or not (user_msg.content or "").strip():
         return
 
-    _title_inflight.add(conv.id)
+    r = get_redis()
+    lock_key = f"title:inflight:{conv.id}"
+    acquired = await r.set(lock_key, "1", ex=60, nx=True)
+    if not acquired:
+        return
     try:
         prompt = titles.build_auto_prompt(user_msg.content, content)
         title = await asyncio.wait_for(titles.complete_title(prompt), timeout=20)
@@ -778,7 +956,10 @@ async def _auto_title_events(
     except Exception:
         logger.exception("auto title failed")
     finally:
-        _title_inflight.discard(conv.id)
+        try:
+            await r.delete(lock_key)
+        except Exception:
+            pass
 
 
 def _build_workspace_instructions(
@@ -792,14 +973,239 @@ def _build_workspace_instructions(
         f"当前对话文件工作区（conversation_id: {conv_id}）共有 {len(workspace_files)} 个已就绪文件：",
     ]
     for f in workspace_files:
-        tag = " [本轮新附带]" if f.id in attached_ids else ""
+        tags: list[str] = []
+        if f.id in attached_ids:
+            tags.append("本轮新附带")
+        if f.is_global and f.conversation_id != conv_id:
+            tags.append("全局共享文件")
+        tag_str = f" [{' · '.join(tags)}]" if tags else ""
         lines.append(
-            f"- {f.filename}{tag} (file_id={f.id}, category={f.category}, mime={f.mime_type}, size={f.size_bytes} bytes)"
+            f"- {f.filename}{tag_str} (file_id={f.id}, category={f.category}, mime={f.mime_type}, size={f.size_bytes} bytes)"
         )
     lines.append(
-        "若用户询问或需要处理以上任意文件，请调用 list_workspace_files / read_workspace_file / search_workspace_files 工具按需读取真实内容。"
+        "若用户询问或需要处理以上任意文件，请调用 list_workspace_files / read_workspace_file / search_workspace_files 工具按需读取真实内容；若需要向用户交付报告、代码、网页、表格等文本产物，可调用 write_workspace_file 写入工作区。"
     )
     return "\n".join(lines)
+
+
+def _serialize_pending_item(item: dict[str, Any]) -> dict[str, Any]:
+    out = {}
+    for k, v in item.items():
+        if isinstance(v, uuid.UUID):
+            out[k] = str(v)
+        elif isinstance(v, datetime):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    return out
+
+
+def _pending_events_since(
+    profile: str,
+    initial_mem_ids: set[str] | None = None,
+    initial_skill_ids: set[str] | None = None,
+    since_dt: datetime | None = None,
+) -> list[dict]:
+    events: list[dict] = []
+    mem_items = memory_service.list_pending(profile)
+    if initial_mem_ids is not None:
+        new_mem = [item for item in mem_items if item["id"] not in initial_mem_ids]
+    elif since_dt is not None:
+        new_mem = [
+            item
+            for item in mem_items
+            if item.get("created_at") is None or item["created_at"] >= since_dt
+        ]
+    else:
+        new_mem = mem_items
+    if new_mem:
+        events.append(
+            sse(
+                "memory.pending",
+                {
+                    "items": [_serialize_pending_item(i) for i in new_mem],
+                    "count": len(new_mem),
+                },
+            )
+        )
+
+    skill_items = skills_service.list_pending(profile)
+    if initial_skill_ids is not None:
+        new_skills = [item for item in skill_items if item["id"] not in initial_skill_ids]
+    elif since_dt is not None:
+        new_skills = [
+            item
+            for item in skill_items
+            if item.get("created_at") is None or item["created_at"] >= since_dt
+        ]
+    else:
+        new_skills = skill_items
+    if new_skills:
+        events.append(
+            sse(
+                "skills.pending",
+                {
+                    "items": [_serialize_pending_item(i) for i in new_skills],
+                    "count": len(new_skills),
+                },
+            )
+        )
+    return events
+
+
+async def _prepare_turn_context(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    conv_id: uuid.UUID,
+    profile: str,
+    file_ids: list[uuid.UUID] | None,
+    skill_names: list[str] | None,
+) -> tuple[dict | None, str | None]:
+    user = await db.get(User, user_id)
+
+    conv_files = list(
+        (
+            await db.execute(
+                select(ConversationFile)
+                .where(
+                    ConversationFile.conversation_id == conv_id,
+                    ConversationFile.user_id == user_id,
+                    ConversationFile.status == "ready",
+                )
+                .order_by(ConversationFile.created_at.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    conv_file_ids = {f.id for f in conv_files}
+    requested_ids = list(dict.fromkeys(file_ids or []))
+    missing_requested = [fid for fid in requested_ids if fid not in conv_file_ids]
+
+    global_attached: list[ConversationFile] = []
+    if missing_requested:
+        global_attached = list(
+            (
+                await db.execute(
+                    select(ConversationFile)
+                    .where(
+                        ConversationFile.id.in_(missing_requested),
+                        ConversationFile.user_id == user_id,
+                        ConversationFile.status == "ready",
+                        ConversationFile.is_global.is_(True),
+                    )
+                    .order_by(ConversationFile.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    all_context_files = [*conv_files, *global_attached]
+    by_id = {f.id: f for f in all_context_files}
+    attached_files = [by_id[fid] for fid in requested_ids if fid in by_id]
+
+    cleaned_skills: list[str] = []
+    if skill_names:
+        disabled_set = set(provisioning.read_disabled_skills(profile))
+        local_skills = {s["name"]: s for s in skills_service.list_skills(profile)}
+        seen_skills: set[str] = set()
+        for raw_name in skill_names:
+            name = (raw_name or "").strip()
+            if not name or name in seen_skills or name in disabled_set:
+                continue
+            seen_skills.add(name)
+            cleaned_skills.append(name)
+            if len(cleaned_skills) >= 10:
+                break
+    else:
+        local_skills = {}
+
+    payload: dict[str, Any] = {}
+    if attached_files:
+        payload["attachments"] = [
+            {
+                "id": str(f.id),
+                "filename": f.filename,
+                "ext": f.ext,
+                "category": f.category,
+                "size_bytes": f.size_bytes,
+                "is_global": f.is_global,
+            }
+            for f in attached_files
+        ]
+    if cleaned_skills:
+        payload["skills"] = cleaned_skills
+
+    instruction_parts: list[str] = []
+    profile_ctx = provisioning.build_profile_context(user)
+    if profile_ctx:
+        instruction_parts.append(profile_ctx)
+
+    if cleaned_skills:
+        skill_lines = ["本轮对话用户显式指定使用以下技能（请优先调用并遵循其工作流程）："]
+        for sname in cleaned_skills:
+            info = local_skills.get(sname)
+            desc = (info.get("description") or "").strip() if info else ""
+            skill_lines.append(f"- {sname}" + (f"：{desc}" if desc else ""))
+        instruction_parts.append("\n".join(skill_lines))
+
+    workspace_ctx = _build_workspace_instructions(conv_id, all_context_files, {f.id for f in attached_files})
+    if workspace_ctx:
+        instruction_parts.append(workspace_ctx)
+
+    return (payload or None), ("\n\n".join(instruction_parts) if instruction_parts else None)
+
+
+async def _run_pipeline_turn(
+    db: AsyncSession,
+    client: HermesClient,
+    conv: Conversation,
+    user_id: uuid.UUID,
+    profile: str,
+    assistant: Message,
+    prompt_content: str,
+    instructions: str | None,
+    *,
+    conversation_history: list[dict[str, str]] | None = None,
+    max_seconds: int | None = None,
+) -> AsyncIterator[dict]:
+    initial_mem_ids = {item["id"] for item in memory_service.list_pending(profile)}
+    initial_skill_ids = {item["id"] for item in skills_service.list_pending(profile)}
+
+    run_started = time.time() - 2
+    run = await client.create_run(
+        prompt_content,
+        conv.hermes_session_id,
+        uuid.uuid4().hex,
+        instructions=instructions,
+        conversation_history=conversation_history,
+    )
+    run_id = str(run.get("run_id") or run.get("id"))
+    conv.active_run_id = run_id
+    conv.active_run_status = "running"
+    assistant.hermes_run_id = run_id
+    await db.commit()
+    yield sse("run.started", {"run_id": run_id})
+
+    pipeline = ChatPipeline(
+        db,
+        client,
+        conv,
+        assistant,
+        run_id,
+        started_at=run_started,
+        max_seconds=max_seconds,
+    )
+    await pipeline.prepare()
+    async for ev in pipeline.pump():
+        yield ev
+    if pipeline.terminal:
+        await _settle_usage(db, user_id, assistant)
+        for ev in _pending_events_since(profile, initial_mem_ids, initial_skill_ids):
+            yield ev
+        async for ev in _auto_title_events(db, conv, assistant, client):
+            yield ev
 
 
 async def stream_chat(
@@ -809,6 +1215,7 @@ async def stream_chat(
     api_key: str,
     content: str,
     file_ids: list[uuid.UUID] | None = None,
+    skill_names: list[str] | None = None,
     max_seconds: int | None = None,
 ) -> AsyncIterator[dict]:
     async with SessionLocal() as db:
@@ -835,38 +1242,8 @@ async def stream_chat(
                 conv.hermes_session_id = str(session.get("id") or session.get("session_id") or "")
                 await db.commit()
 
-            workspace_files = list(
-                (
-                    await db.execute(
-                        select(ConversationFile)
-                        .where(
-                            ConversationFile.conversation_id == conv.id,
-                            ConversationFile.user_id == user_id,
-                            ConversationFile.status == "ready",
-                        )
-                        .order_by(ConversationFile.created_at.asc())
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            requested_ids = {fid for fid in (file_ids or [])}
-            attached_files = [f for f in workspace_files if f.id in requested_ids]
-            user_payload = (
-                {
-                    "attachments": [
-                        {
-                            "id": str(f.id),
-                            "filename": f.filename,
-                            "ext": f.ext,
-                            "category": f.category,
-                            "size_bytes": f.size_bytes,
-                        }
-                        for f in attached_files
-                    ]
-                }
-                if attached_files
-                else None
+            user_payload, instructions = await _prepare_turn_context(
+                db, user_id, conv.id, profile, file_ids, skill_names
             )
 
             user_msg = Message(
@@ -889,34 +1266,23 @@ async def stream_chat(
             conv.last_message_at = datetime.now(timezone.utc)
             await db.commit()
             await usage.record_message(db, user_id)
-            yield sse("message.created", {"user_message_id": str(user_msg.id), "assistant_message_id": str(assistant.id)})
+            yield sse(
+                "message.created",
+                {"user_message_id": str(user_msg.id), "assistant_message_id": str(assistant.id)},
+            )
 
-            instructions = _build_workspace_instructions(conv.id, workspace_files, {f.id for f in attached_files})
-            run_started = time.time() - 2
-            run = await client.create_run(
+            async for ev in _run_pipeline_turn(
+                db,
+                client,
+                conv,
+                user_id,
+                profile,
+                assistant,
                 content,
-                conv.hermes_session_id,
-                uuid.uuid4().hex,
-                instructions=instructions,
-            )
-            run_id = str(run.get("run_id") or run.get("id"))
-            conv.active_run_id = run_id
-            conv.active_run_status = "running"
-            assistant.hermes_run_id = run_id
-            await db.commit()
-            yield sse("run.started", {"run_id": run_id})
-
-            pipeline = ChatPipeline(
-                db, client, conv, assistant, run_id, started_at=run_started, max_seconds=max_seconds
-            )
-            await pipeline.prepare()
-            async for ev in pipeline.pump():
+                instructions,
+                max_seconds=max_seconds,
+            ):
                 yield ev
-            if pipeline.terminal:
-                await _settle_usage(db, user_id, assistant)
-            if pipeline.terminal:
-                async for ev in _auto_title_events(db, conv, assistant, client):
-                    yield ev
         except HermesError as exc:
             if assistant is not None:
                 assistant.status = "failed"
@@ -926,6 +1292,256 @@ async def stream_chat(
             yield sse("error", {"code": "hermes_error", "status": exc.status_code, "detail": exc.detail})
         except Exception as exc:
             logger.exception("chat stream failed")
+            if assistant is not None:
+                assistant.status = "failed"
+            conv.active_run_id = None
+            conv.active_run_status = None
+            await db.commit()
+            yield sse("error", {"code": "internal_error", "detail": str(exc)})
+        finally:
+            await client.aclose()
+
+
+async def stream_regenerate(
+    conv_id: uuid.UUID,
+    user_id: uuid.UUID,
+    profile: str,
+    api_key: str,
+    target_message_id: uuid.UUID,
+    max_seconds: int | None = None,
+) -> AsyncIterator[dict]:
+    async with SessionLocal() as db:
+        conv = await db.get(Conversation, conv_id)
+        if conv is None:
+            yield sse("error", {"code": "not_found"})
+            return
+        now = datetime.now(timezone.utc)
+        claimed = await db.execute(
+            update(Conversation)
+            .where(Conversation.id == conv_id, Conversation.active_run_id.is_(None))
+            .values(active_run_id="pending", active_run_status="starting", last_message_at=now)
+        )
+        await db.commit()
+        if not claimed.rowcount:
+            yield sse("error", {"code": "run_in_progress", "detail": "当前会话有进行中的任务"})
+            return
+        await db.refresh(conv)
+        client = HermesClient(profile, api_key)
+        assistant = None
+        try:
+            all_rows = list(
+                (await db.execute(select(Message).where(Message.conversation_id == conv.id))).scalars().all()
+            )
+            ordered = sort_messages(all_rows)
+            target_idx = next((idx for idx, m in enumerate(ordered) if m.id == target_message_id), None)
+            if target_idx is None or ordered[target_idx].role != "assistant":
+                conv.active_run_id = None
+                conv.active_run_status = None
+                await db.commit()
+                yield sse("error", {"code": "invalid_target", "detail": "未找到可重新生成的助手消息"})
+                return
+
+            preceding_idx = next(
+                (idx for idx in range(target_idx - 1, -1, -1) if ordered[idx].role == "user"),
+                None,
+            )
+            if preceding_idx is None:
+                conv.active_run_id = None
+                conv.active_run_status = None
+                await db.commit()
+                yield sse("error", {"code": "invalid_target", "detail": "未找到对应的用户消息"})
+                return
+
+            target_msg = ordered[target_idx]
+            user_msg = ordered[preceding_idx]
+            history = _history_from_messages(ordered[:preceding_idx])
+
+            delete_ids = {m.id for m in ordered[target_idx:]}
+            if target_msg.hermes_run_id:
+                for m in ordered:
+                    if m.role == "tool" and m.hermes_run_id == target_msg.hermes_run_id:
+                        delete_ids.add(m.id)
+            if delete_ids:
+                await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
+
+            prompt_payload = user_msg.tool_payload or {}
+            file_ids: list[uuid.UUID] = []
+            for att in prompt_payload.get("attachments") or []:
+                if isinstance(att, dict) and att.get("id"):
+                    try:
+                        file_ids.append(uuid.UUID(str(att["id"])))
+                    except ValueError:
+                        pass
+            skill_names = [str(s) for s in (prompt_payload.get("skills") or []) if str(s).strip()]
+
+            _, instructions = await _prepare_turn_context(
+                db, user_id, conv.id, profile, file_ids, skill_names
+            )
+
+            # Create a fresh Hermes session so discarded turns never pollute agent history.
+            session = await client.create_session(conv.title)
+            conv.hermes_session_id = str(session.get("id") or session.get("session_id") or "")
+
+            assistant_ts = max(datetime.now(timezone.utc), user_msg.created_at + timedelta(milliseconds=1))
+            assistant = Message(
+                conversation_id=conv.id,
+                role="assistant",
+                content="",
+                status="streaming",
+                created_at=assistant_ts,
+            )
+            db.add(assistant)
+            conv.plan = None
+            conv.last_message_at = datetime.now(timezone.utc)
+            await db.commit()
+            await usage.record_message(db, user_id)
+            yield sse(
+                "message.created",
+                {
+                    "user_message_id": str(user_msg.id),
+                    "assistant_message_id": str(assistant.id),
+                    "replaced_message_id": str(target_message_id),
+                },
+            )
+
+            async for ev in _run_pipeline_turn(
+                db,
+                client,
+                conv,
+                user_id,
+                profile,
+                assistant,
+                user_msg.content,
+                instructions,
+                conversation_history=history or None,
+                max_seconds=max_seconds,
+            ):
+                yield ev
+        except HermesError as exc:
+            if assistant is not None:
+                assistant.status = "failed"
+            conv.active_run_id = None
+            conv.active_run_status = None
+            await db.commit()
+            yield sse("error", {"code": "hermes_error", "status": exc.status_code, "detail": exc.detail})
+        except Exception as exc:
+            logger.exception("chat regenerate failed")
+            if assistant is not None:
+                assistant.status = "failed"
+            conv.active_run_id = None
+            conv.active_run_status = None
+            await db.commit()
+            yield sse("error", {"code": "internal_error", "detail": str(exc)})
+        finally:
+            await client.aclose()
+
+
+async def stream_edit(
+    conv_id: uuid.UUID,
+    user_id: uuid.UUID,
+    profile: str,
+    api_key: str,
+    target_message_id: uuid.UUID,
+    content: str,
+    file_ids: list[uuid.UUID] | None = None,
+    skill_names: list[str] | None = None,
+    max_seconds: int | None = None,
+) -> AsyncIterator[dict]:
+    async with SessionLocal() as db:
+        conv = await db.get(Conversation, conv_id)
+        if conv is None:
+            yield sse("error", {"code": "not_found"})
+            return
+        now = datetime.now(timezone.utc)
+        claimed = await db.execute(
+            update(Conversation)
+            .where(Conversation.id == conv_id, Conversation.active_run_id.is_(None))
+            .values(active_run_id="pending", active_run_status="starting", last_message_at=now)
+        )
+        await db.commit()
+        if not claimed.rowcount:
+            yield sse("error", {"code": "run_in_progress", "detail": "当前会话有进行中的任务"})
+            return
+        await db.refresh(conv)
+        client = HermesClient(profile, api_key)
+        assistant = None
+        try:
+            all_rows = list(
+                (await db.execute(select(Message).where(Message.conversation_id == conv.id))).scalars().all()
+            )
+            ordered = sort_messages(all_rows)
+            target_idx = next((idx for idx, m in enumerate(ordered) if m.id == target_message_id), None)
+            if target_idx is None or ordered[target_idx].role != "user":
+                conv.active_run_id = None
+                conv.active_run_status = None
+                await db.commit()
+                yield sse("error", {"code": "invalid_target", "detail": "未找到可编辑的用户消息"})
+                return
+
+            history = _history_from_messages(ordered[:target_idx])
+            delete_ids = {m.id for m in ordered[target_idx:]}
+            if delete_ids:
+                await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
+
+            user_payload, instructions = await _prepare_turn_context(
+                db, user_id, conv.id, profile, file_ids, skill_names
+            )
+
+            # Create a fresh Hermes session so discarded turns never pollute agent history.
+            session = await client.create_session(conv.title)
+            conv.hermes_session_id = str(session.get("id") or session.get("session_id") or "")
+
+            user_msg = Message(
+                conversation_id=conv.id,
+                role="user",
+                content=content,
+                tool_payload=user_payload,
+                status="completed",
+                created_at=datetime.now(timezone.utc),
+            )
+            assistant = Message(
+                conversation_id=conv.id,
+                role="assistant",
+                content="",
+                status="streaming",
+                created_at=user_msg.created_at + timedelta(milliseconds=1),
+            )
+            db.add_all([user_msg, assistant])
+            conv.plan = None
+            conv.last_message_at = datetime.now(timezone.utc)
+            await db.commit()
+            await usage.record_message(db, user_id)
+            yield sse(
+                "message.created",
+                {
+                    "user_message_id": str(user_msg.id),
+                    "assistant_message_id": str(assistant.id),
+                    "replaced_message_id": str(target_message_id),
+                },
+            )
+
+            async for ev in _run_pipeline_turn(
+                db,
+                client,
+                conv,
+                user_id,
+                profile,
+                assistant,
+                content,
+                instructions,
+                conversation_history=history or None,
+                max_seconds=max_seconds,
+            ):
+                yield ev
+        except HermesError as exc:
+            if assistant is not None:
+                assistant.status = "failed"
+            conv.active_run_id = None
+            conv.active_run_status = None
+            await db.commit()
+            yield sse("error", {"code": "hermes_error", "status": exc.status_code, "detail": exc.detail})
+        except Exception as exc:
+            logger.exception("chat edit failed")
             if assistant is not None:
                 assistant.status = "failed"
             conv.active_run_id = None
@@ -965,7 +1581,9 @@ async def stream_reconnect(
                 yield ev
             if pipeline.terminal:
                 await _settle_usage(db, conv.user_id, assistant)
-            if pipeline.terminal:
+                since_dt = assistant.created_at - timedelta(seconds=2) if assistant.created_at else None
+                for ev in _pending_events_since(profile, since_dt=since_dt):
+                    yield ev
                 async for ev in _auto_title_events(db, conv, assistant, client):
                     yield ev
         except HermesError as exc:

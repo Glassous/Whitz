@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import User
 from app.db.session import get_db
-from app.services import mcp_files
+from app.services import mcp_files, mcp_skills
 
 router = APIRouter(prefix="/api/internal/mcp", tags=["internal-mcp"])
 
@@ -41,13 +41,15 @@ def _rpc_error(req_id, code: int, message: str, http_status: int = 200) -> JSONR
     )
 
 
-@router.post("/files")
-async def mcp_files_post(
+async def _handle_mcp_post(
+    *,
     request: Request,
-    authorization: str | None = Header(default=None),
-    x_whitz_profile: str | None = Header(default=None),
-    mcp_session_id: str | None = Header(default=None),
-    db: AsyncSession = Depends(get_db),
+    authorization: str | None,
+    x_whitz_profile: str | None,
+    mcp_session_id: str | None,
+    db: AsyncSession,
+    server_name: str,
+    service_mod,
 ):
     user = await _authenticate_profile(db, authorization, x_whitz_profile)
     try:
@@ -80,7 +82,7 @@ async def mcp_files_post(
                 "result": {
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "whitz-files", "version": "1.0.0"},
+                    "serverInfo": {"name": server_name, "version": "1.0.0"},
                 },
             },
         )
@@ -91,19 +93,38 @@ async def mcp_files_post(
     if method == "tools/list":
         return JSONResponse(
             headers=headers,
-            content={"jsonrpc": "2.0", "id": req_id, "result": {"tools": mcp_files.MCP_TOOLS}},
+            content={"jsonrpc": "2.0", "id": req_id, "result": {"tools": service_mod.MCP_TOOLS}},
         )
 
     if method == "tools/call":
         tool_name = str(params.get("name") or "")
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
-        result = await mcp_files.call_tool(db, user, tool_name, arguments)
+        result = await service_mod.call_tool(db, user, tool_name, arguments)
         return JSONResponse(
             headers=headers,
             content={"jsonrpc": "2.0", "id": req_id, "result": result},
         )
 
     return _rpc_error(req_id, -32601, f"Method not found: {method}")
+
+
+@router.post("/files")
+async def mcp_files_post(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_whitz_profile: str | None = Header(default=None),
+    mcp_session_id: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _handle_mcp_post(
+        request=request,
+        authorization=authorization,
+        x_whitz_profile=x_whitz_profile,
+        mcp_session_id=mcp_session_id,
+        db=db,
+        server_name="whitz-files",
+        service_mod=mcp_files,
+    )
 
 
 @router.get("/files")
@@ -113,4 +134,33 @@ async def mcp_files_get():
 
 @router.delete("/files")
 async def mcp_files_delete():
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/skills")
+async def mcp_skills_post(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_whitz_profile: str | None = Header(default=None),
+    mcp_session_id: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _handle_mcp_post(
+        request=request,
+        authorization=authorization,
+        x_whitz_profile=x_whitz_profile,
+        mcp_session_id=mcp_session_id,
+        db=db,
+        server_name="whitz-skills",
+        service_mod=mcp_skills,
+    )
+
+
+@router.get("/skills")
+async def mcp_skills_get():
+    return Response(status_code=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+@router.delete("/skills")
+async def mcp_skills_delete():
     return Response(status_code=status.HTTP_204_NO_CONTENT)

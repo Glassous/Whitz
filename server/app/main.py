@@ -8,7 +8,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.api.routes import admin, admin_membership, agent, auth, chat, conversations, files, mcp, users
+from app.api.routes import (
+    admin,
+    admin_membership,
+    agent,
+    auth,
+    chat,
+    conversations,
+    files,
+    library,
+    mcp,
+    memory,
+    skills,
+    users,
+)
 from app.core.config import get_settings
 from app.core.redis import close_redis, get_redis
 from app.db.session import SessionLocal, engine
@@ -74,6 +87,9 @@ def create_app() -> FastAPI:
     app.include_router(admin_membership.router)
     app.include_router(conversations.router)
     app.include_router(files.router)
+    app.include_router(library.router)
+    app.include_router(memory.router)
+    app.include_router(skills.router)
     app.include_router(mcp.router)
     app.include_router(chat.router)
     app.include_router(agent.router)
