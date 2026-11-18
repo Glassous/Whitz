@@ -98,6 +98,11 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
     persona: str
+    profile_context_enabled: bool = False
+    profile_context_consented_at: datetime | None = None
+    memory_enabled: bool = False
+    memory_consented_at: datetime | None = None
+    memory_require_confirm: bool = True
     email_verified_at: datetime | None = None
     membership_tier: str
     membership_expires_at: datetime | None
@@ -195,7 +200,8 @@ class ConversationCreate(BaseModel):
 
 
 class ConversationUpdate(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    is_pinned: bool | None = None
 
 
 class MessageOut(BaseModel):
@@ -216,6 +222,8 @@ class ConversationOut(BaseModel):
 
     id: uuid.UUID
     title: str
+    is_pinned: bool = False
+    pinned_at: datetime | None = None
     plan: dict | None
     active_run_id: str | None
     active_run_status: str | None
@@ -241,6 +249,13 @@ class ConversationSearchHit(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
     file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
+    skill_names: list[str] = Field(default_factory=list, max_length=10)
+
+
+class EditMessageRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=32000)
+    file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
+    skill_names: list[str] = Field(default_factory=list, max_length=10)
 
 
 class FilePresignRequest(BaseModel):
@@ -270,15 +285,34 @@ class ConversationFileOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    conversation_id: uuid.UUID
+    conversation_id: uuid.UUID | None = None
     filename: str
     ext: str
     mime_type: str
     category: str
     size_bytes: int
     status: str
+    source: str = "user"
+    is_global: bool = False
+    message_id: uuid.UUID | None = None
+    preview_url: str | None = None
+    thumb_url: str | None = None
+    preview_expires_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class LibraryFileOut(ConversationFileOut):
+    conversation_title: str | None = None
+
+
+class LibraryFileUpdateRequest(BaseModel):
+    is_global: bool | None = None
+    filename: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class AttachLibraryFilesRequest(BaseModel):
+    file_ids: list[uuid.UUID] = Field(min_length=1, max_length=20)
 
 
 class FileDownloadUrlOut(BaseModel):
@@ -423,3 +457,248 @@ class AdminUserOut(BaseModel):
     membership_expires_at: datetime | None
     credits: CreditSummaryOut | None = None
     created_at: datetime
+
+
+class ProfileContextUpdateRequest(BaseModel):
+    enabled: bool
+    consent: bool = False
+
+
+class MemorySettingsUpdateRequest(BaseModel):
+    enabled: bool | None = None
+    require_confirm: bool | None = None
+    consent: bool = False
+
+
+class MemoryEntryOut(BaseModel):
+    id: str
+    target: str = "memory"
+    content: str
+    source: str = "manual"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class MemoryEntryCreateRequest(BaseModel):
+    target: Literal["memory", "user"] = "memory"
+    content: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("content")
+    @classmethod
+    def check_content(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("记忆内容不能为空")
+        return cleaned
+
+
+class MemoryEntryUpdateRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    target: Literal["memory", "user"] | None = None
+
+    @field_validator("content")
+    @classmethod
+    def check_content(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("记忆内容不能为空")
+        return cleaned
+
+
+class MemoryPendingOut(BaseModel):
+    id: str
+    target: str = "memory"
+    action: str = "add"
+    content: str
+    old_content: str | None = None
+    conversation_id: uuid.UUID | None = None
+    created_at: datetime | None = None
+
+
+class MemoryPendingResolveRequest(BaseModel):
+    action: Literal["approve", "reject"]
+    content: str | None = Field(default=None, max_length=2000)
+
+
+class MemoryOverviewOut(BaseModel):
+    memory_enabled: bool
+    memory_consented_at: datetime | None = None
+    memory_require_confirm: bool
+    entries: list[MemoryEntryOut] = Field(default_factory=list)
+    pending: list[MemoryPendingOut] = Field(default_factory=list)
+    char_count: int = 0
+    char_limit: int = 2200
+    memory_char_count: int = 0
+    memory_char_limit: int = 2200
+    user_char_count: int = 0
+    user_char_limit: int = 1375
+
+
+class SkillOut(BaseModel):
+    name: str
+    title: str | None = None
+    description: str = ""
+    category: str | None = None
+    enabled: bool = True
+    source: str = "custom"
+    repo_url: str | None = None
+    content: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    updated_at: datetime | None = None
+
+
+class SkillCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+    content: str = Field(min_length=1, max_length=64000)
+    category: str | None = Field(default=None, max_length=64)
+    enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def check_skill_name(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned or "/" in cleaned or "\\" in cleaned or ".." in cleaned:
+            raise ValueError("技能名称无效")
+        return cleaned
+
+
+class SkillToggleRequest(BaseModel):
+    enabled: bool
+
+
+class SkillGithubPreviewRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=500)
+    ref: str | None = Field(default=None, max_length=120)
+    path: str | None = Field(default=None, max_length=300)
+
+
+class SkillGithubPreviewOut(BaseModel):
+    name: str
+    description: str = ""
+    content: str
+    repo_url: str
+    ref: str | None = None
+    path: str | None = None
+
+
+class SkillGithubInstallRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=500)
+    name: str | None = Field(default=None, max_length=80)
+    ref: str | None = Field(default=None, max_length=120)
+    path: str | None = Field(default=None, max_length=300)
+    enabled: bool = True
+
+
+class SkillPendingOut(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    content: str
+    action: str = "create"
+    source: str = "agent"
+    conversation_id: uuid.UUID | None = None
+    created_at: datetime | None = None
+
+
+class SkillPendingResolveRequest(BaseModel):
+    action: Literal["approve", "reject"]
+    content: str | None = Field(default=None, max_length=64000)
+    enabled: bool = True
+
+
+class UserSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id: uuid.UUID
+    user_agent: str | None = None
+    client_ip: str | None = None
+    last_used_at: datetime | None = None
+    created_at: datetime
+    expires_at: datetime
+    is_current: bool = False
+
+
+class AdminLedgerItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: uuid.UUID
+    created_at: datetime
+    tokens: int
+    credits: float = 0.0
+    kind: str
+    tier: str | None = None
+    conversation_id: uuid.UUID | None = None
+    message_id: uuid.UUID | None = None
+    actor_user_id: uuid.UUID | None = None
+    actor_email: str | None = None
+    note: str | None = None
+
+
+class InviteRedemptionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    code_id: uuid.UUID
+    code: str | None = None
+    user_id: uuid.UUID
+    user_email: str | None = None
+    tier: str
+    duration_days: int
+    redeemed_at: datetime
+
+
+class AdminUserDetailOut(AdminUserOut):
+    persona: str = ""
+    email_verified_at: datetime | None = None
+    credit_anchor_at: datetime | None = None
+    updated_at: datetime | None = None
+    profile_context_enabled: bool = False
+    profile_context_consented_at: datetime | None = None
+    memory_enabled: bool = False
+    memory_consented_at: datetime | None = None
+    memory_require_confirm: bool = True
+    conversation_count: int = 0
+    message_count: int = 0
+    file_count: int = 0
+    total_tokens: int = 0
+    total_messages: int = 0
+    total_runs: int = 0
+    active_sessions: list[UserSessionOut] = Field(default_factory=list)
+    recent_ledger: list[AdminLedgerItemOut] = Field(default_factory=list)
+    invite_redemptions: list[InviteRedemptionOut] = Field(default_factory=list)
+
+
+class AdminAnalyticsDayOut(BaseModel):
+    day: str
+    messages: int = 0
+    tokens: int = 0
+    credits: float = 0.0
+    runs: int = 0
+    new_users: int = 0
+    active_users: int = 0
+
+
+class AdminAnalyticsTopUserOut(BaseModel):
+    user_id: uuid.UUID
+    email: str
+    display_name: str
+    membership_tier: str
+    messages: int = 0
+    tokens: int = 0
+    credits: float = 0.0
+    runs: int = 0
+
+
+class AdminAnalyticsOut(BaseModel):
+    days: int = 30
+    start_day: str
+    end_day: str
+    tokens_per_credit: int = 5000
+    daily: list[AdminAnalyticsDayOut] = Field(default_factory=list)
+    top_users: list[AdminAnalyticsTopUserOut] = Field(default_factory=list)
+    membership_distribution: dict[str, int] = Field(default_factory=dict)
+    file_stats: dict[str, int] = Field(default_factory=dict)
+    summary: dict[str, int | float] = Field(default_factory=dict)
+    generated_at: datetime

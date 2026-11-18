@@ -73,8 +73,10 @@ class Settings(BaseSettings):
     cos_sts_duration_seconds: int = 900
     cos_upload_expires_seconds: int = 600
     cos_download_expires_seconds: int = 300
+    cos_image_thumb_query: str = ""
     file_max_size_mb: int = 20
     max_files_per_conversation: int = 20
+    pending_file_ttl_seconds: int = 1800
 
     internal_mcp_base_url: str = "http://server:8000"
 

@@ -46,6 +46,11 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(16), default="user")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     persona: Mapped[str] = mapped_column(Text, default="")
+    profile_context_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    profile_context_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    memory_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    memory_require_confirm: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     hermes_profile: Mapped[str] = mapped_column(String(64), unique=True)
     hermes_api_key: Mapped[str] = mapped_column(String(128))
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -193,6 +198,8 @@ class Conversation(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     hermes_session_id: Mapped[str] = mapped_column(String(128))
     title: Mapped[str] = mapped_column(String(200), default="新对话")
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     plan: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     active_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     active_run_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -207,7 +214,7 @@ class Conversation(Base):
         back_populates="conversation", cascade="all, delete-orphan", order_by="Message.created_at"
     )
     files: Mapped[list["ConversationFile"]] = relationship(
-        back_populates="conversation", cascade="all, delete-orphan", order_by="ConversationFile.created_at"
+        back_populates="conversation", passive_deletes=True, order_by="ConversationFile.created_at"
     )
 
 
@@ -218,8 +225,8 @@ class ConversationFile(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
@@ -232,13 +239,17 @@ class ConversationFile(Base):
     storage_key: Mapped[str] = mapped_column(String(512), unique=True)
     etag: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="pending", server_default="pending")
+    source: Mapped[str] = mapped_column(String(24), default="user", server_default="user")
+    is_global: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    expires_cleanup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    conversation: Mapped[Conversation] = relationship(back_populates="files")
+    conversation: Mapped[Conversation | None] = relationship(back_populates="files")
 
 
 class Message(Base):

@@ -9,6 +9,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
 from app.core.config import get_settings
+from app.core.redis import get_redis
 
 _hasher = PasswordHasher()
 
@@ -89,3 +90,17 @@ def hash_refresh_token(token: str) -> str:
 
 def generate_hermes_key() -> str:
     return secrets.token_hex(32)
+
+
+def session_revoked_key(session_id: uuid.UUID | str) -> str:
+    return f"session_revoked:{session_id}"
+
+
+async def revoke_session(session_id: uuid.UUID | str) -> None:
+    settings = get_settings()
+    ttl = max(60, int(settings.jwt_access_ttl_minutes) * 60 + 60)
+    await get_redis().set(session_revoked_key(session_id), "1", ex=ttl)
+
+
+async def is_session_revoked(session_id: uuid.UUID | str) -> bool:
+    return bool(await get_redis().exists(session_revoked_key(session_id)))

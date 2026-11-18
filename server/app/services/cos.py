@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 
@@ -51,15 +51,16 @@ def _cos_origin(settings: Settings) -> str:
 
 def build_storage_key(
     user_id: uuid.UUID,
-    conversation_id: uuid.UUID,
+    conversation_id: uuid.UUID | None,
     file_id: uuid.UUID,
     filename: str,
     settings: Settings | None = None,
 ) -> str:
     s = settings or get_settings()
     prefix = s.cos_key_prefix.strip().strip("/") or "whitz/uploads"
+    scope = str(conversation_id) if conversation_id is not None else "global"
     safe_name = filename.replace("/", "_").replace("\\", "_")
-    return f"{prefix}/{user_id}/{conversation_id}/{file_id}/{safe_name}"
+    return f"{prefix}/{user_id}/{scope}/{file_id}/{safe_name}"
 
 
 def _encode_uri_path(key: str) -> str:
@@ -94,7 +95,7 @@ def sign_v5(
 
     norm_params: dict[str, str] = {}
     for k, v in (params or {}).items():
-        lk = k.strip().lower()
+        lk = _rfc3986_quote(k.strip()).lower()
         if lk:
             norm_params[lk] = str(v)
     param_keys = sorted(norm_params.keys())
@@ -302,12 +303,33 @@ async def presign_put(
     }
 
 
+def _parse_query_params(raw_query: str) -> dict[str, str]:
+    cleaned = raw_query.strip().lstrip("?&")
+    if not cleaned:
+        return {}
+    parsed: dict[str, str] = {}
+    for part in cleaned.split("&"):
+        if not part:
+            continue
+        if "=" in part:
+            k, v = part.split("=", 1)
+            k_clean = unquote(k.strip())
+            if k_clean:
+                parsed[k_clean] = unquote(v)
+        else:
+            k_clean = unquote(part.strip())
+            if k_clean:
+                parsed[k_clean] = ""
+    return parsed
+
+
 def presign_get(
     *,
     key: str,
     filename: str | None = None,
     inline: bool = False,
     expires_seconds: int | None = None,
+    extra_params: dict[str, str] | None = None,
     settings: Settings | None = None,
 ) -> str:
     s = _require_cos(settings)
@@ -319,6 +341,11 @@ def presign_get(
         disp = "inline" if inline else "attachment"
         encoded = quote(filename, safe="")
         params["response-content-disposition"] = f"{disp}; filename*=UTF-8''{encoded}"
+    if extra_params:
+        for k, v in extra_params.items():
+            cleaned_k = k.strip()
+            if cleaned_k:
+                params[cleaned_k] = str(v)
 
     auth, _ = sign_v5(
         method="GET",
@@ -329,9 +356,51 @@ def presign_get(
         params=params,
         expires_seconds=ttl,
     )
-    query_parts = [f"{k}={_rfc3986_quote(v)}" for k, v in sorted(params.items())]
+    query_parts: list[str] = []
+    for k, v in sorted(params.items()):
+        if v == "":
+            query_parts.append(_rfc3986_quote(k, safe="/-_.~!"))
+        else:
+            query_parts.append(f"{_rfc3986_quote(k, safe='/-_.~')}={_rfc3986_quote(v)}")
     query_parts.append(auth)
     return f"{_cos_origin(s)}{_encode_uri_path(key)}?{'&'.join(query_parts)}"
+
+
+def presign_preview_urls(
+    key: str,
+    filename: str,
+    category: str,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    s = _require_cos(settings)
+    ttl = int(s.cos_download_expires_seconds or 300)
+    preview_url = presign_get(
+        key=key,
+        filename=filename or None,
+        inline=True,
+        expires_seconds=ttl,
+        settings=s,
+    )
+    thumb_url: str | None = None
+    if category == "image":
+        thumb_query = s.cos_image_thumb_query.strip()
+        if thumb_query:
+            thumb_params = _parse_query_params(thumb_query)
+            thumb_url = presign_get(
+                key=key,
+                filename=filename or None,
+                inline=True,
+                expires_seconds=ttl,
+                extra_params=thumb_params,
+                settings=s,
+            )
+        else:
+            thumb_url = preview_url
+    return {
+        "preview_url": preview_url,
+        "thumb_url": thumb_url,
+        "expires_in": ttl,
+    }
 
 
 async def head_object(key: str, settings: Settings | None = None) -> dict[str, Any] | None:
@@ -397,6 +466,45 @@ async def get_object_bytes(
     except httpx.HTTPError as exc:
         raise CosError(f"下载 COS 文件失败: {exc}", status_code=502) from exc
     return bytes(buf)
+
+
+async def put_object_bytes(
+    key: str,
+    data: bytes,
+    content_type: str,
+    settings: Settings | None = None,
+) -> str | None:
+    s = _require_cos(settings)
+    creds = _master_credentials(s)
+    host = _cos_host(s)
+    mime = (content_type or "application/octet-stream").strip()
+    auth, _ = sign_v5(
+        method="PUT",
+        key=key,
+        secret_id=creds.secret_id,
+        secret_key=creds.secret_key,
+        headers={
+            "host": host,
+            "content-type": mime,
+            "content-length": str(len(data)),
+        },
+        expires_seconds=120,
+    )
+    url = f"{_cos_origin(s)}{_encode_uri_path(key)}"
+    headers = {
+        "Authorization": auth,
+        "Host": host,
+        "Content-Type": mime,
+        "Content-Length": str(len(data)),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), trust_env=False) as client:
+            resp = await client.put(url, content=data, headers=headers)
+    except httpx.HTTPError as exc:
+        raise CosError(f"上传 COS 文件失败: {exc}", status_code=502) from exc
+    if resp.status_code >= 400:
+        raise CosError(f"写入 COS 文件失败 ({resp.status_code})", status_code=502)
+    return (resp.headers.get("etag") or "").strip('"') or None
 
 
 async def delete_object(key: str, settings: Settings | None = None) -> None:

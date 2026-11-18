@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import Depends, HTTPException, Request, status
@@ -5,11 +6,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import decode_access_claims
+from app.core.security import decode_access_claims, is_session_revoked, revoke_session
 from app.db.models import User
 from app.db.session import get_db
 from app.services import membership
 
+logger = logging.getLogger("whitz.deps")
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -23,6 +25,14 @@ async def get_current_user(
     claims = decode_access_claims(credentials.credentials)
     if claims is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "令牌无效或已过期")
+    if claims.session_id is not None:
+        try:
+            revoked = await is_session_revoked(claims.session_id)
+        except Exception:
+            logger.warning("session revocation backend unavailable", exc_info=True)
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "会话校验服务暂不可用")
+        if revoked:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录状态已失效，请重新登录")
     user = await db.get(User, claims.user_id)
     if user is None or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号不存在或已被禁用")
