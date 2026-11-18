@@ -24,6 +24,8 @@ coverage.xml
 # --- Node / frontend ---
 node_modules/
 dist/
+desktop/out/
+desktop/release/
 *.tsbuildinfo
 npm-debug.log*
 yarn-debug.log*

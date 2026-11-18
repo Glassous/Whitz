@@ -1,9 +1,17 @@
+import { getHost, type RefreshResult } from "../host";
 import type { AuthResponse } from "../types";
 
 const USER_KEY = "whitz_user";
-const BASE = "/api";
 
-export type RefreshResult = "ok" | "unauthorized" | "error";
+export type { RefreshResult };
+
+function baseUrl(): string {
+  return getHost().transport.baseUrl;
+}
+
+function credentials(): RequestCredentials {
+  return getHost().transport.credentials;
+}
 
 // The access token stays in memory; the refresh token lives in an HttpOnly cookie.
 let accessToken: string | null = null;
@@ -39,10 +47,15 @@ export function getUserStorageKey(): string {
 }
 
 export function setSession(auth: AuthResponse): void {
+  applySession(auth, true);
+}
+
+function applySession(auth: AuthResponse, persist: boolean): void {
   accessToken = auth.access_token;
   lastRefreshAt = Date.now();
   localStorage.setItem(USER_KEY, JSON.stringify(auth.user));
   scheduleAutoRefresh(auth.expires_in);
+  if (persist) getHost().persistSession(auth);
 }
 
 export function updateAccessToken(token: string): void {
@@ -115,15 +128,28 @@ async function parseBody(resp: Response): Promise<unknown> {
 let refreshPromise: Promise<RefreshResult> | null = null;
 
 async function callRefresh(): Promise<Response> {
-  return fetch(BASE + "/auth/refresh", {
+  return fetch(baseUrl() + "/auth/refresh", {
     method: "POST",
-    credentials: "include",
+    credentials: credentials(),
     headers: { "Content-Type": "application/json" },
     body: "{}",
   });
 }
 
 async function doRefresh(): Promise<RefreshResult> {
+  const host = getHost();
+  if (host.kind === "desktop") {
+    try {
+      const result = await host.refresh();
+      if (result.reason === "ok" && result.auth) {
+        applySession(result.auth, false);
+        return "ok";
+      }
+      return result.reason;
+    } catch {
+      return "error";
+    }
+  }
   try {
     let resp = await callRefresh();
     if (resp.status === 401) {
@@ -134,7 +160,7 @@ async function doRefresh(): Promise<RefreshResult> {
     if (resp.status === 401 || resp.status === 403) return "unauthorized";
     if (!resp.ok) return "error";
     const auth = (await resp.json()) as AuthResponse;
-    setSession(auth);
+    applySession(auth, false);
     return "ok";
   } catch {
     return "error";
@@ -188,10 +214,10 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
   const token = getAccessToken();
   if (token) headers["Authorization"] = "Bearer " + token;
 
-  let resp = await fetch(BASE + path, {
+  let resp = await fetch(baseUrl() + path, {
     method,
     headers,
-    credentials: "include",
+    credentials: credentials(),
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     signal: opts.signal,
   });
@@ -200,10 +226,10 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
     const res = await refreshOnce();
     if (res === "ok") {
       const retryHeaders = { ...headers, Authorization: "Bearer " + getAccessToken() };
-      resp = await fetch(BASE + path, {
+      resp = await fetch(baseUrl() + path, {
         method,
         headers: retryHeaders,
-        credentials: "include",
+        credentials: credentials(),
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
         signal: opts.signal,
       });
@@ -225,16 +251,7 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
 }
 
 export async function revokeSession(): Promise<void> {
-  try {
-    await fetch(BASE + "/auth/logout", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-  } catch {
-    /* ignore */
-  }
+  await getHost().revokeSession();
 }
 
 export const api = {

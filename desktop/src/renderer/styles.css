@@ -1,0 +1,58 @@
+@import "../../../web/src/styles/main.css";
+@source "../";
+@source "../../../web/src";
+
+:root {
+  --work-accent: #b8722f;
+  --work-accent-weak: #f6ecdf;
+}
+
+.dark {
+  --work-accent: #e0a858;
+  --work-accent-weak: #2a2118;
+}
+
+.app-drag {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+.desktop-titlebar {
+  height: 40px;
+  padding-right: 148px;
+}
+
+.desktop-main {
+  padding-top: 40px;
+}
+
+.work-glow {
+  background:
+    radial-gradient(1200px 320px at 12% -10%, color-mix(in srgb, var(--work-accent) 12%, transparent), transparent 70%),
+    radial-gradient(900px 260px at 88% 0%, color-mix(in srgb, var(--work-accent) 7%, transparent), transparent 72%);
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+.work-dot-live {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-dot-live {
+    animation: none;
+  }
+}

@@ -1,32 +1,60 @@
-import { createRouter, createWebHistory } from "vue-router";
+import {
+  createRouter,
+  createWebHistory,
+  type NavigationGuard,
+  type RouteLocationRaw,
+  type RouteRecordRaw,
+  type RouterHistory,
+} from "vue-router";
 import { useAuthStore } from "../stores/auth";
 
-const router = createRouter({
-  history: createWebHistory(),
-  routes: [
-    { path: "/login", name: "login", component: () => import("../views/LoginView.vue"), meta: { guestOnly: true } },
-    { path: "/register", name: "register", component: () => import("../views/RegisterView.vue"), meta: { guestOnly: true } },
-    { path: "/forgot", name: "forgot", component: () => import("../views/ForgotPasswordView.vue"), meta: { guestOnly: true } },
-    { path: "/", name: "chat", component: () => import("../views/ChatView.vue"), meta: { requiresAuth: true } },
-    { path: "/c/:id", name: "chat-conversation", component: () => import("../views/ChatView.vue"), meta: { requiresAuth: true } },
-    { path: "/settings", name: "settings", component: () => import("../views/SettingsView.vue"), meta: { requiresAuth: true } },
-    { path: "/:pathMatch(.*)*", redirect: "/" },
-  ],
-});
+export const appRoutes: RouteRecordRaw[] = [
+  { path: "/login", name: "login", component: () => import("../views/LoginView.vue"), meta: { guestOnly: true } },
+  { path: "/register", name: "register", component: () => import("../views/RegisterView.vue"), meta: { guestOnly: true } },
+  { path: "/forgot", name: "forgot", component: () => import("../views/ForgotPasswordView.vue"), meta: { guestOnly: true } },
+  { path: "/", name: "chat", component: () => import("../views/ChatView.vue"), meta: { requiresAuth: true } },
+  { path: "/c/:id", name: "chat-conversation", component: () => import("../views/ChatView.vue"), meta: { requiresAuth: true } },
+  { path: "/settings", name: "settings", component: () => import("../views/SettingsView.vue"), meta: { requiresAuth: true } },
+  { path: "/:pathMatch(.*)*", redirect: "/" },
+];
 
-router.beforeEach((to) => {
-  const auth = useAuthStore();
-  if (to.meta.requiresAuth && !auth.isAuthenticated) {
-    return { name: "login", query: { redirect: to.fullPath } };
-  }
-  if (to.meta.guestOnly && auth.isAuthenticated) {
-    const rawRedirect = typeof to.query.redirect === "string" ? to.query.redirect : "";
-    if (rawRedirect.startsWith("/") && !rawRedirect.startsWith("//")) {
-      return rawRedirect;
+export interface CreateRouterOptions {
+  history?: RouterHistory;
+  routes?: RouteRecordRaw[];
+  authenticatedHome?: RouteLocationRaw;
+  onAuthRequired?: (to: { fullPath: string }) => RouteLocationRaw;
+  extraGuards?: NavigationGuard[];
+}
+
+export function createAppRouter(options: CreateRouterOptions = {}) {
+  const router = createRouter({
+    history: options.history ?? createWebHistory(),
+    routes: options.routes ?? appRoutes,
+  });
+
+  router.beforeEach((to) => {
+    const auth = useAuthStore();
+    if (to.meta.requiresAuth && !auth.isAuthenticated) {
+      if (options.onAuthRequired) return options.onAuthRequired({ fullPath: to.fullPath });
+      return { name: "login", query: { redirect: to.fullPath } };
     }
-    return { name: "chat" };
+    if (to.meta.guestOnly && auth.isAuthenticated) {
+      const rawRedirect = typeof to.query.redirect === "string" ? to.query.redirect : "";
+      if (rawRedirect.startsWith("/") && !rawRedirect.startsWith("//")) {
+        return rawRedirect;
+      }
+      return options.authenticatedHome ?? { name: "chat" };
+    }
+    return true;
+  });
+
+  for (const guard of options.extraGuards ?? []) {
+    router.beforeEach(guard);
   }
-  return true;
-});
+
+  return router;
+}
+
+const router = createAppRouter();
 
 export default router;

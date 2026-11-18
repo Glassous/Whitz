@@ -15,6 +15,7 @@ from app.api.routes import (
     auth,
     chat,
     conversations,
+    desktop,
     files,
     library,
     mcp,
@@ -52,9 +53,14 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="Whitz API", version="0.1.0", lifespan=lifespan)
 
+    origins = {
+        o.strip()
+        for o in f"{settings.cors_origins},{settings.desktop_origins}".split(",")
+        if o.strip()
+    }
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
+        allow_origins=sorted(origins),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -93,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(mcp.router)
     app.include_router(chat.router)
     app.include_router(agent.router)
+    app.include_router(desktop.router)
 
     @app.get("/api/health")
     async def health() -> dict:

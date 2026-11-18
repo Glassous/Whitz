@@ -1,0 +1,85 @@
+<script setup lang="ts">
+import { computed } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { useDesktopStore } from "../../stores/desktop";
+
+const route = useRoute();
+const router = useRouter();
+const desktop = useDesktopStore();
+
+const inWork = computed(() => typeof route.name === "string" && route.name.startsWith("work"));
+const online = computed(() => desktop.online);
+const userLabel = computed(() => desktop.user?.display_name ?? "未登录");
+
+function switchTo(target: "chat" | "work") {
+  if (target === "work" && !desktop.workEnabled) return;
+  void router.push({ name: target === "chat" ? "chat" : "work" });
+}
+
+function goAccount() {
+  void router.push({ name: desktop.loggedIn ? "settings" : "login" });
+}
+
+async function toggleOffline() {
+  await desktop.setForcedOffline(!desktop.connectivity.forced_offline);
+}
+</script>
+
+<template>
+  <header class="desktop-titlebar app-drag fixed inset-x-0 top-0 z-50 flex items-center gap-4 border-b border-line/70 bg-canvas/80 px-4 backdrop-blur-xl">
+    <div class="no-drag flex items-center gap-2.5">
+      <span class="brand-mark h-4 w-4 text-fg" aria-hidden="true"></span>
+      <span class="text-[13px] font-semibold tracking-tight text-fg">Whitz</span>
+    </div>
+
+    <div class="no-drag flex items-center rounded-full border border-line bg-surface/70 p-0.5" role="tablist" aria-label="工作模式">
+      <button
+        type="button"
+        role="tab"
+        :aria-selected="!inWork"
+        class="focus-ring rounded-full px-3 py-1 text-[12px] font-medium transition-colors"
+        :class="!inWork ? 'bg-canvas text-fg shadow-sm' : 'text-fg-muted hover:text-fg'"
+        @click="switchTo('chat')"
+      >
+        Chat
+      </button>
+      <button
+        v-if="desktop.workEnabled"
+        type="button"
+        role="tab"
+        :aria-selected="inWork"
+        class="focus-ring flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] font-medium transition-colors"
+        :class="inWork ? 'bg-canvas text-fg shadow-sm' : 'text-fg-muted hover:text-fg'"
+        @click="switchTo('work')"
+      >
+        <span class="h-1.5 w-1.5 rounded-full" :style="{ background: inWork ? 'var(--work-accent)' : 'var(--line-strong)' }"></span>
+        Work
+      </button>
+    </div>
+
+    <div class="flex-1"></div>
+
+    <div class="no-drag flex items-center gap-3">
+      <button
+        type="button"
+        class="focus-ring flex items-center gap-1.5 rounded-full px-2 py-1 text-[11px] transition-colors hover:bg-hover"
+        :class="desktop.connectivity.forced_offline ? 'text-warning' : 'text-fg-faint hover:text-fg'"
+        :title="desktop.connectivity.forced_offline ? '已强制离线，点击恢复在线' : '在线，点击切换到离线模式'"
+        @click="toggleOffline"
+      >
+        <span
+          class="h-1.5 w-1.5 rounded-full"
+          :style="{ background: online ? 'var(--success)' : 'var(--fg-faint)' }"
+        ></span>
+        {{ desktop.connectivity.forced_offline ? "强制离线" : online ? "在线" : "离线" }}
+      </button>
+      <button
+        type="button"
+        class="focus-ring flex max-w-[160px] items-center gap-2 rounded-full border border-line px-2.5 py-1 text-[11px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+        @click="goAccount"
+      >
+        <span class="truncate">{{ userLabel }}</span>
+      </button>
+    </div>
+  </header>
+</template>

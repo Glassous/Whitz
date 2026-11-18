@@ -1,3 +1,4 @@
+import { getHost } from "../host";
 import { ApiError, getAccessToken, handleUnauthorized, isAccessTokenExpiringSoon, tryRefresh } from "./client";
 
 export interface SSEEvent {
@@ -73,10 +74,11 @@ export async function* streamSSE(
   const token = getAccessToken();
   if (token) headers["Authorization"] = "Bearer " + token;
 
-  let resp = await fetch("/api" + path, {
+  const host = getHost();
+  let resp = await fetch(host.transport.baseUrl + path, {
     method: "POST",
     headers,
-    credentials: "include",
+    credentials: host.transport.credentials,
     body: JSON.stringify(body),
     signal,
   });
@@ -84,10 +86,10 @@ export async function* streamSSE(
   if (resp.status === 401) {
     if (await tryRefresh()) {
       headers["Authorization"] = "Bearer " + getAccessToken();
-      resp = await fetch("/api" + path, {
+      resp = await fetch(host.transport.baseUrl + path, {
         method: "POST",
         headers,
-        credentials: "include",
+        credentials: host.transport.credentials,
         body: JSON.stringify(body),
         signal,
       });
@@ -120,11 +122,22 @@ export async function* streamSSEGet(
   const headers: Record<string, string> = { ...extraHeaders, Accept: "text/event-stream" };
   const token = getAccessToken();
   if (token) headers["Authorization"] = "Bearer " + token;
-  let resp = await fetch("/api" + path, { method: "GET", headers, credentials: "include", signal });
+  const host = getHost();
+  let resp = await fetch(host.transport.baseUrl + path, {
+    method: "GET",
+    headers,
+    credentials: host.transport.credentials,
+    signal,
+  });
   if (resp.status === 401) {
     if (await tryRefresh()) {
       headers["Authorization"] = "Bearer " + getAccessToken();
-      resp = await fetch("/api" + path, { method: "GET", headers, credentials: "include", signal });
+      resp = await fetch(host.transport.baseUrl + path, {
+        method: "GET",
+        headers,
+        credentials: host.transport.credentials,
+        signal,
+      });
     } else {
       handleUnauthorized();
     }

@@ -85,6 +85,23 @@ class Settings(BaseSettings):
 
     internal_mcp_base_url: str = "http://server:8000"
 
+    # ===== 桌面端 =====
+    desktop_origins: str = "app://whitz,http://localhost:5174"
+    desktop_work_mode_enabled: bool = True
+    desktop_work_disabled_reason: str = ""
+    desktop_min_app_version: str = "0.1.0"
+    desktop_latest_app_version: str = ""
+    desktop_policy_ttl_minutes: int = 360
+    # Ed25519 私钥：base64 原始 32 字节种子，或 PEM。留空则不签名（仅开发环境）
+    desktop_policy_private_key: str = ""
+    desktop_policy_key_id: str = "desktop-1"
+    desktop_llm_model_alias: str = "whitz-default"
+    # 代理转发给上游的真实模型名；留空则复用 LLM_MODEL
+    desktop_llm_upstream_model: str = ""
+    desktop_llm_max_tokens: int = 8192
+    desktop_llm_base_url: str = ""
+    desktop_llm_request_timeout_seconds: float = 300.0
+
     @property
     def cos_configured(self) -> bool:
         return bool(
