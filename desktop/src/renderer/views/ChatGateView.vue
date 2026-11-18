@@ -82,10 +82,14 @@ async function retry() {
           <BaseButton v-if="desktop.loggedIn" size="lg" @click="router.push(redirect)">进入 Chat</BaseButton>
           <BaseButton v-else size="lg" @click="goLogin">去登录</BaseButton>
           <BaseButton variant="secondary" size="lg" @click="goWork">
-            {{ desktop.workEnabled ? "继续用 Work" : "返回首页" }}
+            {{ !desktop.workEnabled ? "返回首页" : desktop.loggedIn ? "继续用 Work" : "不登录，使用 Work 模式" }}
           </BaseButton>
         </template>
       </div>
+
+      <p v-if="!desktop.loggedIn && desktop.workEnabled" class="mt-4 text-[12px] leading-relaxed text-fg-faint">
+        Work 模式的数据只保存在本机；登录后可随时切换回云端 Chat，并解锁共享额度。
+      </p>
 
       <p v-if="!desktop.workEnabled" class="mt-4 text-[12px] text-fg-faint">
         当前版本的 Work 模式未启用，请登录后使用 Chat。

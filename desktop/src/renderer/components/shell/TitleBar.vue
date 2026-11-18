@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { chromeBack } from "@web/host/chrome";
 import { useDesktopStore } from "../../stores/desktop";
 
 const route = useRoute();
@@ -27,10 +28,23 @@ async function toggleOffline() {
 
 <template>
   <header class="desktop-titlebar app-drag relative z-50 flex shrink-0 items-center gap-4 border-b border-line/70 bg-canvas/80 px-4 backdrop-blur-xl">
-    <div class="no-drag flex items-center gap-2.5">
-      <span class="brand-mark h-4 w-4 text-fg" aria-hidden="true"></span>
-      <span class="text-[13px] font-semibold tracking-tight text-fg">Whitz</span>
+    <div class="no-drag flex items-center">
+      <span class="brand-mark-tight h-[11px] w-[17px] text-fg" aria-hidden="true"></span>
+      <span class="-ml-[3px] translate-y-[0.5px] select-none text-[13.5px] font-semibold leading-none tracking-tight text-fg">hitz</span>
     </div>
+
+    <button
+      v-if="chromeBack"
+      type="button"
+      class="no-drag focus-ring flex items-center gap-1.5 rounded-full border border-line bg-canvas/60 px-2.5 py-1 text-[12px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+      :title="chromeBack.label"
+      @click="chromeBack.run()"
+    >
+      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
+      </svg>
+      <span class="max-w-[150px] truncate">{{ chromeBack.label }}</span>
+    </button>
 
     <div class="no-drag flex items-center rounded-full border border-line bg-surface/70 p-0.5" role="tablist" aria-label="工作模式">
       <button

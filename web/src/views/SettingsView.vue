@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../api/client";
+import { clearChromeBack, isDesktopShell, setChromeBack } from "../host/chrome";
 import { useTheme, type ThemePreference } from "../lib/theme";
 import { useAuthStore } from "../stores/auth";
 import { useConversationsStore } from "../stores/conversations";
@@ -79,8 +80,24 @@ watch(
   },
 );
 
+const desktopShell = isDesktopShell();
+let chromeBackToken: number | null = null;
+
+watch(
+  () => activePage.value,
+  (page) => {
+    if (!desktopShell) return;
+    chromeBackToken = setChromeBack({
+      label: page === "password" ? "返回用户信息" : "返回对话",
+      run: page === "password" ? goBackFromMobilePage : goBackToChat,
+    });
+  },
+  { immediate: true },
+);
+
 onBeforeUnmount(() => {
   mediaQuery?.removeEventListener("change", onMediaChange);
+  if (chromeBackToken !== null) clearChromeBack(chromeBackToken);
 });
 
 const showMobileMenu = computed(() => !isDesktop.value && mobileAtRoot.value);
@@ -529,8 +546,8 @@ async function disableProfileContext() {
       aria-label="设置导航"
       class="hidden w-[300px] shrink-0 flex-col bg-sidebar p-4 md:flex lg:w-[320px]"
     >
-      <!-- Top Back to Chat button -->
-      <div class="mb-3 flex items-center justify-between">
+      <!-- Top Back to Chat button (desktop moves this into the title bar) -->
+      <div v-if="!desktopShell" class="mb-3 flex items-center justify-between">
         <button
           type="button"
           class="focus-ring inline-flex h-9 items-center gap-1.5 rounded-xl px-2.5 text-[13.5px] font-medium text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
@@ -1195,6 +1212,7 @@ async function disableProfileContext() {
         <div v-else-if="activePage === 'password'" class="w-full space-y-5">
           <div class="hidden items-center gap-3 md:flex">
             <button
+              v-if="!desktopShell"
               type="button"
               class="focus-ring inline-flex h-9 items-center gap-1.5 rounded-full bg-sidebar px-3.5 text-[13.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg dark:bg-surface"
               @click="activePage = 'profile'"

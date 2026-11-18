@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted } from "vue";
 import { useRouter } from "vue-router";
+import { clearChromeBack, setChromeBack } from "@web/host/chrome";
 import { useDesktopStore } from "../stores/desktop";
 import { useRuntimeStore } from "../stores/runtime";
 import BaseButton from "@web/components/ui/BaseButton.vue";
@@ -9,6 +10,15 @@ import ModelForm from "../components/work/ModelForm.vue";
 const router = useRouter();
 const desktop = useDesktopStore();
 const runtime = useRuntimeStore();
+let chromeBackToken: number | null = null;
+
+onMounted(() => {
+  chromeBackToken = setChromeBack({ label: "返回工作台", run: () => void router.push({ name: "work" }) });
+});
+
+onBeforeUnmount(() => {
+  if (chromeBackToken !== null) clearChromeBack(chromeBackToken);
+});
 
 const progress = computed(() => runtime.progress);
 const installed = computed(() => runtime.installed);

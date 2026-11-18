@@ -427,8 +427,8 @@ function isRunning(c: Conversation): boolean {
       />
     </div>
 
-    <!-- Brand header (fixed left padding so W never shifts) -->
-    <div class="relative z-10 flex shrink-0 items-center justify-between px-3.5 pb-2 pt-3.5">
+    <!-- Brand header: mobile drawer only; the desktop title bar owns the brand -->
+    <div class="relative z-10 flex shrink-0 items-center justify-between px-3.5 pb-2 pt-3.5 md:hidden">
       <div class="flex min-w-0 items-center">
         <button
           type="button"

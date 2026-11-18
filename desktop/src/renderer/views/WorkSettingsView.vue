@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { onBeforeUnmount, onMounted } from "vue";
 import { useRouter } from "vue-router";
+import { clearChromeBack, setChromeBack } from "@web/host/chrome";
 import { useDesktopStore } from "../stores/desktop";
 import { useRuntimeStore } from "../stores/runtime";
 import BaseButton from "@web/components/ui/BaseButton.vue";
@@ -9,10 +10,16 @@ import ModelForm from "../components/work/ModelForm.vue";
 const router = useRouter();
 const desktop = useDesktopStore();
 const runtime = useRuntimeStore();
+let chromeBackToken: number | null = null;
 
 onMounted(() => {
+  chromeBackToken = setChromeBack({ label: "返回工作台", run: () => void router.push({ name: "work" }) });
   void runtime.loadSettings();
   void desktop.refreshPolicy();
+});
+
+onBeforeUnmount(() => {
+  if (chromeBackToken !== null) clearChromeBack(chromeBackToken);
 });
 
 async function restart() {
@@ -27,12 +34,9 @@ function openLogs() {
 <template>
   <div class="h-full overflow-y-auto custom-scrollbar">
     <div class="mx-auto max-w-[820px] px-8 py-9">
-      <header class="flex items-center justify-between">
-        <div>
-          <p class="text-[11px] font-medium uppercase tracking-[0.18em] text-fg-faint">Whitz Work</p>
-          <h1 class="mt-2 text-[22px] font-semibold tracking-tight text-fg">本地设置</h1>
-        </div>
-        <BaseButton variant="secondary" size="sm" @click="router.push({ name: 'work' })">返回工作台</BaseButton>
+      <header>
+        <p class="text-[11px] font-medium uppercase tracking-[0.18em] text-fg-faint">Whitz Work</p>
+        <h1 class="mt-2 text-[22px] font-semibold tracking-tight text-fg">本地设置</h1>
       </header>
 
       <section class="mt-7 rounded-2xl border border-line bg-canvas p-6">
