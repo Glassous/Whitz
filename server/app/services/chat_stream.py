@@ -1109,10 +1109,11 @@ async def _prepare_turn_context(
     if skill_names:
         disabled_set = set(provisioning.read_disabled_skills(profile))
         local_skills = {s["name"]: s for s in skills_service.list_skills(profile)}
+        hidden_builtins = skills_service.hidden_builtin_names()
         seen_skills: set[str] = set()
         for raw_name in skill_names:
             name = (raw_name or "").strip()
-            if not name or name in seen_skills or name in disabled_set:
+            if not name or name in seen_skills or name in disabled_set or name.lower() in hidden_builtins:
                 continue
             seen_skills.add(name)
             cleaned_skills.append(name)

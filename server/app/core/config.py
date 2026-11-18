@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     hermes_data_dir: str = "./.hermes-data"
     hermes_api_server_key: str = ""
 
+    # Hermes built-in skills that depend on toolsets/CLIs the platform does not expose
+    # are hidden from users. Both are comma separated skill names.
+    skills_builtin_allowlist: str = ""
+    skills_builtin_denylist: str = ""
+
     admin_email: str = ""
     admin_password: str = ""
     cors_origins: str = "http://localhost:5173"

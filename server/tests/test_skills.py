@@ -451,3 +451,72 @@ async def test_builtin_skills_disk_fallback_when_hermes_skills_fails(register, c
     finally:
         get_settings.cache_clear()
         shutil.rmtree(isolated_hermes, ignore_errors=True)
+
+
+async def test_unusable_builtin_skills_are_hidden(register, client, db, monkeypatch):
+    from pathlib import Path
+
+    isolated_hermes = Path(os.environ["HERMES_DATA_DIR"]) / f"hidden-{uuid.uuid4().hex[:8]}"
+    isolated_hermes.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_DATA_DIR", str(isolated_hermes))
+    monkeypatch.delenv("SKILLS_BUILTIN_ALLOWLIST", raising=False)
+    monkeypatch.delenv("SKILLS_BUILTIN_DENYLIST", raising=False)
+    get_settings.cache_clear()
+    try:
+        reg = await register(email="skhidden@test.local", display_name="SkHidden")
+        headers = auth_header(reg["access_token"])
+
+        global_skills = isolated_hermes / "skills"
+        # Third-party CLI agent skill: needs the disabled `terminal` toolset.
+        (global_skills / "autonomous-ai-agents" / "codex").mkdir(parents=True)
+        (global_skills / "autonomous-ai-agents" / "codex" / "SKILL.md").write_text(
+            "---\nname: codex\ndescription: Delegate coding tasks to Codex CLI\ntags: [coding]\n---\n\n"
+            'Run `terminal(command="codex exec ...", pty=true)`.\n',
+            encoding="utf-8",
+        )
+        # Unlisted name, but the body calls a toolset Whitz never enables.
+        (global_skills / "creative" / "shell-helper").mkdir(parents=True)
+        (global_skills / "creative" / "shell-helper" / "SKILL.md").write_text(
+            '---\nname: shell-helper\ndescription: Helper\n---\n\nterminal(command="ls")\n',
+            encoding="utf-8",
+        )
+        # Plain instruction skill: no host tools required, stays visible.
+        (global_skills / "productivity" / "pdf").mkdir(parents=True)
+        (global_skills / "productivity" / "pdf" / "SKILL.md").write_text(
+            "---\nname: pdf\ndescription: Read and edit PDF files\ntags: [pdf, docs]\n---\n\n# PDF\n",
+            encoding="utf-8",
+        )
+
+        class FailingSkillsHermes:
+            def __init__(self, profile: str, api_key: str) -> None:
+                pass
+
+            async def skills(self) -> list:
+                raise HermesError(500, {"error": "boom"})
+
+            async def aclose(self) -> None:
+                pass
+
+        monkeypatch.setattr(skills_routes, "HermesClient", FailingSkillsHermes)
+
+        listed = await client.get("/api/skills", headers=headers)
+        assert listed.status_code == 200, listed.text
+        assert {item["name"] for item in listed.json()} == {"pdf"}
+
+        # Hidden skills are not addressable either.
+        blocked = await client.patch("/api/skills/codex", json={"enabled": False}, headers=headers)
+        assert blocked.status_code == 404
+
+        # Platform denylist hides an otherwise usable built-in skill.
+        monkeypatch.setenv("SKILLS_BUILTIN_DENYLIST", "pdf")
+        get_settings.cache_clear()
+        assert (await client.get("/api/skills", headers=headers)).json() == []
+
+        # Allowlist restricts the visible catalog to the listed names only.
+        monkeypatch.delenv("SKILLS_BUILTIN_DENYLIST", raising=False)
+        monkeypatch.setenv("SKILLS_BUILTIN_ALLOWLIST", "shell-helper")
+        get_settings.cache_clear()
+        assert (await client.get("/api/skills", headers=headers)).json() == []
+    finally:
+        get_settings.cache_clear()
+        shutil.rmtree(isolated_hermes, ignore_errors=True)

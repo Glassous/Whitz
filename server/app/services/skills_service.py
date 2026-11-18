@@ -74,6 +74,63 @@ _BUILTIN_EXCLUDED_DIRS = frozenset(
 )
 _SKILL_SUPPORT_DIRS = frozenset({"references", "templates", "assets", "scripts"})
 
+# Hermes ships a large built-in catalog (~/.hermes/skills) written for a full host. Whitz
+# profiles only expose web/todo/skills/session_search/clarify/whitz_files/whitz_skills and
+# strip terminal/file/browser/code_execution/computer_use (see provisioning.DISABLED_TOOLSETS),
+# so skills that drive those tools can never produce a result here. They are hidden from the
+# skill management UI instead of pretending to be usable.
+_UNAVAILABLE_TOOLSET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("terminal", re.compile(r"(?<![\w.])terminal\s*\(", re.IGNORECASE)),
+    ("process", re.compile(r"(?<![\w.])process\s*\(\s*(?:action\s*[=:]|session_id\s*[=:])", re.IGNORECASE)),
+    ("code_execution", re.compile(r"(?<![\w.])code_execution\s*\(", re.IGNORECASE)),
+    ("browser", re.compile(r"(?<![\w.])browser\s*\(", re.IGNORECASE)),
+    ("computer_use", re.compile(r"(?<![\w.])computer_use\s*\(", re.IGNORECASE)),
+    ("terminal", re.compile(r"\bpty\s*(?:=|:)\s*true\b", re.IGNORECASE)),
+)
+_CLI_INSTALL_PATTERN = re.compile(
+    r"\b(?:npm\s+install\s+(?:-g|--global)"
+    r"|pip3?\s+install"
+    r"|uv\s+(?:tool\s+)?install"
+    r"|brew\s+install"
+    r"|apt-get\s+install"
+    r"|winget\s+install)\b",
+    re.IGNORECASE,
+)
+_UNAVAILABLE_BUILTIN_CATEGORIES = frozenset(
+    {"apple", "autonomous-ai-agents", "smart-home", "email", "social-media", "note-taking", "devops"}
+)
+_UNAVAILABLE_BUILTIN_NAMES = frozenset(
+    {
+        "apple-notes",
+        "apple-reminders",
+        "findmy",
+        "imessage",
+        "claude-code",
+        "codex",
+        "opencode",
+        "hermes-agent",
+        "himalaya",
+        "xurl",
+        "google-workspace",
+        "obsidian",
+        "teams-meeting-pipeline",
+        "gif-search",
+        "songsee",
+        "manim-video",
+        "ascii-video",
+        "p5js",
+        "dogfood",
+        "python-debugpy",
+        "node-inspect-debugger",
+        "codebase-inspection",
+        "test-driven-development",
+        "systematic-debugging",
+        "requesting-code-review",
+        "spike",
+    }
+)
+_HIDDEN_BUILTIN_REASON_GENERIC = "该技能依赖本平台未向智能体开放的宿主工具或本地命令行"
+
 _SECURITY_RULES: list[tuple[str, str, re.Pattern[str]]] = [
     (
         "remote_pipe_exec",
@@ -150,6 +207,48 @@ def _global_skills_dir() -> Path:
 
 def _pending_dir(profile: str) -> Path:
     return provisioning.profile_dir(profile) / "pending" / "skills"
+
+
+def _split_names(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {part.strip().lower() for part in re.split(r"[,;\s]+", value) if part.strip()}
+
+
+def _builtin_name_overrides() -> tuple[set[str], set[str]]:
+    settings = get_settings()
+    return _split_names(settings.skills_builtin_allowlist), _split_names(settings.skills_builtin_denylist)
+
+
+def _builtin_unavailable_reason(
+    content: str | None,
+    *,
+    name: str,
+    category: str | None,
+) -> str | None:
+    """Explain why a Hermes built-in skill cannot run here, or return None when it can."""
+    allow, deny = _builtin_name_overrides()
+    lowered = (name or "").strip().lower()
+    if lowered in deny:
+        return "该技能已被平台屏蔽"
+    if allow and lowered not in allow:
+        return "该技能未在平台技能白名单中"
+    if lowered in _UNAVAILABLE_BUILTIN_NAMES:
+        return _HIDDEN_BUILTIN_REASON_GENERIC
+    if category and category.strip().lower() in _UNAVAILABLE_BUILTIN_CATEGORIES:
+        return _HIDDEN_BUILTIN_REASON_GENERIC
+    if content:
+        for toolset, pattern in _UNAVAILABLE_TOOLSET_PATTERNS:
+            if pattern.search(content):
+                return f"该技能依赖 {toolset} 工具集，本平台未向智能体开放"
+        if _CLI_INSTALL_PATTERN.search(content):
+            return _HIDDEN_BUILTIN_REASON_GENERIC
+    return None
+
+
+def hidden_builtin_names() -> set[str]:
+    """Lower-cased names of built-in skills hidden on this deployment."""
+    return {item["name"].lower() for item in _scan_builtin_skills(set()) if not item.get("available")}
 
 
 def validate_skill_name(raw_name: str) -> str:
@@ -407,12 +506,14 @@ def _scan_builtin_skills(disabled_set: set[str]) -> list[dict[str, Any]]:
         except ValueError:
             rel_parts = ()
         path_category = rel_parts[0] if len(rel_parts) >= 3 else None
+        category = path_category or parsed["category"]
+        unavailable_reason = _builtin_unavailable_reason(content, name=name, category=category)
         items.append(
             {
                 "name": name,
                 "title": parsed["title"] or name,
                 "description": parsed["description"],
-                "category": path_category or parsed["category"],
+                "category": category,
                 "enabled": name not in disabled_set,
                 "source": "builtin",
                 "editable": False,
@@ -420,6 +521,8 @@ def _scan_builtin_skills(disabled_set: set[str]) -> list[dict[str, Any]]:
                 "content": content,
                 "tags": parsed["tags"],
                 "updated_at": mtime,
+                "available": unavailable_reason is None,
+                "unavailable_reason": unavailable_reason,
             }
         )
     return items
@@ -437,6 +540,8 @@ def list_skills(profile: str, *, hermes_skills: list[Any] | None = None) -> list
             item = _local_skill_entry(entry_dir, disabled_set)
             if item is not None:
                 by_name[item["name"]] = item
+
+    builtin_items = {item["name"].lower(): item for item in _scan_builtin_skills(disabled_set)}
 
     added_from_hermes = False
     for raw in hermes_skills or []:
@@ -456,11 +561,22 @@ def list_skills(profile: str, *, hermes_skills: list[Any] | None = None) -> list
         raw_tags = raw.get("tags")
         tags = [str(t).strip() for t in raw_tags if str(t).strip()] if isinstance(raw_tags, list) else []
         source = str(raw.get("source") or "builtin")
+        category = str(raw.get("category")).strip() if raw.get("category") else None
+        if source == "builtin":
+            scanned = builtin_items.get(name.lower())
+            if scanned is not None:
+                unavailable_reason = scanned.get("unavailable_reason")
+            else:
+                content = raw.get("content") if isinstance(raw.get("content"), str) else None
+                unavailable_reason = _builtin_unavailable_reason(content, name=name, category=category)
+            if unavailable_reason:
+                # Built-in skills the platform cannot run stay invisible for every user.
+                continue
         by_name[name] = {
             "name": name,
             "title": str(raw.get("title") or name),
             "description": str(raw.get("description") or ""),
-            "category": str(raw.get("category")).strip() if raw.get("category") else None,
+            "category": category,
             "enabled": name not in disabled_set and bool(raw.get("enabled", True)),
             "source": source,
             "editable": bool(raw.get("editable")) if "editable" in raw else source != "builtin",
@@ -471,9 +587,12 @@ def list_skills(profile: str, *, hermes_skills: list[Any] | None = None) -> list
         }
 
     if not added_from_hermes:
-        for item in _scan_builtin_skills(disabled_set):
-            if item["name"] not in by_name:
-                by_name[item["name"]] = item
+        for item in builtin_items.values():
+            if not item.get("available") or item["name"] in by_name:
+                continue
+            by_name[item["name"]] = {
+                key: value for key, value in item.items() if key not in ("available", "unavailable_reason")
+            }
 
     return sorted(by_name.values(), key=lambda s: (0 if s["source"] != "builtin" else 1, s["name"].lower()))
 
