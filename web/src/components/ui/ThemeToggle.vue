@@ -10,7 +10,7 @@ const { theme, toggle } = useTheme();
     class="focus-ring inline-flex h-9 w-9 items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-hover hover:text-fg"
     :aria-label="theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'"
     :title="theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'"
-    @click="toggle"
+    @click="toggle()"
   >
     <svg v-if="theme === 'dark'" class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
       <circle cx="12" cy="12" r="4" />

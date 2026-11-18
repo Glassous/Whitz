@@ -24,6 +24,7 @@ const emit = defineEmits<{
   delete: [string];
   close: [];
   "open-search": [];
+  "drag-progress": [number | null];
 }>();
 
 const auth = useAuthStore();
@@ -45,6 +46,98 @@ function onMediaChange(e: MediaQueryListEvent) {
 }
 
 const isRail = computed(() => Boolean(props.collapsed && isDesktop.value));
+const isMobileDrawer = computed(() => !isDesktop.value);
+
+// 1:1 finger-following left-swipe to close on mobile
+const asideRef = ref<HTMLElement | null>(null);
+const isSwiping = ref(false);
+const dragOffsetX = ref(0);
+let swipeStartX = 0;
+let swipeStartY = 0;
+let swipeStartTime = 0;
+let swipeLocked: "horizontal" | "vertical" | null = null;
+let drawerWidth = 276;
+
+function resetSwipe() {
+  isSwiping.value = false;
+  dragOffsetX.value = 0;
+  swipeLocked = null;
+  emit("drag-progress", null);
+}
+
+function onTouchStart(e: TouchEvent) {
+  if (isDesktop.value || !props.open || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  swipeStartX = t.clientX;
+  swipeStartY = t.clientY;
+  swipeStartTime = performance.now();
+  swipeLocked = null;
+  drawerWidth = asideRef.value?.offsetWidth || 276;
+}
+
+function onTouchMove(e: TouchEvent) {
+  if (isDesktop.value || !props.open || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  const dx = t.clientX - swipeStartX;
+  const dy = t.clientY - swipeStartY;
+
+  if (!swipeLocked) {
+    if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 6) {
+      swipeLocked = "vertical";
+      return;
+    }
+    if (dx < -6 && Math.abs(dx) > Math.abs(dy)) {
+      swipeLocked = "horizontal";
+      isSwiping.value = true;
+    } else {
+      return;
+    }
+  }
+
+  if (swipeLocked === "horizontal") {
+    if (e.cancelable) e.preventDefault();
+    const clamped = Math.max(-drawerWidth, Math.min(0, dx));
+    dragOffsetX.value = clamped;
+    emit("drag-progress", Math.max(0, Math.min(1, 1 + clamped / drawerWidth)));
+  }
+}
+
+function onTouchEnd(e: TouchEvent) {
+  if (!isSwiping.value) {
+    swipeLocked = null;
+    return;
+  }
+  const elapsed = Math.max(1, performance.now() - swipeStartTime);
+  const endX = e.changedTouches[0]?.clientX ?? swipeStartX;
+  const velocity = (endX - swipeStartX) / elapsed;
+  const shouldClose = dragOffsetX.value < -drawerWidth * 0.3 || velocity < -0.45;
+  resetSwipe();
+  if (shouldClose) {
+    emit("close");
+  }
+}
+
+function onDrawerKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape" && !isDesktop.value && props.open) {
+    e.stopPropagation();
+    emit("close");
+  }
+}
+
+watch(
+  () => props.open,
+  (val) => {
+    if (!val) resetSwipe();
+  },
+);
+
+const drawerStyle = computed(() => {
+  if (!isSwiping.value || isDesktop.value) return undefined;
+  return {
+    translate: `${dragOffsetX.value}px 0px`,
+    transition: "none",
+  };
+});
 
 // Quick card popover (opened by clicking avatar)
 const quickCardOpen = ref(false);
@@ -279,11 +372,25 @@ function isRunning(c: Conversation): boolean {
 
 <template>
   <aside
-    class="group/sidebar fixed inset-y-0 left-0 z-40 flex w-[276px] shrink-0 flex-col overflow-x-hidden bg-sidebar text-fg transition-[width,transform] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] md:static md:z-20 md:translate-x-0"
+    ref="asideRef"
+    :role="isMobileDrawer && open ? 'dialog' : undefined"
+    :aria-modal="isMobileDrawer && open ? 'true' : undefined"
+    :aria-hidden="isMobileDrawer && !open ? 'true' : undefined"
+    :inert="isMobileDrawer && !open ? true : undefined"
+    :aria-label="isMobileDrawer ? '对话导航侧栏' : undefined"
+    class="group/sidebar fixed inset-y-0 left-0 z-40 flex w-[276px] shrink-0 touch-pan-y flex-col overflow-x-hidden bg-sidebar text-fg will-change-[translate] md:static md:z-20 md:translate-x-0 md:shadow-none"
     :class="[
-      open ? 'translate-x-0' : '-translate-x-full',
+      open
+        ? 'translate-x-0 shadow-2xl transition-[width,translate] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]'
+        : '-translate-x-full transition-[width,translate] duration-200 ease-in',
       isRail ? 'md:w-[68px]' : 'md:w-[276px]',
     ]"
+    :style="drawerStyle"
+    @touchstart.passive="onTouchStart"
+    @touchmove="onTouchMove"
+    @touchend="onTouchEnd"
+    @touchcancel="resetSwipe"
+    @keydown="onDrawerKeydown"
   >
     <!-- Subtle atmospheric top aura -->
     <div class="pointer-events-none absolute inset-x-0 top-0 h-44 overflow-hidden">
@@ -553,28 +660,19 @@ function isRunning(c: Conversation): boolean {
           @click.stop
         >
           <!-- Account summary -->
-          <div class="flex items-center justify-between gap-2">
-            <div class="min-w-0">
-              <div class="flex items-center gap-1.5">
-                <span class="truncate text-[14.5px] font-medium text-fg">
-                  {{ auth.user?.display_name || auth.user?.email }}
-                </span>
-                <span
-                  class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold leading-none"
-                  :class="tierBadgeClass"
-                >
-                  {{ credits.tierLabel }}
-                </span>
-              </div>
-              <p v-if="auth.user?.email" class="mt-0.5 truncate text-[12.5px] text-fg-faint">{{ auth.user.email }}</p>
+          <div class="min-w-0">
+            <div class="flex items-center gap-1.5">
+              <span class="truncate text-[14.5px] font-medium text-fg">
+                {{ auth.user?.display_name || auth.user?.email }}
+              </span>
+              <span
+                class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold leading-none"
+                :class="tierBadgeClass"
+              >
+                {{ credits.tierLabel }}
+              </span>
             </div>
-            <router-link
-              to="/settings"
-              class="focus-ring shrink-0 rounded-lg px-2.5 py-1 text-[13px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
-              @click="quickCardOpen = false"
-            >
-              设置
-            </router-link>
+            <p v-if="auth.user?.email" class="mt-0.5 truncate text-[12.5px] text-fg-faint">{{ auth.user.email }}</p>
           </div>
 
           <!-- Quota / Usage -->
@@ -645,7 +743,7 @@ function isRunning(c: Conversation): boolean {
                     ? 'bg-canvas font-medium text-fg shadow-xs dark:bg-[#242422]'
                     : 'text-fg-muted hover:text-fg'
                 "
-                @click="setTheme(opt.value)"
+                @click="setTheme(opt.value, 'bottom-left')"
               >
                 <svg
                   v-if="opt.value === 'system'"

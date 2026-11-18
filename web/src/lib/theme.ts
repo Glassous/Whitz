@@ -2,6 +2,7 @@ import { ref } from "vue";
 
 export type Theme = "light" | "dark";
 export type ThemePreference = "system" | "light" | "dark";
+export type ThemeTransitionOrigin = "bottom-left" | "top-left";
 
 const KEY = "whitz_theme";
 
@@ -59,9 +60,7 @@ if (typeof window !== "undefined") {
 }
 
 export function useTheme() {
-  function set(next: ThemePreference) {
-    preference.value = next;
-    apply(next);
+  function persistPreference(next: ThemePreference) {
     try {
       if (next === "system") {
         localStorage.removeItem(KEY);
@@ -73,8 +72,50 @@ export function useTheme() {
     }
   }
 
-  function toggle() {
-    set(theme.value === "dark" ? "light" : "dark");
+  function set(next: ThemePreference, origin: ThemeTransitionOrigin = "bottom-left") {
+    const prevResolved = theme.value;
+    const nextResolved = resolveTheme(next);
+    preference.value = next;
+    persistPreference(next);
+
+    const reduceMotion =
+      typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (
+      prevResolved === nextResolved ||
+      reduceMotion ||
+      typeof document === "undefined" ||
+      !("startViewTransition" in document)
+    ) {
+      apply(next);
+      return;
+    }
+
+    const x = 0;
+    const y = origin === "top-left" ? 0 : window.innerHeight;
+    const endRadius = Math.hypot(window.innerWidth, window.innerHeight);
+
+    const transition = (
+      document as Document & { startViewTransition: (cb: () => void) => { ready: Promise<void> } }
+    ).startViewTransition(() => {
+      apply(next);
+    });
+
+    void transition.ready.then(() => {
+      document.documentElement.animate(
+        {
+          clipPath: [`circle(0px at ${x}px ${y}px)`, `circle(${endRadius}px at ${x}px ${y}px)`],
+        },
+        {
+          duration: 460,
+          easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+          pseudoElement: "::view-transition-new(root)",
+        },
+      );
+    });
+  }
+
+  function toggle(origin: ThemeTransitionOrigin = "bottom-left") {
+    set(theme.value === "dark" ? "light" : "dark", origin);
   }
 
   return { theme, preference, set, toggle };

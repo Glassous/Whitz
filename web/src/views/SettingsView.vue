@@ -450,7 +450,7 @@ async function savePassword() {
               class="visually-hidden"
               :value="opt.value"
               :checked="preference === opt.value"
-              @change="setTheme(opt.value)"
+              @change="setTheme(opt.value, 'top-left')"
             />
             <svg
               v-if="opt.value === 'system'"
@@ -619,7 +619,7 @@ async function savePassword() {
                 class="visually-hidden"
                 :value="opt.value"
                 :checked="preference === opt.value"
-                @change="setTheme(opt.value)"
+                @change="setTheme(opt.value, 'top-left')"
               />
               <span>{{ opt.label }}</span>
             </label>

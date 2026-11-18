@@ -682,3 +682,25 @@ progress.upload-progress:indeterminate {
     min-block-size: 44px;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Directional circular theme view-transition                          */
+/* ------------------------------------------------------------------ */
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+::view-transition-new(root) {
+  z-index: 2147483647;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}

@@ -31,7 +31,14 @@ const showPlan = ref(false);
 const planTab = ref<TaskPanelTab>("steps");
 const sidebarOpen = ref(false);
 const sidebarCollapsed = ref(false);
+const drawerDragProgress = ref<number | null>(null);
 const mobileStepsOpen = ref(false);
+const isDesktop = ref(typeof window !== "undefined" ? window.innerWidth >= 768 : true);
+let mediaQuery: MediaQueryList | null = null;
+function onMediaChange(e: MediaQueryListEvent) {
+  isDesktop.value = e.matches;
+  if (e.matches) sidebarOpen.value = false;
+}
 const searchOpen = ref(false);
 const focusMessageId = ref<string | null>(null);
 let pollTimer: number | null = null;
@@ -280,6 +287,11 @@ watch(routeConversationId, async (nextId) => {
 
 onMounted(async () => {
   window.addEventListener("keydown", onGlobalKeydown);
+  if (typeof window !== "undefined") {
+    mediaQuery = window.matchMedia("(min-width: 768px)");
+    isDesktop.value = mediaQuery.matches;
+    mediaQuery.addEventListener("change", onMediaChange);
+  }
   void loadAgent();
   void credits.fetch();
   await conversations.fetchList();
@@ -299,6 +311,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onGlobalKeydown);
+  mediaQuery?.removeEventListener("change", onMediaChange);
   if (pollTimer) window.clearTimeout(pollTimer);
   chat.abort();
 });
@@ -307,14 +320,19 @@ onBeforeUnmount(() => {
 <template>
   <div class="flex h-dvh overflow-hidden bg-canvas">
     <Transition
-      enter-active-class="transition duration-200 ease-out"
+      enter-active-class="transition duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
       enter-from-class="opacity-0"
       enter-to-class="opacity-100"
-      leave-active-class="transition duration-150 ease-in"
+      leave-active-class="transition duration-200 ease-in"
       leave-from-class="opacity-100"
       leave-to-class="opacity-0"
     >
-      <div v-if="sidebarOpen" class="fixed inset-0 z-30 bg-black/40 md:hidden" @click="sidebarOpen = false" />
+      <div
+        v-if="sidebarOpen"
+        class="fixed inset-0 z-30 bg-black/40 md:hidden"
+        :style="drawerDragProgress !== null ? { opacity: drawerDragProgress, transition: 'none' } : undefined"
+        @click="sidebarOpen = false"
+      />
     </Transition>
 
     <ConversationSidebar
@@ -329,9 +347,10 @@ onBeforeUnmount(() => {
       @delete="onDelete"
       @close="sidebarOpen = false"
       @open-search="searchOpen = true"
+      @drag-progress="drawerDragProgress = $event"
     />
 
-    <main class="relative flex min-w-0 flex-1">
+    <main class="relative flex min-w-0 flex-1" :inert="(!isDesktop && sidebarOpen) || undefined">
       <!-- Fixed task panel toggle (top-right inside panel when expanded, same position when collapsed) -->
       <button
         type="button"
@@ -527,15 +546,15 @@ onBeforeUnmount(() => {
       <div v-if="mobileStepsOpen" class="fixed inset-0 z-40 lg:hidden">
         <div class="absolute inset-0 bg-black/40" @click="mobileStepsOpen = false" />
         <div class="absolute inset-y-0 right-0 flex w-[min(360px,90vw)] flex-col bg-sidebar shadow-2xl transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]">
-          <div class="flex h-11 shrink-0 items-center justify-between pl-4 pr-2">
-            <span class="text-[12px] font-medium text-fg">任务面板</span>
+          <div class="flex h-13 shrink-0 items-center justify-between pl-4 pr-2.5">
+            <h3 class="text-[16px] font-semibold text-fg">任务面板</h3>
             <button
               type="button"
-              class="flex h-8 w-8 items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+              class="focus-ring flex h-9 w-9 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover hover:text-fg"
               aria-label="关闭任务面板"
               @click="mobileStepsOpen = false"
             >
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
               </svg>
             </button>
@@ -543,6 +562,7 @@ onBeforeUnmount(() => {
           <div class="min-h-0 flex-1">
             <PlanPanel
               v-model:active-tab="planTab"
+              :hide-header="true"
               :plan="chat.viewPlan"
               :reasoning="chat.viewReasoning"
               :streaming="chat.viewStreaming"
