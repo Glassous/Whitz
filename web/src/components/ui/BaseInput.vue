@@ -3,18 +3,26 @@ import { onMounted, ref } from "vue";
 
 const props = withDefaults(
   defineProps<{
+    id?: string;
+    name?: string;
     label?: string;
     type?: string;
     placeholder?: string;
     error?: string | null;
     disabled?: boolean;
+    required?: boolean;
+    maxlength?: number | string;
     autocomplete?: string;
+    autocorrect?: string;
+    autocapitalize?: string;
+    spellcheck?: boolean;
+    enterkeyhint?: "enter" | "done" | "go" | "next" | "previous" | "search" | "send";
     autofocus?: boolean;
     size?: "sm" | "md";
     rounded?: "xl" | "2xl" | "full";
     soft?: boolean;
   }>(),
-  { type: "text", disabled: false, autofocus: false, size: "md", rounded: "xl", soft: false },
+  { type: "text", disabled: false, required: false, autofocus: false, size: "md", rounded: "xl", soft: false },
 );
 
 const model = defineModel<string>({ default: "" });
@@ -33,12 +41,20 @@ onMounted(() => {
     </span>
     <div class="relative">
       <input
+        :id="id"
         ref="input"
         v-model="model"
+        :name="name"
         :type="type"
         :placeholder="placeholder"
         :disabled="disabled"
+        :required="required"
+        :maxlength="maxlength"
         :autocomplete="autocomplete"
+        :autocorrect="autocorrect"
+        :autocapitalize="autocapitalize"
+        :spellcheck="spellcheck"
+        :enterkeyhint="enterkeyhint"
         class="focus-ring w-full border text-[15px] text-fg transition-colors placeholder:text-fg-faint disabled:opacity-60"
         :class="[
           size === 'sm' ? 'h-9.5' : 'h-11',

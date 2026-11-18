@@ -145,6 +145,14 @@ const sortedConversations = computed(() => {
   return props.conversations.toSorted((a, b) => timestamp(b) - timestamp(a));
 });
 
+const avatarLoadFailed = ref(false);
+watch(
+  () => auth.user?.avatar_url,
+  () => {
+    avatarLoadFailed.value = false;
+  },
+);
+
 const initials = computed(() => {
   const name = auth.user?.display_name?.trim();
   if (name) return Array.from(name)[0]?.toUpperCase() ?? "U";
@@ -483,7 +491,15 @@ function isRunning(c: Conversation): boolean {
           @click.stop="toggleQuickCard"
         >
           <span class="flex h-10 w-10 shrink-0 items-center justify-center">
+            <img
+              v-if="auth.user?.avatar_url && !avatarLoadFailed"
+              :src="auth.user.avatar_url"
+              alt=""
+              class="h-9 w-9 rounded-full bg-surface object-cover"
+              @error="avatarLoadFailed = true"
+            />
             <span
+              v-else
               class="flex h-9 w-9 items-center justify-center rounded-full bg-surface text-[13px] font-semibold text-fg transition-colors hover:bg-hover"
             >
               {{ initials }}

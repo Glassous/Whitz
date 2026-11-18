@@ -4,6 +4,16 @@ export interface User {
   id: string;
   email: string;
   display_name: string;
+  avatar_url?: string | null;
+  bio?: string;
+  gender?: string | null;
+  birthday?: string | null;
+  phone?: string | null;
+  location?: string | null;
+  occupation?: string | null;
+  website?: string | null;
+  preferred_language?: string;
+  timezone?: string;
   role: "user" | "admin";
   is_active: boolean;
   persona: string;

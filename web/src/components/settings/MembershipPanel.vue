@@ -2,7 +2,6 @@
 import { computed, onMounted, ref } from "vue";
 import { useAuthStore } from "../../stores/auth";
 import { useCreditsStore } from "../../stores/credits";
-import BaseInput from "../ui/BaseInput.vue";
 import BaseButton from "../ui/BaseButton.vue";
 import type { MembershipTier } from "../../types";
 
@@ -13,19 +12,30 @@ const redeemCode = ref("");
 const redeemMsg = ref<string | null>(null);
 const redeemErr = ref<string | null>(null);
 const redeeming = ref(false);
+const redeemInput = ref<HTMLInputElement | null>(null);
 
-const tierTone = computed(() => {
-  if (credits.tier === "pro") return "border-[#7C6BF0]/40 bg-[#7C6BF0]/10 text-[#6B5CE0]";
-  if (credits.tier === "plus") return "border-accent/40 bg-accent-weak text-accent";
-  return "border-line bg-surface text-fg-muted";
+const fallbackPlans: { tier: MembershipTier; label: string }[] = [
+  { tier: "free", label: "Free" },
+  { tier: "plus", label: "Plus" },
+  { tier: "pro", label: "Pro" },
+];
+
+const displayPlans = computed(() => credits.status?.plans ?? fallbackPlans);
+
+const tierBadgeClass = computed(() => {
+  if (credits.tier === "pro") return "bg-primary text-primary-fg";
+  if (credits.tier === "plus") return "bg-active text-fg";
+  return "bg-surface text-fg-muted";
 });
 
 function fmtDate(value: string | null): string {
   return value ? new Date(value).toLocaleDateString() : "长期有效";
 }
 
-function fmtDateTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : "—";
+function fmtReset(value: string | null | undefined): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 const availablePercent = computed(() => {
@@ -42,9 +52,9 @@ function progressClass(percent: number): string {
 }
 
 function planTagline(tier: MembershipTier): string {
-  if (tier === "pro") return "无 5 小时限制，可一次用完整周额度";
-  if (tier === "plus") return "更高的周额度，5 小时分段可用";
-  return "基础周额度，5 小时分段可用";
+  if (tier === "pro") return "无 5 小时限制 · 可单次用完整周额度";
+  if (tier === "plus") return "更高周额度 · 5 小时分段恢复";
+  return "基础周额度 · 5 小时分段恢复";
 }
 
 async function redeem() {
@@ -52,16 +62,19 @@ async function redeem() {
   redeemErr.value = null;
   if (!redeemCode.value.trim()) {
     redeemErr.value = "请输入邀请码";
+    redeemInput.value?.focus();
     return;
   }
   redeeming.value = true;
   try {
     const info = await credits.redeem(redeemCode.value);
     redeemCode.value = "";
-    redeemMsg.value = `兑换成功，当前为 ${info.tier_label}，有效期至 ${fmtDate(info.expires_at)}`;
+    redeemMsg.value = `已升级至 ${info.tier_label}（至 ${fmtDate(info.expires_at)}）`;
     await auth.refreshUser();
   } catch (e: any) {
-    redeemErr.value = e?.detail?.detail ?? "兑换失败，请检查邀请码";
+    redeemErr.value =
+      typeof e?.detail?.detail === "string" ? e.detail.detail : (e?.message ?? "兑换失败，请检查邀请码");
+    redeemInput.value?.focus();
   } finally {
     redeeming.value = false;
   }
@@ -73,46 +86,67 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="rounded-2xl border p-4" :class="tierTone">
-      <div class="flex items-start justify-between gap-4">
-        <div>
-          <p class="text-[12.5px] uppercase tracking-wide opacity-70">会员档位</p>
-          <p class="mt-1 text-[24px] font-semibold leading-none">{{ credits.tierLabel }}</p>
-          <p class="mt-1.5 text-[13.5px]">
-            {{
-              credits.tier === "free"
-                ? "免费额度按周与 5 小时滚动刷新"
-                : `有效期至 ${fmtDate(credits.status?.expires_at ?? null)}`
-            }}
-          </p>
-        </div>
-        <div class="text-right">
-          <p class="text-[12.5px] uppercase tracking-wide opacity-70">还剩</p>
-          <p class="mt-1 text-[24px] font-semibold leading-none tabular-nums">
-            {{ availablePercent === null ? "—" : `${availablePercent}%` }}
-          </p>
-          <p class="mt-1.5 text-[12.5px] opacity-80">额度按滚动窗口恢复</p>
-        </div>
-      </div>
-      <p v-if="credits.overdrawn" class="mt-3 rounded-lg bg-danger-weak px-2.5 py-1.5 text-[13px] text-danger">
-        额度已用完，将在 {{ fmtDateTime(credits.nextResetAt) }} 刷新后恢复。
-      </p>
+  <div class="flex min-h-0 flex-1 flex-col gap-3">
+    <!-- Section header -->
+    <div class="flex items-center justify-between gap-2">
+      <h2 id="heading-membership" class="text-[15px] font-semibold text-fg">会员与额度</h2>
+      <span class="text-[12px] tabular-nums text-fg-faint">
+        {{ credits.tier === "free" ? "滚动窗口刷新" : `有效至 ${fmtDate(credits.status?.expires_at ?? null)}` }}
+      </span>
     </div>
 
-    <p v-if="credits.error" class="rounded-xl bg-danger-weak px-3 py-2 text-[13px] text-danger">
-      {{ credits.error }}
-    </p>
+    <!-- Current tier & available quota summary -->
+    <div class="flex items-center justify-between gap-3 rounded-2xl bg-canvas px-3.5 py-3">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2">
+          <span
+            class="shrink-0 rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold leading-snug"
+            :class="tierBadgeClass"
+          >
+            {{ credits.tierLabel }}
+          </span>
+          <span v-if="credits.overdrawn" class="text-[12px] font-medium text-danger">额度已用尽</span>
+        </div>
+        <p class="mt-1 truncate text-[12.5px] text-fg-muted">{{ planTagline(credits.tier) }}</p>
+      </div>
 
-    <div class="space-y-4 rounded-2xl border border-line bg-canvas p-4">
-      <div>
-        <div class="flex items-center justify-between text-[13.5px]">
-          <span class="text-fg-muted">本周剩余</span>
-          <span class="tabular-nums text-fg">
-            {{ credits.status?.weekly.limit ? `${credits.weeklyPercent}%` : "不限" }}
+      <div class="shrink-0 text-right">
+        <p class="text-[11.5px] text-fg-faint">当前可用</p>
+        <p class="mt-0.5 text-[21px] font-semibold leading-none tabular-nums text-fg">
+          {{ availablePercent === null ? "—" : `${availablePercent}%` }}
+        </p>
+      </div>
+    </div>
+
+    <div
+      v-if="credits.overdrawn"
+      role="alert"
+      class="rounded-xl bg-danger-weak px-3 py-2 text-[12.5px] text-danger"
+    >
+      额度已耗尽，将于 {{ fmtReset(credits.nextResetAt) }} 重置后恢复。
+    </div>
+
+    <div
+      v-if="credits.error"
+      role="alert"
+      class="rounded-xl bg-danger-weak px-3 py-2 text-[12.5px] text-danger"
+    >
+      {{ credits.error }}
+    </div>
+
+    <!-- Quota windows (hide 5-hour block entirely for Pro) -->
+    <div
+      class="grid gap-2.5"
+      :class="credits.tier === 'pro' ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'"
+    >
+      <div class="rounded-2xl bg-canvas/75 p-3 dark:bg-canvas/80">
+        <div class="flex items-center justify-between text-[12.5px]">
+          <span class="font-medium text-fg-muted">本周剩余</span>
+          <span class="font-semibold tabular-nums text-fg">
+            {{ !credits.status ? "—" : credits.status.weekly.limit ? `${credits.weeklyPercent}%` : "不限" }}
           </span>
         </div>
-        <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-surface">
+        <div class="mt-2 h-1.5 overflow-clip rounded-full bg-surface">
           <div
             v-if="credits.status?.weekly.limit"
             class="h-full rounded-full transition-[width] duration-500"
@@ -121,60 +155,100 @@ onMounted(() => {
           />
           <div v-else class="h-full w-full rounded-full bg-fg/65" />
         </div>
-        <p class="mt-1.5 text-[12.5px] text-fg-faint">
+        <p class="mt-1.5 text-[11.5px] tabular-nums text-fg-faint">
           {{
             credits.status?.weekly.limit
-              ? `下次刷新 ${fmtDateTime(credits.status?.weekly.reset_at ?? null)}`
-              : "当前档位无周限额"
+              ? `${fmtReset(credits.status.weekly.reset_at)} 重置`
+              : "无周限额限制"
           }}
         </p>
       </div>
-      <div v-if="credits.status && credits.tier !== 'pro'">
-        <div class="flex items-center justify-between text-[13.5px]">
-          <span class="text-fg-muted">5 小时剩余</span>
-          <span class="tabular-nums text-fg">{{ credits.fiveHourPercent }}%</span>
+
+      <div v-if="credits.tier !== 'pro'" class="rounded-2xl bg-canvas/75 p-3 dark:bg-canvas/80">
+        <div class="flex items-center justify-between text-[12.5px]">
+          <span class="font-medium text-fg-muted">5 小时剩余</span>
+          <span class="font-semibold tabular-nums text-fg">
+            {{ credits.status ? `${credits.fiveHourPercent}%` : "—" }}
+          </span>
         </div>
-        <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-surface">
+        <div class="mt-2 h-1.5 overflow-clip rounded-full bg-surface">
           <div
             class="h-full rounded-full transition-[width] duration-500"
             :class="progressClass(credits.fiveHourPercent)"
             :style="{ width: `${credits.fiveHourPercent}%` }"
           />
         </div>
-        <p class="mt-1.5 text-[12.5px] text-fg-faint">
-          下次刷新 {{ fmtDateTime(credits.status?.five_hour.reset_at ?? null) }}
+        <p class="mt-1.5 text-[11.5px] tabular-nums text-fg-faint">
+          {{ credits.status ? `${fmtReset(credits.status.five_hour.reset_at)} 重置` : "加载中…" }}
         </p>
       </div>
     </div>
 
-    <div class="grid gap-2 sm:grid-cols-3">
+    <!-- Compact 3-tier comparison -->
+    <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
       <div
-        v-for="p in credits.status?.plans ?? []"
+        v-for="p in displayPlans"
         :key="p.tier"
-        class="rounded-xl border p-3"
-        :class="p.tier === credits.tier ? 'border-accent bg-accent-weak/40' : 'border-line'"
+        class="rounded-xl px-3 py-2.5 transition-colors"
+        :class="
+          p.tier === credits.tier
+            ? 'bg-canvas ring-1 ring-accent/55 dark:bg-active/65'
+            : 'bg-canvas/50 dark:bg-canvas/45'
+        "
       >
-        <div class="flex items-center justify-between">
-          <p class="text-[14.5px] font-semibold text-fg">{{ p.label }}</p>
-          <span v-if="p.tier === credits.tier" class="text-[11.5px] font-medium text-accent">当前</span>
+        <div class="flex items-center justify-between gap-1">
+          <span class="text-[13px] font-semibold text-fg">{{ p.label }}</span>
+          <span
+            v-if="p.tier === credits.tier"
+            class="rounded-full bg-accent-weak px-1.5 py-0.5 text-[10.5px] font-medium leading-none text-accent"
+          >
+            当前
+          </span>
         </div>
-        <p class="mt-2 text-[13px] font-medium leading-relaxed text-fg-muted">
-          {{ planTagline(p.tier) }}
-        </p>
+        <p class="mt-1 text-[11.5px] leading-snug text-fg-muted">{{ planTagline(p.tier) }}</p>
       </div>
     </div>
 
-    <div class="rounded-2xl border border-line bg-canvas p-4">
-      <h3 class="text-[14.5px] font-semibold text-fg">兑换邀请码</h3>
-      <p class="mt-0.5 text-[13px] text-fg-muted">输入管理员提供的兑换码，升级或续期会员。</p>
-      <div class="mt-3 flex flex-col gap-2 sm:flex-row">
-        <div class="flex-1">
-          <BaseInput v-model="redeemCode" placeholder="WZ-XXXX-XXXX-XXXX-XXXX" />
-        </div>
-        <BaseButton :loading="redeeming" @click="redeem">兑换</BaseButton>
+    <!-- Inline invite code redemption -->
+    <form
+      method="POST"
+      action="/api/users/me/redeem"
+      aria-labelledby="label-redeem-code"
+      class="mt-auto pt-1"
+      @submit.prevent="redeem"
+    >
+      <div class="mb-1.5 flex items-center justify-between gap-2">
+        <label id="label-redeem-code" for="settings-redeem-code" class="text-[12.5px] font-medium text-fg-muted">
+          兑换邀请码
+        </label>
+        <span v-if="redeemErr" id="redeem-error" role="alert" class="truncate text-[12px] text-danger">
+          {{ redeemErr }}
+        </span>
+        <span v-else-if="redeemMsg" role="status" aria-live="polite" class="truncate text-[12px] text-success">
+          {{ redeemMsg }}
+        </span>
       </div>
-      <p v-if="redeemErr" class="mt-2 text-[13px] text-danger">{{ redeemErr }}</p>
-      <p v-if="redeemMsg" class="mt-2 text-[13px] text-success">{{ redeemMsg }}</p>
-    </div>
+      <div class="flex items-center gap-2">
+        <input
+          id="settings-redeem-code"
+          ref="redeemInput"
+          v-model="redeemCode"
+          name="code"
+          type="text"
+          maxlength="32"
+          placeholder="WZ-XXXX-XXXX-XXXX-XXXX"
+          autocorrect="off"
+          autocapitalize="none"
+          spellcheck="false"
+          enterkeyhint="done"
+          :aria-invalid="redeemErr ? 'true' : undefined"
+          :aria-describedby="redeemErr ? 'redeem-error' : undefined"
+          class="focus-ring h-9.5 min-w-0 flex-1 rounded-xl border bg-canvas px-3 font-mono text-[13px] text-fg transition-colors placeholder:font-sans placeholder:text-fg-faint hover:border-line-strong"
+          :class="redeemErr ? 'border-danger' : 'border-line/80'"
+          @input="redeemErr = null; redeemMsg = null"
+        />
+        <BaseButton type="submit" size="sm" rounded="full" :loading="redeeming" class="shrink-0">兑换</BaseButton>
+      </div>
+    </form>
   </div>
 </template>

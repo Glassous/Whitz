@@ -63,7 +63,11 @@ export function useTheme() {
     preference.value = next;
     apply(next);
     try {
-      localStorage.setItem(KEY, next);
+      if (next === "system") {
+        localStorage.removeItem(KEY);
+      } else {
+        localStorage.setItem(KEY, next);
+      }
     } catch {
       /* ignore */
     }

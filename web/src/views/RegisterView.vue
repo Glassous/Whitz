@@ -36,8 +36,10 @@ async function handleSendCode() {
 }
 
 function validate(): string | null {
-  if (!displayName.value.trim()) return "请输入昵称";
-  if (displayName.value.trim().length > 80) return "昵称不能超过 80 个字符";
+  const trimmedName = displayName.value.trim();
+  if (!trimmedName) return "请输入用户名";
+  if (trimmedName.length > 80) return "用户名不能超过 80 个字符";
+  if (trimmedName.includes("@")) return "用户名不能包含 @ 符号";
   const trimmedEmail = email.value.trim();
   if (!trimmedEmail || !isValidEmail(trimmedEmail)) return "请输入有效的邮箱地址";
   if (!code.value.trim()) return "请输入邮箱验证码";
@@ -74,7 +76,21 @@ async function submit() {
 <template>
   <AuthLayout mode="register" title="创建账号" subtitle="通过邮箱验证码验证后即可开始对话">
     <form class="space-y-3" @submit.prevent="submit">
-      <BaseInput v-model="displayName" size="sm" label="昵称" placeholder="怎么称呼你？" autofocus />
+      <BaseInput
+        v-model="displayName"
+        name="display_name"
+        size="sm"
+        label="用户名"
+        placeholder="设置唯一用户名，可用于登录"
+        autocomplete="username"
+        autocorrect="off"
+        autocapitalize="none"
+        :spellcheck="false"
+        maxlength="80"
+        enterkeyhint="next"
+        required
+        autofocus
+      />
 
       <BaseInput
         v-model="email"

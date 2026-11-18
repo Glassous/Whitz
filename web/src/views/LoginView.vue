@@ -14,7 +14,7 @@ const route = useRoute();
 
 type LoginMode = "password" | "code";
 const mode = ref<LoginMode>("password");
-const email = ref("");
+const account = ref("");
 const password = ref("");
 const code = ref("");
 const showPassword = ref(false);
@@ -23,7 +23,7 @@ const loading = ref(false);
 
 const { sending, cooldown, notice, sendCode, clearNotice } = useEmailCode("login");
 
-watch([mode, email, password, code], () => {
+watch([mode, account, password, code], () => {
   if (error.value) error.value = null;
 });
 
@@ -33,7 +33,7 @@ watch(mode, () => {
 
 async function handleSendCode() {
   error.value = null;
-  const res = await sendCode(email.value);
+  const res = await sendCode(account.value);
   if (!res.ok && res.error) {
     error.value = res.error;
   }
@@ -41,8 +41,12 @@ async function handleSendCode() {
 
 async function submit() {
   error.value = null;
-  const trimmedEmail = email.value.trim();
-  if (!trimmedEmail || !isValidEmail(trimmedEmail)) {
+  const trimmedAccount = account.value.trim();
+  if (!trimmedAccount) {
+    error.value = mode.value === "password" ? "请输入邮箱或用户名" : "请输入有效的邮箱地址";
+    return;
+  }
+  if (mode.value === "code" && !isValidEmail(trimmedAccount)) {
     error.value = "请输入有效的邮箱地址";
     return;
   }
@@ -57,9 +61,9 @@ async function submit() {
   loading.value = true;
   try {
     if (mode.value === "password") {
-      await auth.login(trimmedEmail, password.value);
+      await auth.login(trimmedAccount, password.value);
     } else {
-      await auth.loginWithCode(trimmedEmail, code.value.trim());
+      await auth.loginWithCode(trimmedAccount, code.value.trim());
     }
     const rawRedirect = typeof route.query.redirect === "string" ? route.query.redirect : "/";
     const redirect = rawRedirect.startsWith("/") && !rawRedirect.startsWith("//") ? rawRedirect : "/";
@@ -151,11 +155,17 @@ async function submit() {
 
     <form class="space-y-3.5" @submit.prevent="submit">
       <BaseInput
-        v-model="email"
-        label="邮箱"
-        type="email"
-        placeholder="you@example.com"
-        autocomplete="email"
+        v-model="account"
+        :name="mode === 'password' ? 'identifier' : 'email'"
+        :label="mode === 'password' ? '邮箱或用户名' : '邮箱'"
+        :type="mode === 'password' ? 'text' : 'email'"
+        :placeholder="mode === 'password' ? '邮箱地址或用户名' : 'you@example.com'"
+        :autocomplete="mode === 'password' ? 'username' : 'email'"
+        autocorrect="off"
+        autocapitalize="none"
+        :spellcheck="false"
+        enterkeyhint="next"
+        required
         autofocus
       />
 

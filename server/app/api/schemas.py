@@ -1,13 +1,25 @@
+import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+
+PHONE_RE = re.compile(r"^[+\d\s\-()]{5,32}$")
 
 EmailStr = Annotated[
     str, StringConstraints(strip_whitespace=True, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", max_length=320)
 ]
+UsernameStr = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)
+]
 EmailCodePurpose = Literal["register", "login", "reset_password"]
+
+
+def _validate_username_no_at(value: str) -> str:
+    if "@" in value:
+        raise ValueError("用户名不能包含 @ 符号")
+    return value
 
 
 class EmailCodeRequest(BaseModel):
@@ -25,12 +37,31 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     code: str = Field(min_length=4, max_length=12)
     password: str = Field(min_length=8, max_length=128)
-    display_name: str = Field(min_length=1, max_length=80)
+    display_name: UsernameStr
+
+    @field_validator("display_name")
+    @classmethod
+    def check_display_name(cls, v: str) -> str:
+        return _validate_username_no_at(v)
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    identifier: str | None = Field(default=None, max_length=320)
+    email: str | None = Field(default=None, max_length=320)
     password: str
+
+    @model_validator(mode="after")
+    def resolve_identifier(self) -> "LoginRequest":
+        raw = self.identifier if self.identifier is not None else self.email
+        cleaned = (raw or "").strip()
+        if not cleaned:
+            raise ValueError("请输入邮箱或用户名")
+        self.identifier = cleaned
+        return self
+
+    @property
+    def login_id(self) -> str:
+        return self.identifier or ""
 
 
 class EmailCodeLoginRequest(BaseModel):
@@ -54,6 +85,16 @@ class UserOut(BaseModel):
     id: uuid.UUID
     email: str
     display_name: str
+    avatar_url: str | None = None
+    bio: str = ""
+    gender: str | None = None
+    birthday: date | None = None
+    phone: str | None = None
+    location: str | None = None
+    occupation: str | None = None
+    website: str | None = None
+    preferred_language: str = "zh-CN"
+    timezone: str = "Asia/Shanghai"
     role: str
     is_active: bool
     persona: str
@@ -73,7 +114,71 @@ class TokenResponse(BaseModel):
 
 
 class UpdateProfileRequest(BaseModel):
-    display_name: str = Field(min_length=1, max_length=80)
+    display_name: UsernameStr | None = None
+    avatar_url: str | None = Field(default=None, max_length=500)
+    bio: str | None = Field(default=None, max_length=300)
+    gender: str | None = Field(default=None, max_length=40)
+    birthday: date | None = None
+    phone: str | None = Field(default=None, max_length=32)
+    location: str | None = Field(default=None, max_length=80)
+    occupation: str | None = Field(default=None, max_length=80)
+    website: str | None = Field(default=None, max_length=255)
+    preferred_language: str | None = Field(default=None, max_length=16)
+    timezone: str | None = Field(default=None, max_length=64)
+
+    @field_validator("display_name")
+    @classmethod
+    def check_display_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _validate_username_no_at(v)
+
+    @field_validator("avatar_url")
+    @classmethod
+    def check_avatar_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            return None
+        if not (cleaned.startswith("https://") or cleaned.startswith("http://")):
+            raise ValueError("头像链接必须以 http:// 或 https:// 开头")
+        return cleaned
+
+    @field_validator("website")
+    @classmethod
+    def check_website(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            return None
+        if not (cleaned.startswith("https://") or cleaned.startswith("http://")):
+            raise ValueError("个人主页需以 http:// 或 https:// 开头")
+        return cleaned
+
+    @field_validator("phone")
+    @classmethod
+    def check_phone(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            return None
+        if not PHONE_RE.match(cleaned):
+            raise ValueError("请输入有效的联系电话")
+        return cleaned
+
+    @field_validator("bio", "gender", "location", "occupation", "preferred_language", "timezone")
+    @classmethod
+    def strip_optional_text(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip()
+
+
+class AvatarUploadRequest(BaseModel):
+    data_url: str = Field(min_length=32, max_length=1_600_000)
 
 
 class ChangePasswordRequest(BaseModel):
@@ -301,6 +406,16 @@ class AdminUserOut(BaseModel):
     id: uuid.UUID
     email: str
     display_name: str
+    avatar_url: str | None = None
+    bio: str = ""
+    gender: str | None = None
+    birthday: date | None = None
+    phone: str | None = None
+    location: str | None = None
+    occupation: str | None = None
+    website: str | None = None
+    preferred_language: str = "zh-CN"
+    timezone: str = "Asia/Shanghai"
     role: str
     is_active: bool
     hermes_profile: str

@@ -152,11 +152,18 @@ def auth_header(token: str) -> dict:
 
 @pytest.fixture
 def register(client, sent_emails):
+    counter = 0
+
     async def _register(
         email: str = "user@test.local",
         password: str = "Passw0rd!",
-        display_name: str = "Tester",
+        display_name: str | None = None,
     ) -> dict:
+        nonlocal counter
+        if display_name is None:
+            counter += 1
+            local = email.split("@", 1)[0]
+            display_name = f"{local}-{counter}"
         code_resp = await client.post(
             "/api/auth/email-code",
             json={"email": email, "purpose": "register"},

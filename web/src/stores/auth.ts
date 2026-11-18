@@ -113,8 +113,8 @@ export const useAuthStore = defineStore("auth", () => {
     ready.value = true;
   }
 
-  async function login(email: string, password: string) {
-    const auth = await api.post<AuthResponse>("/auth/login", { email, password });
+  async function login(identifier: string, password: string) {
+    const auth = await api.post<AuthResponse>("/auth/login", { identifier, password });
     applySession(auth);
   }
 

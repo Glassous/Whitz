@@ -81,10 +81,138 @@ async def test_email_code_cooldown_and_smtp_failure_clears_cooldown(client, monk
 
 
 async def test_login_success(register, client):
-    await register(email="login@test.local", password="Passw0rd!")
+    await register(email="login@test.local", password="Passw0rd!", display_name="LoginUser")
     resp = await client.post("/api/auth/login", json={"email": "login@test.local", "password": "Passw0rd!"})
     assert resp.status_code == 200
     assert resp.json()["user"]["email"] == "login@test.local"
+
+    # Login with username (case-insensitive) using identifier or email field.
+    by_name = await client.post("/api/auth/login", json={"identifier": "loginuser", "password": "Passw0rd!"})
+    assert by_name.status_code == 200
+    assert by_name.json()["user"]["email"] == "login@test.local"
+
+    by_name_exact = await client.post("/api/auth/login", json={"identifier": "LoginUser", "password": "Passw0rd!"})
+    assert by_name_exact.status_code == 200
+    assert by_name_exact.json()["user"]["display_name"] == "LoginUser"
+
+
+async def test_username_globally_unique_and_updatable(register, client, sent_emails):
+    first = await register(email="u1@test.local", password="Passw0rd!", display_name="UniqueAlice")
+    await register(email="u2@test.local", password="Passw0rd!", display_name="UniqueBob")
+
+    # Registering with a colliding username (different case) must fail with 409.
+    code_resp = await client.post("/api/auth/email-code", json={"email": "u3@test.local", "purpose": "register"})
+    assert code_resp.status_code == 200
+    dup = await client.post(
+        "/api/auth/register",
+        json={
+            "email": "u3@test.local",
+            "code": sent_emails[-1]["code"],
+            "password": "Passw0rd!",
+            "display_name": "uniquealice",
+        },
+    )
+    assert dup.status_code == 409
+
+    # Registering with '@' in username is rejected.
+    bad_at = await client.post(
+        "/api/auth/register",
+        json={
+            "email": "u3@test.local",
+            "code": sent_emails[-1]["code"],
+            "password": "Passw0rd!",
+            "display_name": "alice@test",
+        },
+    )
+    assert bad_at.status_code == 422
+
+    # Updating profile to another user's username fails with 409.
+    conflict = await client.patch(
+        "/api/users/me",
+        json={"display_name": "uniquebob"},
+        headers=auth_header(first["access_token"]),
+    )
+    assert conflict.status_code == 409
+
+    # Updating own username to a new unique name succeeds and updates login identifier.
+    renamed = await client.patch(
+        "/api/users/me",
+        json={"display_name": "AliceRenamed"},
+        headers=auth_header(first["access_token"]),
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["display_name"] == "AliceRenamed"
+
+    old_login = await client.post("/api/auth/login", json={"identifier": "UniqueAlice", "password": "Passw0rd!"})
+    assert old_login.status_code == 401
+    new_login = await client.post("/api/auth/login", json={"identifier": "alicerenamed", "password": "Passw0rd!"})
+    assert new_login.status_code == 200
+    assert new_login.json()["user"]["email"] == "u1@test.local"
+
+
+async def test_extended_profile_fields_update_and_validation(register, client):
+    data = await register(email="profile@test.local", display_name="ProfileUser")
+    headers = auth_header(data["access_token"])
+
+    # Invalid avatar URL and phone should be rejected.
+    bad_avatar = await client.patch("/api/users/me", json={"avatar_url": "javascript:alert(1)"}, headers=headers)
+    assert bad_avatar.status_code == 422
+    bad_phone = await client.patch("/api/users/me", json={"phone": "abc"}, headers=headers)
+    assert bad_phone.status_code == 422
+
+    updated = await client.patch(
+        "/api/users/me",
+        json={
+            "bio": "专注于 AI 工程化落地",
+            "gender": "非二元",
+            "birthday": "1998-06-14",
+            "phone": "+86 138 0013 8000",
+            "location": "上海",
+            "occupation": "全栈工程师",
+            "website": "https://whitz.dev",
+            "preferred_language": "zh-CN",
+            "timezone": "Asia/Shanghai",
+        },
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+    assert body["bio"] == "专注于 AI 工程化落地"
+    assert body["gender"] == "非二元"
+    assert body["birthday"] == "1998-06-14"
+    assert body["phone"] == "+86 138 0013 8000"
+    assert body["location"] == "上海"
+    assert body["occupation"] == "全栈工程师"
+    assert body["website"] == "https://whitz.dev"
+    assert body["preferred_language"] == "zh-CN"
+    assert body["timezone"] == "Asia/Shanghai"
+
+    # Upload 1x1 PNG avatar via PUT /api/users/me/avatar, fetch it, then delete it.
+    tiny_png_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+        "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    up = await client.put(
+        "/api/users/me/avatar",
+        json={"data_url": f"data:image/png;base64,{tiny_png_b64}"},
+        headers=headers,
+    )
+    assert up.status_code == 200, up.text
+    avatar_url = up.json()["avatar_url"]
+    assert avatar_url and avatar_url.startswith("/api/users/")
+
+    fetched = await client.get(avatar_url)
+    assert fetched.status_code == 200
+    assert fetched.headers["content-type"] == "image/png"
+
+    deleted = await client.delete("/api/users/me/avatar", headers=headers)
+    assert deleted.status_code == 200
+    assert deleted.json()["avatar_url"] is None
+
+    me = await client.get("/api/users/me", headers=headers)
+    assert me.status_code == 200
+    assert me.json()["occupation"] == "全栈工程师"
+    assert me.json()["gender"] == "非二元"
 
 
 async def test_login_with_email_code(register, client, sent_emails):

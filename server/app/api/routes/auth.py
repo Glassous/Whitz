@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -188,9 +188,15 @@ async def register(
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
     email = body.email.strip().lower()
+    display_name = body.display_name.strip()
     existing = await db.execute(select(User).where(User.email == email))
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已注册")
+    existing_name = await db.execute(
+        select(User.id).where(func.lower(User.display_name) == display_name.lower())
+    )
+    if existing_name.scalar_one_or_none() is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "该用户名已被使用")
 
     try:
         await email_service.verify_email_code("register", email, body.code, consume=False)
@@ -210,7 +216,7 @@ async def register(
     user = User(
         email=email,
         password_hash=hash_password(body.password),
-        display_name=body.display_name.strip(),
+        display_name=display_name,
         hermes_profile=profile,
         hermes_api_key=api_key,
         email_verified_at=now,
@@ -224,6 +230,8 @@ async def register(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
+        if "uq_users_display_name_lower" in str(exc.orig):
+            raise HTTPException(status.HTTP_409_CONFLICT, "该用户名已被使用") from exc
         raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已注册") from exc
     await email_service.consume_verification_code("register", email)
     await db.refresh(user)
@@ -239,19 +247,22 @@ async def login(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
-    email = body.email.strip().lower()
-    result = await db.execute(select(User).where(User.email == email))
+    ident = body.login_id.lower()
+    if "@" in ident:
+        result = await db.execute(select(User).where(User.email == ident))
+    else:
+        result = await db.execute(select(User).where(func.lower(User.display_name) == ident))
     user = result.scalar_one_or_none()
     if user is None or not verify_password(body.password, user.password_hash):
         await audit.record(
             "auth.login_failed",
             actor=user.id if user else None,
-            actor_email=email,
+            actor_email=user.email if user else ident,
             outcome="failure",
             severity="warning",
             request=request,
         )
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "邮箱或密码错误")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号或密码错误")
     if not user.is_active:
         await audit.record(
             "auth.login_blocked",
