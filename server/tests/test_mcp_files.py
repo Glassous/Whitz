@@ -89,7 +89,12 @@ async def test_mcp_files_auth_and_tools(client, register, db, monkeypatch):
         headers=mcp_headers,
     )
     tool_names = [t["name"] for t in tools_resp.json()["result"]["tools"]]
-    assert set(tool_names) == {"list_workspace_files", "read_workspace_file", "search_workspace_files"}
+    assert set(tool_names) == {
+        "list_workspace_files",
+        "read_workspace_file",
+        "search_workspace_files",
+        "write_workspace_file",
+    }
 
     # Call list_workspace_files
     listed = await client.post(
@@ -154,4 +159,92 @@ async def test_mcp_files_auth_and_tools(client, register, db, monkeypatch):
         headers={"Authorization": f"Bearer {u2.hermes_api_key}", "X-Whitz-Profile": u2.hermes_profile},
     )
     assert denied.json()["result"]["isError"] is True
+
+    # Global file from another conversation is visible when include_global=True and readable/searchable
+    other_conv_resp = await client.post(
+        "/api/conversations",
+        json={"title": "Global Source"},
+        headers=auth_header(u1_auth["access_token"]),
+    )
+    other_conv_id = other_conv_resp.json()["id"]
+    global_id = uuid.uuid4()
+    db.add(
+        ConversationFile(
+            id=global_id,
+            conversation_id=uuid.UUID(other_conv_id),
+            user_id=u1.id,
+            filename="shared.md",
+            ext=".md",
+            mime_type="text/markdown",
+            category="document",
+            size_bytes=20,
+            storage_key=f"whitz/uploads/{u1.id}/{other_conv_id}/{global_id}/shared.md",
+            status="ready",
+            is_global=True,
+        )
+    )
+    await db.commit()
+
+    listed_global = await client.post(
+        "/api/internal/mcp/files",
+        json={
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "list_workspace_files", "arguments": {"conversation_id": conv_id}},
+        },
+        headers=mcp_headers,
+    )
+    global_files = json.loads(listed_global.json()["result"]["content"][0]["text"])["files"]
+    assert len(global_files) == 2
+    assert {f["scope"] for f in global_files} == {"conversation", "global"}
+
+    # write_workspace_file creates assistant artifact in COS + DB
+    written_objects: dict[str, bytes] = {}
+
+    async def _fake_put_bytes(key: str, data: bytes, content_type: str, settings=None) -> str:
+        written_objects[key] = data
+        return "etag-written"
+
+    monkeypatch.setattr(cos, "put_object_bytes", _fake_put_bytes)
+
+    write_resp = await client.post(
+        "/api/internal/mcp/files",
+        json={
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "write_workspace_file",
+                "arguments": {
+                    "conversation_id": conv_id,
+                    "filename": "report.html",
+                    "content": "<h1>Report</h1>",
+                },
+            },
+        },
+        headers=mcp_headers,
+    )
+    write_payload = json.loads(write_resp.json()["result"]["content"][0]["text"])
+    assert write_payload["status"] == "created"
+    assert write_payload["source"] == "assistant"
+    assert len(written_objects) == 1
+    created_row = await db.get(ConversationFile, uuid.UUID(write_payload["file_id"]))
+    assert created_row is not None and created_row.source == "assistant"
+
+    # Reject disallowed binary/executable extensions
+    bad_write = await client.post(
+        "/api/internal/mcp/files",
+        json={
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "write_workspace_file",
+                "arguments": {"conversation_id": conv_id, "filename": "bin.exe", "content": "x"},
+            },
+        },
+        headers=mcp_headers,
+    )
+    assert bad_write.json()["result"]["isError"] is True
     get_settings.cache_clear()

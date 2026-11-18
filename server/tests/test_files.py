@@ -195,3 +195,149 @@ def test_build_workspace_instructions_includes_ready_files():
     assert "report.pdf" in text
     assert "data.csv [本轮新附带]" in text
     assert "read_workspace_file" in text
+
+
+@pytest.mark.asyncio
+async def test_pending_cleanup_preview_content_and_global_library(client, register, db, cos_env, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select
+    from app.db.models import ConversationFile, User
+
+    u1 = await register(email="lib1@test.local", display_name="Lib1")
+    u2 = await register(email="lib2@test.local", display_name="Lib2")
+    h1 = auth_header(u1["access_token"])
+    h2 = auth_header(u2["access_token"])
+    user1 = (await db.execute(select(User).where(User.email == "lib1@test.local"))).scalar_one()
+
+    conv1_id = (await client.post("/api/conversations", json={"title": "会话一"}, headers=h1)).json()["id"]
+    conv2_id = (await client.post("/api/conversations", json={"title": "会话二"}, headers=h1)).json()["id"]
+
+    # Insert an expired pending file and verify cleanup happens on list_files
+    expired_id = uuid.uuid4()
+    db.add(
+        ConversationFile(
+            id=expired_id,
+            conversation_id=uuid.UUID(conv1_id),
+            user_id=user1.id,
+            filename="abandoned.txt",
+            ext=".txt",
+            mime_type="text/plain",
+            category="document",
+            size_bytes=10,
+            storage_key=f"whitz/uploads/{user1.id}/{conv1_id}/{expired_id}/abandoned.txt",
+            status="pending",
+            expires_cleanup_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        )
+    )
+    ready_id = uuid.uuid4()
+    db.add(
+        ConversationFile(
+            id=ready_id,
+            conversation_id=uuid.UUID(conv1_id),
+            user_id=user1.id,
+            filename="page.html",
+            ext=".html",
+            mime_type="text/html",
+            category="code",
+            size_bytes=25,
+            storage_key=f"whitz/uploads/{user1.id}/{conv1_id}/{ready_id}/page.html",
+            status="ready",
+            source="assistant",
+        )
+    )
+    img_id = uuid.uuid4()
+    db.add(
+        ConversationFile(
+            id=img_id,
+            conversation_id=uuid.UUID(conv1_id),
+            user_id=user1.id,
+            filename="chart.png",
+            ext=".png",
+            mime_type="image/png",
+            category="image",
+            size_bytes=120,
+            storage_key=f"whitz/uploads/{user1.id}/{conv1_id}/{img_id}/chart.png",
+            status="ready",
+        )
+    )
+    await db.commit()
+
+    deleted_keys: list[str] = []
+
+    async def _fake_delete_objects(keys, settings=None):
+        deleted_keys.extend(keys)
+
+    async def _fake_delete_object(key, settings=None):
+        deleted_keys.append(key)
+
+    async def _fake_get_bytes(key: str, *, max_bytes: int, settings=None) -> bytes:
+        return b"<h1>Hello World</h1>"
+
+    copied_puts: list[str] = []
+
+    async def _fake_put_bytes(key: str, data: bytes, content_type: str, settings=None) -> str:
+        copied_puts.append(key)
+        return "etag-cloned"
+
+    monkeypatch.setattr(cos, "delete_objects", _fake_delete_objects)
+    monkeypatch.setattr(cos, "delete_object", _fake_delete_object)
+    monkeypatch.setattr(cos, "get_object_bytes", _fake_get_bytes)
+    monkeypatch.setattr(cos, "put_object_bytes", _fake_put_bytes)
+
+    listed = await client.get(f"/api/conversations/{conv1_id}/files", headers=h1)
+    assert listed.status_code == 200
+    assert len(listed.json()) == 2
+    assert await db.get(ConversationFile, expired_id) is None
+
+    # Preview URLs & thumb URLs attached
+    img_item = next(f for f in listed.json() if f["id"] == str(img_id))
+    assert img_item["preview_url"] and "q-signature=" in img_item["preview_url"]
+    assert img_item["thumb_url"] is not None
+    assert img_item["preview_expires_at"] is not None
+
+    # In-panel preview-content returns UTF-8 HTML text
+    preview = await client.get(f"/api/conversations/{conv1_id}/files/{ready_id}/preview-content", headers=h1)
+    assert preview.status_code == 200
+    assert preview.json()["format"] == "text"
+    assert preview.json()["content"] == "<h1>Hello World</h1>"
+
+    # Global Library listing & cross-user isolation
+    lib = await client.get("/api/library/files", headers=h1)
+    assert lib.status_code == 200
+    assert lib.json()["total"] == 2
+    assert {item["conversation_title"] for item in lib.json()["items"]} == {"会话一"}
+    assert (await client.get("/api/library/files", headers=h2)).json()["total"] == 0
+
+    # Mark page.html as global and rename
+    patched = await client.patch(
+        f"/api/library/files/{ready_id}",
+        json={"is_global": True, "filename": "landing.html"},
+        headers=h1,
+    )
+    assert patched.status_code == 200
+    assert patched.json()["is_global"] is True
+    assert patched.json()["filename"] == "landing.html"
+
+    # Attach to conv2 clones COS object with a new unique storage_key
+    attached = await client.post(
+        f"/api/conversations/{conv2_id}/files/attach",
+        json={"file_ids": [str(ready_id)]},
+        headers=h1,
+    )
+    assert attached.status_code == 200, attached.text
+    assert len(attached.json()) == 1
+    assert attached.json()[0]["id"] != str(ready_id)
+    assert attached.json()[0]["conversation_id"] == conv2_id
+    assert len(copied_puts) == 1
+
+    # Deleting conv1 preserves is_global=True file (conversation_id -> None), deletes non-global chart.png
+    del_conv1 = await client.delete(f"/api/conversations/{conv1_id}", headers=h1)
+    assert del_conv1.status_code == 204
+    db.expire_all()
+    survived = await db.get(ConversationFile, ready_id)
+    assert survived is not None
+    assert survived.conversation_id is None
+    assert survived.is_global is True
+    assert await db.get(ConversationFile, img_id) is None
+    assert any(str(img_id) in k for k in deleted_keys)
+    assert all(str(ready_id) not in k for k in deleted_keys)

@@ -21,7 +21,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api.routes import conversations as conversations_routes
-from app.core import ratelimit, redis as redis_mod
+from app.core import redis as redis_mod
 from app.db.models import Base
 from app.db.session import get_db
 from app.main import create_app
@@ -74,11 +74,6 @@ class FakeHermesClient:
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limits():
-    ratelimit.email_code_ip_limiter._hits.clear()
-    ratelimit.email_code_addr_limiter._hits.clear()
-    ratelimit.reset_password_limiter._hits.clear()
-    ratelimit.login_code_limiter._hits.clear()
-    ratelimit.redeem_limiter._hits.clear()
     if isinstance(redis_mod._redis, redis_mod.MemoryRedis):
         redis_mod._redis._data.clear()
     yield

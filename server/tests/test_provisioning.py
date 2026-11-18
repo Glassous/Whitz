@@ -47,10 +47,30 @@ def test_provision_writes_three_files():
     assert "API_SERVER_KEY=key-abc" in (d / ".env").read_text(encoding="utf-8")
     cfg = yaml.safe_load((d / "config.yaml").read_text(encoding="utf-8"))
     assert cfg["platform_toolsets"]["api_server"] == provisioning.TOOLSETS
+    assert "memory" not in cfg["platform_toolsets"]["api_server"]
+    assert cfg["memory"]["memory_enabled"] is False
+    assert cfg["memory"]["write_approval"] is True
     assert "whitz_files" in cfg["mcp_servers"]
+    assert "whitz_skills" in cfg["mcp_servers"]
     assert cfg["mcp_servers"]["whitz_files"]["headers"]["Authorization"] == "Bearer key-abc"
     assert cfg["mcp_servers"]["whitz_files"]["headers"]["X-Whitz-Profile"] == profile
+    assert cfg["mcp_servers"]["whitz_skills"]["url"].endswith("/api/internal/mcp/skills")
     assert "自定义" in (d / "SOUL.md").read_text(encoding="utf-8")
+
+
+def test_memory_and_disabled_skills_config():
+    cfg = provisioning.build_config(
+        "u1",
+        "k1",
+        memory_enabled=True,
+        memory_require_confirm=False,
+        disabled_skills=["skill-a", "skill-b"],
+    )
+    assert "memory" in cfg["platform_toolsets"]["api_server"]
+    assert cfg["memory"]["memory_enabled"] is True
+    assert cfg["memory"]["user_profile_enabled"] is True
+    assert cfg["memory"]["write_approval"] is False
+    assert cfg["skills"]["disabled"] == ["skill-a", "skill-b"]
 
 
 def test_set_parked_toggles_marker():
