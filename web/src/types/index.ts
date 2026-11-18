@@ -20,6 +20,11 @@ export interface User {
   email_verified_at?: string | null;
   membership_tier: MembershipTier;
   membership_expires_at: string | null;
+  profile_context_enabled: boolean;
+  profile_context_consented_at: string | null;
+  memory_enabled: boolean;
+  memory_consented_at: string | null;
+  memory_require_confirm: boolean;
   created_at: string;
 }
 
@@ -89,6 +94,8 @@ export interface Conversation {
   plan: Plan | null;
   active_run_id: string | null;
   active_run_status: string | null;
+  is_pinned: boolean;
+  pinned_at: string | null;
   created_at: string;
   updated_at: string;
   last_message_at: string | null;
@@ -127,15 +134,25 @@ export type FileCategory = "document" | "spreadsheet" | "code" | "image";
 
 export interface ConversationFile {
   id: string;
-  conversation_id: string;
+  conversation_id: string | null;
   filename: string;
   ext: string;
   mime_type: string;
   category: FileCategory | string;
   size_bytes: number;
   status: "pending" | "ready" | "failed" | string;
+  source: "user" | "assistant" | string;
+  is_global: boolean;
+  message_id?: string | null;
+  preview_url?: string | null;
+  thumb_url?: string | null;
+  preview_expires_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface LibraryFileItem extends ConversationFile {
+  conversation_title?: string | null;
 }
 
 export interface FileAttachmentMeta {
@@ -144,6 +161,21 @@ export interface FileAttachmentMeta {
   ext: string;
   category: string;
   size_bytes: number;
+}
+
+export interface WorkspaceArtifactMeta {
+  id: string;
+  filename: string;
+  ext: string;
+  category: FileCategory | string;
+  size_bytes: number;
+  mime_type?: string;
+  source?: "assistant" | "user" | string;
+  is_global?: boolean;
+  message_id?: string | null;
+  preview_url?: string | null;
+  thumb_url?: string | null;
+  preview_expires_at?: string | null;
 }
 
 export type UploadTaskStatus = "signing" | "uploading" | "completing" | "error";
@@ -158,9 +190,23 @@ export interface UploadTask {
   status: UploadTaskStatus;
   error?: string | null;
   file?: File;
+  localPreviewUrl?: string | null;
 }
 
 export type TaskPanelTab = "steps" | "files";
+
+export type PreviewTarget =
+  | {
+      kind: "file";
+      file: ConversationFile;
+      previewUrl?: string | null;
+      content?: string | null;
+    }
+  | {
+      kind: "html";
+      html: string;
+      title?: string;
+    };
 
 export interface ToolPayload {
   args?: unknown;
@@ -173,6 +219,8 @@ export interface ToolPayload {
   reasoning?: ReasoningBlock[];
   plan?: Plan | null;
   attachments?: FileAttachmentMeta[];
+  skills?: string[];
+  artifacts?: WorkspaceArtifactMeta[];
 }
 
 export interface Message {
@@ -205,4 +253,88 @@ export interface PendingControl {
   execution_generation: number | null;
   tool?: string | null;
   preview?: string | null;
+}
+
+export interface SkillItem {
+  name: string;
+  title?: string | null;
+  description: string;
+  category?: string | null;
+  enabled: boolean;
+  source?: "builtin" | "user" | "github" | "assistant" | "custom" | string;
+  content?: string | null;
+  tags?: string[];
+  repo_url?: string | null;
+  path?: string | null;
+  editable?: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface SkillPendingItem {
+  id: string;
+  name: string;
+  action: "create" | "update" | "delete" | string;
+  source?: string;
+  description?: string | null;
+  category?: string | null;
+  content: string;
+  reason?: string | null;
+  conversation_id?: string | null;
+  message_id?: string | null;
+  status?: "pending" | "approved" | "rejected" | string;
+  created_at?: string | null;
+  resolved_at?: string | null;
+}
+
+export interface MemoryEntry {
+  id: string;
+  content: string;
+  target?: "memory" | "user" | string;
+  category?: string | null;
+  source?: "user" | "assistant" | "manual" | string;
+  char_count?: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface MemoryPendingItem {
+  id: string;
+  action: "add" | "replace" | "remove" | "create" | "update" | "delete" | string;
+  target?: "memory" | "user" | string;
+  content: string;
+  old_content?: string | null;
+  category?: string | null;
+  reason?: string | null;
+  conversation_id?: string | null;
+  message_id?: string | null;
+  status?: "pending" | "approved" | "rejected" | string;
+  created_at?: string | null;
+  resolved_at?: string | null;
+}
+
+export interface MemoryOverview {
+  memory_enabled: boolean;
+  memory_consented_at: string | null;
+  memory_require_confirm: boolean;
+  profile_context_enabled?: boolean;
+  profile_context_consented_at?: string | null;
+  entries: MemoryEntry[];
+  pending: MemoryPendingItem[];
+  char_count?: number;
+  char_limit?: number;
+  memory_char_count?: number;
+  memory_char_limit?: number;
+  user_char_count?: number;
+  user_char_limit?: number;
+}
+
+export interface UserSessionItem {
+  session_id: string;
+  user_agent: string | null;
+  client_ip: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string;
+  is_current: boolean;
 }

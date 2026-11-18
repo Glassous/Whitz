@@ -2,6 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ACCEPT_ATTR, SUPPORTED_TYPES_SUMMARY, categoryLabel, formatFileSize, validateDragItems } from "../../lib/fileTypes";
 import type { ConversationFile, UploadTask } from "../../types";
+import SkillPickerPopover from "./SkillPickerPopover.vue";
+
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
 const props = defineProps<{
   streaming: boolean;
@@ -9,6 +12,7 @@ const props = defineProps<{
   uploading?: boolean;
   uploads?: UploadTask[];
   attachedFiles?: ConversationFile[];
+  selectedSkills?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -18,6 +22,7 @@ const emit = defineEmits<{
   "cancel-upload": [localId: string];
   "dismiss-upload": [localId: string];
   "detach-file": [fileId: string];
+  "update:selectedSkills": [skills: string[]];
 }>();
 
 const NORMAL_MAX_HEIGHT = 160;
@@ -31,11 +36,37 @@ const expanded = ref(false);
 const dragDepth = ref(0);
 const dragValid = ref(true);
 const dragReason = ref("");
+const failedThumbIds = ref<Set<string>>(new Set());
 
 const isDragging = computed(() => dragDepth.value > 0);
-const hasChips = computed(() => (props.uploads?.length ?? 0) > 0 || (props.attachedFiles?.length ?? 0) > 0);
+const hasChips = computed(
+  () =>
+    (props.uploads?.length ?? 0) > 0 ||
+    (props.attachedFiles?.length ?? 0) > 0 ||
+    (props.selectedSkills?.length ?? 0) > 0,
+);
 const sendLockedByUpload = computed(() => !!props.uploading && !props.streaming);
 const canSubmit = computed(() => !!text.value.trim() && !props.streaming && !props.disabled && !props.uploading);
+
+function fileThumbUrl(f: ConversationFile): string | null {
+  if (failedThumbIds.value.has(f.id)) return null;
+  const isImg = f.category === "image" || IMAGE_EXTS.has((f.ext || "").toLowerCase());
+  if (!isImg) return null;
+  return f.thumb_url || f.preview_url || null;
+}
+
+function markThumbFailed(id: string) {
+  const next = new Set(failedThumbIds.value);
+  next.add(id);
+  failedThumbIds.value = next;
+}
+
+function removeSkill(name: string) {
+  emit(
+    "update:selectedSkills",
+    (props.selectedSkills ?? []).filter((s) => s !== name),
+  );
+}
 
 const uploadStatusAnnouncement = computed(() => {
   const active = props.uploads?.filter((u) => u.status !== "error") ?? [];
@@ -61,6 +92,8 @@ function toggleExpand() {
 function submit() {
   const value = text.value.trim();
   if (!value || props.streaming || props.disabled || props.uploading) return;
+  const pop = document.getElementById("chat-skill-picker") as (HTMLElement & { hidePopover?: () => void }) | null;
+  pop?.hidePopover?.();
   emit("send", value);
   text.value = "";
   expanded.value = false;
@@ -192,7 +225,7 @@ onBeforeUnmount(() => {
       class="relative flex flex-col rounded-[24px] bg-surface p-2 shadow-sm transition-colors focus-within:bg-hover sm:rounded-[26px] sm:px-3.5 sm:pb-2.5 sm:pt-3"
       :class="isDragging ? (dragValid ? 'ring-2 ring-accent/60' : 'ring-2 ring-danger/70') : ''"
     >
-      <!-- Uploading & newly attached chips -->
+      <!-- Uploading, attached file & selected skill chips -->
       <div v-if="hasChips" class="mb-2 flex flex-wrap gap-1.5 px-1">
         <div
           v-for="u in uploads"
@@ -201,7 +234,13 @@ onBeforeUnmount(() => {
           :class="u.status === 'error' ? 'bg-danger-weak text-danger' : 'bg-canvas/85 text-fg'"
         >
           <div class="flex items-center gap-1.5">
-            <span class="shrink-0 rounded bg-surface px-1 py-0.5 text-[10.5px] font-medium text-fg-muted">
+            <img
+              v-if="u.localPreviewUrl"
+              :src="u.localPreviewUrl"
+              :alt="u.filename"
+              class="h-7 w-7 shrink-0 rounded-lg bg-surface object-cover"
+            />
+            <span v-else class="shrink-0 rounded bg-surface px-1 py-0.5 text-[10.5px] font-medium text-fg-muted">
               {{ categoryLabel(u.category, u.ext) }}
             </span>
             <span class="min-w-0 flex-1 truncate font-medium" :title="u.filename">{{ u.filename }}</span>
@@ -233,7 +272,14 @@ onBeforeUnmount(() => {
           class="inline-flex max-w-[240px] items-center gap-1.5 rounded-xl bg-canvas/85 px-2.5 py-1.5 text-[12px] text-fg"
           :title="`${f.filename} (${formatFileSize(f.size_bytes)})`"
         >
-          <span class="shrink-0 rounded bg-surface px-1 py-0.5 text-[10.5px] font-medium text-fg-muted">
+          <img
+            v-if="fileThumbUrl(f)"
+            :src="fileThumbUrl(f)!"
+            :alt="f.filename"
+            class="h-7 w-7 shrink-0 rounded-lg bg-surface object-cover"
+            @error="markThumbFailed(f.id)"
+          />
+          <span v-else class="shrink-0 rounded bg-surface px-1 py-0.5 text-[10.5px] font-medium text-fg-muted">
             {{ categoryLabel(f.category, f.ext) }}
           </span>
           <span class="min-w-0 flex-1 truncate font-medium">{{ f.filename }}</span>
@@ -244,6 +290,29 @@ onBeforeUnmount(() => {
             aria-label="从本条消息移除标签（文件仍保留在工作区）"
             title="从本条消息移除标签（文件仍保留在工作区）"
             @click="emit('detach-file', f.id)"
+          >
+            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+
+        <div
+          v-for="skillName in selectedSkills"
+          :key="`skill-${skillName}`"
+          class="inline-flex max-w-[220px] items-center gap-1.5 rounded-xl bg-accent-weak/85 px-2.5 py-1.5 text-[12px] text-fg"
+          :title="`技能：${skillName}`"
+        >
+          <svg class="h-3.5 w-3.5 shrink-0 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3z" />
+          </svg>
+          <span class="min-w-0 flex-1 truncate font-medium">{{ skillName }}</span>
+          <button
+            type="button"
+            class="focus-ring flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-fg-faint transition-colors hover:bg-hover hover:text-fg"
+            :aria-label="`移除技能 ${skillName}`"
+            title="移除技能"
+            @click="removeSkill(skillName)"
           >
             <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
               <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
@@ -269,8 +338,8 @@ onBeforeUnmount(() => {
           />
         </div>
 
-        <!-- Left upload button (bottom-left on both mobile & desktop) -->
-        <div class="col-start-1 row-start-1 flex items-center gap-2 self-end sm:col-start-1 sm:row-start-2 sm:self-center">
+        <!-- Left upload & skill buttons (bottom-left on both mobile & desktop) -->
+        <div class="col-start-1 row-start-1 flex items-center gap-1 self-end sm:col-start-1 sm:row-start-2 sm:gap-1.5 sm:self-center">
           <button
             type="button"
             class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:gap-1.5 sm:px-2.5 sm:text-[13px] sm:font-medium"
@@ -287,6 +356,31 @@ onBeforeUnmount(() => {
               />
             </svg>
             <span class="hidden sm:inline">上传文件</span>
+          </button>
+
+          <button
+            type="button"
+            popovertarget="chat-skill-picker"
+            class="skill-picker-anchor focus-ring relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:gap-1.5 sm:px-2.5 sm:text-[13px] sm:font-medium"
+            :class="selectedSkills?.length ? 'bg-accent-weak/85 text-fg' : ''"
+            :disabled="disabled"
+            aria-label="选择技能"
+            title="选择本轮对话附加技能"
+          >
+            <svg class="h-[17px] w-[17px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3zM5 17l.9 2.1L8 20l-2.1.9L5 23l-.9-2.1L2 20l2.1-.9L5 17z"
+              />
+            </svg>
+            <span class="hidden sm:inline">技能</span>
+            <span
+              v-if="selectedSkills?.length"
+              class="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-fg tabular-nums sm:static"
+            >
+              {{ selectedSkills.length }}
+            </span>
           </button>
 
           <span v-if="sendLockedByUpload" class="hidden text-[12px] text-fg-faint sm:inline">
@@ -413,5 +507,10 @@ onBeforeUnmount(() => {
         </div>
       </Transition>
     </div>
+
+    <SkillPickerPopover
+      :selected-skills="selectedSkills ?? []"
+      @update:selected-skills="emit('update:selectedSkills', $event)"
+    />
   </div>
 </template>

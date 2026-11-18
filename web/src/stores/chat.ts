@@ -6,13 +6,19 @@ import { streamSSE, streamSSEGet, type SSEEvent } from "../api/sse";
 import type {
   ConversationDetail,
   ConversationFile,
+  MemoryOverview,
+  MemoryPendingItem,
   Message,
   PendingControl,
   Plan,
   PlanItem,
   ReasoningBlock,
+  SkillPendingItem,
+  ToolPayload,
+  WorkspaceArtifactMeta,
 } from "../types";
 import { useConversationsStore } from "./conversations";
+import { useFilesStore } from "./files";
 
 let seq = 0;
 const tempId = (prefix: string) => `${prefix}-${Date.now()}-${seq++}`;
@@ -33,9 +39,12 @@ export const useChatStore = defineStore("chat", () => {
   const plan = ref<Plan | null>(null);
   const reasoning = ref<ReasoningBlock[]>([]);
   const pendingControl = ref<PendingControl | null>(null);
+  const pendingMemory = ref<MemoryPendingItem[]>([]);
+  const pendingSkills = ref<SkillPendingItem[]>([]);
   const error = ref<string | null>(null);
   const selectedTurnId = ref<string | null>(null);
   let controller: AbortController | null = null;
+  let pendingUserTargetId: string | null = null;
 
   const currentStep = computed(() => {
     const items = plan.value?.items ?? [];
@@ -134,6 +143,28 @@ export const useChatStore = defineStore("chat", () => {
     selectedTurnId.value = id;
   }
 
+  async function loadConversationPending(targetConvId: string) {
+    try {
+      const [memRes, skillRes] = await Promise.allSettled([
+        api.get<MemoryOverview>("/users/me/memory"),
+        api.get<SkillPendingItem[]>("/skills/pending"),
+      ]);
+      if (convId.value !== targetConvId) return;
+      if (memRes.status === "fulfilled" && Array.isArray(memRes.value?.pending)) {
+        pendingMemory.value = memRes.value.pending.filter(
+          (item) => (!item.conversation_id || item.conversation_id === targetConvId) && (item.status ?? "pending") === "pending",
+        );
+      }
+      if (skillRes.status === "fulfilled" && Array.isArray(skillRes.value)) {
+        pendingSkills.value = skillRes.value.filter(
+          (item) => (!item.conversation_id || item.conversation_id === targetConvId) && (item.status ?? "pending") === "pending",
+        );
+      }
+    } catch {
+      /* ignore pending load failures */
+    }
+  }
+
   function loadFromConversation(detail: ConversationDetail) {
     convId.value = detail.id;
     messages.value = detail.messages.map((m) => ({ ...m }));
@@ -146,12 +177,16 @@ export const useChatStore = defineStore("chat", () => {
     selectedTurnId.value = lastAssistant?.id ?? null;
     activeRunId.value = detail.active_run_id;
     pendingControl.value = null;
+    pendingMemory.value = [];
+    pendingSkills.value = [];
+    pendingUserTargetId = null;
     error.value = null;
     streaming.value = false;
     activeAssistantId.value = null;
     if (detail.active_run_id && detail.active_run_status && detail.active_run_status !== "completed") {
       void reconnect(detail.active_run_id);
     }
+    void loadConversationPending(detail.id);
   }
 
   function reset() {
@@ -166,6 +201,9 @@ export const useChatStore = defineStore("chat", () => {
     reasoning.value = [];
     selectedTurnId.value = null;
     pendingControl.value = null;
+    pendingMemory.value = [];
+    pendingSkills.value = [];
+    pendingUserTargetId = null;
     error.value = null;
   }
 
@@ -186,12 +224,62 @@ export const useChatStore = defineStore("chat", () => {
     a.tool_payload = payload;
   }
 
+  function extractPendingItems<T extends { id: string }>(d: Record<string, any>, primaryKey: string): T[] {
+    if (Array.isArray(d[primaryKey])) return d[primaryKey];
+    if (Array.isArray(d.items)) return d.items;
+    if (Array.isArray(d.pending)) return d.pending;
+    if (d.item && typeof d.item === "object" && typeof d.item.id === "string") return [d.item as T];
+    if (typeof d.id === "string") return [d as T];
+    return [];
+  }
+
+  function mergePending<T extends { id: string }>(target: T[], incoming: T[]): T[] {
+    if (!incoming.length) return target;
+    const next = [...target];
+    for (const item of incoming) {
+      if (!item?.id) continue;
+      const idx = next.findIndex((existing) => existing.id === item.id);
+      if (idx >= 0) next[idx] = { ...next[idx], ...item };
+      else next.push(item);
+    }
+    return next;
+  }
+
+  function appendArtifactToAssistant(rawFile: ConversationFile | WorkspaceArtifactMeta) {
+    const a = assistant();
+    if (!a) return;
+    const payload: ToolPayload = { ...(a.tool_payload ?? {}) };
+    const prev = Array.isArray(payload.artifacts) ? [...payload.artifacts] : [];
+    const meta: WorkspaceArtifactMeta = {
+      id: rawFile.id,
+      filename: rawFile.filename,
+      ext: rawFile.ext,
+      category: rawFile.category,
+      size_bytes: rawFile.size_bytes,
+      mime_type: rawFile.mime_type,
+      source: rawFile.source ?? "assistant",
+      is_global: rawFile.is_global,
+      message_id: rawFile.message_id ?? a.id,
+      preview_url: rawFile.preview_url,
+      thumb_url: rawFile.thumb_url,
+      preview_expires_at: rawFile.preview_expires_at,
+    };
+    const idx = prev.findIndex((item) => item.id === meta.id);
+    if (idx >= 0) prev[idx] = { ...prev[idx], ...meta };
+    else prev.push(meta);
+    payload.artifacts = prev;
+    a.tool_payload = payload;
+  }
+
   function handleEvent(ev: SSEEvent) {
     const d = ev.data as Record<string, any>;
     switch (ev.event) {
       case "message.created": {
-        const userMsg = messages.value.find((m) => m.id.startsWith("temp-user"));
+        const userMsg = messages.value.find(
+          (m) => m.id.startsWith("temp-user") || (pendingUserTargetId !== null && m.id === pendingUserTargetId),
+        );
         if (userMsg && d.user_message_id) userMsg.id = d.user_message_id;
+        pendingUserTargetId = null;
         const a = assistant();
         if (a && d.assistant_message_id) {
           const previousId = a.id;
@@ -315,11 +403,36 @@ export const useChatStore = defineStore("chat", () => {
         };
         { const a = assistant(); if (a) a.status = "waiting"; }
         break;
+      case "workspace.file_created": {
+        const rawFile = (d.file && typeof d.file === "object" ? d.file : d) as ConversationFile | undefined;
+        if (!rawFile?.id || !rawFile?.filename) break;
+        useFilesStore().upsertFile(rawFile);
+        appendArtifactToAssistant(rawFile);
+        break;
+      }
+      case "memory.pending": {
+        const items = extractPendingItems<MemoryPendingItem>(d, "memory");
+        pendingMemory.value = mergePending(pendingMemory.value, items);
+        break;
+      }
+      case "skills.pending":
+      case "skill.pending": {
+        const items = extractPendingItems<SkillPendingItem>(d, "skills");
+        pendingSkills.value = mergePending(pendingSkills.value, items);
+        break;
+      }
       case "run.completed": {
         const a = assistant();
         if (a) {
           if (typeof d.output === "string" && d.output) a.content = d.output;
           a.status = "completed";
+        }
+        if (Array.isArray(d.artifacts)) {
+          for (const art of d.artifacts) {
+            if (art && typeof art === "object" && art.id && art.filename) {
+              appendArtifactToAssistant(art as WorkspaceArtifactMeta);
+            }
+          }
         }
         if (Array.isArray(d.reasoning)) reasoning.value = normalizeReasoning(d.reasoning);
         if (d.plan) plan.value = d.plan;
@@ -366,6 +479,7 @@ export const useChatStore = defineStore("chat", () => {
     streaming.value = false;
     activeRunId.value = null;
     pendingControl.value = null;
+    pendingUserTargetId = null;
   }
 
   async function consume(gen: AsyncGenerator<SSEEvent>) {
@@ -393,34 +507,25 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
-  async function send(content: string, attachedFiles: ConversationFile[] = []) {
-    if (!convId.value || streaming.value) return;
-    error.value = null;
-    reasoning.value = [];
-    plan.value = null;
-    const userId = tempId("temp-user");
+  function buildUserToolPayload(attachedFiles: ConversationFile[], skillNames: string[]): ToolPayload | null {
+    const payload: ToolPayload = {};
+    if (attachedFiles.length) {
+      payload.attachments = attachedFiles.map((f) => ({
+        id: f.id,
+        filename: f.filename,
+        ext: f.ext,
+        category: f.category,
+        size_bytes: f.size_bytes,
+      }));
+    }
+    if (skillNames.length) {
+      payload.skills = [...skillNames];
+    }
+    return Object.keys(payload).length ? payload : null;
+  }
+
+  function pushAssistantPlaceholder(): string {
     const assistantId = tempId("temp-assistant");
-    const fileIds = attachedFiles.map((f) => f.id);
-    messages.value.push({
-      id: userId,
-      role: "user",
-      content,
-      tool_name: null,
-      tool_payload: attachedFiles.length
-        ? {
-            attachments: attachedFiles.map((f) => ({
-              id: f.id,
-              filename: f.filename,
-              ext: f.ext,
-              category: f.category,
-              size_bytes: f.size_bytes,
-            })),
-          }
-        : null,
-      status: "completed",
-      hermes_run_id: null,
-      created_at: new Date().toISOString(),
-    });
     messages.value.push({
       id: assistantId,
       role: "assistant",
@@ -433,24 +538,155 @@ export const useChatStore = defineStore("chat", () => {
     });
     activeAssistantId.value = assistantId;
     selectedTurnId.value = assistantId;
+    return assistantId;
+  }
+
+  async function streamTurn(
+    path: string,
+    body: Record<string, unknown>,
+    fallbackError: string,
+  ) {
+    if (!convId.value) return;
     streaming.value = true;
     controller = new AbortController();
     try {
       const headers = await chatTicketHeaders(convId.value, "send");
-      await consume(
-        streamSSE(
-          `/conversations/${convId.value}/messages`,
-          fileIds.length ? { content, file_ids: fileIds } : { content },
-          controller.signal,
-          headers,
-        ),
-      );
+      await consume(streamSSE(path, body, controller.signal, headers));
     } catch (e: any) {
-      error.value = apiErrorMessage(e, "发送失败");
+      error.value = apiErrorMessage(e, fallbackError);
       const a = assistant();
       if (a && a.status === "streaming") a.status = "failed";
       finishRun();
     }
+  }
+
+  async function send(content: string, attachedFiles: ConversationFile[] = [], skillNames: string[] = []) {
+    if (!convId.value || streaming.value) return;
+    error.value = null;
+    reasoning.value = [];
+    plan.value = null;
+    pendingControl.value = null;
+    pendingUserTargetId = null;
+    const userId = tempId("temp-user");
+    const fileIds = attachedFiles.map((f) => f.id);
+    messages.value.push({
+      id: userId,
+      role: "user",
+      content,
+      tool_name: null,
+      tool_payload: buildUserToolPayload(attachedFiles, skillNames),
+      status: "completed",
+      hermes_run_id: null,
+      created_at: new Date().toISOString(),
+    });
+    pushAssistantPlaceholder();
+    const body: Record<string, unknown> = { content };
+    if (fileIds.length) body.file_ids = fileIds;
+    if (skillNames.length) body.skill_names = skillNames;
+    await streamTurn(`/conversations/${convId.value}/messages`, body, "发送失败");
+  }
+
+  async function regenerate(assistantMessageId: string) {
+    if (!convId.value || streaming.value) return;
+    const idx = messages.value.findIndex((m) => m.id === assistantMessageId && m.role === "assistant");
+    if (idx < 0) return;
+
+    let prevUserIdx = -1;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (messages.value[i].role === "user") {
+        prevUserIdx = i;
+        break;
+      }
+    }
+
+    if (assistantMessageId.startsWith("temp-") && prevUserIdx >= 0 && messages.value[prevUserIdx].id.startsWith("temp-")) {
+      const prevUser = messages.value[prevUserIdx];
+      const filesStore = useFilesStore();
+      const attached = (prevUser.tool_payload?.attachments ?? []).map((att) => {
+        const found = filesStore.files.find((f) => f.id === att.id);
+        if (found) return found;
+        return {
+          id: att.id,
+          conversation_id: convId.value,
+          filename: att.filename,
+          ext: att.ext,
+          mime_type: "",
+          category: att.category,
+          size_bytes: att.size_bytes,
+          status: "ready",
+          source: "user",
+          is_global: false,
+          created_at: prevUser.created_at,
+          updated_at: prevUser.created_at,
+        } satisfies ConversationFile;
+      });
+      const skills = prevUser.tool_payload?.skills ?? [];
+      messages.value = messages.value.slice(0, prevUserIdx);
+      await send(prevUser.content, attached, skills);
+      return;
+    }
+
+    error.value = null;
+    reasoning.value = [];
+    plan.value = null;
+    pendingControl.value = null;
+    pendingUserTargetId = null;
+    messages.value = messages.value.slice(0, prevUserIdx >= 0 ? prevUserIdx + 1 : idx);
+    pushAssistantPlaceholder();
+    await streamTurn(`/conversations/${convId.value}/messages/${assistantMessageId}/regenerate`, {}, "重新生成失败");
+  }
+
+  async function editAndResend(
+    userMessageId: string,
+    content: string,
+    attachedFiles: ConversationFile[] = [],
+    skillNames: string[] = [],
+  ) {
+    if (!convId.value || streaming.value) return;
+    const idx = messages.value.findIndex((m) => m.id === userMessageId && m.role === "user");
+    if (idx < 0) return;
+
+    if (userMessageId.startsWith("temp-")) {
+      messages.value = messages.value.slice(0, idx);
+      await send(content, attachedFiles, skillNames);
+      return;
+    }
+
+    error.value = null;
+    reasoning.value = [];
+    plan.value = null;
+    pendingControl.value = null;
+    pendingUserTargetId = userMessageId;
+
+    const targetUser = messages.value[idx];
+    messages.value = [
+      ...messages.value.slice(0, idx),
+      {
+        ...targetUser,
+        content,
+        tool_payload: buildUserToolPayload(attachedFiles, skillNames),
+      },
+    ];
+    pushAssistantPlaceholder();
+
+    const fileIds = attachedFiles.map((f) => f.id);
+    await streamTurn(
+      `/conversations/${convId.value}/messages/${userMessageId}/edit`,
+      { content, file_ids: fileIds, skill_names: skillNames },
+      "保存并重发失败",
+    );
+  }
+
+  async function resolvePendingMemory(id: string, action: "approve" | "reject", content?: string) {
+    const body = content !== undefined ? { action, content } : { action };
+    await api.post(`/users/me/memory/pending/${id}`, body);
+    pendingMemory.value = pendingMemory.value.filter((item) => item.id !== id);
+  }
+
+  async function resolvePendingSkill(id: string, action: "approve" | "reject", content?: string) {
+    const body = content !== undefined ? { action, content } : { action };
+    await api.post(`/skills/pending/${id}`, body);
+    pendingSkills.value = pendingSkills.value.filter((item) => item.id !== id);
   }
 
   async function reconnect(runId: string) {
@@ -532,6 +768,8 @@ export const useChatStore = defineStore("chat", () => {
     convId, messages, streaming, activeAssistantId, activeRunId, plan, reasoning, currentStep, runningTool,
     selectedTurnId, selectedTurn, assistantTurns, viewPlan, viewReasoning, viewStreaming, viewCurrentStep,
     viewRunningTool, selectTurn,
-    pendingControl, error, loadFromConversation, reset, send, reconnect, stop, approve, clarify, abort,
+    pendingControl, pendingMemory, pendingSkills, error,
+    loadFromConversation, reset, send, regenerate, editAndResend, reconnect, stop, approve, clarify, abort,
+    resolvePendingMemory, resolvePendingSkill,
   };
 });

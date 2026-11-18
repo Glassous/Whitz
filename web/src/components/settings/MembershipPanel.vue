@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { useAuthStore } from "../../stores/auth";
 import { useCreditsStore } from "../../stores/credits";
 import BaseButton from "../ui/BaseButton.vue";
-import type { MembershipTier } from "../../types";
+import type { MembershipPlan, MembershipTier } from "../../types";
 
 const auth = useAuthStore();
 const credits = useCreditsStore();
@@ -14,13 +14,42 @@ const redeemErr = ref<string | null>(null);
 const redeeming = ref(false);
 const redeemInput = ref<HTMLInputElement | null>(null);
 
-const fallbackPlans: { tier: MembershipTier; label: string }[] = [
-  { tier: "free", label: "Free" },
-  { tier: "plus", label: "Plus" },
-  { tier: "pro", label: "Pro" },
+const fallbackPlans: MembershipPlan[] = [
+  {
+    tier: "free",
+    label: "Free",
+    weekly_credits: 100,
+    five_hour_credits: 20,
+    max_runs_per_user: 1,
+    chat_per_minute: 10,
+    run_max_seconds: 600,
+    summary: "每周 100 积分，5 小时最多 20 积分",
+  },
+  {
+    tier: "plus",
+    label: "Plus",
+    weekly_credits: 500,
+    five_hour_credits: 100,
+    max_runs_per_user: 1,
+    chat_per_minute: 20,
+    run_max_seconds: 900,
+    summary: "每周 500 积分，5 小时最多 100 积分",
+  },
+  {
+    tier: "pro",
+    label: "Pro",
+    weekly_credits: 1250,
+    five_hour_credits: null,
+    max_runs_per_user: 2,
+    chat_per_minute: 30,
+    run_max_seconds: 1200,
+    summary: "每周 1250 积分，无 5 小时限制",
+  },
 ];
 
-const displayPlans = computed(() => credits.status?.plans ?? fallbackPlans);
+const displayPlans = computed<MembershipPlan[]>(() =>
+  credits.status?.plans?.length ? credits.status.plans : fallbackPlans,
+);
 
 const tierBadgeClass = computed(() => {
   if (credits.tier === "pro") return "bg-primary text-primary-fg";
@@ -107,7 +136,9 @@ onMounted(() => {
           </span>
           <span v-if="credits.overdrawn" class="text-[12px] font-medium text-danger">额度已用尽</span>
         </div>
-        <p class="mt-1 truncate text-[12.5px] text-fg-muted">{{ planTagline(credits.tier) }}</p>
+        <p class="mt-1 truncate text-[12.5px] text-fg-muted">
+          {{ credits.status?.plan?.summary || planTagline(credits.tier) }}
+        </p>
       </div>
 
       <div class="shrink-0 text-right">
@@ -184,28 +215,44 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- Compact 3-tier comparison -->
-    <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+    <!-- 3-tier comparison -->
+    <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
       <div
         v-for="p in displayPlans"
         :key="p.tier"
-        class="rounded-xl px-3 py-2.5 transition-colors"
+        class="flex flex-col rounded-2xl px-3.5 py-3 transition-colors"
         :class="
           p.tier === credits.tier
             ? 'bg-canvas ring-1 ring-accent/55 dark:bg-active/65'
-            : 'bg-canvas/50 dark:bg-canvas/45'
+            : 'bg-canvas/55 dark:bg-canvas/45'
         "
       >
-        <div class="flex items-center justify-between gap-1">
-          <span class="text-[13px] font-semibold text-fg">{{ p.label }}</span>
+        <div class="flex items-center justify-between gap-1.5">
+          <span class="text-[13.5px] font-semibold text-fg">{{ p.label }}</span>
           <span
             v-if="p.tier === credits.tier"
-            class="rounded-full bg-accent-weak px-1.5 py-0.5 text-[10.5px] font-medium leading-none text-accent"
+            class="rounded-full bg-accent-weak px-2 py-0.5 text-[10.5px] font-medium leading-none text-accent"
           >
             当前
           </span>
         </div>
-        <p class="mt-1 text-[11.5px] leading-snug text-fg-muted">{{ planTagline(p.tier) }}</p>
+        <p class="mt-1 text-[12px] leading-snug text-fg-muted">{{ p.summary || planTagline(p.tier) }}</p>
+        <dl class="mt-2.5 space-y-1 border-t border-line/60 pt-2 text-[11.5px]">
+          <div class="flex items-center justify-between gap-2">
+            <dt class="text-fg-faint">每周额度</dt>
+            <dd class="font-medium tabular-nums text-fg">{{ p.weekly_credits }} 积分</dd>
+          </div>
+          <div class="flex items-center justify-between gap-2">
+            <dt class="text-fg-faint">5 小时额度</dt>
+            <dd class="font-medium tabular-nums text-fg">
+              {{ p.five_hour_credits !== null ? `${p.five_hour_credits} 积分` : "不限" }}
+            </dd>
+          </div>
+          <div class="flex items-center justify-between gap-2">
+            <dt class="text-fg-faint">最大并发运行</dt>
+            <dd class="font-medium tabular-nums text-fg">{{ p.max_runs_per_user }} 个</dd>
+          </div>
+        </dl>
       </div>
     </div>
 

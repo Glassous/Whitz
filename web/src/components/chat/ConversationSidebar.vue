@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { streamSSE } from "../../api/sse";
 import type { Conversation } from "../../types";
 import { useAuthStore } from "../../stores/auth";
+import { sortConversations } from "../../stores/conversations";
 import { useCreditsStore } from "../../stores/credits";
 import { useTheme, type ThemePreference } from "../../lib/theme";
 import BaseButton from "../ui/BaseButton.vue";
@@ -21,6 +22,7 @@ const emit = defineEmits<{
   select: [string];
   create: [];
   rename: [string, string];
+  pin: [string, boolean];
   delete: [string];
   close: [];
   "open-search": [];
@@ -230,12 +232,22 @@ let titleController: AbortController | null = null;
 const deleteTarget = ref<Conversation | null>(null);
 const openMenuId = ref<string | null>(null);
 
-function timestamp(c: Conversation): number {
-  return new Date(c.last_message_at ?? c.updated_at ?? c.created_at).getTime();
-}
-
-const sortedConversations = computed(() => {
-  return props.conversations.toSorted((a, b) => timestamp(b) - timestamp(a));
+const sortedConversations = computed(() => sortConversations(props.conversations));
+const pinnedConversations = computed(() => sortedConversations.value.filter((c) => c.is_pinned));
+const recentConversations = computed(() => sortedConversations.value.filter((c) => !c.is_pinned));
+const conversationSections = computed(() => {
+  if (!pinnedConversations.value.length) {
+    return recentConversations.value.length
+      ? [{ key: "all", label: "", items: recentConversations.value }]
+      : [];
+  }
+  const sections: { key: string; label: string; items: Conversation[] }[] = [
+    { key: "pinned", label: "置顶对话", items: pinnedConversations.value },
+  ];
+  if (recentConversations.value.length) {
+    sections.push({ key: "recent", label: "最近对话", items: recentConversations.value });
+  }
+  return sections;
 });
 
 const avatarLoadFailed = ref(false);
@@ -270,6 +282,11 @@ function create() {
 
 function toggleMenu(c: Conversation) {
   openMenuId.value = openMenuId.value === c.id ? null : c.id;
+}
+
+function togglePin(c: Conversation) {
+  openMenuId.value = null;
+  emit("pin", c.id, !c.is_pinned);
 }
 
 function closePopovers() {
@@ -365,8 +382,16 @@ function confirmDelete() {
   deleteTarget.value = null;
 }
 
+const ACTIVE_RUN_STATUSES = new Set([
+  "starting",
+  "running",
+  "waiting",
+  "waiting_for_approval",
+  "waiting_for_clarify",
+]);
+
 function isRunning(c: Conversation): boolean {
-  return c.active_run_status === "running" || c.active_run_status === "waiting";
+  return Boolean(c.active_run_status && ACTIVE_RUN_STATUSES.has(c.active_run_status));
 }
 </script>
 
@@ -508,68 +533,104 @@ function isRunning(c: Conversation): boolean {
           />
         </div>
 
-        <!-- Expanded Flat Conversation List (no date grouping) -->
+        <!-- Conversation List (split into 置顶对话 / 最近对话 when any pinned exists) -->
         <template v-else>
-          <div v-if="sortedConversations.length" class="space-y-0.5 pt-2">
-            <div
-              v-for="c in sortedConversations"
-              :key="c.id"
-              class="group/item relative flex items-center rounded-xl pr-1 transition-colors duration-150"
-              :class="c.id === currentId ? 'bg-hover/90 dark:bg-active' : 'hover:bg-hover/65'"
-            >
-              <button
-                type="button"
-                class="focus-ring flex h-10 min-w-0 flex-1 items-center gap-2 rounded-xl pl-3 pr-1 text-left text-[14px] transition-colors"
-                :class="c.id === currentId ? 'font-medium text-fg' : 'text-fg-muted hover:text-fg'"
-                @click="select(c.id)"
-              >
-                <span
-                  v-if="isRunning(c)"
-                  class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
-                />
-                <span class="truncate">{{ c.title }}</span>
-              </button>
-
-              <button
-                type="button"
-                class="focus-ring flex h-7.5 w-7.5 shrink-0 items-center justify-center rounded-lg text-fg-faint transition-opacity hover:bg-surface hover:text-fg md:opacity-0 md:group-hover/item:opacity-100"
-                :class="openMenuId === c.id ? 'md:opacity-100 bg-surface text-fg' : ''"
-                aria-label="更多操作"
-                @click.stop="toggleMenu(c)"
-              >
-                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-                  <circle cx="5" cy="12" r="1.6" />
-                  <circle cx="12" cy="12" r="1.6" />
-                  <circle cx="19" cy="12" r="1.6" />
-                </svg>
-              </button>
-
-              <div
-                v-if="openMenuId === c.id"
-                class="animate-rise absolute right-1 top-10.5 z-30 w-34 origin-top-right rounded-xl bg-canvas p-1 shadow-lg dark:bg-[#161615]"
-                style="box-shadow: var(--shadow)"
-                @click.stop
-              >
-                <button
-                  type="button"
-                  class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13.5px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
-                  @click="openRename(c)"
+          <div v-if="conversationSections.length" class="pt-2">
+            <div v-for="(section, sIdx) in conversationSections" :key="section.key" :class="sIdx > 0 ? 'mt-3' : ''">
+              <p v-if="section.label" class="px-3 pb-1 text-[11.5px] font-medium text-fg-faint">
+                {{ section.label }}
+              </p>
+              <div class="space-y-0.5">
+                <div
+                  v-for="c in section.items"
+                  :key="c.id"
+                  class="group/item relative flex items-center rounded-xl pr-1 transition-colors duration-150"
+                  :class="c.id === currentId ? 'bg-hover/90 dark:bg-active' : 'hover:bg-hover/65'"
                 >
-                  <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-                  </svg>
-                  重命名
-                </button>
-                <button
-                  type="button"
-                  class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13.5px] text-danger transition-colors hover:bg-danger-weak"
-                  @click="askDelete(c)"
-                >
-                  <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
-                  </svg>
-                  删除
-                </button>
+                  <button
+                    type="button"
+                    class="focus-ring flex h-10 min-w-0 flex-1 items-center gap-2 rounded-xl pl-3 pr-1 text-left text-[14px] transition-colors"
+                    :class="c.id === currentId ? 'font-medium text-fg' : 'text-fg-muted hover:text-fg'"
+                    @click="select(c.id)"
+                  >
+                    <span
+                      v-if="isRunning(c)"
+                      class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
+                    />
+                    <svg
+                      v-if="c.is_pinned"
+                      class="h-3.5 w-3.5 shrink-0 text-fg-faint"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      aria-label="已置顶"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M12 17v5M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 2 2 0 000-4H8a2 2 0 000 4 1 1 0 011 1v3.76z"
+                      />
+                    </svg>
+                    <span class="truncate">{{ c.title }}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="focus-ring flex h-7.5 w-7.5 shrink-0 items-center justify-center rounded-lg text-fg-faint transition-opacity hover:bg-surface hover:text-fg md:opacity-0 md:group-hover/item:opacity-100"
+                    :class="openMenuId === c.id ? 'md:opacity-100 bg-surface text-fg' : ''"
+                    aria-label="更多操作"
+                    @click.stop="toggleMenu(c)"
+                  >
+                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+                      <circle cx="5" cy="12" r="1.6" />
+                      <circle cx="12" cy="12" r="1.6" />
+                      <circle cx="19" cy="12" r="1.6" />
+                    </svg>
+                  </button>
+
+                  <div
+                    v-if="openMenuId === c.id"
+                    class="animate-rise absolute right-1 top-10.5 z-30 w-36 origin-top-right rounded-xl bg-canvas p-1 shadow-lg dark:bg-[#161615]"
+                    style="box-shadow: var(--shadow)"
+                    @click.stop
+                  >
+                    <button
+                      type="button"
+                      class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13.5px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+                      @click="togglePin(c)"
+                    >
+                      <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          d="M12 17v5M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 2 2 0 000-4H8a2 2 0 000 4 1 1 0 011 1v3.76z"
+                        />
+                      </svg>
+                      {{ c.is_pinned ? "取消置顶" : "置顶" }}
+                    </button>
+                    <button
+                      type="button"
+                      class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13.5px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+                      @click="openRename(c)"
+                    >
+                      <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                      </svg>
+                      重命名
+                    </button>
+                    <button
+                      type="button"
+                      class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13.5px] text-danger transition-colors hover:bg-danger-weak"
+                      @click="askDelete(c)"
+                    >
+                      <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
+                      </svg>
+                      删除
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { api } from "../api/client";
 import { useTheme, type ThemePreference } from "../lib/theme";
 import { useAuthStore } from "../stores/auth";
@@ -11,19 +11,41 @@ import BaseBadge from "../components/ui/BaseBadge.vue";
 import BaseModal from "../components/ui/BaseModal.vue";
 import PersonaEditor from "../components/settings/PersonaEditor.vue";
 import MembershipPanel from "../components/settings/MembershipPanel.vue";
+import MemoryPanel from "../components/settings/MemoryPanel.vue";
+import SkillsPanel from "../components/settings/SkillsPanel.vue";
+import LibraryPanel from "../components/settings/LibraryPanel.vue";
+import DevicesPanel from "../components/settings/DevicesPanel.vue";
 import AvatarCropModal from "../components/settings/AvatarCropModal.vue";
 
-type SettingsPage = "profile" | "membership" | "persona" | "password";
+type SettingsTab = "profile" | "library" | "memory" | "skills" | "membership" | "persona" | "devices";
+type SettingsPage = SettingsTab | "password";
+
+const VALID_TABS: readonly SettingsTab[] = [
+  "profile",
+  "library",
+  "memory",
+  "skills",
+  "membership",
+  "persona",
+  "devices",
+];
+
+function parseTabQuery(raw: unknown): SettingsTab | null {
+  const val = Array.isArray(raw) ? raw[0] : raw;
+  return typeof val === "string" && (VALID_TABS as readonly string[]).includes(val) ? (val as SettingsTab) : null;
+}
 
 const auth = useAuthStore();
 const conversations = useConversationsStore();
 const credits = useCreditsStore();
+const route = useRoute();
 const router = useRouter();
 const { preference, set: setTheme } = useTheme();
 const adminUrl = import.meta.env.VITE_ADMIN_URL;
 
-const activePage = ref<SettingsPage>("profile");
-const mobileAtRoot = ref(true);
+const initialQueryTab = parseTabQuery(route.query.tab);
+const activePage = ref<SettingsPage>(initialQueryTab ?? "profile");
+const mobileAtRoot = ref(!initialQueryTab);
 const isDesktop = ref(typeof window !== "undefined" ? window.innerWidth >= 768 : true);
 let mediaQuery: MediaQueryList | null = null;
 
@@ -37,8 +59,25 @@ onMounted(() => {
     isDesktop.value = mediaQuery.matches;
     mediaQuery.addEventListener("change", onMediaChange);
   }
+  const tab = parseTabQuery(route.query.tab);
+  if (tab) {
+    activePage.value = tab;
+    mobileAtRoot.value = false;
+  }
   void credits.fetch();
+  void auth.refreshUser().catch(() => {});
 });
+
+watch(
+  () => route.query.tab,
+  (raw) => {
+    const tab = parseTabQuery(raw);
+    if (tab) {
+      activePage.value = tab;
+      mobileAtRoot.value = false;
+    }
+  },
+);
 
 onBeforeUnmount(() => {
   mediaQuery?.removeEventListener("change", onMediaChange);
@@ -46,9 +85,12 @@ onBeforeUnmount(() => {
 
 const showMobileMenu = computed(() => !isDesktop.value && mobileAtRoot.value);
 
-function selectMainPage(page: "profile" | "membership" | "persona") {
+function selectMainPage(page: SettingsTab) {
   activePage.value = page;
   mobileAtRoot.value = false;
+  if (parseTabQuery(route.query.tab) !== page) {
+    void router.replace({ query: { ...route.query, tab: page } });
+  }
 }
 
 function openPasswordPage() {
@@ -70,14 +112,19 @@ const themeOptions: { value: ThemePreference; label: string }[] = [
   { value: "dark", label: "深色" },
 ];
 
-const navItems: { key: "profile" | "membership" | "persona"; label: string; desc: string }[] = [
-  { key: "profile", label: "用户信息", desc: "头像、个人资料与账号安全" },
+const navItems: { key: SettingsTab; label: string; desc: string }[] = [
+  { key: "profile", label: "用户信息", desc: "头像、个人资料与隐私上下文" },
+  { key: "library", label: "个人资料库", desc: "全部对话文件与全局共享资料" },
+  { key: "memory", label: "长期记忆", desc: "记忆开关、待确认与条目管理" },
+  { key: "skills", label: "技能管理", desc: "内置、自定义与 GitHub 技能" },
   { key: "membership", label: "会员与额度", desc: "当前档位、用量与兑换码" },
   { key: "persona", label: "助理人设", desc: "定制语气、角色与回答方式" },
+  { key: "devices", label: "登录设备", desc: "管理活跃会话与设备安全" },
 ];
 
 const pageTitle = computed(() => {
   if (activePage.value === "password") return "修改密码";
+  if (activePage.value === "devices") return "登录设备管理";
   return navItems.find((n) => n.key === activePage.value)?.label ?? "用户信息";
 });
 
@@ -397,6 +444,72 @@ async function savePassword() {
     pwdSaving.value = false;
   }
 }
+
+// Profile context injection toggle + consent modal
+const profileContextEnabled = computed(() => Boolean(auth.user?.profile_context_enabled));
+const profileContextSaving = ref(false);
+const profileContextMsg = ref<string | null>(null);
+const profileContextErr = ref<string | null>(null);
+const profileConsentModalOpen = ref(false);
+const profileConsentErr = ref<string | null>(null);
+
+function formatConsentedAt(value: string | null | undefined): string {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function onToggleProfileContext() {
+  if (profileContextSaving.value) return;
+  profileContextMsg.value = null;
+  profileContextErr.value = null;
+  profileConsentErr.value = null;
+  if (!profileContextEnabled.value) {
+    profileConsentModalOpen.value = true;
+  } else {
+    void disableProfileContext();
+  }
+}
+
+async function confirmEnableProfileContext() {
+  profileContextSaving.value = true;
+  profileConsentErr.value = null;
+  profileContextMsg.value = null;
+  profileContextErr.value = null;
+  try {
+    await api.patch("/users/me/profile-context", { enabled: true, consent: true });
+    await auth.refreshUser();
+    profileConsentModalOpen.value = false;
+    profileContextMsg.value = "已开启个人资料注入上下文";
+  } catch (e: any) {
+    profileConsentErr.value = typeof e?.detail?.detail === "string" ? e.detail.detail : (e?.message ?? "开启失败");
+  } finally {
+    profileContextSaving.value = false;
+  }
+}
+
+async function disableProfileContext() {
+  profileContextSaving.value = true;
+  profileContextMsg.value = null;
+  profileContextErr.value = null;
+  try {
+    await api.patch("/users/me/profile-context", { enabled: false, consent: false });
+    await auth.refreshUser();
+    profileContextMsg.value = "已关闭个人资料注入上下文";
+  } catch (e: any) {
+    profileContextErr.value = typeof e?.detail?.detail === "string" ? e.detail.detail : (e?.message ?? "关闭失败");
+  } finally {
+    profileContextSaving.value = false;
+  }
+}
 </script>
 
 <template>
@@ -520,12 +633,12 @@ async function savePassword() {
       </div>
 
       <!-- Main Section Tabs -->
-      <nav class="flex-1 space-y-1.5">
+      <nav v-scrollbar class="custom-scrollbar flex-1 space-y-1.5 overflow-y-auto pr-0.5">
         <button
           v-for="item in navItems"
           :key="item.key"
           type="button"
-          class="focus-ring flex w-full items-center gap-3 rounded-2xl px-3.5 py-3 text-left transition-colors"
+          class="focus-ring flex w-full items-center gap-3 rounded-2xl px-3.5 py-2.5 text-left transition-colors"
           :class="
             activePage === item.key
               ? 'bg-hover/90 text-fg dark:bg-active'
@@ -538,11 +651,26 @@ async function savePassword() {
               <circle cx="12" cy="8" r="4" />
               <path stroke-linecap="round" d="M4 20c0-3.5 3.6-6 8-6s8 2.5 8 6" />
             </svg>
+            <svg v-else-if="item.key === 'library'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+            </svg>
+            <svg v-else-if="item.key === 'memory'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 19.5A2.5 2.5 0 016.5 17H20" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
+              <path stroke-linecap="round" d="M9 7h7M9 11h5" />
+            </svg>
+            <svg v-else-if="item.key === 'skills'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+            </svg>
             <svg v-else-if="item.key === 'membership'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
               <path stroke-linecap="round" stroke-linejoin="round" d="M3 8l4 3 5-6 5 6 4-3-2 11H5L3 8z" />
             </svg>
-            <svg v-else class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+            <svg v-else-if="item.key === 'persona'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3zM5 17l.9 2.1L8 20l-2.1.9L5 23l-.9-2.1L2 20l2.1-.9L5 17z" />
+            </svg>
+            <svg v-else class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+              <rect x="3" y="4" width="18" height="12" rx="2" />
+              <path stroke-linecap="round" d="M2 20h20" />
             </svg>
           </span>
           <span class="min-w-0 flex-1">
@@ -988,6 +1116,66 @@ async function savePassword() {
             </div>
           </form>
 
+          <!-- Profile Context Injection Switch Card -->
+          <section class="rounded-[24px] bg-sidebar p-5 dark:bg-surface">
+            <div class="flex items-start justify-between gap-4">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <h2 class="text-[15px] font-semibold text-fg">个人资料注入上下文</h2>
+                  <BaseBadge :tone="profileContextEnabled ? 'green' : 'gray'">
+                    {{ profileContextEnabled ? "已开启" : "未开启" }}
+                  </BaseBadge>
+                </div>
+                <p class="mt-1 text-[13px] leading-relaxed text-fg-muted">
+                  允许 AI 助理在对话中参考你的用户名、语言偏好、时区、职业、所在地区、性别与个人简介，提供更贴合个人背景的回复。邮箱、手机号、生日等敏感隐私绝不会被注入。
+                </p>
+                <p
+                  v-if="profileContextEnabled && auth.user?.profile_context_consented_at"
+                  class="mt-1 text-[12px] text-fg-faint"
+                >
+                  授权时间：{{ formatConsentedAt(auth.user.profile_context_consented_at) }}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="profileContextEnabled"
+                aria-label="个人资料注入上下文"
+                :disabled="profileContextSaving"
+                class="focus-ring relative mt-0.5 inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                :class="profileContextEnabled ? 'bg-primary' : 'bg-line-strong'"
+                @click="onToggleProfileContext"
+              >
+                <span
+                  class="h-6 w-6 rounded-full bg-canvas shadow-xs transition-transform"
+                  :class="profileContextEnabled ? 'translate-x-5' : 'translate-x-0'"
+                />
+              </button>
+            </div>
+
+            <p v-if="profileContextErr" role="alert" class="mt-2.5 text-[12.5px] text-danger">
+              {{ profileContextErr }}
+            </p>
+            <p v-else-if="profileContextMsg" role="status" aria-live="polite" class="mt-2.5 text-[12.5px] text-success">
+              {{ profileContextMsg }}
+            </p>
+          </section>
+
+          <!-- Login Devices entry -> Devices tab -->
+          <section class="flex items-center justify-between gap-4 rounded-[24px] bg-sidebar p-5 dark:bg-surface">
+            <div class="min-w-0">
+              <h2 class="text-[15px] font-semibold text-fg">登录设备管理</h2>
+              <p class="mt-0.5 text-[13px] text-fg-muted">查看当前登录的浏览器与终端会话，支持远程下线异常或闲置设备。</p>
+            </div>
+            <BaseButton variant="secondary" rounded="full" class="shrink-0" @click="selectMainPage('devices')">
+              <span>管理设备</span>
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
+              </svg>
+            </BaseButton>
+          </section>
+
           <!-- Security entry -> independent Password sub-page -->
           <section class="flex items-center justify-between gap-4 rounded-[24px] bg-sidebar p-5 dark:bg-surface">
             <div class="min-w-0">
@@ -1126,7 +1314,34 @@ async function savePassword() {
           </form>
         </div>
 
-        <!-- Page 2: Membership -->
+        <!-- Page 2: Personal Library -->
+        <div v-else-if="activePage === 'library'" class="w-full space-y-5">
+          <div class="hidden md:block">
+            <h1 class="text-[20px] font-semibold tracking-tight text-fg">个人资料库</h1>
+            <p class="mt-1 text-[13.5px] text-fg-muted">集中管理你在各对话中上传的文件与 AI 产出资料，支持设为全局共享或引用到当前对话。</p>
+          </div>
+          <LibraryPanel />
+        </div>
+
+        <!-- Page 3: Long-Term Memory -->
+        <div v-else-if="activePage === 'memory'" class="w-full space-y-5">
+          <div class="hidden md:block">
+            <h1 class="text-[20px] font-semibold tracking-tight text-fg">长期记忆</h1>
+            <p class="mt-1 text-[13.5px] text-fg-muted">管理长期记忆开关、待确认写入提议，以及助理笔记与个人偏好条目。</p>
+          </div>
+          <MemoryPanel />
+        </div>
+
+        <!-- Page 4: Skills Management -->
+        <div v-else-if="activePage === 'skills'" class="w-full space-y-5">
+          <div class="hidden md:block">
+            <h1 class="text-[20px] font-semibold tracking-tight text-fg">技能管理</h1>
+            <p class="mt-1 text-[13.5px] text-fg-muted">管理内置技能、编写自定义技能，或从 GitHub 仓库预览并安全安装技能。</p>
+          </div>
+          <SkillsPanel />
+        </div>
+
+        <!-- Page 5: Membership -->
         <div v-else-if="activePage === 'membership'" class="w-full space-y-5">
           <div class="hidden md:block">
             <h1 class="text-[20px] font-semibold tracking-tight text-fg">会员与额度</h1>
@@ -1137,7 +1352,7 @@ async function savePassword() {
           </div>
         </div>
 
-        <!-- Page 3: Persona -->
+        <!-- Page 6: Persona -->
         <div v-else-if="activePage === 'persona'" class="w-full space-y-5">
           <div class="hidden md:block">
             <h1 class="text-[20px] font-semibold tracking-tight text-fg">助理人设</h1>
@@ -1147,8 +1362,68 @@ async function savePassword() {
             <PersonaEditor :persona="auth.user?.persona ?? ''" />
           </div>
         </div>
+
+        <!-- Page 7: Devices -->
+        <div v-else-if="activePage === 'devices'" class="w-full space-y-5">
+          <div class="hidden md:block">
+            <h1 class="text-[20px] font-semibold tracking-tight text-fg">登录设备管理</h1>
+            <p class="mt-1 text-[13.5px] text-fg-muted">查看当前所有活跃登录会话，可随时将异常或不再使用的设备下线。</p>
+          </div>
+          <DevicesPanel />
+        </div>
       </div>
     </main>
+
+    <!-- Profile Context Injection Consent Modal -->
+    <BaseModal
+      :open="profileConsentModalOpen"
+      title="开启个人资料注入上下文"
+      width="34rem"
+      @close="profileConsentModalOpen = false"
+    >
+      <div class="space-y-3.5 text-[13.5px] leading-relaxed text-fg-muted">
+        <p>开启后，系统在发起 AI 对话时会将以下个人资料字段注入上下文，帮助助理更准确地理解你的背景与偏好：</p>
+
+        <div class="rounded-2xl bg-surface/75 p-3.5">
+          <p class="mb-2 text-[12.5px] font-semibold text-fg">将共享给 AI 助理的字段：</p>
+          <div class="flex flex-wrap gap-1.5">
+            <BaseBadge tone="gray">用户名</BaseBadge>
+            <BaseBadge tone="gray">偏好语言</BaseBadge>
+            <BaseBadge tone="gray">时区</BaseBadge>
+            <BaseBadge tone="gray">职业</BaseBadge>
+            <BaseBadge tone="gray">所在地区</BaseBadge>
+            <BaseBadge tone="gray">性别</BaseBadge>
+            <BaseBadge tone="gray">个人简介</BaseBadge>
+          </div>
+        </div>
+
+        <div class="rounded-2xl bg-success-weak px-3.5 py-3 text-[13px] text-success">
+          <strong>隐私保护说明：</strong>你的<strong>邮箱、手机号、生日不会被注入</strong>到 AI 上下文中；你可以随时在「用户信息」页面关闭此开关。
+        </div>
+
+        <p v-if="profileConsentErr" role="alert" class="text-[13px] text-danger">
+          {{ profileConsentErr }}
+        </p>
+      </div>
+
+      <template #footer>
+        <BaseButton
+          variant="soft"
+          rounded="full"
+          :disabled="profileContextSaving"
+          @click="profileConsentModalOpen = false"
+        >
+          取消
+        </BaseButton>
+        <BaseButton
+          rounded="full"
+          :loading="profileContextSaving"
+          @click="confirmEnableProfileContext"
+        >
+          确认同意并开启
+        </BaseButton>
+      </template>
+    </BaseModal>
 
     <!-- Avatar Cropper Modal -->
     <AvatarCropModal

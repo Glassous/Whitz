@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "katex/dist/katex.min.css";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -384,6 +385,191 @@ body {
   font-size: inherit;
   color: inherit;
 }
+
+/* Code block wrapper & header */
+.markdown-body .md-code-block {
+  margin: 0.9em 0;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--code);
+}
+.dark .markdown-body .md-code-block {
+  border-color: var(--line-strong);
+}
+.markdown-body .md-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.42rem 0.7rem 0.42rem 0.9rem;
+  background: rgba(255, 255, 255, 0.045);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: #a3a29b;
+  font-size: 12px;
+  line-height: 1.2;
+}
+.markdown-body .md-code-lang {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.14rem 0.48rem;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #d6d5ce;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  text-transform: lowercase;
+}
+.markdown-body .md-code-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.markdown-body .md-code-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 26px;
+  padding: 0.18rem 0.52rem;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #b5b4ad;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.markdown-body .md-code-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f3f2ef;
+}
+.markdown-body .md-code-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.markdown-body .md-copy-btn .md-icon-check {
+  display: none;
+}
+.markdown-body .md-copy-btn.is-copied {
+  color: #6ec287;
+}
+.markdown-body .md-copy-btn.is-copied .md-icon-copy {
+  display: none;
+}
+.markdown-body .md-copy-btn.is-copied .md-icon-check {
+  display: inline-block;
+}
+.markdown-body .md-code-block > pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+}
+
+/* Mermaid diagram blocks */
+.markdown-body .md-mermaid-block {
+  background: var(--canvas);
+  border-color: var(--line);
+}
+.dark .markdown-body .md-mermaid-block {
+  background: var(--surface);
+  border-color: var(--line-strong);
+}
+.markdown-body .md-mermaid-block > .md-code-header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-muted);
+}
+.markdown-body .md-mermaid-block .md-code-lang {
+  background: var(--hover);
+  color: var(--fg);
+}
+.markdown-body .md-mermaid-block .md-code-btn {
+  color: var(--fg-muted);
+}
+.markdown-body .md-mermaid-block .md-code-btn:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+.markdown-body .md-mermaid-block .md-copy-btn.is-copied {
+  color: var(--success);
+}
+.markdown-body .md-mermaid-toggle {
+  gap: 0.22rem;
+}
+.markdown-body .md-mermaid-toggle .md-toggle-sep {
+  opacity: 0.45;
+}
+.markdown-body .md-mermaid-block[data-view="diagram"] .md-toggle-opt[data-opt="diagram"],
+.markdown-body .md-mermaid-block[data-view="source"] .md-toggle-opt[data-opt="source"] {
+  color: var(--fg);
+  font-weight: 600;
+}
+.markdown-body .md-mermaid-diagram {
+  padding: 1rem;
+  overflow-x: auto;
+  background: var(--canvas);
+}
+.dark .markdown-body .md-mermaid-diagram {
+  background: var(--surface);
+}
+.markdown-body .md-mermaid-diagram svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+.markdown-body .md-mermaid-loading {
+  padding: 0.75rem 0;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--fg-faint);
+}
+.markdown-body .md-mermaid-error {
+  padding: 0.48rem 0.9rem;
+  background: var(--warning-weak);
+  color: var(--warning);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.markdown-body .md-mermaid-block[data-view="diagram"] .md-mermaid-source,
+.markdown-body .md-mermaid-block[data-view="source"] .md-mermaid-diagram,
+.markdown-body .md-mermaid-block[data-state="error"] .md-mermaid-diagram,
+.markdown-body .md-mermaid-block:not([data-state="error"]) .md-mermaid-error {
+  display: none;
+}
+
+/* KaTeX math formulas */
+.markdown-body .katex {
+  font-size: 1.06em;
+  color: inherit;
+}
+.markdown-body .md-math-block {
+  display: block;
+  margin: 0.9em 0;
+  padding: 0.35em 0.25em;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+}
+.markdown-body .md-math-block > .katex-display {
+  margin: 0;
+}
+.markdown-body .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.15em 0;
+}
+.markdown-body .katex-error {
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
 .markdown-body table {
   border-collapse: collapse;
   margin: 0.9em 0;
@@ -425,7 +611,7 @@ body {
     border: none;
     background: transparent;
     color: inherit;
-    max-width: calc(100vw - 2rem);
+    max-width: calc(100dvw - 2rem);
     max-height: calc(100dvh - 2rem);
     overflow: visible;
     opacity: 0;
@@ -716,5 +902,90 @@ progress.upload-progress:indeterminate {
   ::view-transition-old(*),
   ::view-transition-new(*) {
     animation: none !important;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Native [popover] & CSS Anchor Positioning (skill picker)            */
+/* ------------------------------------------------------------------ */
+
+.skill-picker-anchor {
+  anchor-name: --skill-picker-anchor;
+}
+
+[popover].whitz-popover,
+[popover].skill-picker-popover {
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--canvas);
+  color: var(--fg);
+  box-shadow: var(--shadow);
+  padding: 0;
+  max-width: calc(100dvw - 2rem);
+  max-height: min(26rem, calc(100dvh - 6rem));
+  overflow: hidden;
+  overscroll-behavior: contain;
+  opacity: 0;
+  transition-property: opacity, transform, display, overlay;
+  transition-duration: 0.16s;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  transition-behavior: allow-discrete;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [popover].whitz-popover,
+  [popover].skill-picker-popover {
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+[popover]:is(:popover-open, .\:popover-open).whitz-popover,
+[popover]:is(:popover-open, .\:popover-open).skill-picker-popover {
+  opacity: 1;
+
+  @starting-style {
+    opacity: 0;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    transform: translateY(0) scale(1);
+
+    @starting-style {
+      transform: translateY(6px) scale(0.98);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [popover].whitz-popover,
+  [popover].skill-picker-popover {
+    transition-duration: 0.08s;
+  }
+}
+
+@supports (position-area: block-start) {
+  .skill-picker-popover {
+    position-anchor: --skill-picker-anchor;
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    margin-block: 0.5rem;
+    position-area: block-start span-inline-end;
+    position-try-fallbacks: flip-block, flip-inline, block-start span-inline-start, block-end span-inline-end;
+  }
+
+  .skill-picker-popover[data-align="end"] {
+    position-area: block-start span-inline-start;
+  }
+}
+
+@supports not (position-area: block-start) {
+  :where(.skill-picker-popover) {
+    position: fixed;
+    inset: auto;
+    inset-block-end: 5.5rem;
+    inset-inline: 1rem;
+    margin-inline: auto;
+    margin-block: 0;
   }
 }

@@ -7,13 +7,15 @@ import { useAuthStore } from "../stores/auth";
 import { useCreditsStore } from "../stores/credits";
 import { useFilesStore } from "../stores/files";
 import { api } from "../api/client";
-import type { AgentStatus, ConversationFile, TaskPanelTab } from "../types";
+import type { AgentStatus, ConversationFile, PreviewTarget, TaskPanelTab } from "../types";
 import ConversationSidebar from "../components/chat/ConversationSidebar.vue";
 import MessageList from "../components/chat/MessageList.vue";
 import ChatInput from "../components/chat/ChatInput.vue";
 import PlanPanel from "../components/chat/PlanPanel.vue";
 import ApprovalCard from "../components/chat/ApprovalCard.vue";
 import ClarifyCard from "../components/chat/ClarifyCard.vue";
+import MemoryPendingCard from "../components/chat/MemoryPendingCard.vue";
+import SkillPendingCard from "../components/chat/SkillPendingCard.vue";
 import SearchModal from "../components/chat/SearchModal.vue";
 
 const route = useRoute();
@@ -26,9 +28,55 @@ const filesStore = useFilesStore();
 
 const routeConversationId = computed(() => (typeof route.params.id === "string" && route.params.id ? route.params.id : null));
 
+const PANEL_WIDTH_STORAGE_KEY = "whitz_task_panel_width";
+const DEFAULT_PANEL_WIDTH = 340;
+const MIN_PANEL_WIDTH = 300;
+const PREVIEW_MIN_PANEL_WIDTH = 500;
+
+function maxPanelWidth(): number {
+  if (typeof window === "undefined") return 820;
+  return Math.max(MIN_PANEL_WIDTH, Math.floor(Math.min(820, window.innerWidth * 0.62)));
+}
+
+function clampPanelWidth(w: number): number {
+  return Math.round(Math.max(MIN_PANEL_WIDTH, Math.min(maxPanelWidth(), w)));
+}
+
+function loadInitialPanelWidth(): number {
+  if (typeof window === "undefined") return DEFAULT_PANEL_WIDTH;
+  try {
+    const raw = window.localStorage.getItem(PANEL_WIDTH_STORAGE_KEY);
+    if (!raw) return clampPanelWidth(DEFAULT_PANEL_WIDTH);
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? clampPanelWidth(parsed) : clampPanelWidth(DEFAULT_PANEL_WIDTH);
+  } catch {
+    return DEFAULT_PANEL_WIDTH;
+  }
+}
+
+function savePanelWidth(width: number) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, String(width));
+  } catch {
+    /* ignore storage failures */
+  }
+}
+
 const agent = ref<AgentStatus | null>(null);
 const showPlan = ref(false);
 const planTab = ref<TaskPanelTab>("steps");
+const previewTarget = ref<PreviewTarget | null>(null);
+const panelWidth = ref<number>(loadInitialPanelWidth());
+const isResizingPanel = ref(false);
+let prePreviewPanelWidth: number | null = null;
+let resizeStartX = 0;
+let resizeStartWidth = DEFAULT_PANEL_WIDTH;
+
+const selectedSkills = ref<string[]>([]);
+const pendingBusyIds = ref<Set<string>>(new Set());
+const pendingErrors = ref<Record<string, string>>({});
+
 const sidebarOpen = ref(false);
 const sidebarCollapsed = ref(false);
 const drawerDragProgress = ref<number | null>(null);
@@ -39,9 +87,52 @@ function onMediaChange(e: MediaQueryListEvent) {
   isDesktop.value = e.matches;
   if (e.matches) sidebarOpen.value = false;
 }
+function onWindowResize() {
+  panelWidth.value = clampPanelWidth(panelWidth.value);
+}
 const searchOpen = ref(false);
 const focusMessageId = ref<string | null>(null);
 let pollTimer: number | null = null;
+
+function onPanelResizePointerDown(e: PointerEvent) {
+  if (!showPlan.value) return;
+  const target = e.currentTarget as HTMLElement;
+  target.setPointerCapture(e.pointerId);
+  isResizingPanel.value = true;
+  resizeStartX = e.clientX;
+  resizeStartWidth = panelWidth.value;
+  prePreviewPanelWidth = null;
+}
+
+function onPanelResizePointerMove(e: PointerEvent) {
+  if (!isResizingPanel.value) return;
+  const delta = resizeStartX - e.clientX;
+  panelWidth.value = clampPanelWidth(resizeStartWidth + delta);
+}
+
+function onPanelResizePointerUp(e: PointerEvent) {
+  if (!isResizingPanel.value) return;
+  isResizingPanel.value = false;
+  const target = e.currentTarget as HTMLElement;
+  if (target.hasPointerCapture(e.pointerId)) {
+    target.releasePointerCapture(e.pointerId);
+  }
+  savePanelWidth(panelWidth.value);
+}
+
+function onPanelResizeKeydown(e: KeyboardEvent) {
+  if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    prePreviewPanelWidth = null;
+    panelWidth.value = clampPanelWidth(panelWidth.value + 24);
+    savePanelWidth(panelWidth.value);
+  } else if (e.key === "ArrowRight") {
+    e.preventDefault();
+    prePreviewPanelWidth = null;
+    panelWidth.value = clampPanelWidth(panelWidth.value - 24);
+    savePanelWidth(panelWidth.value);
+  }
+}
 
 function setSidebarCollapsed(next: boolean) {
   sidebarCollapsed.value = next;
@@ -122,6 +213,8 @@ function createConversation() {
   conversations.clearCurrent();
   chat.reset();
   filesStore.reset();
+  previewTarget.value = null;
+  selectedSkills.value = [];
   showPlan.value = false;
   planTab.value = "steps";
   if (routeConversationId.value) {
@@ -140,6 +233,8 @@ async function onSelect(id: string) {
     return;
   }
   chat.abort();
+  previewTarget.value = null;
+  selectedSkills.value = [];
   const ok = await openConversation(id);
   if (ok) {
     showPlan.value = true;
@@ -154,6 +249,8 @@ async function onSelectFromSearch(conversationId: string, messageId: string | nu
   mobileStepsOpen.value = false;
   if (conversationId !== conversations.current?.id) {
     chat.abort();
+    previewTarget.value = null;
+    selectedSkills.value = [];
     const ok = await openConversation(conversationId);
     if (!ok) return;
   }
@@ -168,11 +265,17 @@ async function onRename(id: string, title: string) {
   await conversations.rename(id, title);
 }
 
+async function onPin(id: string, isPinned: boolean) {
+  await conversations.togglePin(id, isPinned);
+}
+
 async function onDelete(id: string) {
   const wasCurrent = conversations.current?.id === id;
   await conversations.remove(id);
   if (wasCurrent) {
     chat.reset();
+    previewTarget.value = null;
+    selectedSkills.value = [];
     if (conversations.conversations.length) {
       const nextId = conversations.conversations[0].id;
       const ok = await openConversation(nextId);
@@ -202,6 +305,7 @@ async function ensureConversationId(): Promise<string> {
 async function onUploadFiles(fileList: FileList, dataTransfer?: DataTransfer | null, switchToFilesTab = false) {
   if (!agent.value?.ready) return;
   if (switchToFilesTab) {
+    previewTarget.value = null;
     showPlan.value = true;
     planTab.value = "files";
   }
@@ -211,9 +315,22 @@ async function onUploadFiles(fileList: FileList, dataTransfer?: DataTransfer | n
   }
 }
 
+async function onAttachLibraryFiles(fileIds: string[]) {
+  if (!agent.value?.ready || !fileIds.length) return;
+  try {
+    const cid = await ensureConversationId();
+    await filesStore.attachLibraryFiles(fileIds, cid, true);
+  } catch (e: any) {
+    filesStore.error = e?.detail?.detail ?? e?.message ?? "引用资料库文件失败";
+  }
+}
+
 async function onDeleteFile(fileId: string) {
   try {
     await filesStore.removeFile(fileId);
+    if (previewTarget.value?.kind === "file" && previewTarget.value.file.id === fileId) {
+      previewTarget.value = null;
+    }
   } catch (e: any) {
     filesStore.error = e?.detail?.detail ?? e?.message ?? "删除文件失败";
   }
@@ -221,7 +338,7 @@ async function onDeleteFile(fileId: string) {
 
 async function onDownloadFile(file: ConversationFile) {
   try {
-    const url = await filesStore.getDownloadUrl(file.id, false);
+    const url = await filesStore.getDownloadUrl(file.id, false, file.conversation_id ?? undefined);
     if (url) {
       window.open(url, "_blank", "noopener,noreferrer");
     }
@@ -230,26 +347,150 @@ async function onDownloadFile(file: ConversationFile) {
   }
 }
 
+function openPreviewTarget(next: PreviewTarget) {
+  previewTarget.value = next;
+  if (window.innerWidth >= 1024) {
+    showPlan.value = true;
+  } else {
+    mobileStepsOpen.value = true;
+  }
+}
+
+function onPreviewFile(file: ConversationFile) {
+  openPreviewTarget({ kind: "file", file });
+}
+
+function onPreviewHtml(html: string) {
+  openPreviewTarget({ kind: "html", html, title: "HTML 代码预览" });
+}
+
+function closePreview() {
+  previewTarget.value = null;
+}
+
+function closeMobileDrawer() {
+  mobileStepsOpen.value = false;
+  previewTarget.value = null;
+}
+
 async function onSend(content: string) {
   if (chat.streaming || filesStore.hasActiveUploads) return;
   try {
     await ensureConversationId();
     const attached = filesStore.attachedFiles;
     filesStore.consumeAttachedIds();
+    const skillNames = [...selectedSkills.value];
+    selectedSkills.value = [];
     planTab.value = "steps";
-    await chat.send(content, attached);
+    await chat.send(content, attached, skillNames);
     await conversations.fetchList();
   } catch (e: any) {
     chat.error = e?.detail?.detail ?? e?.message ?? "无法开始对话，请稍后重试";
   }
 }
 
+async function onRegenerate(assistantMessageId: string) {
+  if (chat.streaming || filesStore.hasActiveUploads) return;
+  try {
+    await chat.regenerate(assistantMessageId);
+    await conversations.fetchList();
+  } catch (e: any) {
+    chat.error = e?.detail?.detail ?? e?.message ?? "重新生成失败，请稍后重试";
+  }
+}
+
+async function onEditMessage(userMessageId: string, content: string) {
+  if (chat.streaming || filesStore.hasActiveUploads) return;
+  try {
+    const original = chat.messages.find((m) => m.id === userMessageId && m.role === "user");
+    const existingAttachments = original?.tool_payload?.attachments ?? [];
+    const resolvedAttached: ConversationFile[] = existingAttachments.map((att) => {
+      const found = filesStore.files.find((f) => f.id === att.id);
+      if (found) return found;
+      return {
+        id: att.id,
+        conversation_id: chat.convId,
+        filename: att.filename,
+        ext: att.ext,
+        mime_type: "",
+        category: att.category,
+        size_bytes: att.size_bytes,
+        status: "ready",
+        source: "user",
+        is_global: false,
+        created_at: original?.created_at ?? new Date().toISOString(),
+        updated_at: original?.created_at ?? new Date().toISOString(),
+      };
+    });
+    const existingSkills = original?.tool_payload?.skills ?? [];
+    await chat.editAndResend(userMessageId, content, resolvedAttached, existingSkills);
+    await conversations.fetchList();
+  } catch (e: any) {
+    chat.error = e?.detail?.detail ?? e?.message ?? "保存并重发失败，请稍后重试";
+  }
+}
+
+async function onResolveMemory(id: string, action: "approve" | "reject", content?: string) {
+  const nextBusy = new Set(pendingBusyIds.value);
+  nextBusy.add(id);
+  pendingBusyIds.value = nextBusy;
+  const { [id]: _, ...restErrors } = pendingErrors.value;
+  pendingErrors.value = restErrors;
+  try {
+    await chat.resolvePendingMemory(id, action, content);
+  } catch (e: any) {
+    pendingErrors.value = {
+      ...pendingErrors.value,
+      [id]: e?.detail?.detail ?? e?.message ?? "操作失败，请重试",
+    };
+  } finally {
+    const afterBusy = new Set(pendingBusyIds.value);
+    afterBusy.delete(id);
+    pendingBusyIds.value = afterBusy;
+  }
+}
+
+async function onResolveSkill(id: string, action: "approve" | "reject") {
+  const nextBusy = new Set(pendingBusyIds.value);
+  nextBusy.add(id);
+  pendingBusyIds.value = nextBusy;
+  const { [id]: _, ...restErrors } = pendingErrors.value;
+  pendingErrors.value = restErrors;
+  try {
+    await chat.resolvePendingSkill(id, action);
+  } catch (e: any) {
+    pendingErrors.value = {
+      ...pendingErrors.value,
+      [id]: e?.detail?.detail ?? e?.message ?? "操作失败，请重试",
+    };
+  } finally {
+    const afterBusy = new Set(pendingBusyIds.value);
+    afterBusy.delete(id);
+    pendingBusyIds.value = afterBusy;
+  }
+}
+
 function onViewSteps(id: string) {
   chat.selectTurn(id);
+  previewTarget.value = null;
   planTab.value = "steps";
   showPlan.value = true;
   if (window.innerWidth < 1024) mobileStepsOpen.value = true;
 }
+
+watch(previewTarget, (next, prev) => {
+  if (next && !prev) {
+    if (panelWidth.value < PREVIEW_MIN_PANEL_WIDTH) {
+      prePreviewPanelWidth = panelWidth.value;
+      panelWidth.value = clampPanelWidth(PREVIEW_MIN_PANEL_WIDTH);
+    }
+  } else if (!next && prev) {
+    if (prePreviewPanelWidth !== null) {
+      panelWidth.value = clampPanelWidth(prePreviewPanelWidth);
+      prePreviewPanelWidth = null;
+    }
+  }
+});
 
 watch(
   () => chat.streaming,
@@ -268,6 +509,8 @@ watch(routeConversationId, async (nextId) => {
   if (nextId) {
     if (nextId !== conversations.current?.id) {
       chat.abort();
+      previewTarget.value = null;
+      selectedSkills.value = [];
       const ok = await openConversation(nextId);
       if (ok) {
         showPlan.value = true;
@@ -281,12 +524,15 @@ watch(routeConversationId, async (nextId) => {
     conversations.clearCurrent();
     chat.reset();
     filesStore.reset();
+    previewTarget.value = null;
+    selectedSkills.value = [];
     showPlan.value = false;
   }
 });
 
 onMounted(async () => {
   window.addEventListener("keydown", onGlobalKeydown);
+  window.addEventListener("resize", onWindowResize);
   if (typeof window !== "undefined") {
     mediaQuery = window.matchMedia("(min-width: 768px)");
     isDesktop.value = mediaQuery.matches;
@@ -311,6 +557,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onGlobalKeydown);
+  window.removeEventListener("resize", onWindowResize);
   mediaQuery?.removeEventListener("change", onMediaChange);
   if (pollTimer) window.clearTimeout(pollTimer);
   chat.abort();
@@ -344,6 +591,7 @@ onBeforeUnmount(() => {
       @select="onSelect"
       @create="createConversation"
       @rename="onRename"
+      @pin="onPin"
       @delete="onDelete"
       @close="sidebarOpen = false"
       @open-search="searchOpen = true"
@@ -401,6 +649,11 @@ onBeforeUnmount(() => {
             :focus-message-id="focusMessageId"
             @steps="onViewSteps"
             @focus-handled="focusMessageId = null"
+            @regenerate="onRegenerate"
+            @edit="onEditMessage"
+            @preview-html="onPreviewHtml"
+            @preview-file="onPreviewFile"
+            @download-file="onDownloadFile"
           />
 
           <div v-else v-scrollbar class="custom-scrollbar h-full overflow-y-auto">
@@ -448,6 +701,24 @@ onBeforeUnmount(() => {
               />
             </Transition>
 
+            <MemoryPendingCard
+              v-for="item in chat.pendingMemory"
+              :key="`mem-${item.id}`"
+              :item="item"
+              :busy="pendingBusyIds.has(item.id)"
+              :error="pendingErrors[item.id] ?? null"
+              @resolve="onResolveMemory"
+            />
+
+            <SkillPendingCard
+              v-for="item in chat.pendingSkills"
+              :key="`skill-${item.id}`"
+              :item="item"
+              :busy="pendingBusyIds.has(item.id)"
+              :error="pendingErrors[item.id] ?? null"
+              @resolve="onResolveSkill"
+            />
+
             <Transition
               enter-active-class="transition duration-200 ease-out"
               enter-from-class="-translate-y-1 opacity-0"
@@ -492,6 +763,7 @@ onBeforeUnmount(() => {
             </Transition>
 
             <ChatInput
+              v-model:selected-skills="selectedSkills"
               :streaming="chat.streaming"
               :disabled="!agent?.ready"
               :uploading="filesStore.hasActiveUploads"
@@ -509,11 +781,39 @@ onBeforeUnmount(() => {
       </div>
 
       <aside
-        class="hidden h-full shrink-0 overflow-hidden bg-sidebar transition-[width,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] lg:block"
-        :class="showPlan ? 'w-[320px] opacity-100' : 'pointer-events-none w-0 opacity-0'"
+        class="relative hidden h-full shrink-0 overflow-hidden bg-sidebar lg:block"
+        :class="[
+          showPlan ? 'opacity-100' : 'pointer-events-none opacity-0',
+          isResizingPanel ? 'transition-none' : 'transition-[width,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
+        ]"
+        :style="{ width: showPlan ? `${panelWidth}px` : '0px' }"
         :aria-hidden="!showPlan"
       >
-        <div class="h-full w-[320px]">
+        <div
+          v-if="showPlan"
+          role="separator"
+          tabindex="0"
+          aria-orientation="vertical"
+          aria-label="调整任务面板宽度"
+          :aria-valuemin="MIN_PANEL_WIDTH"
+          :aria-valuemax="maxPanelWidth()"
+          :aria-valuenow="panelWidth"
+          title="左右拖拽调整面板宽度"
+          class="focus-ring group absolute inset-y-0 left-0 z-30 flex w-2.5 cursor-col-resize touch-none select-none items-center justify-center transition-colors hover:bg-hover/60"
+          :class="isResizingPanel ? 'bg-hover/80' : ''"
+          @pointerdown="onPanelResizePointerDown"
+          @pointermove="onPanelResizePointerMove"
+          @pointerup="onPanelResizePointerUp"
+          @pointercancel="onPanelResizePointerUp"
+          @keydown="onPanelResizeKeydown"
+        >
+          <span
+            class="h-10 w-0.5 rounded-full transition-colors"
+            :class="isResizingPanel ? 'bg-accent' : 'bg-transparent group-hover:bg-line-strong'"
+            aria-hidden="true"
+          />
+        </div>
+        <div class="h-full" :style="{ width: `${panelWidth}px` }">
           <PlanPanel
             v-model:active-tab="planTab"
             :plan="chat.viewPlan"
@@ -526,11 +826,16 @@ onBeforeUnmount(() => {
             :uploads="filesStore.uploads"
             :files-loading="filesStore.loading"
             :upload-disabled="!agent?.ready"
+            :preview-target="previewTarget"
+            :resizing="isResizingPanel"
             @upload="(files, dt) => onUploadFiles(files, dt, true)"
             @cancel-upload="filesStore.cancelUpload"
             @dismiss-upload="filesStore.dismissUpload"
             @delete-file="onDeleteFile"
             @download-file="onDownloadFile"
+            @preview-file="onPreviewFile"
+            @close-preview="closePreview"
+            @attach-library="onAttachLibraryFiles"
           />
         </div>
       </aside>
@@ -545,15 +850,18 @@ onBeforeUnmount(() => {
       leave-to-class="opacity-0 [&>div:last-child]:translate-x-full"
     >
       <div v-if="mobileStepsOpen" class="fixed inset-0 z-40 lg:hidden">
-        <div class="absolute inset-0 bg-black/40" @click="mobileStepsOpen = false" />
-        <div class="absolute inset-y-0 right-0 flex w-[min(360px,90vw)] flex-col bg-sidebar shadow-2xl transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]">
+        <div class="absolute inset-0 bg-black/40" @click="closeMobileDrawer" />
+        <div
+          class="absolute inset-y-0 right-0 flex flex-col bg-sidebar shadow-2xl transition-[width,transform] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
+          :class="previewTarget ? 'w-full max-w-[100dvw] overflow-x-hidden' : 'w-[min(360px,90dvw)]'"
+        >
           <div class="flex h-13 shrink-0 items-center justify-between pl-4 pr-2.5">
             <h3 class="text-[16px] font-semibold text-fg">任务面板</h3>
             <button
               type="button"
               class="focus-ring flex h-9 w-9 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover hover:text-fg"
               aria-label="关闭任务面板"
-              @click="mobileStepsOpen = false"
+              @click="closeMobileDrawer"
             >
               <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
@@ -574,11 +882,15 @@ onBeforeUnmount(() => {
               :uploads="filesStore.uploads"
               :files-loading="filesStore.loading"
               :upload-disabled="!agent?.ready"
+              :preview-target="previewTarget"
               @upload="(files, dt) => onUploadFiles(files, dt, true)"
               @cancel-upload="filesStore.cancelUpload"
               @dismiss-upload="filesStore.dismissUpload"
               @delete-file="onDeleteFile"
               @download-file="onDownloadFile"
+              @preview-file="onPreviewFile"
+              @close-preview="closePreview"
+              @attach-library="onAttachLibraryFiles"
             />
           </div>
         </div>

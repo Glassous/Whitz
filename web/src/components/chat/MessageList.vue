@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from "vue";
-import type { Message } from "../../types";
+import type { ConversationFile, Message } from "../../types";
 import MessageBubble from "./MessageBubble.vue";
 
 const props = defineProps<{ messages: Message[]; focusMessageId?: string | null }>();
-const emit = defineEmits<{ steps: [id: string]; "focus-handled": [] }>();
+const emit = defineEmits<{
+  steps: [id: string];
+  "focus-handled": [];
+  regenerate: [assistantMessageId: string];
+  edit: [userMessageId: string, content: string];
+  "preview-html": [html: string];
+  "preview-file": [file: ConversationFile];
+  "download-file": [file: ConversationFile];
+}>();
 
 const TOP_CLEARANCE = 88;
 const MIN_BOTTOM_GAP = 148;
@@ -177,7 +185,15 @@ onBeforeUnmount(() => {
           idx < visibleMessages.length - 6 ? 'message-deferred' : '',
         ]"
       >
-        <MessageBubble :message="m" @steps="emit('steps', m.id)" />
+        <MessageBubble
+          :message="m"
+          @steps="emit('steps', m.id)"
+          @regenerate="emit('regenerate', $event)"
+          @edit="(id, content) => emit('edit', id, content)"
+          @preview-html="emit('preview-html', $event)"
+          @preview-file="emit('preview-file', $event)"
+          @download-file="emit('download-file', $event)"
+        />
       </div>
       <div aria-hidden="true" class="shrink-0" :style="{ height: `${spacerHeight}px` }" />
     </div>

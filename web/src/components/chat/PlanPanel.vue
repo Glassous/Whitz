@@ -8,9 +8,24 @@ import {
   formatFileSize,
   validateDragItems,
 } from "../../lib/fileTypes";
-import type { ConversationFile, Plan, PlanItem, ReasoningBlock, TaskPanelTab, UploadTask } from "../../types";
+import type {
+  ConversationFile,
+  LibraryFileItem,
+  Plan,
+  PlanItem,
+  PreviewTarget,
+  ReasoningBlock,
+  TaskPanelTab,
+  UploadTask,
+} from "../../types";
+import { useFilesStore } from "../../stores/files";
+import BaseButton from "../ui/BaseButton.vue";
+import BaseModal from "../ui/BaseModal.vue";
 import Spinner from "../ui/Spinner.vue";
+import FilePreviewPane from "./FilePreviewPane.vue";
 import ReasoningEntry from "./ReasoningEntry.vue";
+
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
 const props = defineProps<{
   plan: Plan | null;
@@ -25,6 +40,8 @@ const props = defineProps<{
   filesLoading?: boolean;
   uploadDisabled?: boolean;
   hideHeader?: boolean;
+  previewTarget?: PreviewTarget | null;
+  resizing?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -34,7 +51,12 @@ const emit = defineEmits<{
   "dismiss-upload": [localId: string];
   "delete-file": [fileId: string];
   "download-file": [file: ConversationFile];
+  "preview-file": [file: ConversationFile];
+  "close-preview": [];
+  "attach-library": [fileIds: string[]];
 }>();
+
+const filesStore = useFilesStore();
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const splitContainerRef = ref<HTMLElement | null>(null);
@@ -253,6 +275,89 @@ watch(
 );
 
 const totalFileCount = computed(() => props.files.length + props.uploads.filter((u) => u.status !== "error").length);
+
+const failedThumbIds = ref<Set<string>>(new Set());
+const refreshedThumbIds = new Set<string>();
+
+function isImageFile(file: { category: string; ext?: string }): boolean {
+  return file.category === "image" || IMAGE_EXTS.has((file.ext || "").toLowerCase());
+}
+
+function fileThumbUrl(file: ConversationFile): string | null {
+  if (!isImageFile(file) || failedThumbIds.value.has(file.id)) return null;
+  return file.thumb_url || file.preview_url || null;
+}
+
+async function onThumbError(file: ConversationFile) {
+  if (!refreshedThumbIds.has(file.id)) {
+    refreshedThumbIds.add(file.id);
+    try {
+      const fresh = await filesStore.ensureFreshUrl(file, true);
+      if (fresh) return;
+    } catch {
+      /* fall back below */
+    }
+  }
+  const next = new Set(failedThumbIds.value);
+  next.add(file.id);
+  failedThumbIds.value = next;
+}
+
+// Library quick picker modal
+const libraryOpen = ref(false);
+const libraryLoading = ref(false);
+const libraryAttaching = ref(false);
+const libraryError = ref<string | null>(null);
+const libraryQuery = ref("");
+const libraryOnlyGlobal = ref(true);
+const libraryItems = ref<LibraryFileItem[]>([]);
+const selectedLibraryIds = ref<Set<string>>(new Set());
+
+const existingFileIds = computed(() => new Set(props.files.map((f) => f.id)));
+
+const filteredLibraryItems = computed(() => {
+  const q = libraryQuery.value.trim().toLowerCase();
+  return libraryItems.value.filter((item) => {
+    if (libraryOnlyGlobal.value && !item.is_global) return false;
+    if (!q) return true;
+    return (
+      item.filename.toLowerCase().includes(q) ||
+      (item.conversation_title ?? "").toLowerCase().includes(q)
+    );
+  });
+});
+
+async function openLibraryPicker() {
+  if (props.uploadDisabled) return;
+  libraryOpen.value = true;
+  libraryError.value = null;
+  selectedLibraryIds.value = new Set();
+  libraryLoading.value = true;
+  try {
+    libraryItems.value = await filesStore.fetchLibraryFiles({ page: 1, page_size: 60 });
+  } catch (e: any) {
+    libraryError.value = e?.detail?.detail ?? e?.message ?? "加载个人资料库失败";
+  } finally {
+    libraryLoading.value = false;
+  }
+}
+
+function toggleLibrarySelect(id: string) {
+  if (existingFileIds.value.has(id)) return;
+  const next = new Set(selectedLibraryIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  selectedLibraryIds.value = next;
+}
+
+function confirmLibraryAttach() {
+  const ids = [...selectedLibraryIds.value];
+  if (!ids.length) return;
+  libraryAttaching.value = true;
+  emit("attach-library", ids);
+  libraryOpen.value = false;
+  libraryAttaching.value = false;
+}
 </script>
 
 <template>
@@ -272,14 +377,25 @@ const totalFileCount = computed(() => props.files.length + props.uploads.filter(
       @change="onFileChange"
     />
 
-    <!-- Desktop Header (hidden on mobile where drawer provides top header) -->
-    <div v-if="!hideHeader" class="shrink-0 px-5 pb-2 pt-3.5 lg:pr-14">
-      <div class="flex h-10 items-center justify-between">
-        <h3 class="text-[16px] font-semibold text-fg">任务面板</h3>
-      </div>
-    </div>
+    <!-- File Preview Mode (hides both Steps & Files list panes) -->
+    <FilePreviewPane
+      v-if="previewTarget"
+      :target="previewTarget"
+      :hide-header="hideHeader"
+      :resizing="resizing"
+      @close="emit('close-preview')"
+      @download="emit('download-file', $event)"
+    />
 
-    <!-- Split-pane container: Top = Steps, Draggable Handle, Bottom = Files -->
+    <template v-else>
+      <!-- Desktop Header (hidden on mobile where drawer provides top header) -->
+      <div v-if="!hideHeader" class="shrink-0 px-5 pb-2 pt-3.5 lg:pr-14">
+        <div class="flex h-10 items-center justify-between">
+          <h3 class="text-[16px] font-semibold text-fg">任务面板</h3>
+        </div>
+      </div>
+
+      <!-- Split-pane container: Top = Steps, Draggable Handle, Bottom = Files -->
     <div ref="splitContainerRef" class="flex min-h-0 flex-1 flex-col">
       <!-- Top Pane: Steps -->
       <section
@@ -444,17 +560,28 @@ const totalFileCount = computed(() => props.files.length + props.uploads.filter(
               {{ totalFileCount }} / {{ MAX_FILES_PER_CONVERSATION }}
             </span>
           </div>
-          <button
-            type="button"
-            class="focus-ring inline-flex items-center gap-1 rounded-lg bg-canvas px-2.5 py-1 text-[12px] font-medium text-fg transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="uploadDisabled"
-            @click="openFilePicker"
-          >
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
-              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-            </svg>
-            <span>上传文件</span>
-          </button>
+          <div class="flex items-center gap-1">
+            <button
+              type="button"
+              class="focus-ring inline-flex items-center gap-1 rounded-lg bg-canvas px-2 py-1 text-[12px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="uploadDisabled"
+              title="从个人资料库引用文件"
+              @click="openLibraryPicker"
+            >
+              <span>资料库</span>
+            </button>
+            <button
+              type="button"
+              class="focus-ring inline-flex items-center gap-1 rounded-lg bg-canvas px-2.5 py-1 text-[12px] font-medium text-fg transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="uploadDisabled"
+              @click="openFilePicker"
+            >
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
+                <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+              </svg>
+              <span>上传文件</span>
+            </button>
+          </div>
         </div>
 
         <div v-scrollbar class="custom-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto pl-4 pr-2.5 pb-4 pt-1">
@@ -467,7 +594,13 @@ const totalFileCount = computed(() => props.files.length + props.uploads.filter(
               :class="u.status === 'error' ? 'bg-danger-weak text-danger' : 'bg-canvas/85 text-fg'"
             >
               <div class="flex items-center gap-2">
-                <span class="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted">
+                <img
+                  v-if="u.localPreviewUrl"
+                  :src="u.localPreviewUrl"
+                  :alt="u.filename"
+                  class="h-9 w-9 shrink-0 rounded-lg bg-surface object-cover"
+                />
+                <span v-else class="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted">
                   {{ categoryLabel(u.category, u.ext) }}
                 </span>
                 <span class="min-w-0 flex-1 truncate font-medium" :title="u.filename">{{ u.filename }}</span>
@@ -505,16 +638,55 @@ const totalFileCount = computed(() => props.files.length + props.uploads.filter(
             <div
               v-for="f in files"
               :key="f.id"
-              class="group flex items-center gap-2.5 rounded-xl bg-canvas/80 px-3 py-2.5 transition-colors hover:bg-canvas"
+              role="button"
+              tabindex="0"
+              class="focus-ring group flex cursor-pointer items-center gap-2.5 rounded-xl bg-canvas/80 px-3 py-2.5 transition-colors hover:bg-canvas"
+              :title="`点击在线预览 ${f.filename}`"
+              @click="emit('preview-file', f)"
+              @keydown.enter.self="emit('preview-file', f)"
+              @keydown.space.self.prevent="emit('preview-file', f)"
             >
-              <span class="shrink-0 rounded-md bg-surface px-1.5 py-0.5 text-[11px] font-medium text-fg-muted">
+              <img
+                v-if="fileThumbUrl(f)"
+                :src="fileThumbUrl(f)!"
+                :alt="f.filename"
+                class="h-9 w-9 shrink-0 rounded-lg bg-surface object-cover"
+                @error="onThumbError(f)"
+              />
+              <span v-else class="shrink-0 rounded-md bg-surface px-1.5 py-0.5 text-[11px] font-medium text-fg-muted">
                 {{ categoryLabel(f.category, f.ext) }}
               </span>
               <div class="min-w-0 flex-1">
                 <p class="truncate text-[13.5px] font-medium text-fg" :title="f.filename">{{ f.filename }}</p>
-                <p class="text-[11.5px] tabular-nums text-fg-faint">{{ formatFileSize(f.size_bytes) }}</p>
+                <div class="flex items-center gap-1.5 text-[11.5px] text-fg-faint">
+                  <span class="tabular-nums">{{ formatFileSize(f.size_bytes) }}</span>
+                  <span
+                    v-if="f.source === 'assistant'"
+                    class="rounded bg-accent-weak/80 px-1 py-0.2 text-[10px] font-medium text-accent"
+                  >
+                    AI
+                  </span>
+                  <span
+                    v-if="f.is_global"
+                    class="rounded bg-surface px-1 py-0.2 text-[10px] font-medium text-fg-muted"
+                  >
+                    全局
+                  </span>
+                </div>
               </div>
-              <div class="flex shrink-0 items-center gap-1">
+              <div class="flex shrink-0 items-center gap-0.5" @click.stop>
+                <button
+                  type="button"
+                  class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-hover hover:text-fg"
+                  aria-label="在线预览"
+                  title="在线预览"
+                  @click="emit('preview-file', f)"
+                >
+                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                </button>
                 <button
                   type="button"
                   class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-hover hover:text-fg"
@@ -543,7 +715,7 @@ const totalFileCount = computed(() => props.files.length + props.uploads.filter(
             </div>
 
             <p class="pt-1 text-[12px] leading-relaxed text-fg-faint">
-              当前对话内，AI 可随时读取工作区内的全部文件；支持将文件直接拖拽至此面板。
+              点击任意文件可在线预览；当前对话内 AI 可随时读取工作区内的全部文件。
             </p>
           </div>
 
@@ -561,7 +733,7 @@ const totalFileCount = computed(() => props.files.length + props.uploads.filter(
             </svg>
             <p class="text-[13px] font-medium text-fg-muted">工作区暂无文件</p>
             <p class="mt-1 text-[11.5px] leading-relaxed text-fg-faint">
-              支持拖拽文件至此或点击上方「上传文件」
+              支持拖拽文件至此、点击「上传文件」或从个人资料库引用
             </p>
             <p class="mt-1.5 text-[11px] leading-relaxed text-fg-faint/85">
               {{ SUPPORTED_TYPES_SUMMARY }}
@@ -570,6 +742,89 @@ const totalFileCount = computed(() => props.files.length + props.uploads.filter(
         </div>
       </section>
     </div>
+    </template>
+
+    <!-- Library Quick Attach Modal -->
+    <BaseModal :open="libraryOpen" title="从个人资料库引用文件" width="36rem" @close="libraryOpen = false">
+      <div class="space-y-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <input
+            v-model="libraryQuery"
+            type="text"
+            placeholder="搜索文件名或来源对话…"
+            class="focus-ring h-9 min-w-0 flex-1 rounded-xl bg-surface px-3 text-[13.5px] text-fg placeholder:text-fg-faint"
+          />
+          <button
+            type="button"
+            class="focus-ring h-9 rounded-xl px-3 text-[12.5px] font-medium transition-colors"
+            :class="libraryOnlyGlobal ? 'bg-accent-weak text-accent' : 'bg-surface text-fg-muted hover:text-fg'"
+            @click="libraryOnlyGlobal = !libraryOnlyGlobal"
+          >
+            {{ libraryOnlyGlobal ? "仅全局共享" : "全部资料库" }}
+          </button>
+        </div>
+
+        <div v-scrollbar class="custom-scrollbar max-h-72 overflow-y-auto space-y-1.5 pr-1">
+          <div v-if="libraryLoading" class="space-y-2 py-2">
+            <div v-for="i in 3" :key="i" class="h-12 animate-pulse rounded-xl bg-surface" />
+          </div>
+          <p v-else-if="libraryError" class="py-6 text-center text-[13px] text-danger">{{ libraryError }}</p>
+          <div v-else-if="filteredLibraryItems.length" class="space-y-1.5">
+            <button
+              v-for="item in filteredLibraryItems"
+              :key="item.id"
+              type="button"
+              :disabled="existingFileIds.has(item.id)"
+              class="focus-ring flex w-full items-center gap-2.5 rounded-xl border p-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55"
+              :class="
+                selectedLibraryIds.has(item.id)
+                  ? 'border-accent bg-accent-weak/45'
+                  : 'border-line bg-sidebar/60 hover:bg-surface'
+              "
+              @click="toggleLibrarySelect(item.id)"
+            >
+              <img
+                v-if="fileThumbUrl(item)"
+                :src="fileThumbUrl(item)!"
+                :alt="item.filename"
+                class="h-9 w-9 shrink-0 rounded-lg bg-surface object-cover"
+              />
+              <span v-else class="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted">
+                {{ categoryLabel(item.category, item.ext) }}
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-[13px] font-medium text-fg">{{ item.filename }}</span>
+                <span class="block truncate text-[11.5px] text-fg-faint">
+                  {{ formatFileSize(item.size_bytes) }}
+                  <template v-if="item.conversation_title"> · {{ item.conversation_title }}</template>
+                </span>
+              </span>
+              <span v-if="existingFileIds.has(item.id)" class="shrink-0 text-[11px] text-fg-faint">已在工作区</span>
+              <span
+                v-else-if="item.is_global"
+                class="shrink-0 rounded-full bg-surface px-2 py-0.5 text-[10.5px] font-medium text-fg-muted"
+              >
+                全局
+              </span>
+            </button>
+          </div>
+          <p v-else class="py-8 text-center text-[13px] text-fg-faint">
+            {{ libraryOnlyGlobal ? "暂无全局共享文件，可切换「全部资料库」查看" : "资料库暂无可用文件" }}
+          </p>
+        </div>
+      </div>
+      <template #footer>
+        <BaseButton variant="soft" rounded="full" @click="libraryOpen = false">取消</BaseButton>
+        <BaseButton
+          rounded="full"
+          :loading="libraryAttaching"
+          :disabled="selectedLibraryIds.size === 0"
+          @click="confirmLibraryAttach"
+        >
+          引用选中 ({{ selectedLibraryIds.size }})
+        </BaseButton>
+      </template>
+    </BaseModal>
 
     <!-- Full Task Panel Drag Overlay -->
     <Transition
