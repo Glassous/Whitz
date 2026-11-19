@@ -116,9 +116,12 @@ export type MessageStatus = "streaming" | "completed" | "failed" | "cancelled" |
 
 export interface ReasoningTool {
   name: string;
+  call_id?: string | null;
   args?: string;
   result?: string;
   status?: string;
+  duration_ms?: number | null;
+  error?: string | null;
 }
 
 export interface ReasoningBlock {
@@ -230,7 +233,7 @@ export interface Message {
   tool_name: string | null;
   tool_payload: ToolPayload | null;
   status: MessageStatus;
-  hermes_run_id: string | null;
+  run_id: string | null;
   created_at: string;
 }
 

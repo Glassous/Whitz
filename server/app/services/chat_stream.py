@@ -15,8 +15,8 @@ from app.core.config import get_settings
 from app.core.redis import get_redis
 from app.db.models import Conversation, ConversationFile, Message, User
 from app.db.session import SessionLocal
-from app.services import cos, membership, memory_service, provisioning, skills_service, titles, usage
-from app.services.hermes import HermesClient, HermesError
+from app.services import cos, membership, memory_service, profile_context, skills_service, titles, usage
+from app.services.agent_client import AgentClient, AgentError
 
 logger = logging.getLogger("whitz.chat")
 
@@ -146,7 +146,7 @@ class ChatPipeline:
     def __init__(
         self,
         db: AsyncSession,
-        client: HermesClient,
+        client: AgentClient,
         conv: Conversation,
         assistant: Message,
         run_id: str,
@@ -161,7 +161,9 @@ class ChatPipeline:
         self.max_seconds = max_seconds
         self.buffer: list[str] = []
         self.last_flush = time.monotonic()
+        self.pending_tools_by_call: dict[str, Message] = {}
         self.pending_tools: dict[str, list[Message]] = {}
+        self.existing_tools_by_call: dict[str, Message] = {}
         self.existing_tools: dict[str, list[Message]] = {}
         self.plan: dict | None = conv.plan
         if not self.plan:
@@ -206,19 +208,23 @@ class ChatPipeline:
         return f"{tool}\x00{json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}"
 
     async def prepare(self) -> None:
-        if not self.assistant.hermes_run_id:
+        if not self.assistant.run_id:
             return
         result = await self.db.execute(
             select(Message)
             .where(
                 Message.conversation_id == self.conv.id,
-                Message.hermes_run_id == self.run_id,
+                Message.run_id == self.run_id,
                 Message.role == "tool",
             )
             .order_by(Message.created_at)
         )
         for row in result.scalars():
-            args = (row.tool_payload or {}).get("args")
+            payload = row.tool_payload or {}
+            call_id = payload.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                self.existing_tools_by_call[call_id] = row
+            args = payload.get("args")
             key = self._tool_key(row.tool_name or "tool", args)
             self.existing_tools.setdefault(key, []).append(row)
 
@@ -370,35 +376,6 @@ class ChatPipeline:
         text = text.strip()
         return text if len(text) <= limit else text[:limit] + "…"
 
-    @classmethod
-    def _tool_entries(cls, tool_calls) -> list[tuple[str | None, str, str]]:
-        entries: list[tuple[str | None, str, str]] = []
-        for call in tool_calls or []:
-            if not isinstance(call, dict):
-                continue
-            fn = call.get("function") if isinstance(call.get("function"), dict) else {}
-            name = fn.get("name") or call.get("name") or "tool"
-            args = fn.get("arguments", call.get("arguments"))
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (json.JSONDecodeError, ValueError):
-                    pass
-            if name == "tool_call" and isinstance(args, dict) and isinstance(args.get("calls"), list):
-                for inner in args["calls"]:
-                    if not isinstance(inner, dict):
-                        continue
-                    inner_args = inner.get("arguments")
-                    if isinstance(inner_args, str):
-                        try:
-                            inner_args = json.loads(inner_args)
-                        except (json.JSONDecodeError, ValueError):
-                            pass
-                    entries.append((call.get("id"), inner.get("name") or "tool", cls._clip(inner_args)))
-                continue
-            entries.append((call.get("id"), name, cls._clip(args)))
-        return entries
-
     @staticmethod
     def _unwrap_tool_result(text: str) -> str:
         text = text.strip()
@@ -409,42 +386,6 @@ class ChatPipeline:
         if text.rstrip().endswith(suffix):
             text = text.rstrip()[: -len(suffix)]
         return text.strip()
-
-    @classmethod
-    def _compact_result(cls, tool_name: str, content) -> str:
-        if content is None:
-            return ""
-        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-        if tool_name == "todo_list":
-            return "已更新任务清单"
-        raw = cls._unwrap_tool_result(text)
-        obj = None
-        start = min([i for i in (raw.find("{"), raw.find("[")) if i >= 0], default=-1)
-        if start >= 0:
-            try:
-                obj = json.loads(raw[start:])
-            except (json.JSONDecodeError, ValueError):
-                obj = None
-        if tool_name in ("web_search", "web_extract") and isinstance(obj, dict):
-            data = obj.get("data") if isinstance(obj.get("data"), dict) else obj
-            items = data.get("web") or data.get("results") or data.get("items") or []
-            results = []
-            for item in items[:8] if isinstance(items, list) else []:
-                if not isinstance(item, dict):
-                    continue
-                results.append(
-                    {
-                        "title": str(item.get("title") or item.get("name") or "")[:200],
-                        "url": str(item.get("url") or item.get("link") or "")[:500],
-                        "snippet": str(
-                            item.get("description") or item.get("snippet") or item.get("content") or ""
-                        )[:600],
-                    }
-                )
-            return json.dumps({"results": results}, ensure_ascii=False)
-        if isinstance(obj, (dict, list)):
-            return cls._clip(json.dumps(obj, ensure_ascii=False, indent=2), 4000)
-        return cls._clip(raw, 1200)
 
     async def _persist_reasoning(self) -> None:
         if not self.reasoning and not self.plan and not self.artifacts:
@@ -464,125 +405,6 @@ class ChatPipeline:
         self.conv.active_run_status = None
         self.conv.last_message_at = datetime.now(timezone.utc)
 
-    async def _fetch_session(self) -> list | None:
-        if not self.conv.hermes_session_id:
-            return None
-        try:
-            return await self.client.session_messages(self.conv.hermes_session_id)
-        except HermesError:
-            return None
-
-    def _plan_from_messages(self, messages: list) -> list[dict] | None:
-        for msg in reversed(messages):
-            if not isinstance(msg, dict):
-                continue
-            try:
-                ts = float(msg.get("timestamp") or 0)
-            except (TypeError, ValueError):
-                ts = 0.0
-            if ts and ts < self.started_at:
-                continue
-            found = parse_todos(msg.get("content")) if msg.get("role") == "tool" else None
-            if found is None:
-                found = _find_todos(msg)
-            if found is not None:
-                return found
-        return None
-
-    def _reasoning_from_messages(self, messages: list) -> list[dict]:
-        todos: list[dict] | None = None
-        blocks: list[dict] = []
-        pending: dict[str, list[dict]] = {}
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            role = msg.get("role")
-            if role not in ("assistant", "tool"):
-                continue
-            try:
-                ts = float(msg.get("timestamp") or 0)
-            except (TypeError, ValueError):
-                ts = 0.0
-            if ts and ts < self.started_at:
-                continue
-            if role == "tool":
-                found = parse_todos(msg.get("content"))
-                if found is not None:
-                    todos = found
-                call_id = msg.get("tool_call_id")
-                if call_id:
-                    for tool in pending.pop(call_id, []):
-                        tool["result"] = self._compact_result(tool.get("name") or "", msg.get("content"))
-                        tool["status"] = "completed"
-                continue
-
-            text = msg.get("reasoning_content") or msg.get("reasoning") or ""
-            text = text.strip() if isinstance(text, str) else ""
-            content = msg.get("content") if isinstance(msg.get("content"), str) else ""
-            content = content.strip()
-            entries = self._tool_entries(msg.get("tool_calls"))
-            if not text and not entries:
-                continue
-
-            step = None
-            step_id = None
-            if todos:
-                for idx, item in enumerate(todos):
-                    if item.get("status") == "in_progress":
-                        step = idx + 1
-                        step_id = str(item.get("id")) if item.get("id") is not None else None
-                        title = item.get("content") or ""
-                        break
-                else:
-                    title = "总结" if not entries else ""
-            else:
-                title = "" if entries else "总结"
-
-            block = {
-                "step": step,
-                "step_id": step_id,
-                "title": title,
-                "text": text,
-                "content": content if entries else "",
-                "tools": [],
-            }
-            for call_id, name, args in entries:
-                tool = {"name": name, "args": args}
-                block["tools"].append(tool)
-                if call_id:
-                    pending.setdefault(call_id, []).append(tool)
-            blocks.append(block)
-        return blocks
-
-    def _apply_session(self, messages: list) -> None:
-        items = self._plan_from_messages(messages)
-        if items is not None:
-            self.plan = {"items": items}
-        full = self._reasoning_from_messages(messages)
-        if full:
-            self.reasoning = full
-
-    async def _sync_session(self) -> AsyncIterator[dict]:
-        messages = await self._fetch_session()
-        if messages is None:
-            return
-        items = self._plan_from_messages(messages)
-        plan_changed = items is not None and items != (self.plan or {}).get("items")
-        if plan_changed:
-            self.plan = {"items": items}
-            self.conv.plan = self.plan
-        before = json.dumps(self.reasoning, ensure_ascii=False, sort_keys=True)
-        full = self._reasoning_from_messages(messages)
-        reasoning_changed = bool(full) and json.dumps(full, ensure_ascii=False, sort_keys=True) != before
-        if reasoning_changed:
-            self.reasoning = full
-        if reasoning_changed or plan_changed:
-            await self._persist_reasoning()
-        if plan_changed:
-            yield sse("plan.updated", self.plan)
-        if reasoning_changed:
-            yield sse("reasoning.sync", {"blocks": self.reasoning})
-
     async def _control_ids(self, payload: dict) -> tuple[str | None, int | None]:
         request_id = payload.get("request_id") or payload.get("prompt_id")
         generation = payload.get("execution_generation")
@@ -593,7 +415,7 @@ class ChatPipeline:
                 if controls:
                     request_id = request_id or controls[0].get("prompt_id") or controls[0].get("request_id")
                     generation = generation if generation is not None else controls[0].get("execution_generation")
-            except HermesError:
+            except AgentError:
                 pass
         return request_id, generation
 
@@ -628,11 +450,11 @@ class ChatPipeline:
                 yield sse("message.delta", {"text": text})
                 await self._flush()
 
-        elif name == "message.interim":
+        elif name in ("message.interim", "commentary"):
             text = payload.get("text") or payload.get("delta") or ""
             text = text.strip() if isinstance(text, str) else ""
             if not text:
-                yield sse("message.interim", payload)
+                yield sse(name, payload)
             else:
                 block = self._add_commentary(text)
                 streamed = bool(payload.get("already_streamed"))
@@ -648,6 +470,26 @@ class ChatPipeline:
                         "already_streamed": streamed,
                     },
                 )
+
+        elif name == "graph.node":
+            extra = dict(self.assistant.tool_payload or {})
+            runtime = dict(extra.get("runtime") or {})
+            if payload.get("route"):
+                runtime["route"] = payload["route"]
+            if payload.get("model"):
+                runtime["model"] = payload["model"]
+            if runtime:
+                extra["runtime"] = runtime
+                self.assistant.tool_payload = extra
+            yield sse("graph.node", payload)
+
+        elif name == "plan.updated":
+            items = parse_todos(payload.get("items") if "items" in payload else payload)
+            if items is not None:
+                self.plan = {"items": items}
+                self.conv.plan = self.plan
+                await self._persist_reasoning()
+                yield sse("plan.updated", self.plan)
 
         elif name == "tool.started":
             streamed_text = "".join(self.buffer).strip()
@@ -665,28 +507,65 @@ class ChatPipeline:
                     },
                 )
             tool = payload.get("tool") or "tool"
-            preview = payload.get("preview")
-            key = self._tool_key(tool, preview)
-            reused = self.existing_tools.get(key)
-            if reused:
-                row = reused.pop(0)
+            args = payload.get("args") if "args" in payload else payload.get("preview")
+            preview = payload.get("preview") if "preview" in payload else args
+            call_id = payload.get("call_id")
+            key = self._tool_key(tool, args)
+
+            row = None
+            if isinstance(call_id, str) and call_id and call_id in self.existing_tools_by_call:
+                row = self.existing_tools_by_call.pop(call_id)
+            else:
+                reused = self.existing_tools.get(key)
+                if reused:
+                    row = reused.pop(0)
+
+            if row is not None:
                 row.status = "running"
-                row.tool_payload = {**(row.tool_payload or {}), "status": "running"}
+                row.tool_payload = {
+                    **(row.tool_payload or {}),
+                    "args": args,
+                    "call_id": call_id,
+                    "status": "running",
+                }
             else:
                 row = Message(
                     conversation_id=self.conv.id,
                     role="tool",
                     tool_name=tool,
-                    tool_payload={"args": preview, "status": "running"},
+                    tool_payload={"args": args, "call_id": call_id, "status": "running"},
                     status="running",
-                    hermes_run_id=self.run_id,
+                    run_id=self.run_id,
                 )
                 self.db.add(row)
             await self.db.commit()
+            if isinstance(call_id, str) and call_id:
+                self.pending_tools_by_call[call_id] = row
             self.pending_tools.setdefault(tool, []).append(row)
-            yield sse("tool.started", {"tool": tool, "preview": preview, "message_id": str(row.id)})
+
+            block = self._reasoning_block()
+            tools_list = block.setdefault("tools", [])
+            tools_list.append(
+                {
+                    "name": tool,
+                    "call_id": call_id,
+                    "args": self._clip(args),
+                    "status": "running",
+                }
+            )
+
+            out_ev: dict[str, Any] = {
+                "tool": tool,
+                "preview": preview,
+                "args": args,
+                "message_id": str(row.id),
+            }
+            if call_id is not None:
+                out_ev["call_id"] = call_id
+            yield sse("tool.started", out_ev)
+
             if tool == "todo_list":
-                items = parse_todos(preview)
+                items = parse_todos(args if args is not None else preview)
                 if items is not None:
                     self.plan = {"items": items}
                     self.conv.plan = self.plan
@@ -696,60 +575,108 @@ class ChatPipeline:
         elif name == "tool.completed":
             tool = payload.get("tool") or "tool"
             preview = payload.get("preview")
+            result_val = payload.get("result") if "result" in payload else preview
             error = payload.get("error")
             duration = payload.get("duration")
-            rows = self.pending_tools.get(tool) or []
-            row = rows.pop() if rows else None
+            duration_ms = payload.get("duration_ms") if payload.get("duration_ms") is not None else duration
+            call_id = payload.get("call_id")
+
+            row = None
+            if isinstance(call_id, str) and call_id and call_id in self.pending_tools_by_call:
+                row = self.pending_tools_by_call.pop(call_id)
+                q = self.pending_tools.get(tool) or []
+                if row in q:
+                    q.remove(row)
+            else:
+                rows = self.pending_tools.get(tool) or []
+                row = rows.pop() if rows else None
+
+            args_val = payload.get("args")
             if row is not None:
-                args = (row.tool_payload or {}).get("args")
+                if args_val is None:
+                    args_val = (row.tool_payload or {}).get("args")
                 row.tool_payload = {
-                    "args": args,
-                    "result": preview,
+                    "args": args_val,
+                    "result": result_val,
                     "duration": duration,
+                    "duration_ms": duration_ms,
                     "error": error,
+                    "call_id": call_id or (row.tool_payload or {}).get("call_id"),
                     "status": "failed" if error else "completed",
                 }
                 row.status = "failed" if error else "completed"
                 await self.db.commit()
-            yield sse(
-                "tool.completed",
-                {
-                    "tool": tool,
-                    "preview": preview,
-                    "error": error,
-                    "duration": duration,
-                    "message_id": str(row.id) if row else None,
-                },
-            )
+
+            # Update reasoning block tool record
+            for blk in reversed(self.reasoning):
+                matched_tool = None
+                for t_rec in reversed(blk.get("tools") or []):
+                    if call_id and t_rec.get("call_id") == call_id:
+                        matched_tool = t_rec
+                        break
+                    if not call_id and t_rec.get("name") == tool and t_rec.get("status") == "running":
+                        matched_tool = t_rec
+                        break
+                if matched_tool is not None:
+                    matched_tool["status"] = "failed" if error else "completed"
+                    matched_tool["result"] = self._clip(result_val, 1200)
+                    if duration_ms is not None:
+                        matched_tool["duration_ms"] = duration_ms
+                    if error:
+                        matched_tool["error"] = error
+                    await self._persist_reasoning()
+                    break
+
+            out_ev: dict[str, Any] = {
+                "tool": tool,
+                "preview": preview,
+                "result": result_val,
+                "args": args_val,
+                "error": error,
+                "duration": duration,
+                "duration_ms": duration_ms,
+                "message_id": str(row.id) if row else None,
+            }
+            if call_id is not None:
+                out_ev["call_id"] = call_id
+            yield sse("tool.completed", out_ev)
+
             if tool == "todo_list":
-                items = parse_todos(preview)
+                items = parse_todos(result_val if result_val is not None else preview)
                 if items is not None:
                     self.plan = {"items": items}
                     self.conv.plan = self.plan
                     await self.db.commit()
                     yield sse("plan.updated", self.plan)
             if not error and _is_write_workspace_tool(tool):
-                parsed_fid = _extract_artifact_file_id(preview)
+                parsed_fid = _extract_artifact_file_id(result_val if result_val is not None else preview)
                 for art in await self._collect_new_artifacts(parsed_fid):
                     yield sse("workspace.file_created", art)
-            async for ev in self._sync_session():
-                yield ev
 
         elif name in ("approval.request", "clarify.request"):
             request_id, generation = await self._control_ids(payload)
             self.assistant.status = "waiting"
-            self.conv.active_run_status = "waiting_for_approval" if name == "approval.request" else "waiting_for_clarify"
-            await self.db.commit()
-            yield sse(
-                name,
-                {
-                    "request_id": request_id,
-                    "execution_generation": generation,
-                    "tool": payload.get("tool"),
-                    "preview": payload.get("preview"),
-                    "detail": payload,
-                },
+            self.conv.active_run_status = (
+                "waiting_for_approval" if name == "approval.request" else "waiting_for_clarify"
             )
+            await self.db.commit()
+            detail = payload.get("detail") if isinstance(payload.get("detail"), dict) else payload
+            out_payload: dict[str, Any] = {
+                "request_id": request_id,
+                "execution_generation": generation,
+                "tool": payload.get("tool"),
+                "preview": payload.get("preview"),
+                "detail": detail,
+            }
+            if isinstance(detail, dict):
+                if detail.get("code") is not None:
+                    out_payload["code"] = detail.get("code")
+                if detail.get("language") is not None:
+                    out_payload["language"] = detail.get("language")
+                desc = detail.get("reason") or detail.get("description")
+                if desc is not None:
+                    out_payload["description"] = desc
+            yield sse(name, out_payload)
 
         elif name == "run.completed":
             self.terminal = True
@@ -758,11 +685,17 @@ class ChatPipeline:
             output = payload.get("output")
             self.assistant.content = output if output else "".join(self.buffer)
             self.assistant.status = "completed"
-            messages = await self._fetch_session()
-            if messages is not None:
-                self._apply_session(messages)
+            if isinstance(payload.get("plan"), dict):
+                self.plan = payload["plan"]
             extra = dict(self.assistant.tool_payload or {})
-            extra.update({"usage": payload.get("usage"), "runtime": payload.get("runtime")})
+            runtime = dict(extra.get("runtime") or {})
+            if isinstance(payload.get("runtime"), dict):
+                runtime.update(payload["runtime"])
+            for k in ("route", "model"):
+                if payload.get(k):
+                    runtime[k] = payload[k]
+            extra["usage"] = payload.get("usage")
+            extra["runtime"] = runtime or payload.get("runtime")
             if self.reasoning:
                 extra["reasoning"] = self.reasoning
             if self.plan:
@@ -791,9 +724,8 @@ class ChatPipeline:
                 error = error.get("message") or json.dumps(error, ensure_ascii=False)
             self.assistant.content = payload.get("output") or "".join(self.buffer)
             self.assistant.status = "failed" if name == "run.failed" else "cancelled"
-            messages = await self._fetch_session()
-            if messages is not None:
-                self._apply_session(messages)
+            if isinstance(payload.get("plan"), dict):
+                self.plan = payload["plan"]
             extra = dict(self.assistant.tool_payload or {})
             for key in ("usage", "runtime"):
                 if payload.get(key) is not None:
@@ -809,7 +741,12 @@ class ChatPipeline:
             await self.db.commit()
             yield sse(
                 name,
-                {"error": error, "output": self.assistant.content, "plan": self.plan, "reasoning": self.reasoning or None},
+                {
+                    "error": error,
+                    "output": self.assistant.content,
+                    "plan": self.plan,
+                    "reasoning": self.reasoning or None,
+                },
             )
 
         else:
@@ -818,7 +755,7 @@ class ChatPipeline:
     async def _run_state(self) -> tuple[str, dict] | None:
         try:
             run = await self.client.get_run(self.run_id)
-        except HermesError:
+        except AgentError:
             return None
         return str(run.get("status") or ""), run
 
@@ -827,29 +764,32 @@ class ChatPipeline:
         self.assistant.content = "".join(self.buffer)
         self.assistant.status = "failed"
         try:
-            await asyncio.wait_for(self.client.stop_run(self.run_id), timeout=10)
-        except (HermesError, asyncio.TimeoutError):
+            await asyncio.wait_for(self.client.cancel_run(self.run_id), timeout=10)
+        except (AgentError, asyncio.TimeoutError):
             pass
         await self._clear_active()
         await self.db.commit()
 
-    async def pump(self) -> AsyncIterator[dict]:
+    async def pump(self, *, last_event_id: str | None = None) -> AsyncIterator[dict]:
         settings = get_settings()
         max_seconds = self.max_seconds or settings.run_max_seconds
         deadline = time.monotonic() + max_seconds
         timed_out = False
         try:
             async with asyncio.timeout(max(1.0, deadline - time.monotonic())):
-                async for name, payload in self.client.stream_run_events(self.run_id):
+                async for name, payload in self.client.stream_events(self.run_id, last_event_id=last_event_id):
                     async for ev in self.handle(name, payload):
                         yield ev
                     if self.terminal:
                         break
         except TimeoutError:
             timed_out = True
-        except HermesError as exc:
+        except AgentError as exc:
             if exc.status_code != 404:
-                raise
+                # If the agent control plane is still reachable via status polling, reconcile instead of failing immediately.
+                probe = await self._run_state()
+                if probe is None:
+                    raise
         if self.terminal:
             return
         if timed_out:
@@ -879,7 +819,7 @@ class ChatPipeline:
             if event_name:
                 payload = {
                     key: run.get(key)
-                    for key in ("output", "usage", "runtime", "error", "completed", "partial", "interrupted")
+                    for key in ("output", "usage", "runtime", "error", "plan", "reasoning", "completed", "partial", "interrupted")
                     if key in run
                 }
                 async for ev in self.handle(event_name, payload):
@@ -904,7 +844,6 @@ async def _auto_title_events(
     db: AsyncSession,
     conv: Conversation,
     assistant: Message | None,
-    client: HermesClient,
 ) -> AsyncIterator[dict]:
     if conv.title != "新对话" or assistant is None or assistant.status != "completed":
         return
@@ -945,11 +884,6 @@ async def _auto_title_events(
             return
         conv.title = title
         await db.commit()
-        if conv.hermes_session_id:
-            try:
-                await client.patch_session(conv.hermes_session_id, title)
-            except HermesError:
-                pass
         yield sse("title.updated", {"conversation_id": str(conv.id), "title": title})
     except (asyncio.TimeoutError, titles.TitleServiceError):
         logger.warning("auto title skipped for conversation %s", conv.id)
@@ -983,7 +917,7 @@ def _build_workspace_instructions(
             f"- {f.filename}{tag_str} (file_id={f.id}, category={f.category}, mime={f.mime_type}, size={f.size_bytes} bytes)"
         )
     lines.append(
-        "若用户询问或需要处理以上任意文件，请调用 list_workspace_files / read_workspace_file / search_workspace_files 工具按需读取真实内容；若需要向用户交付报告、代码、网页、表格等文本产物，可调用 write_workspace_file 写入工作区。"
+        "若用户询问或需要处理以上任意文件，请优先使用 rag_search_workspace 或 list_workspace_files / read_workspace_file 按需读取真实内容；若需要向用户交付报告、代码、网页、表格等文本产物，可调用 write_workspace_file 写入工作区。"
     )
     return "\n".join(lines)
 
@@ -1000,14 +934,15 @@ def _serialize_pending_item(item: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _pending_events_since(
-    profile: str,
+async def _pending_events_since(
+    db: AsyncSession,
+    user_id: uuid.UUID,
     initial_mem_ids: set[str] | None = None,
     initial_skill_ids: set[str] | None = None,
     since_dt: datetime | None = None,
 ) -> list[dict]:
     events: list[dict] = []
-    mem_items = memory_service.list_pending(profile)
+    mem_items = await memory_service.list_pending(db, user_id)
     if initial_mem_ids is not None:
         new_mem = [item for item in mem_items if item["id"] not in initial_mem_ids]
     elif since_dt is not None:
@@ -1029,7 +964,7 @@ def _pending_events_since(
             )
         )
 
-    skill_items = skills_service.list_pending(profile)
+    skill_items = await skills_service.list_pending(db, user_id)
     if initial_skill_ids is not None:
         new_skills = [item for item in skill_items if item["id"] not in initial_skill_ids]
     elif since_dt is not None:
@@ -1055,21 +990,18 @@ def _pending_events_since(
 
 async def _prepare_turn_context(
     db: AsyncSession,
-    user_id: uuid.UUID,
+    user: User,
     conv_id: uuid.UUID,
-    profile: str,
     file_ids: list[uuid.UUID] | None,
     skill_names: list[str] | None,
-) -> tuple[dict | None, str | None]:
-    user = await db.get(User, user_id)
-
+) -> dict[str, Any]:
     conv_files = list(
         (
             await db.execute(
                 select(ConversationFile)
                 .where(
                     ConversationFile.conversation_id == conv_id,
-                    ConversationFile.user_id == user_id,
+                    ConversationFile.user_id == user.id,
                     ConversationFile.status == "ready",
                 )
                 .order_by(ConversationFile.created_at.asc())
@@ -1090,7 +1022,7 @@ async def _prepare_turn_context(
                     select(ConversationFile)
                     .where(
                         ConversationFile.id.in_(missing_requested),
-                        ConversationFile.user_id == user_id,
+                        ConversationFile.user_id == user.id,
                         ConversationFile.status == "ready",
                         ConversationFile.is_global.is_(True),
                     )
@@ -1105,26 +1037,30 @@ async def _prepare_turn_context(
     by_id = {f.id: f for f in all_context_files}
     attached_files = [by_id[fid] for fid in requested_ids if fid in by_id]
 
+    all_user_skills = await skills_service.list_skills(db, user)
+    enabled_skills = [s for s in all_user_skills if s.get("enabled")]
+    by_skill_name = {s["name"]: s for s in enabled_skills}
+    hidden_builtins = skills_service.hidden_builtin_names()
+
     cleaned_skills: list[str] = []
     if skill_names:
-        disabled_set = set(provisioning.read_disabled_skills(profile))
-        local_skills = {s["name"]: s for s in skills_service.list_skills(profile)}
-        hidden_builtins = skills_service.hidden_builtin_names()
         seen_skills: set[str] = set()
         for raw_name in skill_names:
             name = (raw_name or "").strip()
-            if not name or name in seen_skills or name in disabled_set or name.lower() in hidden_builtins:
+            if not name or name in seen_skills or name.lower() in hidden_builtins:
+                continue
+            # Preserve explicit skill if enabled or not in disabled list
+            all_map = {s["name"]: s for s in all_user_skills}
+            if name in all_map and not all_map[name].get("enabled"):
                 continue
             seen_skills.add(name)
             cleaned_skills.append(name)
             if len(cleaned_skills) >= 10:
                 break
-    else:
-        local_skills = {}
 
-    payload: dict[str, Any] = {}
+    user_payload: dict[str, Any] = {}
     if attached_files:
-        payload["attachments"] = [
+        user_payload["attachments"] = [
             {
                 "id": str(f.id),
                 "filename": f.filename,
@@ -1136,17 +1072,42 @@ async def _prepare_turn_context(
             for f in attached_files
         ]
     if cleaned_skills:
-        payload["skills"] = cleaned_skills
+        user_payload["skills"] = cleaned_skills
+
+    attachments_meta = [
+        {
+            "id": str(f.id),
+            "file_id": str(f.id),
+            "filename": f.filename,
+            "ext": f.ext,
+            "category": f.category,
+            "mime_type": f.mime_type,
+            "size_bytes": f.size_bytes,
+            "is_global": bool(f.is_global),
+            "scope": "global" if f.is_global else "conversation",
+            "attached": f.id in {af.id for af in attached_files},
+        }
+        for f in all_context_files
+    ]
+    active_skills_meta = [
+        {
+            "name": s["name"],
+            "description": s.get("description") or "",
+            "category": s.get("category"),
+            "content": s.get("content") or "",
+        }
+        for s in enabled_skills
+    ]
 
     instruction_parts: list[str] = []
-    profile_ctx = provisioning.build_profile_context(user)
-    if profile_ctx:
-        instruction_parts.append(profile_ctx)
+    prof_ctx = profile_context.build_profile_context(user)
+    if prof_ctx:
+        instruction_parts.append(prof_ctx)
 
     if cleaned_skills:
         skill_lines = ["本轮对话用户显式指定使用以下技能（请优先调用并遵循其工作流程）："]
         for sname in cleaned_skills:
-            info = local_skills.get(sname)
+            info = by_skill_name.get(sname)
             desc = (info.get("description") or "").strip() if info else ""
             skill_lines.append(f"- {sname}" + (f"：{desc}" if desc else ""))
         instruction_parts.append("\n".join(skill_lines))
@@ -1155,37 +1116,59 @@ async def _prepare_turn_context(
     if workspace_ctx:
         instruction_parts.append(workspace_ctx)
 
-    return (payload or None), ("\n\n".join(instruction_parts) if instruction_parts else None)
+    return {
+        "user_payload": user_payload or None,
+        "instructions": "\n\n".join(instruction_parts) if instruction_parts else None,
+        "profile_context": prof_ctx,
+        "persona": user.persona or "",
+        "memory_enabled": bool(user.memory_enabled and user.memory_consented_at),
+        "memory_require_confirm": bool(user.memory_require_confirm),
+        "attachments": attachments_meta,
+        "skills": active_skills_meta,
+        "requested_skills": cleaned_skills,
+    }
 
 
 async def _run_pipeline_turn(
     db: AsyncSession,
-    client: HermesClient,
+    client: AgentClient,
     conv: Conversation,
-    user_id: uuid.UUID,
-    profile: str,
+    user: User,
     assistant: Message,
     prompt_content: str,
-    instructions: str | None,
+    turn_ctx: dict[str, Any],
     *,
     conversation_history: list[dict[str, str]] | None = None,
+    model_route: str = "auto",
     max_seconds: int | None = None,
 ) -> AsyncIterator[dict]:
-    initial_mem_ids = {item["id"] for item in memory_service.list_pending(profile)}
-    initial_skill_ids = {item["id"] for item in skills_service.list_pending(profile)}
+    initial_mem_ids = {item["id"] for item in await memory_service.list_pending(db, user.id)}
+    initial_skill_ids = {item["id"] for item in await skills_service.list_pending(db, user.id)}
 
     run_started = time.time() - 2
     run = await client.create_run(
-        prompt_content,
-        conv.hermes_session_id,
-        uuid.uuid4().hex,
-        instructions=instructions,
+        thread_id=conv.thread_id,
+        user_id=str(user.id),
+        agent_namespace=user.agent_namespace,
+        agent_api_key=user.agent_api_key,
+        conversation_id=str(conv.id),
+        input_text=prompt_content,
+        instructions=turn_ctx.get("instructions"),
         conversation_history=conversation_history,
+        model_route=model_route or "auto",
+        attachments=turn_ctx.get("attachments"),
+        skills=turn_ctx.get("skills"),
+        requested_skills=turn_ctx.get("requested_skills"),
+        persona=turn_ctx.get("persona") or "",
+        profile_context=turn_ctx.get("profile_context"),
+        memory_enabled=bool(turn_ctx.get("memory_enabled")),
+        memory_require_confirm=bool(turn_ctx.get("memory_require_confirm", True)),
+        idempotency_key=uuid.uuid4().hex,
     )
     run_id = str(run.get("run_id") or run.get("id"))
     conv.active_run_id = run_id
     conv.active_run_status = "running"
-    assistant.hermes_run_id = run_id
+    assistant.run_id = run_id
     await db.commit()
     yield sse("run.started", {"run_id": run_id})
 
@@ -1202,26 +1185,28 @@ async def _run_pipeline_turn(
     async for ev in pipeline.pump():
         yield ev
     if pipeline.terminal:
-        await _settle_usage(db, user_id, assistant)
-        for ev in _pending_events_since(profile, initial_mem_ids, initial_skill_ids):
+        await _settle_usage(db, user.id, assistant)
+        for ev in await _pending_events_since(db, user.id, initial_mem_ids, initial_skill_ids):
             yield ev
-        async for ev in _auto_title_events(db, conv, assistant, client):
+        async for ev in _auto_title_events(db, conv, assistant):
             yield ev
 
 
 async def stream_chat(
     conv_id: uuid.UUID,
     user_id: uuid.UUID,
-    profile: str,
+    namespace: str,
     api_key: str,
     content: str,
     file_ids: list[uuid.UUID] | None = None,
     skill_names: list[str] | None = None,
+    model_route: str = "auto",
     max_seconds: int | None = None,
 ) -> AsyncIterator[dict]:
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
-        if conv is None:
+        user = await db.get(User, user_id)
+        if conv is None or user is None:
             yield sse("error", {"code": "not_found"})
             return
         now = datetime.now(timezone.utc)
@@ -1235,23 +1220,20 @@ async def stream_chat(
             yield sse("error", {"code": "run_in_progress", "detail": "当前会话有进行中的任务"})
             return
         await db.refresh(conv)
-        client = HermesClient(profile, api_key)
+        client = AgentClient(namespace, api_key)
         assistant = None
         try:
-            if not conv.hermes_session_id:
-                session = await client.create_session(conv.title)
-                conv.hermes_session_id = str(session.get("id") or session.get("session_id") or "")
+            if not conv.thread_id:
+                conv.thread_id = str(uuid.uuid4())
                 await db.commit()
 
-            user_payload, instructions = await _prepare_turn_context(
-                db, user_id, conv.id, profile, file_ids, skill_names
-            )
+            turn_ctx = await _prepare_turn_context(db, user, conv.id, file_ids, skill_names)
 
             user_msg = Message(
                 conversation_id=conv.id,
                 role="user",
                 content=content,
-                tool_payload=user_payload,
+                tool_payload=turn_ctx["user_payload"],
                 status="completed",
                 created_at=datetime.now(timezone.utc),
             )
@@ -1276,21 +1258,21 @@ async def stream_chat(
                 db,
                 client,
                 conv,
-                user_id,
-                profile,
+                user,
                 assistant,
                 content,
-                instructions,
+                turn_ctx,
+                model_route=model_route,
                 max_seconds=max_seconds,
             ):
                 yield ev
-        except HermesError as exc:
+        except AgentError as exc:
             if assistant is not None:
                 assistant.status = "failed"
             conv.active_run_id = None
             conv.active_run_status = None
             await db.commit()
-            yield sse("error", {"code": "hermes_error", "status": exc.status_code, "detail": exc.detail})
+            yield sse("error", {"code": "agent_error", "status": exc.status_code, "detail": exc.detail})
         except Exception as exc:
             logger.exception("chat stream failed")
             if assistant is not None:
@@ -1306,14 +1288,16 @@ async def stream_chat(
 async def stream_regenerate(
     conv_id: uuid.UUID,
     user_id: uuid.UUID,
-    profile: str,
+    namespace: str,
     api_key: str,
     target_message_id: uuid.UUID,
+    model_route: str = "auto",
     max_seconds: int | None = None,
 ) -> AsyncIterator[dict]:
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
-        if conv is None:
+        user = await db.get(User, user_id)
+        if conv is None or user is None:
             yield sse("error", {"code": "not_found"})
             return
         now = datetime.now(timezone.utc)
@@ -1327,7 +1311,7 @@ async def stream_regenerate(
             yield sse("error", {"code": "run_in_progress", "detail": "当前会话有进行中的任务"})
             return
         await db.refresh(conv)
-        client = HermesClient(profile, api_key)
+        client = AgentClient(namespace, api_key)
         assistant = None
         try:
             all_rows = list(
@@ -1358,9 +1342,9 @@ async def stream_regenerate(
             history = _history_from_messages(ordered[:preceding_idx])
 
             delete_ids = {m.id for m in ordered[target_idx:]}
-            if target_msg.hermes_run_id:
+            if target_msg.run_id:
                 for m in ordered:
-                    if m.role == "tool" and m.hermes_run_id == target_msg.hermes_run_id:
+                    if m.role == "tool" and m.run_id == target_msg.run_id:
                         delete_ids.add(m.id)
             if delete_ids:
                 await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
@@ -1375,13 +1359,16 @@ async def stream_regenerate(
                         pass
             skill_names = [str(s) for s in (prompt_payload.get("skills") or []) if str(s).strip()]
 
-            _, instructions = await _prepare_turn_context(
-                db, user_id, conv.id, profile, file_ids, skill_names
-            )
+            turn_ctx = await _prepare_turn_context(db, user, conv.id, file_ids, skill_names)
 
-            # Create a fresh Hermes session so discarded turns never pollute agent history.
-            session = await client.create_session(conv.title)
-            conv.hermes_session_id = str(session.get("id") or session.get("session_id") or "")
+            # Rotate thread_id so discarded turns never pollute LangGraph checkpoint state.
+            old_thread_id = conv.thread_id
+            conv.thread_id = str(uuid.uuid4())
+            if old_thread_id:
+                try:
+                    await client.delete_thread(old_thread_id)
+                except AgentError:
+                    pass
 
             assistant_ts = max(datetime.now(timezone.utc), user_msg.created_at + timedelta(milliseconds=1))
             assistant = Message(
@@ -1409,22 +1396,22 @@ async def stream_regenerate(
                 db,
                 client,
                 conv,
-                user_id,
-                profile,
+                user,
                 assistant,
                 user_msg.content,
-                instructions,
+                turn_ctx,
                 conversation_history=history or None,
+                model_route=model_route,
                 max_seconds=max_seconds,
             ):
                 yield ev
-        except HermesError as exc:
+        except AgentError as exc:
             if assistant is not None:
                 assistant.status = "failed"
             conv.active_run_id = None
             conv.active_run_status = None
             await db.commit()
-            yield sse("error", {"code": "hermes_error", "status": exc.status_code, "detail": exc.detail})
+            yield sse("error", {"code": "agent_error", "status": exc.status_code, "detail": exc.detail})
         except Exception as exc:
             logger.exception("chat regenerate failed")
             if assistant is not None:
@@ -1440,17 +1427,19 @@ async def stream_regenerate(
 async def stream_edit(
     conv_id: uuid.UUID,
     user_id: uuid.UUID,
-    profile: str,
+    namespace: str,
     api_key: str,
     target_message_id: uuid.UUID,
     content: str,
     file_ids: list[uuid.UUID] | None = None,
     skill_names: list[str] | None = None,
+    model_route: str = "auto",
     max_seconds: int | None = None,
 ) -> AsyncIterator[dict]:
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
-        if conv is None:
+        user = await db.get(User, user_id)
+        if conv is None or user is None:
             yield sse("error", {"code": "not_found"})
             return
         now = datetime.now(timezone.utc)
@@ -1464,7 +1453,7 @@ async def stream_edit(
             yield sse("error", {"code": "run_in_progress", "detail": "当前会话有进行中的任务"})
             return
         await db.refresh(conv)
-        client = HermesClient(profile, api_key)
+        client = AgentClient(namespace, api_key)
         assistant = None
         try:
             all_rows = list(
@@ -1484,19 +1473,21 @@ async def stream_edit(
             if delete_ids:
                 await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
 
-            user_payload, instructions = await _prepare_turn_context(
-                db, user_id, conv.id, profile, file_ids, skill_names
-            )
+            turn_ctx = await _prepare_turn_context(db, user, conv.id, file_ids, skill_names)
 
-            # Create a fresh Hermes session so discarded turns never pollute agent history.
-            session = await client.create_session(conv.title)
-            conv.hermes_session_id = str(session.get("id") or session.get("session_id") or "")
+            old_thread_id = conv.thread_id
+            conv.thread_id = str(uuid.uuid4())
+            if old_thread_id:
+                try:
+                    await client.delete_thread(old_thread_id)
+                except AgentError:
+                    pass
 
             user_msg = Message(
                 conversation_id=conv.id,
                 role="user",
                 content=content,
-                tool_payload=user_payload,
+                tool_payload=turn_ctx["user_payload"],
                 status="completed",
                 created_at=datetime.now(timezone.utc),
             )
@@ -1525,22 +1516,22 @@ async def stream_edit(
                 db,
                 client,
                 conv,
-                user_id,
-                profile,
+                user,
                 assistant,
                 content,
-                instructions,
+                turn_ctx,
                 conversation_history=history or None,
+                model_route=model_route,
                 max_seconds=max_seconds,
             ):
                 yield ev
-        except HermesError as exc:
+        except AgentError as exc:
             if assistant is not None:
                 assistant.status = "failed"
             conv.active_run_id = None
             conv.active_run_status = None
             await db.commit()
-            yield sse("error", {"code": "hermes_error", "status": exc.status_code, "detail": exc.detail})
+            yield sse("error", {"code": "agent_error", "status": exc.status_code, "detail": exc.detail})
         except Exception as exc:
             logger.exception("chat edit failed")
             if assistant is not None:
@@ -1555,9 +1546,11 @@ async def stream_edit(
 
 async def stream_reconnect(
     conv_id: uuid.UUID,
-    profile: str,
+    namespace: str,
     api_key: str,
     run_id: str,
+    *,
+    last_event_id: str | None = None,
     max_seconds: int | None = None,
 ) -> AsyncIterator[dict]:
     async with SessionLocal() as db:
@@ -1566,32 +1559,36 @@ async def stream_reconnect(
             yield sse("error", {"code": "not_found"})
             return
         result = await db.execute(
-            select(Message).where(Message.conversation_id == conv.id, Message.hermes_run_id == run_id, Message.role == "assistant")
+            select(Message).where(
+                Message.conversation_id == conv.id,
+                Message.run_id == run_id,
+                Message.role == "assistant",
+            )
         )
         assistant = result.scalars().first()
         if assistant is None:
             yield sse("error", {"code": "run_not_found", "detail": "未找到对应的运行记录"})
             return
-        client = HermesClient(profile, api_key)
+        client = AgentClient(namespace, api_key)
         try:
             yield sse("run.reconnected", {"run_id": run_id, "assistant_message_id": str(assistant.id)})
             pipeline = ChatPipeline(db, client, conv, assistant, run_id, max_seconds=max_seconds)
             pipeline.buffer = [assistant.content or ""]
             await pipeline.prepare()
-            async for ev in pipeline.pump():
+            async for ev in pipeline.pump(last_event_id=last_event_id):
                 yield ev
             if pipeline.terminal:
                 await _settle_usage(db, conv.user_id, assistant)
                 since_dt = assistant.created_at - timedelta(seconds=2) if assistant.created_at else None
-                for ev in _pending_events_since(profile, since_dt=since_dt):
+                for ev in await _pending_events_since(db, conv.user_id, since_dt=since_dt):
                     yield ev
-                async for ev in _auto_title_events(db, conv, assistant, client):
+                async for ev in _auto_title_events(db, conv, assistant):
                     yield ev
-        except HermesError as exc:
+        except AgentError as exc:
             assistant.status = "failed"
             conv.active_run_id = None
             conv.active_run_status = None
             await db.commit()
-            yield sse("error", {"code": "hermes_error", "status": exc.status_code, "detail": exc.detail})
+            yield sse("error", {"code": "agent_error", "status": exc.status_code, "detail": exc.detail})
         finally:
             await client.aclose()

@@ -271,6 +271,39 @@ export const useChatStore = defineStore("chat", () => {
     a.tool_payload = payload;
   }
 
+  function stringifyToolVal(val: unknown): string {
+    if (val == null) return "";
+    if (typeof val === "string") return val;
+    try {
+      return JSON.stringify(val);
+    } catch {
+      return String(val);
+    }
+  }
+
+  function formatControlPreview(d: Record<string, any>): string | null {
+    if (typeof d.code === "string" && d.code.trim()) {
+      const header = [d.language ? `[${d.language}]` : "", d.description].filter(Boolean).join(" ");
+      return header ? `${header}\n${d.code}` : d.code;
+    }
+    if (typeof d.preview === "string") return d.preview;
+    if (d.preview && typeof d.preview === "object") {
+      const p = d.preview as Record<string, unknown>;
+      if (typeof p.question === "string" && p.question) return p.question;
+      if (typeof p.code === "string" && p.code) {
+        const header = [p.language ? `[${p.language}]` : "", p.reason].filter(Boolean).join(" ");
+        return header ? `${header}\n${p.code}` : p.code;
+      }
+      return stringifyToolVal(d.preview);
+    }
+    if (d.detail && typeof d.detail === "object") {
+      const det = d.detail as Record<string, unknown>;
+      if (typeof det.question === "string" && det.question) return det.question;
+      if (typeof det.code === "string" && det.code) return det.code;
+    }
+    return null;
+  }
+
   function handleEvent(ev: SSEEvent) {
     const d = ev.data as Record<string, any>;
     switch (ev.event) {
@@ -349,34 +382,63 @@ export const useChatStore = defineStore("chat", () => {
         break;
       }
       case "message.interim":
+      case "graph.node":
         break;
       case "tool.started": {
+        const rawArgs = stringifyToolVal(d.args ?? d.preview);
         messages.value.push({
           id: d.message_id ?? tempId("tool"),
           role: "tool",
           content: "",
           tool_name: d.tool ?? "tool",
-          tool_payload: { args: d.preview, status: "running" },
+          tool_payload: { args: rawArgs || d.preview, status: "running" },
           status: "running",
-          hermes_run_id: activeRunId.value,
+          run_id: activeRunId.value,
           created_at: new Date().toISOString(),
         });
+        const blk = reasoningBlock(null, "");
+        const toolsList = (blk.tools ??= []);
+        toolsList.push({
+          name: d.tool ?? "tool",
+          call_id: d.call_id ?? null,
+          args: rawArgs,
+          status: "running",
+        });
+        syncTurnToMessage();
         break;
       }
       case "tool.completed": {
+        const rawResult = stringifyToolVal(d.result ?? d.preview);
         const row =
           findMessage(d.message_id) ??
           messages.value.findLast((m) => m.role === "tool" && m.tool_name === d.tool && m.status === "running");
         if (row) {
           row.tool_payload = {
             ...(row.tool_payload ?? {}),
-            result: d.preview,
+            result: rawResult || d.preview,
             duration: d.duration,
             error: d.error,
             status: d.error ? "failed" : "completed",
           };
           row.status = d.error ? "failed" : "completed";
         }
+        for (let i = reasoning.value.length - 1; i >= 0; i--) {
+          const tList = reasoning.value[i].tools;
+          if (!tList?.length) continue;
+          const match = tList.findLast(
+            (t) =>
+              (d.call_id && t.call_id === d.call_id) ||
+              (!d.call_id && t.name === (d.tool ?? "tool") && t.status === "running"),
+          );
+          if (match) {
+            match.status = d.error ? "failed" : "completed";
+            match.result = rawResult;
+            if (d.error) match.error = d.error;
+            if (typeof d.duration_ms === "number") match.duration_ms = d.duration_ms;
+            break;
+          }
+        }
+        syncTurnToMessage();
         break;
       }
       case "plan.updated":
@@ -389,7 +451,7 @@ export const useChatStore = defineStore("chat", () => {
           request_id: d.request_id ?? null,
           execution_generation: d.execution_generation ?? null,
           tool: d.tool,
-          preview: d.preview,
+          preview: formatControlPreview(d),
         };
         { const a = assistant(); if (a) a.status = "waiting"; }
         break;
@@ -399,7 +461,7 @@ export const useChatStore = defineStore("chat", () => {
           request_id: d.request_id ?? null,
           execution_generation: d.execution_generation ?? null,
           tool: d.tool,
-          preview: d.preview,
+          preview: formatControlPreview(d),
         };
         { const a = assistant(); if (a) a.status = "waiting"; }
         break;
@@ -533,7 +595,7 @@ export const useChatStore = defineStore("chat", () => {
       tool_name: null,
       tool_payload: null,
       status: "streaming",
-      hermes_run_id: null,
+      run_id: null,
       created_at: new Date().toISOString(),
     });
     activeAssistantId.value = assistantId;
@@ -576,7 +638,7 @@ export const useChatStore = defineStore("chat", () => {
       tool_name: null,
       tool_payload: buildUserToolPayload(attachedFiles, skillNames),
       status: "completed",
-      hermes_run_id: null,
+      run_id: null,
       created_at: new Date().toISOString(),
     });
     pushAssistantPlaceholder();

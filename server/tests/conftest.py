@@ -5,13 +5,14 @@ import tempfile
 # settings/engine are resolved at import time.
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://whitz:whitz_dev_password@localhost:5434/whitz_test"
 os.environ["JWT_SECRET"] = "test-jwt-secret-0123456789abcdef-0123456789abcdef"
-os.environ["HERMES_DATA_DIR"] = tempfile.mkdtemp(prefix="whitz-test-hermes-")
+os.environ["APP_DATA_DIR"] = tempfile.mkdtemp(prefix="whitz-test-data-")
+os.environ["BUILTIN_SKILLS_DIR"] = tempfile.mkdtemp(prefix="whitz-test-skills-")
 os.environ["ADMIN_EMAIL"] = ""
 os.environ["ADMIN_PASSWORD"] = ""
 os.environ["LLM_BASE_URL"] = "http://llm.test/v1"
 os.environ["LLM_API_KEY"] = "sk-test"
 os.environ["LLM_MODEL"] = "test-model"
-os.environ["HERMES_API_SERVER_KEY"] = "test-gateway-key"
+os.environ["AGENT_INTERNAL_TOKEN"] = "test-agent-token"
 os.environ["REDIS_URL"] = "memory://"
 
 import asyncpg
@@ -52,20 +53,14 @@ async def _ensure_database() -> None:
     _db_ready = True
 
 
-class FakeHermesClient:
-    """Stands in for the gateway so conversation CRUD needs no live Hermes."""
+class FakeAgentClient:
+    """Stands in for the LangGraph agent service so conversation CRUD needs no live agent."""
 
-    def __init__(self, profile: str, api_key: str) -> None:
-        self.profile = profile
-        self.api_key = api_key
+    def __init__(self, namespace: str | None = None, api_key: str | None = None, **kwargs) -> None:
+        self.namespace = namespace or ""
+        self.api_key = api_key or ""
 
-    async def create_session(self, title: str = "新对话") -> dict:
-        return {"id": f"sess-{self.profile}"}
-
-    async def patch_session(self, session_id: str, title: str) -> dict:
-        return {}
-
-    async def delete_session(self, session_id: str) -> None:
+    async def delete_thread(self, thread_id: str) -> None:
         return None
 
     async def aclose(self) -> None:
@@ -114,7 +109,7 @@ async def engine():
 
 @pytest_asyncio.fixture
 async def app(engine, monkeypatch):
-    monkeypatch.setattr(conversations_routes, "HermesClient", FakeHermesClient)
+    monkeypatch.setattr(conversations_routes, "AgentClient", FakeAgentClient)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(audit_service, "SessionLocal", session_factory)
     application = create_app()

@@ -1,10 +1,10 @@
 # 生产环境编排（服务器2）：只拉取 CI 构建好的镜像，不在服务器上构建
 # 用法：cd /opt/whitz && docker compose -f docker-compose.prod.yml up -d
-# 依赖宿主机 .env（同目录），镜像 tag 由 GitHub Actions 通过 WHITZ_SERVER_IMAGE 注入
+# 依赖宿主机 .env（同目录），镜像 tag 由 GitHub Actions 通过 WHITZ_SERVER_IMAGE / WHITZ_AGENT_IMAGE 注入
 services:
   postgres:
-    # 拉不到时可换成镜像加速域名，例如 docker.m.daocloud.io/library/postgres:17-alpine
-    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    # 拉不到时可换成镜像加速域名，例如 docker.m.daocloud.io/pgvector/pgvector:pg17
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg17}
     container_name: whitz-postgres
     restart: unless-stopped
     command:
@@ -90,25 +90,89 @@ services:
     networks:
       - whitz_net
 
-  hermes:
-    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:stable}
-    container_name: whitz-hermes
+  agent-api:
+    # 镜像由 GitHub Actions 构建并推送，部署脚本注入 WHITZ_AGENT_IMAGE
+    image: ${WHITZ_AGENT_IMAGE:-ghcr.io/glassous/whitz-agent:latest}
+    container_name: whitz-agent-api
     restart: unless-stopped
-    command: gateway run
-    environment:
-      API_SERVER_ENABLED: "true"
-      API_SERVER_HOST: 0.0.0.0
-      API_SERVER_KEY: ${HERMES_API_SERVER_KEY}
-      GATEWAY_MULTIPLEX_PROFILES: "true"
-      HERMES_UID: "1000"
-      HERMES_GID: "1000"
+    command: ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8642"]
+    environment: &agent-env
+      APP_ENV: ${APP_ENV:-production}
+      AGENT_ROLE: api
+      AGENT_PORT: "8642"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-whitz}:${POSTGRES_PASSWORD:-whitz_dev_password}@postgres:5432/${POSTGRES_DB:-whitz}
+      REDIS_URL: redis://redis:6379/0
+      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN}
+      INTERNAL_MCP_BASE_URL: ${INTERNAL_MCP_BASE_URL:-http://server:8000}
+      APP_DATA_DIR: ${APP_DATA_DIR:-/app-data}
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL: ${LLM_MODEL}
+      LLM_SUPPORTS_VISION: ${LLM_SUPPORTS_VISION:-true}
+      LLM_FAST_BASE_URL: ${LLM_FAST_BASE_URL:-}
+      LLM_FAST_API_KEY: ${LLM_FAST_API_KEY:-}
+      LLM_FAST_MODEL: ${LLM_FAST_MODEL:-}
+      LLM_REASONING_BASE_URL: ${LLM_REASONING_BASE_URL:-}
+      LLM_REASONING_API_KEY: ${LLM_REASONING_API_KEY:-}
+      LLM_REASONING_MODEL: ${LLM_REASONING_MODEL:-}
+      LLM_VISION_BASE_URL: ${LLM_VISION_BASE_URL:-}
+      LLM_VISION_API_KEY: ${LLM_VISION_API_KEY:-}
+      LLM_VISION_MODEL: ${LLM_VISION_MODEL:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      SANDBOX_MODE: ${SANDBOX_MODE:-disabled}
+      E2B_API_KEY: ${E2B_API_KEY:-}
+      SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+      RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-900}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-whitz}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-}
+      PYTHONDONTWRITEBYTECODE: "1"
     volumes:
-      - hermes_data:/opt/data
-    ports:
-      - "127.0.0.1:8642:8642"
-    mem_limit: 1536m
-    memswap_limit: 2g
-    pids_limit: 512
+      - app_data:/app-data
+    expose:
+      - "8642"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8642/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - whitz_net
+
+  agent-worker:
+    image: ${WHITZ_AGENT_IMAGE:-ghcr.io/glassous/whitz-agent:latest}
+    container_name: whitz-agent-worker
+    restart: unless-stopped
+    command: ["arq", "app.worker.WorkerSettings"]
+    environment:
+      <<: *agent-env
+      AGENT_ROLE: worker
+    volumes:
+      - app_data:/app-data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 768m
+    memswap_limit: 1024m
+    pids_limit: 256
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -134,9 +198,28 @@ services:
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_MODEL: ${LLM_MODEL}
       LLM_SUPPORTS_VISION: ${LLM_SUPPORTS_VISION:-true}
-      HERMES_BASE_URL: http://hermes:8642
-      HERMES_DATA_DIR: /hermes-data
-      HERMES_API_SERVER_KEY: ${HERMES_API_SERVER_KEY}
+      LLM_FAST_BASE_URL: ${LLM_FAST_BASE_URL:-}
+      LLM_FAST_API_KEY: ${LLM_FAST_API_KEY:-}
+      LLM_FAST_MODEL: ${LLM_FAST_MODEL:-}
+      LLM_REASONING_BASE_URL: ${LLM_REASONING_BASE_URL:-}
+      LLM_REASONING_API_KEY: ${LLM_REASONING_API_KEY:-}
+      LLM_REASONING_MODEL: ${LLM_REASONING_MODEL:-}
+      LLM_VISION_BASE_URL: ${LLM_VISION_BASE_URL:-}
+      LLM_VISION_API_KEY: ${LLM_VISION_API_KEY:-}
+      LLM_VISION_MODEL: ${LLM_VISION_MODEL:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      AGENT_BASE_URL: http://agent-api:8642
+      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN}
+      APP_DATA_DIR: ${APP_DATA_DIR:-/app-data}
+      SANDBOX_MODE: ${SANDBOX_MODE:-disabled}
+      E2B_API_KEY: ${E2B_API_KEY:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-whitz}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-}
       SKILLS_BUILTIN_ALLOWLIST: ${SKILLS_BUILTIN_ALLOWLIST:-}
       SKILLS_BUILTIN_DENYLIST: ${SKILLS_BUILTIN_DENYLIST:-}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
@@ -198,7 +281,7 @@ services:
       DESKTOP_LLM_REQUEST_TIMEOUT_SECONDS: ${DESKTOP_LLM_REQUEST_TIMEOUT_SECONDS:-300}
       PYTHONDONTWRITEBYTECODE: "1"
     volumes:
-      - hermes_data:/hermes-data
+      - app_data:/app-data
     ports:
       # 1Panel 的 OpenResty 若不在 host 网络，把 SERVER_BIND_IP 改成宿主机内网 IP
       # （例如 172.17.0.1）或 docker0 网关地址
@@ -208,7 +291,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      hermes:
+      agent-api:
         condition: service_started
     read_only: true
     tmpfs:
@@ -227,7 +310,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  hermes_data:
+  app_data:
 
 networks:
   whitz_net:

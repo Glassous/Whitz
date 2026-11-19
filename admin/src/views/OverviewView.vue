@@ -244,7 +244,7 @@ const servicePills = computed(() => {
   return [
     { key: "postgres", label: "PostgreSQL", ok: s.postgres, okText: "正常", failText: "异常", warnOnFail: false },
     { key: "redis", label: "Redis", ok: s.redis, okText: "正常", failText: "异常", warnOnFail: false },
-    { key: "hermes", label: "Hermes", ok: s.hermes, okText: "正常", failText: "异常", warnOnFail: false },
+    { key: "agent", label: "Agent 引擎", ok: s.agent, okText: "正常", failText: "异常", warnOnFail: false },
     { key: "cos", label: "COS 存储", ok: s.cos_configured, okText: "已配置", failText: "未配置", warnOnFail: true },
     { key: "smtp", label: "SMTP 邮件", ok: s.smtp_configured, okText: "已配置", failText: "未配置", warnOnFail: true },
   ];

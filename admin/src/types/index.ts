@@ -72,7 +72,7 @@ export interface AdminUser {
   timezone?: string;
   role: "user" | "admin";
   is_active: boolean;
-  hermes_profile: string;
+  agent_namespace: string;
   membership_tier: MembershipTier;
   membership_expires_at: string | null;
   credits: CreditSummary | null;
@@ -200,7 +200,7 @@ export interface AdminAnalytics {
 export interface AdminMonitorServices {
   postgres: boolean;
   redis: boolean;
-  hermes: boolean;
+  agent: boolean;
   cos_configured: boolean;
   smtp_configured: boolean;
 }

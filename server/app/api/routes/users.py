@@ -33,7 +33,7 @@ from app.core.security import (
 )
 from app.db.models import RefreshToken, User
 from app.db.session import get_db
-from app.services import audit, membership, provisioning
+from app.services import audit, membership
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -43,7 +43,7 @@ _MAX_AVATAR_BYTES = 1_048_576
 
 
 def _avatars_dir() -> Path:
-    path = Path(get_settings().hermes_data_dir) / "avatars"
+    path = Path(get_settings().app_data_dir) / "avatars"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -216,10 +216,6 @@ async def update_persona(
     user.persona = body.persona
     await db.commit()
     await db.refresh(user)
-    try:
-        provisioning.write_persona(user.hermes_profile, user.persona)
-    except OSError:
-        pass
     return user
 
 

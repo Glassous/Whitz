@@ -53,15 +53,15 @@ async def test_mcp_files_auth_and_tools(client, register, db, monkeypatch):
     monkeypatch.setattr(cos, "get_object_bytes", _fake_get_bytes)
 
     mcp_headers = {
-        "Authorization": f"Bearer {u1.hermes_api_key}",
-        "X-Whitz-Profile": u1.hermes_profile,
+        "Authorization": f"Bearer {u1.agent_api_key}",
+        "X-Whitz-Namespace": u1.agent_namespace,
     }
 
     # Wrong token fails
     bad = await client.post(
         "/api/internal/mcp/files",
         json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-        headers={"Authorization": "Bearer wrong", "X-Whitz-Profile": u1.hermes_profile},
+        headers={"Authorization": "Bearer wrong", "X-Whitz-Profile": u1.agent_namespace},
     )
     assert bad.status_code == 401
 
@@ -156,7 +156,7 @@ async def test_mcp_files_auth_and_tools(client, register, db, monkeypatch):
             "method": "tools/call",
             "params": {"name": "list_workspace_files", "arguments": {"conversation_id": conv_id}},
         },
-        headers={"Authorization": f"Bearer {u2.hermes_api_key}", "X-Whitz-Profile": u2.hermes_profile},
+        headers={"Authorization": f"Bearer {u2.agent_api_key}", "X-Whitz-Profile": u2.agent_namespace},
     )
     assert denied.json()["result"]["isError"] is True
 

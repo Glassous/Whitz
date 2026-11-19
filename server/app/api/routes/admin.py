@@ -33,9 +33,9 @@ from app.db.models import (
     UsageDaily,
     User,
 )
-from app.db.session import get_db
-from app.services import audit, membership, provisioning
-from app.services.hermes import HermesClient
+from app.db.session import detect_pgvector, get_db
+from app.services import audit, membership
+from app.services.agent_client import AgentClient
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -63,14 +63,13 @@ def _smtp_configured(settings: Settings) -> bool:
     return True
 
 
-async def _check_hermes_health(admin: User) -> bool:
-    if not admin.hermes_profile or not admin.hermes_api_key:
-        return False
-    client = HermesClient(admin.hermes_profile, admin.hermes_api_key)
+async def _check_agent_health(admin: User) -> dict:
+    client = AgentClient(admin.agent_namespace, admin.agent_api_key)
     try:
-        return bool(await asyncio.wait_for(client.health(), timeout=2.0))
+        info = await asyncio.wait_for(client.health_info(), timeout=2.0)
+        return info if isinstance(info, dict) else {"ready": bool(info)}
     except Exception:
-        return False
+        return {"ready": False}
     finally:
         try:
             await client.aclose()
@@ -653,7 +652,11 @@ async def monitor(
     except Exception:
         redis_ok = False
 
-    hermes_ok = await _check_hermes_health(admin)
+    agent_info = await _check_agent_health(admin)
+    agent_ok = bool(agent_info.get("ready"))
+    worker_ok = bool(agent_info.get("redis", agent_ok)) if agent_ok else False
+    pgvector_ok = await detect_pgvector(db) if postgres_ok else False
+    sandbox_mode = str(agent_info.get("sandbox_mode") or settings.sandbox_mode or "disabled")
     active_runs = await _query_active_runs(db, now, settings.run_max_seconds)
     (
         failure_spikes_24h,
@@ -666,7 +669,11 @@ async def monitor(
         "services": {
             "postgres": postgres_ok,
             "redis": redis_ok,
-            "hermes": hermes_ok,
+            "agent": agent_ok,
+            "worker": worker_ok,
+            "pgvector": pgvector_ok,
+            "sandbox": sandbox_mode != "disabled",
+            "sandbox_mode": sandbox_mode,
             "cos_configured": bool(settings.cos_configured),
             "smtp_configured": _smtp_configured(settings),
         },
@@ -694,14 +701,14 @@ async def force_stop_run(
 
     run_id = conv.active_run_id
     owner = await db.get(User, conv.user_id)
-    hermes_stopped = False
-    if owner is not None and owner.hermes_profile and owner.hermes_api_key:
-        client = HermesClient(owner.hermes_profile, owner.hermes_api_key)
+    agent_stopped = False
+    if owner is not None and owner.agent_namespace and owner.agent_api_key:
+        client = AgentClient(owner.agent_namespace, owner.agent_api_key)
         try:
-            await asyncio.wait_for(client.stop_run(run_id), timeout=5.0)
-            hermes_stopped = True
+            await asyncio.wait_for(client.cancel_run(run_id), timeout=5.0)
+            agent_stopped = True
         except Exception:
-            hermes_stopped = False
+            agent_stopped = False
         finally:
             try:
                 await client.aclose()
@@ -714,7 +721,7 @@ async def force_stop_run(
             Message.conversation_id == conv.id,
             Message.role == "assistant",
             Message.status.in_(("streaming", "waiting")),
-            or_(Message.hermes_run_id == run_id, Message.hermes_run_id.is_(None)),
+            or_(Message.run_id == run_id, Message.run_id.is_(None)),
         )
         .values(status="cancelled")
     )
@@ -732,13 +739,13 @@ async def force_stop_run(
             "run_id": run_id,
             "user_id": str(conv.user_id),
             "user_email": owner.email if owner else None,
-            "hermes_stopped": hermes_stopped,
+            "agent_stopped": agent_stopped,
         },
     )
     return {
         "conversation_id": str(conv.id),
         "stopped_run_id": run_id,
-        "hermes_stopped": hermes_stopped,
+        "agent_stopped": agent_stopped,
         "status": "cancelled",
     }
 
@@ -1044,10 +1051,6 @@ async def update_user(
                 .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
                 .values(revoked_at=datetime.now(timezone.utc))
             )
-        try:
-            provisioning.set_parked(user.hermes_profile, parked=not body.is_active)
-        except OSError:
-            pass
     if body.role is not None and body.role != user.role:
         user.role = body.role
         changes["role"] = body.role

@@ -6,7 +6,7 @@ from app.core.config import get_settings
 from app.core.security import (
     create_access_token,
     decode_access_token,
-    generate_hermes_key,
+    generate_agent_key,
     generate_refresh_token,
     hash_password,
     hash_refresh_token,
@@ -46,7 +46,7 @@ def test_refresh_token_hash():
     assert generate_refresh_token() != t
 
 
-def test_hermes_key_is_64_hex():
-    key = generate_hermes_key()
+def test_agent_key_is_64_hex():
+    key = generate_agent_key()
     assert len(key) == 64
     int(key, 16)  # raises if not hex

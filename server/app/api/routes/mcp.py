@@ -15,21 +15,21 @@ router = APIRouter(prefix="/api/internal/mcp", tags=["internal-mcp"])
 SUPPORTED_PROTOCOL_VERSION = "2025-03-26"
 
 
-async def _authenticate_profile(
+async def _authenticate_namespace(
     db: AsyncSession,
     authorization: str | None,
-    profile_header: str | None,
+    namespace_header: str | None,
 ) -> User:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing_bearer_token")
     token = authorization[7:].strip()
-    profile = (profile_header or "").strip()
-    if not token or not profile:
+    namespace = (namespace_header or "").strip()
+    if not token or not namespace:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_mcp_credentials")
 
-    result = await db.execute(select(User).where(User.hermes_profile == profile))
+    result = await db.execute(select(User).where(User.agent_namespace == namespace))
     user = result.scalar_one_or_none()
-    if user is None or not user.is_active or not hmac.compare_digest(user.hermes_api_key, token):
+    if user is None or not user.is_active or not hmac.compare_digest(user.agent_api_key, token):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_mcp_credentials")
     return user
 
@@ -45,13 +45,13 @@ async def _handle_mcp_post(
     *,
     request: Request,
     authorization: str | None,
-    x_whitz_profile: str | None,
+    namespace_header: str | None,
     mcp_session_id: str | None,
     db: AsyncSession,
     server_name: str,
     service_mod,
 ):
-    user = await _authenticate_profile(db, authorization, x_whitz_profile)
+    user = await _authenticate_namespace(db, authorization, namespace_header)
     try:
         payload = await request.json()
     except Exception:
@@ -113,13 +113,14 @@ async def mcp_files_post(
     request: Request,
     authorization: str | None = Header(default=None),
     x_whitz_profile: str | None = Header(default=None),
+    x_whitz_namespace: str | None = Header(default=None),
     mcp_session_id: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     return await _handle_mcp_post(
         request=request,
         authorization=authorization,
-        x_whitz_profile=x_whitz_profile,
+        namespace_header=x_whitz_namespace or x_whitz_profile,
         mcp_session_id=mcp_session_id,
         db=db,
         server_name="whitz-files",
@@ -142,13 +143,14 @@ async def mcp_skills_post(
     request: Request,
     authorization: str | None = Header(default=None),
     x_whitz_profile: str | None = Header(default=None),
+    x_whitz_namespace: str | None = Header(default=None),
     mcp_session_id: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     return await _handle_mcp_post(
         request=request,
         authorization=authorization,
-        x_whitz_profile=x_whitz_profile,
+        namespace_header=x_whitz_namespace or x_whitz_profile,
         mcp_session_id=mcp_session_id,
         db=db,
         server_name="whitz-skills",

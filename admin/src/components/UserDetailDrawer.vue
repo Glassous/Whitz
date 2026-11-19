@@ -497,8 +497,8 @@ onMounted(() => {
             <h3 class="text-[12.5px] font-medium text-fg-muted">账号与资料信息</h3>
             <dl class="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-[12px] sm:grid-cols-2">
               <div class="flex items-baseline justify-between gap-2 border-b border-line/60 pb-1.5">
-                <dt class="shrink-0 text-fg-faint">Hermes Profile</dt>
-                <dd class="truncate font-mono text-[11.5px] text-fg">{{ detail.hermes_profile }}</dd>
+                <dt class="shrink-0 text-fg-faint">Agent 命名空间</dt>
+                <dd class="truncate font-mono text-[11.5px] text-fg">{{ detail.agent_namespace }}</dd>
               </div>
               <div class="flex items-baseline justify-between gap-2 border-b border-line/60 pb-1.5">
                 <dt class="shrink-0 text-fg-faint">语言 / 时区</dt>

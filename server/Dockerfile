@@ -13,6 +13,7 @@ RUN uv pip install --system -r pyproject.toml
 
 COPY app ./app
 COPY alembic ./alembic
+COPY resources ./resources
 COPY alembic.ini entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 

@@ -13,14 +13,17 @@ from app.api.schemas import (
 )
 from app.db.models import User
 from app.db.session import get_db
-from app.services import audit, memory_service, provisioning
+from app.services import audit, memory_service
 
 router = APIRouter(prefix="/api/users/me/memory", tags=["memory"])
 
 
 @router.get("", response_model=MemoryOverviewOut)
-async def get_memory_overview(user: User = Depends(get_current_user)) -> MemoryOverviewOut:
-    return MemoryOverviewOut(**memory_service.get_overview(user))
+async def get_memory_overview(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MemoryOverviewOut:
+    return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
 
 
 @router.put("/settings", response_model=MemoryOverviewOut)
@@ -46,16 +49,6 @@ async def update_memory_settings(
     await db.commit()
     await db.refresh(user)
 
-    try:
-        provisioning.sync_profile_config(
-            user.hermes_profile,
-            api_key=user.hermes_api_key,
-            memory_enabled=bool(user.memory_enabled and user.memory_consented_at),
-            memory_require_confirm=bool(user.memory_require_confirm),
-        )
-    except OSError:
-        pass
-
     await audit.record(
         "user.memory_settings_update",
         actor=user,
@@ -67,7 +60,7 @@ async def update_memory_settings(
             "memory_require_confirm": user.memory_require_confirm,
         },
     )
-    return MemoryOverviewOut(**memory_service.get_overview(user))
+    return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
 
 
 @router.post("/entries", response_model=MemoryOverviewOut, status_code=status.HTTP_201_CREATED)
@@ -75,10 +68,12 @@ async def create_memory_entry(
     body: MemoryEntryCreateRequest,
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> MemoryOverviewOut:
     try:
-        entry = memory_service.add_entry(
-            user.hermes_profile,
+        entry = await memory_service.add_entry(
+            db,
+            user.id,
             body.target,
             body.content,
             source="manual",
@@ -94,7 +89,7 @@ async def create_memory_entry(
         request=request,
         metadata={"target": entry["target"]},
     )
-    return MemoryOverviewOut(**memory_service.get_overview(user))
+    return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
 
 
 @router.patch("/entries/{entry_id}", response_model=MemoryOverviewOut)
@@ -103,10 +98,12 @@ async def update_memory_entry(
     body: MemoryEntryUpdateRequest,
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> MemoryOverviewOut:
     try:
-        updated = memory_service.update_entry(
-            user.hermes_profile,
+        updated = await memory_service.update_entry(
+            db,
+            user.id,
             entry_id,
             body.content,
             new_target=body.target,
@@ -122,7 +119,7 @@ async def update_memory_entry(
         request=request,
         metadata={"target": updated["target"]},
     )
-    return MemoryOverviewOut(**memory_service.get_overview(user))
+    return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
 
 
 @router.delete("/entries/{entry_id}", response_model=MemoryOverviewOut)
@@ -130,9 +127,10 @@ async def delete_memory_entry(
     entry_id: str,
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> MemoryOverviewOut:
     try:
-        memory_service.delete_entry(user.hermes_profile, entry_id)
+        await memory_service.delete_entry(db, user.id, entry_id)
     except memory_service.MemoryServiceError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
 
@@ -143,15 +141,16 @@ async def delete_memory_entry(
         target_id=entry_id,
         request=request,
     )
-    return MemoryOverviewOut(**memory_service.get_overview(user))
+    return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
 
 
 @router.delete("", response_model=MemoryOverviewOut)
 async def clear_memory(
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> MemoryOverviewOut:
-    memory_service.clear_all(user.hermes_profile)
+    await memory_service.clear_all(db, user.id)
     await audit.record(
         "memory.clear_all",
         actor=user,
@@ -159,7 +158,7 @@ async def clear_memory(
         target_id=user.id,
         request=request,
     )
-    return MemoryOverviewOut(**memory_service.get_overview(user))
+    return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
 
 
 @router.post("/pending/{pending_id}", response_model=MemoryOverviewOut)
@@ -168,10 +167,12 @@ async def resolve_pending_memory(
     body: MemoryPendingResolveRequest,
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> MemoryOverviewOut:
     try:
-        memory_service.resolve_pending(
-            user.hermes_profile,
+        await memory_service.resolve_pending(
+            db,
+            user.id,
             pending_id,
             body.action,
             content_override=body.content,
@@ -187,4 +188,4 @@ async def resolve_pending_memory(
         request=request,
         metadata={"action": body.action},
     )
-    return MemoryOverviewOut(**memory_service.get_overview(user))
+    return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))

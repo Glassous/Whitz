@@ -1,6 +1,6 @@
-name: Deploy Server
+name: Deploy Backend (Server & Agent)
 
-# 流程：GitHub Runner 构建镜像 → 推国内仓库（默认阿里云 ACR 公网地址，可自动降级 GHCR）→ 服务器2 pull + up
+# 流程：GitHub Runner 并行构建 whitz-server 与 whitz-agent 镜像 → 推阿里云 ACR（自动降级 GHCR）→ 服务器2 pull + up
 # registry 是分层增量传输，每次只上传变化的层（几 MB），不是 docker save 那种每次全量。
 # 服务器2 永远不执行 docker build
 
@@ -9,39 +9,36 @@ on:
     branches: [main]
     paths:
       - "server/**"
+      - "agent/**"
       - "docker-compose.prod.yml"
       - ".github/workflows/deploy-server.yml"
   workflow_dispatch:
 
 concurrency:
-  group: deploy-server
+  group: deploy-backend
   cancel-in-progress: false
 
 env:
   # 阿里云 ACR 个人版「公网地址」（不要用 -vpc 那个，那是阿里云 VPC 内网域名）
   # 换源可通过仓库变量覆盖，Secret 名不变
   REGISTRY: ${{ vars.IMAGE_REGISTRY || 'crpi-m8whm1ehxoe5b6bc.cn-guangzhou.personal.cr.aliyuncs.com' }}
-  IMAGE: ${{ vars.IMAGE_REPO || 'crpi-m8whm1ehxoe5b6bc.cn-guangzhou.personal.cr.aliyuncs.com/whitz/server' }}
+  SERVER_IMAGE: ${{ vars.IMAGE_REPO || 'crpi-m8whm1ehxoe5b6bc.cn-guangzhou.personal.cr.aliyuncs.com/whitz/server' }}
+  AGENT_IMAGE: ${{ vars.AGENT_IMAGE_REPO || 'crpi-m8whm1ehxoe5b6bc.cn-guangzhou.personal.cr.aliyuncs.com/whitz/agent' }}
   # 备份仓库：GitHub Runner 推送只需几秒
-  IMAGE_GHCR: ghcr.io/glassous/whitz-server
+  SERVER_IMAGE_GHCR: ghcr.io/glassous/whitz-server
+  AGENT_IMAGE_GHCR: ghcr.io/glassous/whitz-agent
   REMOTE_DIR: /opt/whitz
   COMPOSE_FILE: docker-compose.prod.yml
   PROJECT: whitz
 
 jobs:
-  build:
-    name: Build & Push Image
+  meta:
+    name: Prepare Metadata & Probe Registry
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
-      image: ${{ steps.pick.outputs.image }}
+      acr_ok: ${{ steps.probe.outputs.ok }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Compute tag
         id: meta
         run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
@@ -59,15 +56,26 @@ jobs:
             echo "::warning::$REGISTRY 在 GitHub Runner 上无法解析，本次自动降级为只推 GHCR"
           fi
 
-      - name: Pick deploy image
-        id: pick
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.probe.outputs.ok }}" = "true" ]; then
-            echo "image=$IMAGE:${{ steps.meta.outputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "image=$IMAGE_GHCR:${{ steps.meta.outputs.tag }}" >> "$GITHUB_OUTPUT"
-          fi
+  build:
+    name: Build & Push (${{ matrix.component }})
+    needs: meta
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - component: server
+            context: ./server
+            dockerfile: ./server/Dockerfile
+          - component: agent
+            context: ./agent
+            dockerfile: ./agent/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
@@ -80,57 +88,55 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login ACR
-        if: ${{ steps.probe.outputs.ok == 'true' }}
+        if: ${{ needs.meta.outputs.acr_ok == 'true' }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
-      - name: Build & Push (ACR + GHCR)
-        if: ${{ steps.probe.outputs.ok == 'true' }}
+      - name: Prepare image tags
+        id: tags
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.component }}" = "server" ]; then
+            ACR_REPO="$SERVER_IMAGE"
+            GHCR_REPO="$SERVER_IMAGE_GHCR"
+          else
+            ACR_REPO="$AGENT_IMAGE"
+            GHCR_REPO="$AGENT_IMAGE_GHCR"
+          fi
+          {
+            echo "tags<<EOF"
+            if [ "${{ needs.meta.outputs.acr_ok }}" = "true" ]; then
+              echo "${ACR_REPO}:${{ needs.meta.outputs.tag }}"
+              echo "${ACR_REPO}:latest"
+            fi
+            echo "${GHCR_REPO}:${{ needs.meta.outputs.tag }}"
+            echo "${GHCR_REPO}:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build & Push
         uses: docker/build-push-action@v6
         with:
-          context: ./server
-          file: ./server/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
           # ACR 个人版不接受 BuildKit 生成的 attestation（OCI empty descriptor），必须关闭
           provenance: false
           sbom: false
           platforms: linux/amd64
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE_GHCR }}:${{ steps.meta.outputs.tag }}
-            ${{ env.IMAGE_GHCR }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build & Push (GHCR only)
-        if: ${{ steps.probe.outputs.ok != 'true' }}
-        uses: docker/build-push-action@v6
-        with:
-          context: ./server
-          file: ./server/Dockerfile
-          push: true
-          provenance: false
-          sbom: false
-          platforms: linux/amd64
-          tags: |
-            ${{ env.IMAGE_GHCR }}:${{ steps.meta.outputs.tag }}
-            ${{ env.IMAGE_GHCR }}:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
   deploy:
     name: Pull & Restart on Server2
-    needs: build
+    needs: [meta, build]
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -139,6 +145,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve deploy images
+        id: images
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.meta.outputs.tag }}"
+          if [ "${{ needs.meta.outputs.acr_ok }}" = "true" ]; then
+            echo "server=${SERVER_IMAGE}:${TAG}" >> "$GITHUB_OUTPUT"
+            echo "agent=${AGENT_IMAGE}:${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            echo "server=${SERVER_IMAGE_GHCR}:${TAG}" >> "$GITHUB_OUTPUT"
+            echo "agent=${AGENT_IMAGE_GHCR}:${TAG}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Upload compose file
         uses: appleboy/scp-action@v0.1.7
@@ -152,10 +171,11 @@ jobs:
           overwrite: true
           timeout: 60s
 
-      - name: Pull image & restart
+      - name: Pull images & restart
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE: ${{ needs.build.outputs.image }}
+          DEPLOY_SERVER_IMAGE: ${{ steps.images.outputs.server }}
+          DEPLOY_AGENT_IMAGE: ${{ steps.images.outputs.agent }}
           REMOTE_DIR: ${{ env.REMOTE_DIR }}
           COMPOSE_FILE: ${{ env.COMPOSE_FILE }}
           PROJECT: ${{ env.PROJECT }}
@@ -169,7 +189,7 @@ jobs:
           key: ${{ secrets.SERVER2_SSH_KEY }}
           port: ${{ secrets.SERVER2_PORT || 22 }}
           command_timeout: 30m
-          envs: IMAGE,REMOTE_DIR,COMPOSE_FILE,PROJECT,REGISTRY_USER,REGISTRY_PASSWORD,GHCR_USER,GHCR_TOKEN
+          envs: DEPLOY_SERVER_IMAGE,DEPLOY_AGENT_IMAGE,REMOTE_DIR,COMPOSE_FILE,PROJECT,REGISTRY_USER,REGISTRY_PASSWORD,GHCR_USER,GHCR_TOKEN
           script: |
             set -euo pipefail
             cd "$REMOTE_DIR"
@@ -181,7 +201,7 @@ jobs:
               exit 1
             fi
 
-            REGISTRY="${IMAGE%%/*}"
+            REGISTRY="${DEPLOY_SERVER_IMAGE%%/*}"
             if [ "$REGISTRY" = "ghcr.io" ]; then
               echo "using GHCR (fallback)"
               echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
@@ -190,15 +210,26 @@ jobs:
               echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
             fi
 
-            export WHITZ_SERVER_IMAGE="$IMAGE"
-            docker compose -p "$PROJECT" -f "$COMPOSE_FILE" pull server
+            export WHITZ_SERVER_IMAGE="$DEPLOY_SERVER_IMAGE"
+            export WHITZ_AGENT_IMAGE="$DEPLOY_AGENT_IMAGE"
+            docker compose -p "$PROJECT" -f "$COMPOSE_FILE" pull server agent-api agent-worker
             docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --remove-orphans
 
             ok=0
             for i in $(seq 1 40); do
+              server_ok=0
+              agent_ok=0
               if docker compose -p "$PROJECT" -f "$COMPOSE_FILE" exec -T server \
                 python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=3).status==200 else 1)" \
                 >/dev/null 2>&1; then
+                server_ok=1
+              fi
+              if docker compose -p "$PROJECT" -f "$COMPOSE_FILE" exec -T agent-api \
+                python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8642/health', timeout=3).status==200 else 1)" \
+                >/dev/null 2>&1; then
+                agent_ok=1
+              fi
+              if [ "$server_ok" = "1" ] && [ "$agent_ok" = "1" ]; then
                 ok=1
                 break
               fi
@@ -207,9 +238,9 @@ jobs:
 
             if [ "$ok" != "1" ]; then
               echo "健康检查失败，最近日志："
-              docker compose -p "$PROJECT" -f "$COMPOSE_FILE" logs --tail=100 server || true
+              docker compose -p "$PROJECT" -f "$COMPOSE_FILE" logs --tail=80 server agent-api agent-worker || true
               exit 1
             fi
 
             docker image prune -f --filter "dangling=true" >/dev/null 2>&1 || true
-            echo "server deployed: $IMAGE @ $(date -u +%FT%TZ)"
+            echo "deployed: server=$WHITZ_SERVER_IMAGE agent=$WHITZ_AGENT_IMAGE @ $(date -u +%FT%TZ)"

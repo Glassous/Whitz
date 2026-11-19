@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -13,12 +13,13 @@ from app.api.schemas import (
     ChatTicketRequest,
     ClarifyRequest,
     EditMessageRequest,
+    RegenerateMessageRequest,
     SendMessageRequest,
 )
 from app.db.models import Conversation, Message, User
 from app.db.session import get_db
 from app.services import audit, chat_stream, chat_tickets, limits, membership
-from app.services.hermes import HermesClient, HermesError
+from app.services.agent_client import AgentClient, AgentError
 
 router = APIRouter(prefix="/api/conversations", tags=["chat"])
 
@@ -42,8 +43,8 @@ def _reset_hint(status_info: dict) -> str:
     return f"，额度将于 {moment.astimezone(timezone.utc).strftime('%m-%d %H:%M UTC')} 刷新"
 
 
-async def _client_for(user: User) -> HermesClient:
-    return HermesClient(user.hermes_profile, user.hermes_api_key)
+async def _client_for(user: User) -> AgentClient:
+    return AgentClient(user.agent_namespace, user.agent_api_key)
 
 
 async def _preflight_chat_turn(
@@ -145,16 +146,18 @@ async def send_message(
             "content_length": len(body.content),
             "file_count": len(body.file_ids),
             "skill_count": len(body.skill_names),
+            "model_route": body.model_route,
         },
     )
     inner = chat_stream.stream_chat(
         conv.id,
         user.id,
-        user.hermes_profile,
-        user.hermes_api_key,
+        user.agent_namespace,
+        user.agent_api_key,
         body.content,
         file_ids=body.file_ids,
         skill_names=body.skill_names,
+        model_route=body.model_route,
         max_seconds=plan.run_max_seconds,
     )
     return EventSourceResponse(
@@ -166,6 +169,7 @@ async def send_message(
 async def regenerate_message(
     message_id: uuid.UUID,
     request: Request,
+    body: RegenerateMessageRequest | None = Body(default=None),
     conv: Conversation = Depends(get_owned_conversation),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -183,20 +187,22 @@ async def regenerate_message(
     if not has_user_before:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "未找到对应的用户消息")
 
+    route = body.model_route if body is not None else "auto"
     plan, sse_slot, run_slot = await _preflight_chat_turn(
         request,
         conv,
         user,
         db,
         audit_action="chat.regenerate",
-        audit_metadata={"target_message_id": str(message_id)},
+        audit_metadata={"target_message_id": str(message_id), "model_route": route},
     )
     inner = chat_stream.stream_regenerate(
         conv.id,
         user.id,
-        user.hermes_profile,
-        user.hermes_api_key,
+        user.agent_namespace,
+        user.agent_api_key,
         message_id,
+        model_route=route,
         max_seconds=plan.run_max_seconds,
     )
     return EventSourceResponse(
@@ -230,17 +236,19 @@ async def edit_and_resend_message(
             "content_length": len(body.content),
             "file_count": len(body.file_ids),
             "skill_count": len(body.skill_names),
+            "model_route": body.model_route,
         },
     )
     inner = chat_stream.stream_edit(
         conv.id,
         user.id,
-        user.hermes_profile,
-        user.hermes_api_key,
+        user.agent_namespace,
+        user.agent_api_key,
         message_id,
         body.content,
         file_ids=body.file_ids,
         skill_names=body.skill_names,
+        model_route=body.model_route,
         max_seconds=plan.run_max_seconds,
     )
     return EventSourceResponse(
@@ -260,11 +268,13 @@ async def reconnect_events(
     if sse_slot is None:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "当前对话并发已满，请稍后再试")
     plan = membership.plan_for(membership.effective_tier(user))
+    last_event_id = request.headers.get("last-event-id")
     inner = chat_stream.stream_reconnect(
         conv.id,
-        user.hermes_profile,
-        user.hermes_api_key,
+        user.agent_namespace,
+        user.agent_api_key,
         run_id,
+        last_event_id=last_event_id,
         max_seconds=plan.run_max_seconds,
     )
     return EventSourceResponse(
@@ -285,13 +295,17 @@ async def stop_run(
     run_id = conv.active_run_id
     client = await _client_for(user)
     try:
-        result = await client.stop_run(run_id)
-    except HermesError as exc:
+        result = await client.cancel_run(run_id)
+    except AgentError as exc:
         raise HTTPException(exc.status_code, exc.detail)
     finally:
         await client.aclose()
     row = await db.execute(
-        select(Message).where(Message.conversation_id == conv.id, Message.hermes_run_id == run_id, Message.role == "assistant")
+        select(Message).where(
+            Message.conversation_id == conv.id,
+            Message.run_id == run_id,
+            Message.role == "assistant",
+        )
     )
     assistant = row.scalars().first()
     if assistant is not None and assistant.status in ("streaming", "waiting"):
@@ -322,8 +336,14 @@ async def approval(
         raise HTTPException(status.HTTP_409_CONFLICT, "没有进行中的任务")
     client = await _client_for(user)
     try:
-        result = await client.approve(conv.active_run_id, body.request_id, body.execution_generation, body.choice)
-    except HermesError as exc:
+        result = await client.resume_run(
+            conv.active_run_id,
+            kind="approval",
+            request_id=body.request_id,
+            execution_generation=body.execution_generation,
+            choice=body.choice,
+        )
+    except AgentError as exc:
         raise HTTPException(exc.status_code, exc.detail)
     finally:
         await client.aclose()
@@ -350,8 +370,14 @@ async def clarify(
         raise HTTPException(status.HTTP_409_CONFLICT, "没有进行中的任务")
     client = await _client_for(user)
     try:
-        result = await client.clarify(conv.active_run_id, body.request_id, body.execution_generation, body.answer)
-    except HermesError as exc:
+        result = await client.resume_run(
+            conv.active_run_id,
+            kind="clarify",
+            request_id=body.request_id,
+            execution_generation=body.execution_generation,
+            answer=body.answer,
+        )
+    except AgentError as exc:
         raise HTTPException(exc.status_code, exc.detail)
     finally:
         await client.aclose()

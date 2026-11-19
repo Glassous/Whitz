@@ -199,7 +199,7 @@ onMounted(load);
               <div>
                 <p class="text-[13px] font-medium text-fg">{{ u.display_name }}</p>
                 <p class="text-xs text-fg-faint">{{ u.email }}</p>
-                <p class="mt-0.5 truncate font-mono text-[10.5px] text-fg-faint">{{ u.hermes_profile }}</p>
+                <p class="mt-0.5 truncate font-mono text-[10.5px] text-fg-faint" title="Agent 命名空间">{{ u.agent_namespace }}</p>
               </div>
             </td>
             <td data-label="角色" class="px-4 py-3">

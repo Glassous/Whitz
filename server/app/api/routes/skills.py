@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.api.schemas import (
@@ -13,8 +14,8 @@ from app.api.schemas import (
     SkillToggleRequest,
 )
 from app.db.models import User
+from app.db.session import get_db
 from app.services import audit, skills_service
-from app.services.hermes import HermesClient, HermesError
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
@@ -26,26 +27,21 @@ class SkillUpdateBody(BaseModel):
     enabled: bool | None = None
 
 
-async def _fetch_hermes_skills(user: User) -> list:
-    client = HermesClient(user.hermes_profile, user.hermes_api_key)
-    try:
-        return await client.skills()
-    except HermesError:
-        return []
-    finally:
-        await client.aclose()
-
-
 @router.get("", response_model=list[SkillOut])
-async def list_skills(user: User = Depends(get_current_user)) -> list[SkillOut]:
-    hermes_skills = await _fetch_hermes_skills(user)
-    items = skills_service.list_skills(user.hermes_profile, hermes_skills=hermes_skills)
+async def list_skills(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[SkillOut]:
+    items = await skills_service.list_skills(db, user)
     return [SkillOut(**item) for item in items]
 
 
 @router.get("/pending", response_model=list[SkillPendingOut])
-async def list_pending_skills(user: User = Depends(get_current_user)) -> list[SkillPendingOut]:
-    items = skills_service.list_pending(user.hermes_profile)
+async def list_pending_skills(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[SkillPendingOut]:
+    items = await skills_service.list_pending(db, user.id)
     return [SkillPendingOut(**item) for item in items]
 
 
@@ -54,9 +50,11 @@ async def create_skill(
     body: SkillCreateRequest,
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> SkillOut:
     try:
-        created = skills_service.create_custom_skill(
+        created = await skills_service.create_custom_skill(
+            db,
             user,
             name=body.name,
             description=body.description,
@@ -84,9 +82,11 @@ async def update_skill(
     body: SkillUpdateBody,
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> SkillOut:
     try:
-        updated = skills_service.update_custom_skill(
+        updated = await skills_service.update_custom_skill(
+            db,
             user,
             name,
             description=body.description,
@@ -113,15 +113,10 @@ async def toggle_skill(
     body: SkillToggleRequest,
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> SkillOut:
-    hermes_skills = await _fetch_hermes_skills(user)
     try:
-        updated = skills_service.toggle_skill(
-            user,
-            name,
-            body.enabled,
-            hermes_skills=hermes_skills,
-        )
+        updated = await skills_service.toggle_skill(db, user, name, body.enabled)
     except skills_service.SkillServiceError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
 
@@ -141,9 +136,10 @@ async def delete_skill(
     name: str,
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> None:
     try:
-        skills_service.delete_skill(user, name)
+        await skills_service.delete_skill(db, user, name)
     except skills_service.SkillServiceError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
 
@@ -177,9 +173,11 @@ async def install_github_skill(
     body: SkillGithubInstallRequest,
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> SkillOut:
     try:
         installed = await skills_service.install_github_skill(
+            db,
             user,
             body.url,
             name=body.name,
@@ -207,9 +205,11 @@ async def resolve_pending_skill(
     body: SkillPendingResolveRequest,
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     try:
-        installed = skills_service.resolve_pending(
+        installed = await skills_service.resolve_pending(
+            db,
             user,
             pending_id,
             body.action,

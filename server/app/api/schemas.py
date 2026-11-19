@@ -213,7 +213,7 @@ class MessageOut(BaseModel):
     tool_name: str | None
     tool_payload: dict | None
     status: str
-    hermes_run_id: str | None
+    run_id: str | None
     created_at: datetime
 
 
@@ -246,16 +246,25 @@ class ConversationSearchHit(BaseModel):
     created_at: datetime
 
 
+ModelRouteType = Literal["auto", "default", "fast", "reasoning", "vision"]
+
+
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
     file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
     skill_names: list[str] = Field(default_factory=list, max_length=10)
+    model_route: ModelRouteType = "auto"
 
 
 class EditMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
     file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
     skill_names: list[str] = Field(default_factory=list, max_length=10)
+    model_route: ModelRouteType = "auto"
+
+
+class RegenerateMessageRequest(BaseModel):
+    model_route: ModelRouteType = "auto"
 
 
 class FilePresignRequest(BaseModel):
@@ -452,7 +461,7 @@ class AdminUserOut(BaseModel):
     timezone: str = "Asia/Shanghai"
     role: str
     is_active: bool
-    hermes_profile: str
+    agent_namespace: str
     membership_tier: str
     membership_expires_at: datetime | None
     credits: CreditSummaryOut | None = None

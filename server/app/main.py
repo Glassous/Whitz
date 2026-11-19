@@ -25,7 +25,7 @@ from app.api.routes import (
 )
 from app.core.config import get_settings
 from app.core.redis import close_redis, get_redis
-from app.db.session import SessionLocal, engine
+from app.db.session import SessionLocal, detect_pgvector, engine
 from app.services import bootstrap
 
 logging.basicConfig(level=logging.INFO)
@@ -40,8 +40,8 @@ async def lifespan(app: FastAPI):
         logger.warning("Redis 暂不可用，依赖 Redis 的接口将失败关闭: %s", exc)
     async with SessionLocal() as db:
         try:
+            await detect_pgvector(db)
             await bootstrap.ensure_admin(db)
-            await bootstrap.reconcile_profiles(db)
         except Exception as exc:
             logger.warning("启动初始化失败（数据库或卷可能尚未就绪）: %s", exc)
     yield

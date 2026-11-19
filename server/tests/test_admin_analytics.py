@@ -18,7 +18,7 @@ from app.db.models import (
     User,
 )
 from app.services import membership
-from app.services.hermes import HermesError
+from app.services.agent_client import AgentError
 from tests.conftest import auth_header
 
 
@@ -131,7 +131,7 @@ async def test_admin_analytics_fills_gaps_top_users_files_and_summary(admin, reg
     )
 
     # Seed files for file_stats
-    conv = Conversation(user_id=u1_id, hermes_session_id="sess-f1", title="Files")
+    conv = Conversation(user_id=u1_id, thread_id="sess-f1", title="Files")
     db.add(conv)
     await db.flush()
     db.add_all(
@@ -298,7 +298,7 @@ async def test_admin_monitor_and_force_stop_run(admin, register, client, db, mon
     # Create active normal run, stalled run, and idle conversation
     c_live = Conversation(
         user_id=u1_id,
-        hermes_session_id="s-live",
+        thread_id="s-live",
         title="Live Task",
         active_run_id="run-live",
         active_run_status="running",
@@ -306,7 +306,7 @@ async def test_admin_monitor_and_force_stop_run(admin, register, client, db, mon
     )
     c_stalled = Conversation(
         user_id=u1_id,
-        hermes_session_id="s-stalled",
+        thread_id="s-stalled",
         title="Stalled Task",
         active_run_id="run-stalled",
         active_run_status="waiting_for_approval",
@@ -314,7 +314,7 @@ async def test_admin_monitor_and_force_stop_run(admin, register, client, db, mon
     )
     c_idle = Conversation(
         user_id=u1_id,
-        hermes_session_id="s-idle",
+        thread_id="s-idle",
         title="Idle Task",
         active_run_id=None,
         active_run_status=None,
@@ -328,7 +328,7 @@ async def test_admin_monitor_and_force_stop_run(admin, register, client, db, mon
         role="assistant",
         content="partial",
         status="waiting",
-        hermes_run_id="run-stalled",
+        run_id="run-stalled",
         created_at=now - timedelta(seconds=750),
     )
     m_live = Message(
@@ -336,7 +336,7 @@ async def test_admin_monitor_and_force_stop_run(admin, register, client, db, mon
         role="assistant",
         content="working",
         status="streaming",
-        hermes_run_id="run-live",
+        run_id="run-live",
         created_at=now - timedelta(seconds=15),
     )
     db.add_all([m_stalled, m_live])
@@ -406,24 +406,27 @@ async def test_admin_monitor_and_force_stop_run(admin, register, client, db, mon
 
     stopped_calls: list[tuple[str, str]] = []
 
-    class MockHermesMonitor:
-        def __init__(self, profile: str, api_key: str) -> None:
-            self.profile = profile
+    class MockAgentMonitor:
+        def __init__(self, namespace: str, api_key: str) -> None:
+            self.namespace = namespace
             self.api_key = api_key
+
+        async def health_info(self) -> dict:
+            return {"ready": True, "status": "ok", "redis": True, "postgres": True, "sandbox_mode": "disabled"}
 
         async def health(self) -> bool:
             return True
 
-        async def stop_run(self, run_id: str) -> dict:
-            stopped_calls.append((self.profile, run_id))
+        async def cancel_run(self, run_id: str) -> dict:
+            stopped_calls.append((self.namespace, run_id))
             if run_id == "run-live":
-                raise HermesError(503, "agent_unreachable")
+                raise AgentError(503, "agent_unreachable")
             return {"status": "cancelled"}
 
         async def aclose(self) -> None:
             pass
 
-    monkeypatch.setattr(admin_routes, "HermesClient", MockHermesMonitor)
+    monkeypatch.setattr(admin_routes, "AgentClient", MockAgentMonitor)
     with monkeypatch.context() as mp:
         mp.setenv("SMTP_HOST", "smtp.test.local")
         mp.setenv("SMTP_USERNAME", "noreply@test.local")
@@ -440,17 +443,24 @@ async def test_admin_monitor_and_force_stop_run(admin, register, client, db, mon
     assert mon["services"] == {
         "postgres": True,
         "redis": True,
-        "hermes": True,
+        "agent": True,
+        "worker": True,
+        "pgvector": False,
+        "sandbox": False,
+        "sandbox_mode": "disabled",
         "cos_configured": False,
         "smtp_configured": True,
     }
 
-    # Verify hermes=False and custom run_max_seconds threshold marks shorter runs as stalled
-    class UnhealthyHermesMonitor(MockHermesMonitor):
+    # Verify agent=False and custom run_max_seconds threshold marks shorter runs as stalled
+    class UnhealthyAgentMonitor(MockAgentMonitor):
+        async def health_info(self) -> dict:
+            return {"ready": False, "status": "unreachable"}
+
         async def health(self) -> bool:
             return False
 
-    monkeypatch.setattr(admin_routes, "HermesClient", UnhealthyHermesMonitor)
+    monkeypatch.setattr(admin_routes, "AgentClient", UnhealthyAgentMonitor)
     with monkeypatch.context() as mp:
         mp.setenv("RUN_MAX_SECONDS", "10")
         get_settings.cache_clear()
@@ -458,14 +468,15 @@ async def test_admin_monitor_and_force_stop_run(admin, register, client, db, mon
             mon_low = await client.get("/api/admin/monitor", headers=auth_header(admin["access_token"]))
             assert mon_low.status_code == 200
             mon_low_body = mon_low.json()
-            assert mon_low_body["services"]["hermes"] is False
+            assert mon_low_body["services"]["agent"] is False
+            assert mon_low_body["services"]["worker"] is False
             assert mon_low_body["services"]["smtp_configured"] is False
             low_runs = {r["active_run_id"]: r for r in mon_low_body["active_runs"]}
             assert low_runs["run-live"]["is_stalled"] is True
         finally:
             get_settings.cache_clear()
     get_settings.cache_clear()
-    monkeypatch.setattr(admin_routes, "HermesClient", MockHermesMonitor)
+    monkeypatch.setattr(admin_routes, "AgentClient", MockAgentMonitor)
 
     runs = mon["active_runs"]
     assert len(runs) == 2
@@ -495,13 +506,13 @@ async def test_admin_monitor_and_force_stop_run(admin, register, client, db, mon
     m_stalled_id = m_stalled.id
     m_live_id = m_live.id
 
-    # Force stop stalled run (Hermes succeeds)
+    # Force stop stalled run (Agent succeeds)
     stop_stalled = await client.post(
         f"/api/admin/conversations/{c_stalled_id}/stop",
         headers=auth_header(admin["access_token"]),
     )
     assert stop_stalled.status_code == 200, stop_stalled.text
-    assert stop_stalled.json()["hermes_stopped"] is True
+    assert stop_stalled.json()["agent_stopped"] is True
     assert stop_stalled.json()["status"] == "cancelled"
 
     # Stopping an already-idle conversation returns 409
@@ -518,13 +529,13 @@ async def test_admin_monitor_and_force_stop_run(admin, register, client, db, mon
     )
     assert stop_missing.status_code == 404
 
-    # Force stop live run even when HermesClient.stop_run fails (best-effort)
+    # Force stop live run even when AgentClient.cancel_run fails (best-effort)
     stop_live = await client.post(
         f"/api/admin/conversations/{c_live_id}/stop",
         headers=auth_header(admin["access_token"]),
     )
     assert stop_live.status_code == 200, stop_live.text
-    assert stop_live.json()["hermes_stopped"] is False
+    assert stop_live.json()["agent_stopped"] is False
 
     db.expire_all()
     refreshed_stalled = await db.get(Conversation, c_stalled_id)
@@ -583,7 +594,7 @@ async def test_admin_user_detail_ledger_sessions_and_revoke(admin, register, cli
     user.memory_consented_at = now
     user.memory_require_confirm = False
 
-    conv = Conversation(user_id=user_id, hermes_session_id="s-det", title="Detail Conv")
+    conv = Conversation(user_id=user_id, thread_id="s-det", title="Detail Conv")
     db.add(conv)
     await db.flush()
     db.add_all(

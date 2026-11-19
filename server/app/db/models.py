@@ -1,5 +1,7 @@
+import json
 import uuid
 from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -12,11 +14,88 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    cast,
     func,
     text,
+    type_coerce,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator, UserDefinedType
+
+_PGVECTOR_ENABLED: bool | None = None
+
+
+def set_pgvector_enabled(enabled: bool) -> None:
+    global _PGVECTOR_ENABLED
+    _PGVECTOR_ENABLED = bool(enabled)
+
+
+def is_pgvector_enabled() -> bool:
+    return bool(_PGVECTOR_ENABLED)
+
+
+def pgvector_detected() -> bool | None:
+    return _PGVECTOR_ENABLED
+
+
+class _PgVectorType(UserDefinedType):
+    cache_ok = True
+
+    def __init__(self, dim: int = 1536) -> None:
+        self.dim = int(dim)
+
+    def get_col_spec(self, **kw: Any) -> str:
+        return f"VECTOR({self.dim})"
+
+
+class SafeVector(TypeDecorator):
+    """Compile to VECTOR(dim) when pgvector is available, or JSONB fallback on plain Postgres."""
+
+    impl = JSONB
+    cache_ok = True
+
+    def __init__(self, dim: int = 1536) -> None:
+        super().__init__()
+        self.dim = int(dim)
+
+    def load_dialect_impl(self, dialect: Any) -> Any:
+        if dialect.name == "postgresql" and is_pgvector_enabled():
+            return dialect.type_descriptor(_PgVectorType(self.dim))
+        return dialect.type_descriptor(JSONB())
+
+    def process_bind_param(self, value: Any, dialect: Any) -> Any:
+        if value is None:
+            return None
+        vec = [float(x) for x in value]
+        if dialect.name == "postgresql" and is_pgvector_enabled():
+            return "[" + ",".join(f"{x:.8f}" for x in vec) + "]"
+        return vec
+
+    def process_result_value(self, value: Any, dialect: Any) -> list[float] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [float(x) for x in parsed]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return None
+            return None
+        if isinstance(value, (list, tuple)):
+            return [float(x) for x in value]
+        return None
+
+    def bind_expression(self, bindvalue: Any) -> Any:
+        if is_pgvector_enabled():
+            return cast(type_coerce(bindvalue, Text), _PgVectorType(self.dim))
+        return bindvalue
+
+    def column_expression(self, col: Any) -> Any:
+        if is_pgvector_enabled():
+            return cast(col, Text)
+        return col
 
 
 class Base(DeclarativeBase):
@@ -51,8 +130,8 @@ class User(Base):
     memory_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     memory_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     memory_require_confirm: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
-    hermes_profile: Mapped[str] = mapped_column(String(64), unique=True)
-    hermes_api_key: Mapped[str] = mapped_column(String(128))
+    agent_namespace: Mapped[str] = mapped_column(String(64), unique=True)
+    agent_api_key: Mapped[str] = mapped_column(String(128))
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     membership_tier: Mapped[str] = mapped_column(String(16), default="free", server_default="free")
@@ -211,7 +290,7 @@ class Conversation(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    hermes_session_id: Mapped[str] = mapped_column(String(128))
+    thread_id: Mapped[str] = mapped_column(String(128), default="", server_default="")
     title: Mapped[str] = mapped_column(String(200), default="新对话")
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
     pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -279,7 +358,110 @@ class Message(Base):
     tool_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
     tool_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="completed")
-    hermes_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+
+
+class MemoryEntry(Base):
+    __tablename__ = "memory_entries"
+    __table_args__ = (Index("ix_memory_entries_user_target", "user_id", "target"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    target: Mapped[str] = mapped_column(String(16), default="memory", server_default="memory")
+    content: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(24), default="manual", server_default="manual")
+    embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MemoryPendingProposal(Base):
+    __tablename__ = "memory_pending_proposals"
+    __table_args__ = (Index("ix_memory_pending_user_status", "user_id", "status", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    target: Mapped[str] = mapped_column(String(16), default="memory", server_default="memory")
+    action: Mapped[str] = mapped_column(String(16), default="add", server_default="add")
+    content: Mapped[str] = mapped_column(Text)
+    old_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserSkill(Base):
+    __tablename__ = "user_skills"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_user_skills_user_name"),
+        Index("ix_user_skills_user_enabled", "user_id", "enabled"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    title: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    description: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    content: Mapped[str] = mapped_column(Text, default="", server_default="")
+    files: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    source: Mapped[str] = mapped_column(String(24), default="custom", server_default="custom")
+    repo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    path: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SkillPendingProposal(Base):
+    __tablename__ = "skill_pending_proposals"
+    __table_args__ = (Index("ix_skill_pending_user_status", "user_id", "status", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    name: Mapped[str] = mapped_column(String(80))
+    description: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    content: Mapped[str] = mapped_column(Text)
+    files: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    action: Mapped[str] = mapped_column(String(24), default="create", server_default="create")
+    source: Mapped[str] = mapped_column(String(24), default="agent", server_default="agent")
+    repo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    path: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FileChunk(Base):
+    __tablename__ = "file_chunks"
+    __table_args__ = (
+        Index("ix_file_chunks_user_conv", "user_id", "conversation_id"),
+        Index("ix_file_chunks_search_tsv", "search_tsv", postgresql_using="gin"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversation_files.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    is_global: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    locator: Mapped[str] = mapped_column(String(160), default="", server_default="")
+    content: Mapped[str] = mapped_column(Text)
+    search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -19,7 +19,7 @@ from app.api.schemas import (
 from app.db.models import Conversation, ConversationFile, Message, User
 from app.db.session import get_db
 from app.services import audit, cos, titles
-from app.services.hermes import HermesClient, HermesError
+from app.services.agent_client import AgentClient, AgentError
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -153,20 +153,10 @@ async def create_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Conversation:
-    conv = Conversation(user_id=user.id, title=body.title, hermes_session_id="")
+    conv = Conversation(user_id=user.id, title=body.title, thread_id=str(uuid.uuid4()))
     db.add(conv)
     await db.commit()
     await db.refresh(conv)
-    client = HermesClient(user.hermes_profile, user.hermes_api_key)
-    try:
-        session = await client.create_session(body.title)
-        conv.hermes_session_id = str(session.get("id") or session.get("session_id") or "")
-        await db.commit()
-        await db.refresh(conv)
-    except HermesError:
-        pass
-    finally:
-        await client.aclose()
     await audit.record(
         "conversation.create",
         actor=user,
@@ -219,15 +209,6 @@ async def rename_conversation(
     if title_changed or pin_changed:
         await db.commit()
         await db.refresh(conv)
-
-    if title_changed and conv.hermes_session_id:
-        client = HermesClient(user.hermes_profile, user.hermes_api_key)
-        try:
-            await client.patch_session(conv.hermes_session_id, conv.title)
-        except HermesError:
-            pass
-        finally:
-            await client.aclose()
 
     if title_changed:
         await audit.record(
@@ -289,11 +270,11 @@ async def delete_conversation(
         .all()
     )
     file_keys = [f.storage_key for f in non_global_files if f.storage_key]
-    if conv.hermes_session_id:
-        client = HermesClient(user.hermes_profile, user.hermes_api_key)
+    if conv.thread_id:
+        client = AgentClient(user.agent_namespace, user.agent_api_key)
         try:
-            await client.delete_session(conv.hermes_session_id)
-        except HermesError:
+            await client.delete_thread(conv.thread_id)
+        except AgentError:
             pass
         finally:
             await client.aclose()

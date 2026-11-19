@@ -88,7 +88,7 @@ def hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def generate_hermes_key() -> str:
+def generate_agent_key() -> str:
     return secrets.token_hex(32)
 
 

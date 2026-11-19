@@ -1,7 +1,6 @@
 import uuid
 
 from app.db.models import Message, User
-from app.services import provisioning
 from tests.conftest import auth_header
 
 
@@ -87,9 +86,8 @@ async def test_admin_disable_and_enable(admin, register, client, db):
     # disabled user cannot log in
     login = await client.post("/api/auth/login", json={"email": "victim@test.local", "password": "Passw0rd!"})
     assert login.status_code == 403
-    # parked marker written
     user = await db.get(User, uuid.UUID(vid))
-    assert (provisioning.profile_dir(user.hermes_profile) / "gateway.parked").exists()
+    assert user.is_active is False
     # re-enable
     enable = await client.patch(
         f"/api/admin/users/{vid}", json={"is_active": True}, headers=auth_header(admin["access_token"])
@@ -97,7 +95,6 @@ async def test_admin_disable_and_enable(admin, register, client, db):
     assert enable.status_code == 200
     login2 = await client.post("/api/auth/login", json={"email": "victim@test.local", "password": "Passw0rd!"})
     assert login2.status_code == 200
-    assert not (provisioning.profile_dir(user.hermes_profile) / "gateway.parked").exists()
 
 
 async def test_admin_cannot_disable_self(admin, client):

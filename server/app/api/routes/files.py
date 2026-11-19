@@ -21,7 +21,7 @@ from app.api.schemas import (
 from app.core.config import Settings, get_settings
 from app.db.models import Conversation, ConversationFile, User
 from app.db.session import get_db
-from app.services import audit, cos, file_parser
+from app.services import audit, cos, file_chunks, file_parser
 from app.services.file_types import FileValidationError, validate_upload_request
 
 router = APIRouter(prefix="/api/conversations", tags=["files"])
@@ -347,6 +347,8 @@ async def complete_upload(
     record.etag = (body.etag if body and body.etag else None) or meta.get("etag")
     await db.commit()
     await db.refresh(record)
+
+    await file_chunks.index_file_chunks_safe(db, record)
 
     await audit.record(
         "file.complete",

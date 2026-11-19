@@ -53,8 +53,9 @@ def test_policy_without_key_is_unsigned(monkeypatch):
     assert json.loads(envelope["payload"])["work_mode"]["enabled"] is True
 
 
-def test_policy_endpoint_public(client):
-    resp = client.get("/api/desktop/policy")
+@pytest.mark.asyncio
+async def test_policy_endpoint_public(client):
+    resp = await client.get("/api/desktop/policy")
     assert resp.status_code == 200
     body = resp.json()
     assert "payload" in body and "signature" in body

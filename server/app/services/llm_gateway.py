@@ -80,7 +80,7 @@ def upstream_base() -> str:
 
 
 def model_alias() -> str:
-    """Model name exposed to desktop clients (and written into local Hermes config)."""
+    """Model name exposed to desktop clients."""
     return get_settings().desktop_llm_model_alias or get_settings().llm_model
 
 

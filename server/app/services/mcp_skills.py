@@ -90,7 +90,7 @@ async def call_tool(
 
     if name == "list_user_skills":
         include_disabled = True if args.get("include_disabled") is None else bool(args.get("include_disabled"))
-        items = skills_service.list_skills(user.hermes_profile)
+        items = await skills_service.list_skills(db, user)
         if not include_disabled:
             items = [item for item in items if item.get("enabled")]
         return _text_result(
@@ -129,8 +129,9 @@ async def call_tool(
         try:
             fetched = await skills_service.fetch_github_skill(url, ref=ref, path=path)
             target_name = skills_service.validate_skill_name(name_override or fetched["name"])
-            pending = skills_service.stage_pending_skill(
-                user.hermes_profile,
+            pending = await skills_service.stage_pending_skill(
+                db,
+                user.id,
                 name=target_name,
                 content=fetched["content"],
                 description=fetched["description"],
@@ -163,8 +164,9 @@ async def call_tool(
         category = str(args["category"]).strip() if args.get("category") else None
         conv_id = str(args["conversation_id"]).strip() if args.get("conversation_id") else None
         try:
-            pending = skills_service.stage_pending_skill(
-                user.hermes_profile,
+            pending = await skills_service.stage_pending_skill(
+                db,
+                user.id,
                 name=skill_name,
                 content=content,
                 description=description,

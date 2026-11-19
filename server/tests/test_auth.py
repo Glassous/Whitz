@@ -3,7 +3,7 @@ import uuid
 
 from app.core.config import get_settings
 from app.db.models import User
-from app.services import email as email_service, provisioning
+from app.services import email as email_service
 from tests.conftest import auth_header
 
 
@@ -14,9 +14,9 @@ async def test_register_creates_user_and_profile(register, db):
     assert data["user"]["email_verified_at"] is not None
     assert data["access_token"] and data["refresh_token"]
     user = await db.get(User, uuid.UUID(data["user"]["id"]))
-    assert user.hermes_profile.startswith("u")
+    assert user.agent_namespace.startswith("u")
+    assert len(user.agent_api_key) == 64
     assert user.email_verified_at is not None
-    assert (provisioning.profile_dir(user.hermes_profile) / "config.yaml").exists()
 
 
 async def test_register_requires_valid_email_code(client, sent_emails):

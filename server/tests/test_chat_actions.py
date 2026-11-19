@@ -2,14 +2,22 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.api.routes import agent as agent_routes
 from app.api.routes import chat as chat_routes
 from app.core.config import get_settings
-from app.db.models import Conversation, ConversationFile, CreditLedger, Message, User
-from app.services import chat_stream, chat_tickets, provisioning
+from app.db.models import (
+    Conversation,
+    ConversationFile,
+    CreditLedger,
+    MemoryPendingProposal,
+    Message,
+    SkillPendingProposal,
+    User,
+)
+from app.services import chat_stream, chat_tickets
 from tests.conftest import auth_header
 
 
@@ -68,7 +76,6 @@ async def test_conversation_pinning_and_ordering(register, client, db):
     c2 = (await client.post("/api/conversations", json={"title": "普通会话2"}, headers=headers)).json()
     c3 = (await client.post("/api/conversations", json={"title": "将置顶会话"}, headers=headers)).json()
 
-    # Update last_message_at so c2 > c1 > c3 naturally
     now = datetime.now(timezone.utc)
     conv1 = await db.get(Conversation, uuid.UUID(c1["id"]))
     conv2 = await db.get(Conversation, uuid.UUID(c2["id"]))
@@ -78,7 +85,6 @@ async def test_conversation_pinning_and_ordering(register, client, db):
     conv3.last_message_at = now - timedelta(minutes=5)
     await db.commit()
 
-    # Pin c3 without passing title
     pin_resp = await client.patch(
         f"/api/conversations/{c3['id']}",
         json={"is_pinned": True},
@@ -89,7 +95,6 @@ async def test_conversation_pinning_and_ordering(register, client, db):
     assert pin_resp.json()["pinned_at"] is not None
     assert pin_resp.json()["title"] == "将置顶会话"
 
-    # Pin c1 afterwards -> c1 has newer pinned_at than c3
     pin_c1 = await client.patch(
         f"/api/conversations/{c1['id']}",
         json={"is_pinned": True},
@@ -100,7 +105,6 @@ async def test_conversation_pinning_and_ordering(register, client, db):
     listed = (await client.get("/api/conversations", headers=headers)).json()
     assert [item["id"] for item in listed] == [c1["id"], c3["id"], c2["id"]]
 
-    # Unpin c1 -> goes below pinned c3
     unpin_c1 = await client.patch(
         f"/api/conversations/{c1['id']}",
         json={"is_pinned": False},
@@ -114,7 +118,7 @@ async def test_conversation_pinning_and_ordering(register, client, db):
     assert [item["id"] for item in listed2] == [c3["id"], c2["id"], c1["id"]]
 
 
-async def test_send_message_injects_profile_skills_global_file_artifacts_and_pending_events(
+async def test_send_message_injects_profile_skills_global_file_artifacts_graph_and_pending_events(
     register, client, db, engine, monkeypatch
 ):
     monkeypatch.setenv("COS_SECRET_ID", "AKIDtest")
@@ -130,7 +134,6 @@ async def test_send_message_injects_profile_skills_global_file_artifacts_and_pen
     headers = auth_header(reg["access_token"])
     user = (await db.execute(select(User).where(User.email == "stream@test.local"))).scalar_one()
 
-    # Enable profile context
     await client.patch("/api/users/me", json={"occupation": "算法工程师"}, headers=headers)
     ctx_resp = await client.patch(
         "/api/users/me/profile-context",
@@ -139,7 +142,6 @@ async def test_send_message_injects_profile_skills_global_file_artifacts_and_pen
     )
     assert ctx_resp.status_code == 200
 
-    # Create a custom skill
     sk_resp = await client.post(
         "/api/skills",
         json={"name": "viz-helper", "description": "生成可视化网页", "content": "# Viz"},
@@ -147,7 +149,6 @@ async def test_send_message_injects_profile_skills_global_file_artifacts_and_pen
     )
     assert sk_resp.status_code == 201
 
-    # Create another conversation with a global file
     other_conv = (await client.post("/api/conversations", json={"title": "资料源"}, headers=headers)).json()
     global_file_id = uuid.uuid4()
     db.add(
@@ -173,38 +174,37 @@ async def test_send_message_injects_profile_skills_global_file_artifacts_and_pen
     recorded_runs: list[dict] = []
     artifact_id = uuid.uuid4()
 
-    class MockStreamHermes:
-        def __init__(self, profile: str, api_key: str) -> None:
-            self.profile = profile
+    class MockStreamAgent:
+        def __init__(self, namespace: str | None = None, api_key: str | None = None) -> None:
+            self.namespace = namespace or ""
 
         async def health(self) -> bool:
             return True
 
-        async def create_session(self, title: str = "新对话") -> dict:
-            return {"id": f"sess-{uuid.uuid4().hex[:8]}"}
-
-        async def create_run(
-            self,
-            input_text: str,
-            session_id: str,
-            idempotency_key: str,
-            *,
-            instructions: str | None = None,
-            conversation_history: list[dict[str, str]] | None = None,
-        ) -> dict:
-            recorded_runs.append(
-                {
-                    "input": input_text,
-                    "session_id": session_id,
-                    "instructions": instructions,
-                    "conversation_history": conversation_history,
-                }
-            )
+        async def create_run(self, **kwargs) -> dict:
+            recorded_runs.append(kwargs)
             return {"run_id": "run-art-1"}
 
-        async def stream_run_events(self, run_id: str):
-            yield ("tool.started", {"tool": "write_workspace_file", "preview": {"filename": "report.html"}})
-            # Simulate MCP tool writing artifact row and pending memory/skill proposals during run
+        async def stream_events(self, run_id: str, *, last_event_id: str | None = None):
+            yield (
+                "graph.node",
+                {
+                    "node": "agent",
+                    "status": "running",
+                    "label": "主控智能体",
+                    "route": "reasoning",
+                    "model": "test-reasoning-model",
+                },
+            )
+            yield (
+                "tool.started",
+                {
+                    "tool": "write_workspace_file",
+                    "call_id": "call-write-1",
+                    "args": {"filename": "report.html"},
+                    "preview": {"filename": "report.html"},
+                },
+            )
             async with session_factory() as inner_db:
                 inner_db.add(
                     ConversationFile(
@@ -221,39 +221,43 @@ async def test_send_message_injects_profile_skills_global_file_artifacts_and_pen
                         source="assistant",
                     )
                 )
+                inner_db.add(
+                    MemoryPendingProposal(
+                        user_id=user.id,
+                        conversation_id=uuid.UUID(conv_id),
+                        target="user",
+                        action="add",
+                        content="偏好 HTML 报表",
+                    )
+                )
+                inner_db.add(
+                    SkillPendingProposal(
+                        user_id=user.id,
+                        conversation_id=uuid.UUID(conv_id),
+                        name="html-pro",
+                        description="HTML",
+                        content="# HTML",
+                    )
+                )
                 await inner_db.commit()
-
-            mem_pend = provisioning.profile_dir(self.profile) / "pending" / "memory"
-            mem_pend.mkdir(parents=True, exist_ok=True)
-            (mem_pend / "m1.json").write_text(
-                json.dumps({"id": "m1", "target": "user", "action": "add", "content": "偏好 HTML 报表"}),
-                encoding="utf-8",
-            )
-            skill_pend = provisioning.profile_dir(self.profile) / "pending" / "skills"
-            skill_pend.mkdir(parents=True, exist_ok=True)
-            (skill_pend / "s1.json").write_text(
-                json.dumps({"id": "s1", "name": "html-pro", "description": "HTML", "content": "# HTML"}),
-                encoding="utf-8",
-            )
 
             yield (
                 "tool.completed",
                 {
                     "tool": "write_workspace_file",
+                    "call_id": "call-write-1",
+                    "duration_ms": 45.2,
                     "preview": json.dumps({"status": "created", "file_id": str(artifact_id), "filename": "report.html"}),
                 },
             )
             yield ("message.delta", {"delta": "报告已生成。"})
             yield ("run.completed", {"output": "报告已生成。", "usage": {"total_tokens": 5000}})
 
-        async def session_messages(self, session_id: str) -> list:
-            return []
-
         async def aclose(self) -> None:
             pass
 
-    monkeypatch.setattr(chat_routes, "HermesClient", MockStreamHermes)
-    monkeypatch.setattr(chat_stream, "HermesClient", MockStreamHermes)
+    monkeypatch.setattr(chat_routes, "AgentClient", MockStreamAgent)
+    monkeypatch.setattr(chat_stream, "AgentClient", MockStreamAgent)
 
     send_headers = await _issue_send_headers(client, reg["access_token"], conv_id)
     resp = await client.post(
@@ -262,12 +266,18 @@ async def test_send_message_injects_profile_skills_global_file_artifacts_and_pen
             "content": "结合公司规范生成可视化报告",
             "file_ids": [str(global_file_id)],
             "skill_names": ["viz-helper"],
+            "model_route": "reasoning",
         },
         headers=send_headers,
     )
     assert resp.status_code == 200, resp.text
     events = _parse_sse_events(resp.text)
     ev_names = [name for name, _ in events]
+    assert "graph.node" in ev_names
+    graph_ev = next(data for name, data in events if name == "graph.node")
+    assert graph_ev["node"] == "agent"
+    assert graph_ev["route"] == "reasoning"
+
     assert "workspace.file_created" in ev_names
     file_ev = next(data for name, data in events if name == "workspace.file_created")
     assert file_ev["id"] == str(artifact_id)
@@ -282,15 +292,14 @@ async def test_send_message_injects_profile_skills_global_file_artifacts_and_pen
     assert completed_ev["artifacts"][0]["id"] == str(artifact_id)
     assert completed_ev["artifacts"][0]["file_id"] == str(artifact_id)
 
-    # Verify instructions injected profile_context, skill, and global file
     assert len(recorded_runs) == 1
+    assert recorded_runs[0]["model_route"] == "reasoning"
     inst = recorded_runs[0]["instructions"] or ""
     assert "算法工程师" in inst
     assert "viz-helper" in inst
     assert "company-spec.md" in inst
     assert "stream@test.local" not in inst
 
-    # Verify persisted user tool_payload and assistant artifacts
     detail = (await client.get(f"/api/conversations/{conv_id}", headers=headers)).json()
     msgs = detail["messages"]
     user_msg = next(m for m in msgs if m["role"] == "user")
@@ -300,6 +309,7 @@ async def test_send_message_injects_profile_skills_global_file_artifacts_and_pen
     assert asst_msg["tool_payload"]["artifacts"][0]["id"] == str(artifact_id)
     assert asst_msg["tool_payload"]["artifacts"][0]["file_id"] == str(artifact_id)
     assert asst_msg["tool_payload"]["artifacts"][0]["filename"] == "report.html"
+    assert asst_msg["run_id"] == "run-art-1"
     get_settings.cache_clear()
 
 
@@ -317,21 +327,17 @@ async def test_artifact_id_contract_on_run_completed_and_reconnect_normalization
     conv_id = conv["id"]
     artifact_id = uuid.uuid4()
 
-    class MockLateArtifactHermes:
-        def __init__(self, profile: str, api_key: str) -> None:
+    class MockLateArtifactAgent:
+        def __init__(self, namespace: str | None = None, api_key: str | None = None) -> None:
             pass
 
         async def health(self) -> bool:
             return True
 
-        async def create_session(self, title: str = "新对话") -> dict:
-            return {"id": "sess-art-id"}
-
-        async def create_run(self, *args, **kwargs) -> dict:
+        async def create_run(self, **kwargs) -> dict:
             return {"run_id": "run-art-late"}
 
-        async def stream_run_events(self, run_id: str):
-            # Artifact row created during run without tool.completed file_id preview, collected at run.completed
+        async def stream_events(self, run_id: str, *, last_event_id: str | None = None):
             async with session_factory() as inner_db:
                 inner_db.add(
                     ConversationFile(
@@ -352,14 +358,11 @@ async def test_artifact_id_contract_on_run_completed_and_reconnect_normalization
             yield ("message.delta", {"delta": "已完成。"})
             yield ("run.completed", {"output": "已完成。", "usage": {"total_tokens": 100}})
 
-        async def session_messages(self, session_id: str) -> list:
-            return []
-
         async def aclose(self) -> None:
             pass
 
-    monkeypatch.setattr(chat_routes, "HermesClient", MockLateArtifactHermes)
-    monkeypatch.setattr(chat_stream, "HermesClient", MockLateArtifactHermes)
+    monkeypatch.setattr(chat_routes, "AgentClient", MockLateArtifactAgent)
+    monkeypatch.setattr(chat_stream, "AgentClient", MockLateArtifactAgent)
 
     send_headers = await _issue_send_headers(client, reg["access_token"], conv_id)
     resp = await client.post(
@@ -381,7 +384,6 @@ async def test_artifact_id_contract_on_run_completed_and_reconnect_normalization
     assert asst_msg["tool_payload"]["artifacts"][0]["id"] == str(artifact_id)
     assert asst_msg["tool_payload"]["artifacts"][0]["message_id"] == asst_msg["id"]
 
-    # Legacy artifact payload lacking "id" is normalized when ChatPipeline initializes
     legacy_fid = str(uuid.uuid4())
     conv_obj = await db.get(Conversation, uuid.UUID(conv_id))
     legacy_msg = Message(
@@ -391,12 +393,12 @@ async def test_artifact_id_contract_on_run_completed_and_reconnect_normalization
         status="streaming",
         tool_payload={"artifacts": [{"file_id": legacy_fid, "filename": "legacy.txt"}]},
     )
-    pipeline = chat_stream.ChatPipeline(db, MockLateArtifactHermes("p", "k"), conv_obj, legacy_msg, "run-leg")
+    pipeline = chat_stream.ChatPipeline(db, MockLateArtifactAgent("p", "k"), conv_obj, legacy_msg, "run-leg")
     assert pipeline.artifacts[0]["id"] == legacy_fid
     assert legacy_fid in pipeline.seen_artifact_ids
 
 
-async def test_regenerate_and_edit_truncate_preserve_credits_and_use_fresh_session(
+async def test_regenerate_and_edit_truncate_preserve_credits_and_rotate_thread(
     register, client, db, engine, monkeypatch
 ):
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -409,7 +411,6 @@ async def test_regenerate_and_edit_truncate_preserve_credits_and_use_fresh_sessi
     conv = (await client.post("/api/conversations", json={"title": "重构对话"}, headers=headers)).json()
     conv_id = conv["id"]
 
-    # Seed 2 turns + CreditLedger rows
     t0 = datetime.now(timezone.utc) - timedelta(minutes=10)
     u1 = Message(conversation_id=uuid.UUID(conv_id), role="user", content="第一问", status="completed", created_at=t0)
     a1 = Message(
@@ -417,7 +418,7 @@ async def test_regenerate_and_edit_truncate_preserve_credits_and_use_fresh_sessi
         role="assistant",
         content="第一答",
         status="completed",
-        hermes_run_id="run-1",
+        run_id="run-1",
         created_at=t0 + timedelta(seconds=1),
     )
     u2 = Message(
@@ -432,7 +433,7 @@ async def test_regenerate_and_edit_truncate_preserve_credits_and_use_fresh_sessi
         role="assistant",
         content="第二答（待重新生成）",
         status="completed",
-        hermes_run_id="run-2",
+        run_id="run-2",
         created_at=t0 + timedelta(seconds=3),
     )
     tool2 = Message(
@@ -440,13 +441,12 @@ async def test_regenerate_and_edit_truncate_preserve_credits_and_use_fresh_sessi
         role="tool",
         tool_name="web_search",
         status="completed",
-        hermes_run_id="run-2",
+        run_id="run-2",
         created_at=t0 + timedelta(seconds=4),
     )
     db.add_all([u1, a1, u2, a2, tool2])
     await db.commit()
 
-    # Add CreditLedger entry referencing a2.id
     db.add(
         CreditLedger(
             user_id=user.id,
@@ -459,54 +459,32 @@ async def test_regenerate_and_edit_truncate_preserve_credits_and_use_fresh_sessi
     )
     await db.commit()
 
-    session_seq = 0
-    created_sessions: list[str] = []
+    deleted_threads: list[str] = []
     run_calls: list[dict] = []
 
-    class MockActionHermes:
-        def __init__(self, profile: str, api_key: str) -> None:
+    class MockActionAgent:
+        def __init__(self, namespace: str | None = None, api_key: str | None = None) -> None:
             pass
 
         async def health(self) -> bool:
             return True
 
-        async def create_session(self, title: str = "新对话") -> dict:
-            nonlocal session_seq
-            session_seq += 1
-            sid = f"fresh-sess-{session_seq}"
-            created_sessions.append(sid)
-            return {"id": sid}
+        async def delete_thread(self, thread_id: str) -> None:
+            deleted_threads.append(thread_id)
 
-        async def create_run(
-            self,
-            input_text: str,
-            session_id: str,
-            idempotency_key: str,
-            *,
-            instructions: str | None = None,
-            conversation_history: list[dict[str, str]] | None = None,
-        ) -> dict:
-            run_calls.append(
-                {
-                    "input": input_text,
-                    "session_id": session_id,
-                    "conversation_history": conversation_history,
-                }
-            )
+        async def create_run(self, **kwargs) -> dict:
+            run_calls.append(kwargs)
             return {"run_id": f"run-new-{len(run_calls)}"}
 
-        async def stream_run_events(self, run_id: str):
+        async def stream_events(self, run_id: str, *, last_event_id: str | None = None):
             yield ("message.delta", {"delta": f"新回复({run_id})"})
             yield ("run.completed", {"output": f"新回复({run_id})", "usage": {"total_tokens": 5000}})
-
-        async def session_messages(self, session_id: str) -> list:
-            return []
 
         async def aclose(self) -> None:
             pass
 
-    monkeypatch.setattr(chat_routes, "HermesClient", MockActionHermes)
-    monkeypatch.setattr(chat_stream, "HermesClient", MockActionHermes)
+    monkeypatch.setattr(chat_routes, "AgentClient", MockActionAgent)
+    monkeypatch.setattr(chat_stream, "AgentClient", MockActionAgent)
 
     # Wrong role -> 400
     bad_regen_headers = await _issue_send_headers(client, reg["access_token"], conv_id)
@@ -517,15 +495,17 @@ async def test_regenerate_and_edit_truncate_preserve_credits_and_use_fresh_sessi
     assert bad_regen.status_code == 400
 
     # Regenerate a2
+    conv_before = await db.get(Conversation, uuid.UUID(conv_id))
+    orig_thread = conv_before.thread_id
     regen_headers = await _issue_send_headers(client, reg["access_token"], conv_id)
     regen_resp = await client.post(
         f"/api/conversations/{conv_id}/messages/{a2.id}/regenerate",
         headers=regen_headers,
     )
     assert regen_resp.status_code == 200, regen_resp.text
-    assert created_sessions == ["fresh-sess-1"]
-    assert run_calls[0]["session_id"] == "fresh-sess-1"
-    assert run_calls[0]["input"] == "第二问"
+    assert len(deleted_threads) == 1 and deleted_threads[0] == orig_thread
+    assert run_calls[0]["thread_id"] != orig_thread
+    assert run_calls[0]["input_text"] == "第二问"
     assert run_calls[0]["conversation_history"] == [
         {"role": "user", "content": "第一问"},
         {"role": "assistant", "content": "第一答"},
@@ -533,27 +513,27 @@ async def test_regenerate_and_edit_truncate_preserve_credits_and_use_fresh_sessi
 
     detail1 = (await client.get(f"/api/conversations/{conv_id}", headers=headers)).json()
     msgs1 = detail1["messages"]
-    assert len(msgs1) == 4  # u1, a1, u2, new_a2 (old a2 & tool2 truncated!)
+    assert len(msgs1) == 4
     assert msgs1[-1]["content"] == "新回复(run-new-1)"
     assert msgs1[-1]["id"] != str(a2.id)
 
-    # CreditLedger for old a2 is preserved!
     ledger_count = len(
         (await db.execute(select(CreditLedger).where(CreditLedger.user_id == user.id))).scalars().all()
     )
-    assert ledger_count == 2  # old a2 + new_a2
+    assert ledger_count == 2
 
-    # Edit u1 -> truncates u1, a1, u2, new_a2 and starts fresh session 2
+    # Edit u1 -> truncates u1, a1, u2, new_a2 and rotates thread again
     edit_headers = await _issue_send_headers(client, reg["access_token"], conv_id)
     edit_resp = await client.post(
         f"/api/conversations/{conv_id}/messages/{u1.id}/edit",
-        json={"content": "修改后的第一问", "skill_names": ["some-skill"]},
+        json={"content": "修改后的第一问", "skill_names": ["some-skill"], "model_route": "fast"},
         headers=edit_headers,
     )
     assert edit_resp.status_code == 200, edit_resp.text
-    assert created_sessions == ["fresh-sess-1", "fresh-sess-2"]
-    assert run_calls[1]["session_id"] == "fresh-sess-2"
-    assert run_calls[1]["input"] == "修改后的第一问"
+    assert len(deleted_threads) == 2
+    assert run_calls[1]["thread_id"] != run_calls[0]["thread_id"]
+    assert run_calls[1]["input_text"] == "修改后的第一问"
+    assert run_calls[1]["model_route"] == "fast"
     assert run_calls[1]["conversation_history"] is None
 
     detail2 = (await client.get(f"/api/conversations/{conv_id}", headers=headers)).json()
@@ -562,7 +542,6 @@ async def test_regenerate_and_edit_truncate_preserve_credits_and_use_fresh_sessi
     assert msgs2[0]["content"] == "修改后的第一问"
     assert msgs2[1]["content"] == "新回复(run-new-2)"
 
-    # Active run guard rejects regenerate/edit with 409
     conv_obj = await db.get(Conversation, uuid.UUID(conv_id))
     conv_obj.active_run_id = "busy-run"
     await db.commit()
@@ -572,3 +551,38 @@ async def test_regenerate_and_edit_truncate_preserve_credits_and_use_fresh_sessi
         headers=busy_headers,
     )
     assert busy_resp.status_code == 409
+
+
+async def test_agent_status_and_topology_endpoints(register, client, monkeypatch):
+    reg = await register(email="topo@test.local", display_name="TopoUser")
+    headers = auth_header(reg["access_token"])
+
+    class MockTopoAgent:
+        def __init__(self, namespace: str | None = None, api_key: str | None = None) -> None:
+            pass
+
+        async def health_info(self) -> dict:
+            return {"ready": True, "status": "ok", "sandbox_mode": "docker"}
+
+        async def topology(self) -> dict:
+            return {
+                "entry": "context_loader",
+                "nodes": [{"id": "context_loader", "label": "Loader"}, {"id": "agent", "label": "Agent"}],
+                "edges": [{"source": "context_loader", "target": "agent"}],
+            }
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr(agent_routes, "AgentClient", MockTopoAgent)
+
+    st = await client.get("/api/agent/status", headers=headers)
+    assert st.status_code == 200
+    assert st.json()["ready"] is True
+    assert st.json()["engine"] == "langgraph"
+    assert st.json()["sandbox_mode"] == "docker"
+
+    topo = await client.get("/api/agent/topology", headers=headers)
+    assert topo.status_code == 200
+    assert topo.json()["entry"] == "context_loader"
+    assert len(topo.json()["nodes"]) == 2

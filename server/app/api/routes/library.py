@@ -4,7 +4,7 @@ import os
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_owned_conversation
@@ -21,7 +21,7 @@ from app.api.schemas import (
     LibraryFileUpdateRequest,
 )
 from app.core.config import get_settings
-from app.db.models import Conversation, ConversationFile, User
+from app.db.models import Conversation, ConversationFile, FileChunk, User
 from app.db.session import get_db
 from app.services import audit, cos, file_types
 
@@ -113,6 +113,9 @@ async def update_library_file(
     if body.is_global is not None and body.is_global != row.is_global:
         row.is_global = body.is_global
         changes["is_global"] = body.is_global
+        await db.execute(
+            update(FileChunk).where(FileChunk.file_id == row.id).values(is_global=body.is_global)
+        )
 
     if body.filename is not None:
         cleaned = file_types.sanitize_filename(body.filename)

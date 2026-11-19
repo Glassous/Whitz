@@ -5,20 +5,20 @@ import json
 import logging
 import os
 import re
-import shutil
 import socket
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 import httpx
 import yaml
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import User
-from app.services import provisioning
+from app.db.models import SkillPendingProposal, User, UserSkill
 
 logger = logging.getLogger("whitz.skills")
 
@@ -74,11 +74,8 @@ _BUILTIN_EXCLUDED_DIRS = frozenset(
 )
 _SKILL_SUPPORT_DIRS = frozenset({"references", "templates", "assets", "scripts"})
 
-# Hermes ships a large built-in catalog (~/.hermes/skills) written for a full host. Whitz
-# profiles only expose web/todo/skills/session_search/clarify/whitz_files/whitz_skills and
-# strip terminal/file/browser/code_execution/computer_use (see provisioning.DISABLED_TOOLSETS),
-# so skills that drive those tools can never produce a result here. They are hidden from the
-# skill management UI instead of pretending to be usable.
+# Built-in skills imported from external catalogs that call unavailable host toolsets/CLIs
+# remain hidden from the skill management UI.
 _UNAVAILABLE_TOOLSET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("terminal", re.compile(r"(?<![\w.])terminal\s*\(", re.IGNORECASE)),
     ("process", re.compile(r"(?<![\w.])process\s*\(\s*(?:action\s*[=:]|session_id\s*[=:])", re.IGNORECASE)),
@@ -108,7 +105,6 @@ _UNAVAILABLE_BUILTIN_NAMES = frozenset(
         "claude-code",
         "codex",
         "opencode",
-        "hermes-agent",
         "himalaya",
         "xurl",
         "google-workspace",
@@ -135,7 +131,10 @@ _SECURITY_RULES: list[tuple[str, str, re.Pattern[str]]] = [
     (
         "remote_pipe_exec",
         "检测到从远程下载并直接通过管道执行脚本（curl/wget | sh/python）",
-        re.compile(r"(?:curl|wget)\b[^\n|]{0,240}\|\s*(?:sudo\s+)?(?:(?:ba|z|da|k)?sh|python[23]?)\b", re.IGNORECASE),
+        re.compile(
+            r"(?:curl|wget)\b[^\n|]{0,240}\|\s*(?:sudo\s+)?(?:(?:ba|z|da|k)?sh|python[23]?)\b",
+            re.IGNORECASE,
+        ),
     ),
     (
         "eval_remote_exec",
@@ -162,14 +161,17 @@ _SECURITY_RULES: list[tuple[str, str, re.Pattern[str]]] = [
         "secret_exfiltration",
         "检测到向外部发送环境变量或敏感密钥的网络外泄行为",
         re.compile(
-            r"(?:curl|wget|Invoke-WebRequest|requests\.post|httpx\.post|urllib\.request)\b[^\n]{0,240}(?:os\.environ|API_SERVER_KEY|JWT_SECRET|COS_SECRET|AWS_SECRET|OPENAI_API_KEY|ANTHROPIC_API_KEY|\.env\b)",
+            r"(?:curl|wget|Invoke-WebRequest|requests\.post|httpx\.post|urllib\.request)\b[^\n]{0,240}(?:os\.environ|API_SERVER_KEY|AGENT_INTERNAL_TOKEN|JWT_SECRET|COS_SECRET|AWS_SECRET|OPENAI_API_KEY|ANTHROPIC_API_KEY|\.env\b)",
             re.IGNORECASE,
         ),
     ),
     (
         "destructive_fs",
         "检测到高危破坏性系统命令（rm -rf / 或 Fork 炸弹）",
-        re.compile(r"(?:\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/(?:\s|$|\*)|:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:)", re.IGNORECASE),
+        re.compile(
+            r"(?:\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/(?:\s|$|\*)|:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:)",
+            re.IGNORECASE,
+        ),
     ),
     (
         "obfuscated_exec",
@@ -197,16 +199,15 @@ class SkillSsrfError(SkillServiceError):
     pass
 
 
-def _skills_dir(profile: str) -> Path:
-    return provisioning.profile_dir(profile) / "skills"
-
-
 def _global_skills_dir() -> Path:
-    return Path(get_settings().hermes_data_dir) / "skills"
-
-
-def _pending_dir(profile: str) -> Path:
-    return provisioning.profile_dir(profile) / "pending" / "skills"
+    settings = get_settings()
+    configured = (settings.builtin_skills_dir or "").strip()
+    if configured:
+        return Path(configured)
+    app_skills = Path(settings.app_data_dir) / "skills"
+    if app_skills.is_dir():
+        return app_skills
+    return Path(__file__).resolve().parents[2] / "resources" / "builtin_skills"
 
 
 def _split_names(value: str | None) -> set[str]:
@@ -226,7 +227,7 @@ def _builtin_unavailable_reason(
     name: str,
     category: str | None,
 ) -> str | None:
-    """Explain why a Hermes built-in skill cannot run here, or return None when it can."""
+    """Explain why a built-in skill cannot run here, or return None when it can."""
     allow, deny = _builtin_name_overrides()
     lowered = (name or "").strip().lower()
     if lowered in deny:
@@ -322,10 +323,13 @@ def parse_skill_markdown(content: str, fallback_name: str = "") -> dict[str, Any
         except yaml.YAMLError:
             meta = {}
 
-    hermes_meta: dict[str, Any] = {}
+    extra_meta: dict[str, Any] = {}
     raw_metadata = meta.get("metadata")
-    if isinstance(raw_metadata, dict) and isinstance(raw_metadata.get("hermes"), dict):
-        hermes_meta = raw_metadata["hermes"]
+    if isinstance(raw_metadata, dict):
+        for meta_key in ("whitz", "agent"):
+            if isinstance(raw_metadata.get(meta_key), dict):
+                extra_meta = raw_metadata[meta_key]
+                break
 
     name = str(meta.get("name") or fallback_name or "").strip()
     title = str(meta.get("title") or "").strip() or None
@@ -336,10 +340,10 @@ def parse_skill_markdown(content: str, fallback_name: str = "") -> dict[str, Any
             if stripped:
                 description = stripped[:240]
                 break
-    category = str(meta.get("category") or hermes_meta.get("category") or "").strip() or None
+    category = str(meta.get("category") or extra_meta.get("category") or "").strip() or None
     raw_tags = meta.get("tags")
     if raw_tags is None:
-        raw_tags = hermes_meta.get("tags")
+        raw_tags = extra_meta.get("tags")
     if isinstance(raw_tags, list):
         tags = [str(t).strip() for t in raw_tags if str(t).strip()]
     elif isinstance(raw_tags, str) and raw_tags.strip():
@@ -398,79 +402,8 @@ def render_skill_markdown(
     return f"---\n{dumped}\n---\n\n{text}\n"
 
 
-def _read_whitz_meta(skill_dir: Path) -> dict[str, Any]:
-    path = skill_dir / ".whitz_meta.json"
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _write_whitz_meta(
-    skill_dir: Path,
-    *,
-    source: str,
-    repo_url: str | None = None,
-    ref: str | None = None,
-    path: str | None = None,
-) -> datetime:
-    now = datetime.now(timezone.utc)
-    payload = {
-        "source": source,
-        "repo_url": repo_url,
-        "ref": ref,
-        "path": path,
-        "updated_at": now.isoformat(),
-    }
-    (skill_dir / ".whitz_meta.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return now
-
-
-def _parse_dt(value: Any, fallback: datetime | None = None) -> datetime | None:
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value), tz=timezone.utc)
-    if isinstance(value, str) and value.strip():
-        try:
-            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-            return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
-        except ValueError:
-            pass
-    return fallback
-
-
-def _local_skill_entry(skill_dir: Path, disabled_set: set[str]) -> dict[str, Any] | None:
-    skill_md = skill_dir / "SKILL.md"
-    if not skill_md.is_file():
-        return None
-    try:
-        content = skill_md.read_text(encoding="utf-8")
-        mtime = datetime.fromtimestamp(skill_md.stat().st_mtime, tz=timezone.utc)
-    except OSError:
-        return None
-    parsed = parse_skill_markdown(content, fallback_name=skill_dir.name)
-    meta = _read_whitz_meta(skill_dir)
-    name = skill_dir.name
-    source = str(meta.get("source") or "custom")
-    return {
-        "name": name,
-        "title": parsed["title"] or name,
-        "description": parsed["description"],
-        "category": parsed["category"],
-        "enabled": name not in disabled_set,
-        "source": source,
-        "editable": source != "builtin",
-        "repo_url": meta.get("repo_url"),
-        "content": content,
-        "tags": parsed["tags"],
-        "updated_at": _parse_dt(meta.get("updated_at"), fallback=mtime),
-    }
-
-
 def _scan_builtin_skills(disabled_set: set[str]) -> list[dict[str, Any]]:
-    """Scan global Hermes built-in skills on disk when /v1/skills is unavailable or empty."""
+    """Scan built-in skills on disk under BUILTIN_SKILLS_DIR / APP_DATA_DIR / resources."""
     global_root = _global_skills_dir()
     if not global_root.is_dir():
         return []
@@ -492,7 +425,9 @@ def _scan_builtin_skills(disabled_set: set[str]) -> list[dict[str, Any]]:
         skill_md = current_dir / "SKILL.md"
         try:
             content = skill_md.read_text(encoding="utf-8")
-            mtime = datetime.fromtimestamp(skill_md.stat().st_mtime, tz=timezone.utc)
+            from datetime import timezone as _tz
+
+            mtime = datetime.fromtimestamp(skill_md.stat().st_mtime, tz=_tz.utc)
         except (OSError, UnicodeDecodeError):
             continue
 
@@ -528,95 +463,53 @@ def _scan_builtin_skills(disabled_set: set[str]) -> list[dict[str, Any]]:
     return items
 
 
-def list_skills(profile: str, *, hermes_skills: list[Any] | None = None) -> list[dict[str, Any]]:
-    disabled_set = set(provisioning.read_disabled_skills(profile))
-    skills_root = _skills_dir(profile)
+def _serialize_user_skill(row: UserSkill) -> dict[str, Any]:
+    parsed = parse_skill_markdown(row.content or "", fallback_name=row.name)
+    tags = row.tags if isinstance(row.tags, list) else parsed["tags"]
+    return {
+        "name": row.name,
+        "title": row.title or parsed["title"] or row.name,
+        "description": row.description or parsed["description"],
+        "category": row.category or parsed["category"],
+        "enabled": bool(row.enabled),
+        "source": row.source or "custom",
+        "editable": (row.source or "custom") != "builtin",
+        "repo_url": row.repo_url,
+        "content": row.content,
+        "tags": [str(t) for t in tags if str(t).strip()],
+        "updated_at": row.updated_at,
+    }
+
+
+async def list_skills(db: AsyncSession, user: User) -> list[dict[str, Any]]:
+    rows = (
+        await db.execute(select(UserSkill).where(UserSkill.user_id == user.id))
+    ).scalars().all()
+
     by_name: dict[str, dict[str, Any]] = {}
+    builtin_enabled_overrides: dict[str, bool] = {}
+    for row in rows:
+        if row.source == "builtin":
+            builtin_enabled_overrides[row.name] = bool(row.enabled)
+        else:
+            by_name[row.name] = _serialize_user_skill(row)
 
-    if skills_root.is_dir():
-        for entry_dir in sorted(skills_root.iterdir(), key=lambda p: p.name.lower()):
-            if not entry_dir.is_dir() or entry_dir.name.startswith("."):
-                continue
-            item = _local_skill_entry(entry_dir, disabled_set)
-            if item is not None:
-                by_name[item["name"]] = item
-
-    builtin_items = {item["name"].lower(): item for item in _scan_builtin_skills(disabled_set)}
-
-    added_from_hermes = False
-    for raw in hermes_skills or []:
-        if not isinstance(raw, dict):
+    disabled_builtins = {name for name, enabled in builtin_enabled_overrides.items() if not enabled}
+    for item in _scan_builtin_skills(disabled_builtins):
+        if not item.get("available"):
             continue
-        name = str(raw.get("name") or "").strip()
-        if not name:
+        if item["name"] in by_name:
             continue
-        added_from_hermes = True
-        if name in by_name:
-            # Keep local content/meta, fill missing fields if any.
-            if not by_name[name].get("description") and raw.get("description"):
-                by_name[name]["description"] = str(raw["description"])
-            if not by_name[name].get("category") and raw.get("category"):
-                by_name[name]["category"] = str(raw["category"])
-            continue
-        raw_tags = raw.get("tags")
-        tags = [str(t).strip() for t in raw_tags if str(t).strip()] if isinstance(raw_tags, list) else []
-        source = str(raw.get("source") or "builtin")
-        category = str(raw.get("category")).strip() if raw.get("category") else None
-        if source == "builtin":
-            scanned = builtin_items.get(name.lower())
-            if scanned is not None:
-                unavailable_reason = scanned.get("unavailable_reason")
-            else:
-                content = raw.get("content") if isinstance(raw.get("content"), str) else None
-                unavailable_reason = _builtin_unavailable_reason(content, name=name, category=category)
-            if unavailable_reason:
-                # Built-in skills the platform cannot run stay invisible for every user.
-                continue
-        by_name[name] = {
-            "name": name,
-            "title": str(raw.get("title") or name),
-            "description": str(raw.get("description") or ""),
-            "category": category,
-            "enabled": name not in disabled_set and bool(raw.get("enabled", True)),
-            "source": source,
-            "editable": bool(raw.get("editable")) if "editable" in raw else source != "builtin",
-            "repo_url": raw.get("repo_url"),
-            "content": raw.get("content") if isinstance(raw.get("content"), str) else None,
-            "tags": tags,
-            "updated_at": _parse_dt(raw.get("updated_at")),
-        }
-
-    if not added_from_hermes:
-        for item in builtin_items.values():
-            if not item.get("available") or item["name"] in by_name:
-                continue
-            by_name[item["name"]] = {
-                key: value for key, value in item.items() if key not in ("available", "unavailable_reason")
-            }
+        cleaned = {k: v for k, v in item.items() if k not in ("available", "unavailable_reason")}
+        if item["name"] in builtin_enabled_overrides:
+            cleaned["enabled"] = builtin_enabled_overrides[item["name"]]
+        by_name[item["name"]] = cleaned
 
     return sorted(by_name.values(), key=lambda s: (0 if s["source"] != "builtin" else 1, s["name"].lower()))
 
 
-def _sync_disabled_list(user: User, disabled: list[str]) -> None:
-    provisioning.sync_profile_config(
-        user.hermes_profile,
-        api_key=user.hermes_api_key,
-        memory_enabled=bool(user.memory_enabled and user.memory_consented_at),
-        memory_require_confirm=bool(user.memory_require_confirm),
-        disabled_skills=disabled,
-    )
-
-
-def _set_skill_enabled(user: User, name: str, enabled: bool) -> None:
-    current = provisioning.read_disabled_skills(user.hermes_profile)
-    if enabled:
-        next_disabled = [item for item in current if item != name]
-    else:
-        next_disabled = current if name in current else [*current, name]
-    _sync_disabled_list(user, next_disabled)
-
-
-def create_custom_skill(
+async def create_custom_skill(
+    db: AsyncSession,
     user: User,
     *,
     name: str,
@@ -626,8 +519,12 @@ def create_custom_skill(
     enabled: bool = True,
 ) -> dict[str, Any]:
     clean_name = validate_skill_name(name)
-    skill_dir = _skills_dir(user.hermes_profile) / clean_name
-    if skill_dir.exists():
+    existing = (
+        await db.execute(
+            select(UserSkill).where(UserSkill.user_id == user.id, UserSkill.name == clean_name)
+        )
+    ).scalar_one_or_none()
+    if existing is not None and existing.source != "builtin":
         raise SkillServiceError(f"技能 '{clean_name}' 已存在", 409)
 
     rendered = render_skill_markdown(
@@ -637,19 +534,42 @@ def create_custom_skill(
         category=category,
     )
     assert_skill_safe({"SKILL.md": rendered})
+    parsed = parse_skill_markdown(rendered, fallback_name=clean_name)
 
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(rendered, encoding="utf-8")
-    _write_whitz_meta(skill_dir, source="custom")
-    _set_skill_enabled(user, clean_name, enabled)
+    if existing is not None:
+        existing.title = parsed["title"] or clean_name
+        existing.description = parsed["description"]
+        existing.category = parsed["category"]
+        existing.content = rendered
+        existing.files = {"SKILL.md": rendered}
+        existing.tags = parsed["tags"]
+        existing.enabled = bool(enabled)
+        existing.source = "custom"
+        existing.repo_url = None
+        existing.ref = None
+        existing.path = None
+        row = existing
+    else:
+        row = UserSkill(
+            user_id=user.id,
+            name=clean_name,
+            title=parsed["title"] or clean_name,
+            description=parsed["description"],
+            category=parsed["category"],
+            content=rendered,
+            files={"SKILL.md": rendered},
+            tags=parsed["tags"],
+            enabled=bool(enabled),
+            source="custom",
+        )
+        db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _serialize_user_skill(row)
 
-    disabled_set = set(provisioning.read_disabled_skills(user.hermes_profile))
-    entry = _local_skill_entry(skill_dir, disabled_set)
-    assert entry is not None
-    return entry
 
-
-def update_custom_skill(
+async def update_custom_skill(
+    db: AsyncSession,
     user: User,
     name: str,
     *,
@@ -659,53 +579,79 @@ def update_custom_skill(
     enabled: bool | None = None,
 ) -> dict[str, Any]:
     clean_name = validate_skill_name(name)
-    skill_dir = _skills_dir(user.hermes_profile) / clean_name
-    skill_md = skill_dir / "SKILL.md"
-    if not skill_md.is_file():
+    row = (
+        await db.execute(
+            select(UserSkill).where(
+                UserSkill.user_id == user.id,
+                UserSkill.name == clean_name,
+                UserSkill.source != "builtin",
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
         raise SkillServiceError("仅支持编辑用户本地或已安装的技能", 404)
 
-    current_content = skill_md.read_text(encoding="utf-8")
-    next_raw = content if content is not None else current_content
+    next_raw = content if content is not None else row.content
     rendered = render_skill_markdown(
         next_raw,
         name=clean_name,
-        description=description,
-        category=category,
+        description=description if description is not None else row.description,
+        category=category if category is not None else row.category,
     )
     assert_skill_safe({"SKILL.md": rendered})
-    skill_md.write_text(rendered, encoding="utf-8")
-    meta = _read_whitz_meta(skill_dir)
-    _write_whitz_meta(
-        skill_dir,
-        source=str(meta.get("source") or "custom"),
-        repo_url=meta.get("repo_url"),
-        ref=meta.get("ref"),
-        path=meta.get("path"),
-    )
+    parsed = parse_skill_markdown(rendered, fallback_name=clean_name)
+
+    files = dict(row.files or {})
+    files["SKILL.md"] = rendered
+    row.title = parsed["title"] or clean_name
+    row.description = parsed["description"]
+    row.category = parsed["category"]
+    row.content = rendered
+    row.files = files
+    row.tags = parsed["tags"]
     if enabled is not None:
-        _set_skill_enabled(user, clean_name, enabled)
+        row.enabled = bool(enabled)
 
-    disabled_set = set(provisioning.read_disabled_skills(user.hermes_profile))
-    entry = _local_skill_entry(skill_dir, disabled_set)
-    assert entry is not None
-    return entry
+    await db.commit()
+    await db.refresh(row)
+    return _serialize_user_skill(row)
 
 
-def toggle_skill(
+async def toggle_skill(
+    db: AsyncSession,
     user: User,
     name: str,
     enabled: bool,
-    *,
-    hermes_skills: list[Any] | None = None,
 ) -> dict[str, Any]:
     clean_name = validate_skill_name(name)
-    known = {item["name"]: item for item in list_skills(user.hermes_profile, hermes_skills=hermes_skills)}
-    disabled_current = set(provisioning.read_disabled_skills(user.hermes_profile))
-    if clean_name not in known and clean_name not in disabled_current:
+    known = {item["name"]: item for item in await list_skills(db, user)}
+    row = (
+        await db.execute(
+            select(UserSkill).where(UserSkill.user_id == user.id, UserSkill.name == clean_name)
+        )
+    ).scalar_one_or_none()
+    if clean_name not in known and row is None:
         raise SkillServiceError("技能不存在", 404)
 
-    _set_skill_enabled(user, clean_name, enabled)
-    refreshed = {item["name"]: item for item in list_skills(user.hermes_profile, hermes_skills=hermes_skills)}
+    if row is not None:
+        row.enabled = bool(enabled)
+    else:
+        meta = known[clean_name]
+        row = UserSkill(
+            user_id=user.id,
+            name=clean_name,
+            title=meta.get("title") or clean_name,
+            description=meta.get("description") or "",
+            category=meta.get("category"),
+            content="",
+            tags=meta.get("tags") or [],
+            enabled=bool(enabled),
+            source="builtin",
+        )
+        db.add(row)
+    await db.commit()
+
+    refreshed = {item["name"]: item for item in await list_skills(db, user)}
     if clean_name in refreshed:
         return refreshed[clean_name]
     return {
@@ -713,7 +659,7 @@ def toggle_skill(
         "title": clean_name,
         "description": "",
         "category": None,
-        "enabled": enabled,
+        "enabled": bool(enabled),
         "source": "builtin",
         "editable": False,
         "repo_url": None,
@@ -723,13 +669,21 @@ def toggle_skill(
     }
 
 
-def delete_skill(user: User, name: str) -> None:
+async def delete_skill(db: AsyncSession, user: User, name: str) -> None:
     clean_name = validate_skill_name(name)
-    skill_dir = _skills_dir(user.hermes_profile) / clean_name
-    if not skill_dir.is_dir():
+    row = (
+        await db.execute(
+            select(UserSkill).where(
+                UserSkill.user_id == user.id,
+                UserSkill.name == clean_name,
+                UserSkill.source != "builtin",
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
         raise SkillServiceError("技能不存在或为系统内置技能（不可删除）", 404)
-    shutil.rmtree(skill_dir)
-    _set_skill_enabled(user, clean_name, True)
+    await db.delete(row)
+    await db.commit()
 
 
 def _is_public_ip(ip_str: str) -> bool:
@@ -931,7 +885,10 @@ async def _fetch_raw_skill_file(
     remaining_bytes: int,
 ) -> bytes:
     encoded_path = "/".join(quote(seg, safe="") for seg in file_path.split("/"))
-    url = f"https://raw.githubusercontent.com/{quote(owner, safe='')}/{quote(repo, safe='')}/{quote(ref, safe='')}/{encoded_path}"
+    url = (
+        f"https://raw.githubusercontent.com/{quote(owner, safe='')}/"
+        f"{quote(repo, safe='')}/{quote(ref, safe='')}/{encoded_path}"
+    )
     return await _http_get_bytes(client, url, max_bytes=remaining_bytes)
 
 
@@ -1012,7 +969,6 @@ async def _fetch_directory_skill_files(
     try:
         await _walk(subpath or "")
     except SkillServiceError as exc:
-        # Fallback to direct raw SKILL.md when GitHub API is rate-limited (403)
         if exc.status_code != 502:
             raise
         target_rel = f"{subpath}/SKILL.md" if subpath else "SKILL.md"
@@ -1100,7 +1056,8 @@ async def preview_github_skill(
     }
 
 
-def _install_skill_files(
+async def _install_skill_files(
+    db: AsyncSession,
     user: User,
     *,
     name: str,
@@ -1141,26 +1098,51 @@ def _install_skill_files(
         sanitized_files[safe_rel] = text
 
     assert_skill_safe(sanitized_files)
+    parsed = parse_skill_markdown(rendered_md, fallback_name=clean_name)
 
-    skill_dir = _skills_dir(user.hermes_profile) / clean_name
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    for rel, text in sanitized_files.items():
-        target = (skill_dir / rel).resolve()
-        if not str(target).startswith(str(skill_dir.resolve())):
-            raise SkillServiceError("检测到非法文件路径", 400)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+    existing = (
+        await db.execute(
+            select(UserSkill).where(UserSkill.user_id == user.id, UserSkill.name == clean_name)
+        )
+    ).scalar_one_or_none()
 
-    _write_whitz_meta(skill_dir, source=source, repo_url=repo_url, ref=ref, path=path)
-    _set_skill_enabled(user, clean_name, enabled)
-
-    disabled_set = set(provisioning.read_disabled_skills(user.hermes_profile))
-    entry = _local_skill_entry(skill_dir, disabled_set)
-    assert entry is not None
-    return entry
+    if existing is not None:
+        existing.title = parsed["title"] or clean_name
+        existing.description = parsed["description"]
+        existing.category = parsed["category"]
+        existing.content = rendered_md
+        existing.files = sanitized_files
+        existing.tags = parsed["tags"]
+        existing.enabled = bool(enabled)
+        existing.source = source
+        existing.repo_url = repo_url
+        existing.ref = ref
+        existing.path = path
+        row = existing
+    else:
+        row = UserSkill(
+            user_id=user.id,
+            name=clean_name,
+            title=parsed["title"] or clean_name,
+            description=parsed["description"],
+            category=parsed["category"],
+            content=rendered_md,
+            files=sanitized_files,
+            tags=parsed["tags"],
+            enabled=bool(enabled),
+            source=source,
+            repo_url=repo_url,
+            ref=ref,
+            path=path,
+        )
+        db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _serialize_user_skill(row)
 
 
 async def install_github_skill(
+    db: AsyncSession,
     user: User,
     url: str,
     *,
@@ -1171,7 +1153,8 @@ async def install_github_skill(
 ) -> dict[str, Any]:
     fetched = await fetch_github_skill(url, ref=ref, path=path)
     target_name = validate_skill_name(name) if name else validate_skill_name(fetched["name"])
-    return _install_skill_files(
+    return await _install_skill_files(
+        db,
         user,
         name=target_name,
         files=fetched["files"],
@@ -1185,8 +1168,9 @@ async def install_github_skill(
     )
 
 
-def stage_pending_skill(
-    profile: str,
+async def stage_pending_skill(
+    db: AsyncSession,
+    user_id: uuid.UUID,
     *,
     name: str,
     content: str,
@@ -1211,91 +1195,71 @@ def stage_pending_skill(
     staged_files["SKILL.md"] = rendered_md
     assert_skill_safe(staged_files)
 
-    pend_dir = _pending_dir(profile)
-    pend_dir.mkdir(parents=True, exist_ok=True)
-    pending_id = uuid.uuid4().hex[:16]
-    now = datetime.now(timezone.utc)
-    conv_str: str | None = None
+    conv_uuid: uuid.UUID | None = None
     if conversation_id is not None:
         try:
-            conv_str = str(uuid.UUID(str(conversation_id)))
+            conv_uuid = uuid.UUID(str(conversation_id))
         except ValueError:
-            conv_str = None
+            conv_uuid = None
 
     parsed = parse_skill_markdown(rendered_md, fallback_name=clean_name)
-    record = {
-        "id": pending_id,
-        "name": clean_name,
-        "description": description.strip() or parsed["description"],
-        "category": category or parsed["category"],
-        "content": rendered_md,
-        "files": staged_files,
-        "action": action,
-        "source": source,
-        "repo_url": repo_url,
-        "ref": ref,
-        "path": path,
-        "conversation_id": conv_str,
-        "created_at": now.isoformat(),
-    }
-    (pend_dir / f"{pending_id}.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    desc = description.strip() or parsed["description"]
+    cat = category or parsed["category"]
+
+    row = SkillPendingProposal(
+        user_id=user_id,
+        conversation_id=conv_uuid,
+        name=clean_name,
+        description=desc,
+        category=cat,
+        content=rendered_md,
+        files=staged_files,
+        action=action,
+        source=source,
+        repo_url=repo_url,
+        ref=ref,
+        path=path,
+        status="pending",
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
     return {
-        "id": pending_id,
-        "name": clean_name,
-        "description": record["description"],
-        "content": rendered_md,
-        "action": action,
-        "source": source,
-        "conversation_id": uuid.UUID(conv_str) if conv_str else None,
-        "created_at": now,
+        "id": str(row.id),
+        "name": row.name,
+        "description": row.description,
+        "content": row.content,
+        "action": row.action,
+        "source": row.source,
+        "conversation_id": row.conversation_id,
+        "created_at": row.created_at,
     }
 
 
-def _normalize_pending_skill(path: Path, raw: dict[str, Any]) -> dict[str, Any]:
-    pending_id = str(raw.get("id") or path.stem).strip() or path.stem
-    conv_id: uuid.UUID | None = None
-    if isinstance(raw.get("conversation_id"), str) and raw["conversation_id"].strip():
-        try:
-            conv_id = uuid.UUID(raw["conversation_id"].strip())
-        except ValueError:
-            conv_id = None
-    try:
-        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-    except OSError:
-        mtime = datetime.now(timezone.utc)
+def _serialize_pending_skill(row: SkillPendingProposal) -> dict[str, Any]:
     return {
-        "id": pending_id,
-        "name": str(raw.get("name") or pending_id),
-        "description": str(raw.get("description") or ""),
-        "content": str(raw.get("content") or ""),
-        "action": str(raw.get("action") or "create"),
-        "source": str(raw.get("source") or "agent"),
-        "conversation_id": conv_id,
-        "created_at": _parse_dt(raw.get("created_at"), fallback=mtime),
-        "_raw": raw,
+        "id": str(row.id),
+        "name": row.name,
+        "description": row.description or "",
+        "content": row.content,
+        "action": row.action or "create",
+        "source": row.source or "agent",
+        "conversation_id": row.conversation_id,
+        "created_at": row.created_at,
     }
 
 
-def list_pending(profile: str) -> list[dict[str, Any]]:
-    pend_dir = _pending_dir(profile)
-    if not pend_dir.is_dir():
-        return []
-    items: list[dict[str, Any]] = []
-    for path in sorted(pend_dir.glob("*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        norm = _normalize_pending_skill(path, data)
-        norm.pop("_raw", None)
-        items.append(norm)
-    items.sort(key=lambda item: item.get("created_at") or datetime.min.replace(tzinfo=timezone.utc))
-    return items
+async def list_pending(db: AsyncSession, user_id: uuid.UUID) -> list[dict[str, Any]]:
+    result = await db.execute(
+        select(SkillPendingProposal)
+        .where(SkillPendingProposal.user_id == user_id, SkillPendingProposal.status == "pending")
+        .order_by(SkillPendingProposal.created_at.asc(), SkillPendingProposal.id.asc())
+    )
+    return [_serialize_pending_skill(row) for row in result.scalars().all()]
 
 
-def resolve_pending(
+async def resolve_pending(
+    db: AsyncSession,
     user: User,
     pending_id: str,
     action: str,
@@ -1305,58 +1269,53 @@ def resolve_pending(
 ) -> dict[str, Any] | None:
     if not _SAFE_ID_RE.match(pending_id) or ".." in pending_id:
         raise SkillServiceError("无效的待审批技能 ID", 400)
-    pend_dir = _pending_dir(user.hermes_profile)
-    if not pend_dir.is_dir():
-        raise SkillServiceError("待审批技能不存在", 404)
+    try:
+        pending_uuid = uuid.UUID(pending_id)
+    except ValueError as exc:
+        raise SkillServiceError("待审批技能不存在", 404) from exc
 
-    direct = pend_dir / f"{pending_id}.json"
-    candidates = [direct] if direct.is_file() else sorted(pend_dir.glob("*.json"))
-    found_path: Path | None = None
-    found_norm: dict[str, Any] | None = None
-    for path in candidates:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        norm = _normalize_pending_skill(path, data)
-        if path.stem == pending_id or norm["id"] == pending_id:
-            found_path = path
-            found_norm = norm
-            break
-
-    if found_path is None or found_norm is None:
+    proposal = (
+        await db.execute(
+            select(SkillPendingProposal).where(
+                SkillPendingProposal.id == pending_uuid,
+                SkillPendingProposal.user_id == user.id,
+                SkillPendingProposal.status == "pending",
+            )
+        )
+    ).scalar_one_or_none()
+    if proposal is None:
         raise SkillServiceError("待审批技能不存在", 404)
 
     if action == "reject":
-        found_path.unlink(missing_ok=True)
+        await db.delete(proposal)
+        await db.commit()
         return None
     if action != "approve":
         raise SkillServiceError(f"不支持的审批动作: {action}", 400)
 
-    raw = found_norm["_raw"]
-    raw_files = raw.get("files") if isinstance(raw.get("files"), dict) else {}
+    raw_files = proposal.files if isinstance(proposal.files, dict) else {}
     files: dict[str, str] = {
         str(k): str(v) for k, v in raw_files.items() if isinstance(k, str) and isinstance(v, str)
     }
     if content_override is not None:
         files["SKILL.md"] = content_override
     elif "SKILL.md" not in files:
-        files["SKILL.md"] = found_norm["content"]
+        files["SKILL.md"] = proposal.content
 
-    source = "github" if found_norm["action"] == "install_github" or raw.get("repo_url") else "agent"
-    installed = _install_skill_files(
+    source = "github" if proposal.action == "install_github" or proposal.repo_url else "agent"
+    installed = await _install_skill_files(
+        db,
         user,
-        name=found_norm["name"],
+        name=proposal.name,
         files=files,
-        description=found_norm["description"],
-        category=raw.get("category"),
+        description=proposal.description,
+        category=proposal.category,
         source=source,
-        repo_url=raw.get("repo_url"),
-        ref=raw.get("ref"),
-        path=raw.get("path"),
+        repo_url=proposal.repo_url,
+        ref=proposal.ref,
+        path=proposal.path,
         enabled=enabled,
     )
-    found_path.unlink(missing_ok=True)
+    await db.delete(proposal)
+    await db.commit()
     return installed

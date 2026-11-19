@@ -1,0 +1,118 @@
+[
+  {
+    "id": "direct-greeting",
+    "category": "agent_first",
+    "input": "你好，请用一句话介绍你能帮我做什么。",
+    "attachments": [],
+    "memory_enabled": false,
+    "requested_route": "auto",
+    "expected_route": "fast",
+    "expected_tools": [],
+    "expect_interrupt": null,
+    "description": "Simple greeting should reply directly without unnecessary tool or RAG calls."
+  },
+  {
+    "id": "workspace-rag-lookup",
+    "category": "hybrid_rag",
+    "input": "请总结我刚才上传的 Q3 财报 PDF 里提到的核心营收增长点。",
+    "attachments": [
+      {
+        "file_id": "11111111-1111-1111-1111-111111111111",
+        "filename": "q3_report.pdf",
+        "category": "document",
+        "mime_type": "application/pdf",
+        "size_bytes": 245000,
+        "scope": "conversation"
+      }
+    ],
+    "memory_enabled": false,
+    "requested_route": "auto",
+    "expected_route": "default",
+    "expected_tools": ["rag_search_workspace"],
+    "expect_interrupt": null,
+    "description": "Agent should autonomously invoke Hybrid RAG on attached document."
+  },
+  {
+    "id": "memory-recall-and-propose",
+    "category": "memory",
+    "input": "记住我以后偏好使用中文回答并附带简短总结，先回忆一下我之前偏好的测试框架。",
+    "attachments": [],
+    "memory_enabled": true,
+    "memory_require_confirm": true,
+    "requested_route": "auto",
+    "expected_route": "default",
+    "expected_tools": ["memory_search", "memory_propose"],
+    "expect_interrupt": null,
+    "description": "Agent should search existing memories and propose a new pending memory entry."
+  },
+  {
+    "id": "multi-step-plan",
+    "category": "planning",
+    "input": "帮我制定一个迁移单体服务到微服务的五步计划并逐步分析。",
+    "attachments": [],
+    "memory_enabled": false,
+    "requested_route": "auto",
+    "expected_route": "reasoning",
+    "expected_tools": ["todo_list"],
+    "expect_interrupt": null,
+    "description": "Complex planning task should route to reasoning and emit todo_list plan updates."
+  },
+  {
+    "id": "hitl-execute-code",
+    "category": "hitl_approval",
+    "input": "请用 Python 计算斐波那契数列第 20 项并验证结果。",
+    "attachments": [],
+    "memory_enabled": false,
+    "requested_route": "auto",
+    "expected_route": "reasoning",
+    "expected_tools": ["execute_code"],
+    "expect_interrupt": "approval",
+    "description": "execute_code must pause at hitl_gate with approval interrupt before sandbox execution."
+  },
+  {
+    "id": "hitl-clarify",
+    "category": "hitl_clarify",
+    "input": "我需要为新上线的服务准备一套自动化部署脚本与环境配置，请帮我生成。",
+    "attachments": [],
+    "memory_enabled": false,
+    "requested_route": "auto",
+    "expected_route": "default",
+    "expected_tools": ["clarify"],
+    "expect_interrupt": "clarify",
+    "description": "Ambiguous deployment request can pause via clarify interrupt for target environment."
+  },
+  {
+    "id": "subagent-researcher",
+    "category": "subagent",
+    "input": "请深度调研 LangGraph 1.x 与 pgvector 混合检索的最佳实践并对比多种融合方案。",
+    "attachments": [],
+    "memory_enabled": false,
+    "requested_route": "auto",
+    "expected_route": "reasoning",
+    "expected_tools": ["delegate_subtask"],
+    "expect_interrupt": null,
+    "description": "Deep multi-hop research task should delegate to Researcher subgraph."
+  },
+  {
+    "id": "vision-routing",
+    "category": "model_routing",
+    "input": "请分析这张架构图中的瓶颈。",
+    "has_images": true,
+    "attachments": [
+      {
+        "file_id": "22222222-2222-2222-2222-222222222222",
+        "filename": "arch.png",
+        "category": "image",
+        "mime_type": "image/png",
+        "size_bytes": 120000,
+        "scope": "conversation"
+      }
+    ],
+    "memory_enabled": false,
+    "requested_route": "auto",
+    "expected_route": "vision",
+    "expected_tools": ["read_workspace_file"],
+    "expect_interrupt": null,
+    "description": "Multimodal image input should route to vision model when vision is supported."
+  }
+]

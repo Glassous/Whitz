@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.models import Conversation, ConversationFile, User
-from app.services import cos, file_parser, file_types
+from app.services import cos, file_chunks, file_parser, file_types
 
 MAX_WRITE_FILE_BYTES = 2 * 1024 * 1024
 WRITABLE_TEXT_EXTENSIONS = frozenset(
@@ -389,6 +389,7 @@ async def call_tool(
             existing.updated_at = datetime.now(timezone.utc)
             await db.commit()
             await db.refresh(existing)
+            await file_chunks.index_file_chunks_safe(db, existing, raw=raw_bytes)
             return _text_result(
                 {
                     "status": "updated",
@@ -442,6 +443,7 @@ async def call_tool(
         db.add(row)
         await db.commit()
         await db.refresh(row)
+        await file_chunks.index_file_chunks_safe(db, row, raw=raw_bytes)
         return _text_result(
             {
                 "status": "created",

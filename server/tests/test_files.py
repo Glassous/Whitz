@@ -341,3 +341,59 @@ async def test_pending_cleanup_preview_content_and_global_library(client, regist
     assert await db.get(ConversationFile, img_id) is None
     assert any(str(img_id) in k for k in deleted_keys)
     assert all(str(ready_id) not in k for k in deleted_keys)
+
+
+@pytest.mark.asyncio
+async def test_file_complete_indexes_chunks_and_syncs_global_flag(client, register, db, cos_env, monkeypatch):
+    from sqlalchemy import select
+
+    from app.db.models import FileChunk
+
+    u1 = await register(email="chunker@test.local", display_name="ChunkUser")
+    h1 = auth_header(u1["access_token"])
+    conv_id = (await client.post("/api/conversations", json={"title": "RAG索引"}, headers=h1)).json()["id"]
+
+    sample_text = ("第一段：LangGraph 状态图支持中断与恢复。\n" * 40).encode("utf-8")
+    pre = await client.post(
+        f"/api/conversations/{conv_id}/files/presign",
+        json={"filename": "arch.md", "mime_type": "text/markdown", "size_bytes": len(sample_text)},
+        headers=h1,
+    )
+    assert pre.status_code == 200
+    file_id = pre.json()["file_id"]
+
+    async def _fake_head(key: str, settings=None):
+        return {"content_length": len(sample_text), "etag": "e1", "content_type": "text/markdown"}
+
+    async def _fake_get(key: str, *, max_bytes: int, settings=None):
+        return sample_text
+
+    monkeypatch.setattr(cos, "head_object", _fake_head)
+    monkeypatch.setattr(cos, "get_object_bytes", _fake_get)
+
+    done = await client.post(f"/api/conversations/{conv_id}/files/{file_id}/complete", json={}, headers=h1)
+    assert done.status_code == 200, done.text
+
+    chunks = (
+        await db.execute(
+            select(FileChunk)
+            .where(FileChunk.file_id == uuid.UUID(file_id))
+            .order_by(FileChunk.chunk_index.asc())
+        )
+    ).scalars().all()
+    assert len(chunks) >= 2
+    assert chunks[0].is_global is False
+    assert chunks[0].search_tsv is not None
+    assert "LangGraph" in chunks[0].content
+
+    patched = await client.patch(
+        f"/api/library/files/{file_id}",
+        json={"is_global": True},
+        headers=h1,
+    )
+    assert patched.status_code == 200
+    db.expire_all()
+    chunks_after = (
+        await db.execute(select(FileChunk).where(FileChunk.file_id == uuid.UUID(file_id)))
+    ).scalars().all()
+    assert all(c.is_global is True for c in chunks_after)

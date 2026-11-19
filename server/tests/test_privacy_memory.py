@@ -1,12 +1,9 @@
-import json
 import uuid
 
-import pytest
-import yaml
 from sqlalchemy import select
 
-from app.db.models import User
-from app.services import bootstrap, memory_service, provisioning
+from app.db.models import MemoryEntry, MemoryPendingProposal, User
+from app.services import profile_context
 from tests.conftest import auth_header
 
 
@@ -33,7 +30,7 @@ async def test_profile_context_consent_and_sanitization(register, client, db):
 
     user = (await db.execute(select(User).where(User.email == "ctx@test.local"))).scalar_one()
     # Disabled by default
-    assert provisioning.build_profile_context(user) is None
+    assert profile_context.build_profile_context(user) is None
 
     # Enabling without consent=True fails with 400
     bad = await client.patch(
@@ -55,7 +52,7 @@ async def test_profile_context_consent_and_sanitization(register, client, db):
     assert body["profile_context_consented_at"] is not None
 
     await db.refresh(user)
-    ctx = provisioning.build_profile_context(user)
+    ctx = profile_context.build_profile_context(user)
     assert ctx is not None
     assert "CtxUser" in ctx
     assert "技术负责人" in ctx
@@ -76,20 +73,18 @@ async def test_profile_context_consent_and_sanitization(register, client, db):
     assert off.status_code == 200
     assert off.json()["profile_context_enabled"] is False
     await db.refresh(user)
-    assert provisioning.build_profile_context(user) is None
+    assert profile_context.build_profile_context(user) is None
 
 
-async def test_memory_settings_consent_config_sync_and_reconcile(register, client, db):
+async def test_memory_settings_consent_and_db_persistence(register, client, db):
     reg = await register(email="memcfg@test.local", display_name="MemCfg")
     headers = auth_header(reg["access_token"])
     user = (await db.execute(select(User).where(User.email == "memcfg@test.local"))).scalar_one()
 
-    # Initial config has memory disabled
-    cfg_path = provisioning.profile_dir(user.hermes_profile) / "config.yaml"
-    cfg0 = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    assert "memory" not in cfg0["platform_toolsets"]["api_server"]
-    assert cfg0["memory"]["memory_enabled"] is False
-    assert cfg0["memory"]["write_approval"] is True
+    # Initial settings have memory disabled
+    ov0 = (await client.get("/api/users/me/memory", headers=headers)).json()
+    assert ov0["memory_enabled"] is False
+    assert ov0["memory_require_confirm"] is True
 
     # Turning on without consent=True returns 400
     bad = await client.put(
@@ -99,7 +94,7 @@ async def test_memory_settings_consent_config_sync_and_reconcile(register, clien
     )
     assert bad.status_code == 400
 
-    # Turning on with consent=True syncs config.yaml
+    # Turning on with consent=True persists on User
     on = await client.put(
         "/api/users/me/memory/settings",
         json={"enabled": True, "require_confirm": True, "consent": True},
@@ -110,26 +105,21 @@ async def test_memory_settings_consent_config_sync_and_reconcile(register, clien
     assert data["memory_enabled"] is True
     assert data["memory_consented_at"] is not None
     assert data["memory_require_confirm"] is True
-
-    cfg1 = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    assert "memory" in cfg1["platform_toolsets"]["api_server"]
-    assert cfg1["memory"]["memory_enabled"] is True
-    assert cfg1["memory"]["user_profile_enabled"] is True
-    assert cfg1["memory"]["write_approval"] is True
-    assert cfg1["memory"]["memory_char_limit"] == 2200
-    assert cfg1["memory"]["user_char_limit"] == 1375
-
-    # Preserve skills.disabled during reconcile_profiles
-    cfg1["skills"] = {"disabled": ["keep-me-disabled"]}
-    cfg_path.write_text(yaml.safe_dump(cfg1, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    assert data["memory_char_limit"] == 2200
+    assert data["user_char_limit"] == 1375
 
     await db.refresh(user)
-    await bootstrap.reconcile_profiles(db)
+    assert user.memory_enabled is True
+    assert user.memory_require_confirm is True
 
-    cfg2 = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    assert "memory" in cfg2["platform_toolsets"]["api_server"]
-    assert cfg2["memory"]["memory_enabled"] is True
-    assert cfg2["skills"]["disabled"] == ["keep-me-disabled"]
+    # Toggling require_confirm to False persists
+    off_confirm = await client.put(
+        "/api/users/me/memory/settings",
+        json={"require_confirm": False},
+        headers=headers,
+    )
+    assert off_confirm.status_code == 200
+    assert off_confirm.json()["memory_require_confirm"] is False
 
 
 async def test_memory_crud_limits_pending_and_isolation(register, client, db):
@@ -139,7 +129,7 @@ async def test_memory_crud_limits_pending_and_isolation(register, client, db):
     h2 = auth_header(u2["access_token"])
     user1 = (await db.execute(select(User).where(User.email == "mem1@test.local"))).scalar_one()
 
-    # Add entries to MEMORY.md and USER.md
+    # Add entries to memory & user targets
     r1 = await client.post(
         "/api/users/me/memory/entries",
         json={"target": "memory", "content": "项目使用 FastAPI + PostgreSQL 17"},
@@ -158,15 +148,14 @@ async def test_memory_crud_limits_pending_and_isolation(register, client, db):
     assert len(r2.json()["entries"]) == 2
     assert r2.json()["user_char_count"] > 0
 
-    # Verify delimiter in MEMORY.md
+    # Verify char count includes delimiter accounting in PG
     r3 = await client.post(
         "/api/users/me/memory/entries",
         json={"target": "memory", "content": "Redis 端口为 6379"},
         headers=h1,
     )
     assert r3.status_code == 201
-    mem_file = provisioning.profile_dir(user1.hermes_profile) / "memories" / "MEMORY.md"
-    assert "\n§\n" in mem_file.read_text(encoding="utf-8")
+    assert r3.json()["memory_char_count"] == len("项目使用 FastAPI + PostgreSQL 17\n§\nRedis 端口为 6379")
 
     # Enforce USER.md 1375 char limit
     oversized = await client.post(
@@ -190,35 +179,28 @@ async def test_memory_crud_limits_pending_and_isolation(register, client, db):
     assert u2_get.status_code == 200
     assert u2_get.json()["entries"] == []
 
-    # Stage pending memory proposals (add & replace) matching Hermes format
-    pend_dir = provisioning.profile_dir(user1.hermes_profile) / "pending" / "memory"
-    pend_dir.mkdir(parents=True, exist_ok=True)
-    p1_id = "mem_pend_1"
-    p2_id = "mem_pend_2"
-    (pend_dir / f"{p1_id}.json").write_text(
-        json.dumps(
-            {
-                "id": p1_id,
-                "target": "memory",
-                "action": "add",
-                "content": "部署使用 Docker Compose",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    # Stage pending memory proposals in PG
+    p1_id = uuid.uuid4()
+    p2_id = uuid.uuid4()
+    db.add_all(
+        [
+            MemoryPendingProposal(
+                id=p1_id,
+                user_id=user1.id,
+                target="memory",
+                action="add",
+                content="部署使用 Docker Compose",
+            ),
+            MemoryPendingProposal(
+                id=p2_id,
+                user_id=user1.id,
+                target="user",
+                action="add",
+                content="应被拒绝的噪音偏好",
+            ),
+        ]
     )
-    (pend_dir / f"{p2_id}.json").write_text(
-        json.dumps(
-            {
-                "id": p2_id,
-                "target": "user",
-                "action": "add",
-                "content": "应被拒绝的噪音偏好",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    await db.commit()
 
     overview = await client.get("/api/users/me/memory", headers=h1)
     assert len(overview.json()["pending"]) == 2
@@ -253,3 +235,5 @@ async def test_memory_crud_limits_pending_and_isolation(register, client, db):
     assert cleared.json()["entries"] == []
     assert cleared.json()["memory_char_count"] == 0
     assert cleared.json()["user_char_count"] == 0
+    remaining_rows = (await db.execute(select(MemoryEntry).where(MemoryEntry.user_id == user1.id))).scalars().all()
+    assert remaining_rows == []

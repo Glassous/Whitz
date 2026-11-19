@@ -39,14 +39,38 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
     llm_supports_vision: bool = True
+    llm_fast_base_url: str = ""
+    llm_fast_api_key: str = ""
+    llm_fast_model: str = ""
+    llm_reasoning_base_url: str = ""
+    llm_reasoning_api_key: str = ""
+    llm_reasoning_model: str = ""
+    llm_vision_base_url: str = ""
+    llm_vision_api_key: str = ""
+    llm_vision_model: str = ""
+
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = ""
+    embedding_dimensions: int = 1536
+    embedding_timeout_seconds: float = 30.0
+
     search_api_key: str = ""
 
-    hermes_base_url: str = "http://localhost:8642"
-    hermes_data_dir: str = "./.hermes-data"
-    hermes_api_server_key: str = ""
+    agent_base_url: str = "http://localhost:8642"
+    agent_internal_token: str = "dev-agent-token"
+    app_data_dir: str = "./.whitz-data"
+    builtin_skills_dir: str = ""
 
-    # Hermes built-in skills that depend on toolsets/CLIs the platform does not expose
-    # are hidden from users. Both are comma separated skill names.
+    sandbox_mode: str = "disabled"
+    e2b_api_key: str = ""
+    langsmith_tracing: bool = False
+    langsmith_api_key: str = ""
+    langsmith_project: str = "whitz-agent"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+
+    # Built-in skills that depend on disabled/unavailable host tools can be filtered
+    # via comma-separated allowlist / denylist names.
     skills_builtin_allowlist: str = ""
     skills_builtin_denylist: str = ""
 

@@ -26,7 +26,7 @@ from app.core.ratelimit import (
 )
 from app.core.security import (
     create_access_token,
-    generate_hermes_key,
+    generate_agent_key,
     generate_refresh_token,
     hash_password,
     hash_refresh_token,
@@ -34,7 +34,7 @@ from app.core.security import (
 )
 from app.db.models import RefreshToken, User
 from app.db.session import get_db
-from app.services import audit, email as email_service, provisioning
+from app.services import audit, email as email_service
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -210,22 +210,18 @@ async def register(
         )
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
-    profile = f"u{uuid.uuid4().hex}"
-    api_key = generate_hermes_key()
+    namespace = f"u{uuid.uuid4().hex}"
+    api_key = generate_agent_key()
     now = datetime.now(timezone.utc)
     user = User(
         email=email,
         password_hash=hash_password(body.password),
         display_name=display_name,
-        hermes_profile=profile,
-        hermes_api_key=api_key,
+        agent_namespace=namespace,
+        agent_api_key=api_key,
         email_verified_at=now,
     )
     db.add(user)
-    try:
-        provisioning.provision_profile(profile, api_key)
-    except OSError as exc:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Agent 存储初始化失败: {exc}")
     try:
         await db.commit()
     except IntegrityError as exc:
