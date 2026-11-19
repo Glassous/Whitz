@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -64,6 +65,43 @@ def _select_subagent_tools(role: str, config: RunnableConfig) -> list[BaseTool]:
     return base
 
 
+async def _invoke_single_tool(
+    tc: dict[str, Any],
+    tool_map: dict[str, BaseTool],
+    conv_id: str,
+    config: RunnableConfig,
+) -> ToolMessage:
+    name = str(tc.get("name") or "")
+    call_id = str(tc.get("id") or name)
+    args = dict(tc.get("args") or {})
+    if conv_id and name in (
+        "list_workspace_files",
+        "read_workspace_file",
+        "search_workspace_files",
+        "write_workspace_file",
+    ):
+        args.setdefault("conversation_id", conv_id)
+    tool_obj = tool_map.get(name)
+    if tool_obj is None:
+        return ToolMessage(
+            tool_call_id=call_id,
+            name=name,
+            content=json.dumps({"error": f"子智能体无权调用工具: {name}"}, ensure_ascii=False),
+            status="error",
+        )
+    try:
+        res = await tool_obj.ainvoke(args, config=config)
+        text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+        return ToolMessage(tool_call_id=call_id, name=name, content=text)
+    except Exception as exc:
+        return ToolMessage(
+            tool_call_id=call_id,
+            name=name,
+            content=json.dumps({"error": str(exc)}, ensure_ascii=False),
+            status="error",
+        )
+
+
 async def _invoke_tools_for_message(
     last_msg: AIMessage,
     tools: list[BaseTool],
@@ -72,35 +110,12 @@ async def _invoke_tools_for_message(
     tool_map = {t.name: t for t in tools}
     cfg = dict(config.get("configurable") or {})
     conv_id = str(cfg.get("conversation_id") or "")
-    out: list[ToolMessage] = []
-    for tc in last_msg.tool_calls or []:
-        name = str(tc.get("name") or "")
-        call_id = str(tc.get("id") or name)
-        args = dict(tc.get("args") or {})
-        if conv_id and name in (
-            "list_workspace_files",
-            "read_workspace_file",
-            "search_workspace_files",
-            "write_workspace_file",
-        ):
-            args.setdefault("conversation_id", conv_id)
-        tool_obj = tool_map.get(name)
-        if tool_obj is None:
-            out.append(
-                ToolMessage(
-                    tool_call_id=call_id,
-                    name=name,
-                    content=json.dumps({"error": f"子智能体无权调用工具: {name}"}, ensure_ascii=False),
-                )
-            )
-            continue
-        try:
-            res = await tool_obj.ainvoke(args, config=config)
-            text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
-        except Exception as exc:
-            text = json.dumps({"error": str(exc)}, ensure_ascii=False)
-        out.append(ToolMessage(tool_call_id=call_id, name=name, content=text))
-    return out
+    calls = list(last_msg.tool_calls or [])
+    if not calls:
+        return []
+    return list(
+        await asyncio.gather(*[_invoke_single_tool(tc, tool_map, conv_id, config) for tc in calls])
+    )
 
 
 def _build_specialist_subgraph(role: str):
@@ -121,10 +136,12 @@ def _build_specialist_subgraph(role: str):
         if not messages:
             task_text = str(state.get("task") or "").strip()
             ctx_text = str(state.get("context") or "").strip()
+            now_str = str(cfg.get("current_time_str") or "").strip()
+            sys_full = f"{system_prompt}\n当前时间：{now_str}" if now_str else system_prompt
             prompt = f"任务：{task_text}"
             if ctx_text:
                 prompt += f"\n\n上下文：\n{ctx_text}"
-            messages = [SystemMessage(content=system_prompt), HumanMessage(content=prompt)]
+            messages = [SystemMessage(content=sys_full), HumanMessage(content=prompt)]
 
         candidates = await router.select_candidates(
             cfg.get("requested_route", "auto"),
@@ -134,9 +151,18 @@ def _build_specialist_subgraph(role: str):
         last_exc: Exception | None = None
         for ep in candidates:
             try:
-                llm = router.build_chat_model(ep, streaming=False)
+                llm = router.build_chat_model(ep, streaming=False, thinking_enabled=True)
                 bound = llm.bind_tools(tools) if tools else llm
-                resp = await bound.ainvoke(messages, config=config)
+                try:
+                    resp = await bound.ainvoke(messages, config=config)
+                except Exception as inner_exc:
+                    if router.is_unsupported_thinking_param_error(inner_exc):
+                        router.mark_thinking_param_unsupported(ep)
+                        llm = router.build_chat_model(ep, streaming=False, include_thinking_params=False)
+                        bound = llm.bind_tools(tools) if tools else llm
+                        resp = await bound.ainvoke(messages, config=config)
+                    else:
+                        raise
                 await router.record_success(ep)
                 return {
                     "messages": [resp] if messages is state.get("messages") else [*messages, resp],

@@ -6,6 +6,8 @@ import { useAuthStore } from "../../stores/auth";
 import { sortConversations } from "../../stores/conversations";
 import { useCreditsStore } from "../../stores/credits";
 import { useTheme, type ThemePreference } from "../../lib/theme";
+import { isDesktopHost } from "../../host";
+import { isDesktopShell } from "../../host/chrome";
 import BaseButton from "../ui/BaseButton.vue";
 import BaseModal from "../ui/BaseModal.vue";
 import BaseInput from "../ui/BaseInput.vue";
@@ -49,6 +51,7 @@ function onMediaChange(e: MediaQueryListEvent) {
 
 const isRail = computed(() => Boolean(props.collapsed && isDesktop.value));
 const isMobileDrawer = computed(() => !isDesktop.value);
+const inDesktop = computed(() => isDesktopShell() || isDesktopHost());
 
 // 1:1 finger-following left-swipe to close on mobile
 const asideRef = ref<HTMLElement | null>(null);
@@ -427,9 +430,12 @@ function isRunning(c: Conversation): boolean {
       />
     </div>
 
-    <!-- Brand header: mobile drawer only; the desktop title bar owns the brand -->
-    <div class="relative z-10 flex shrink-0 items-center justify-between px-3.5 pb-2 pt-3.5 md:hidden">
-      <div class="flex min-w-0 items-center">
+    <!-- Brand header: shown in sidebar on Web; Desktop title bar owns the brand -->
+    <div
+      v-if="!inDesktop || isMobileDrawer"
+      class="relative z-10 flex shrink-0 items-center justify-between px-3.5 pb-2 pt-3.5"
+    >
+      <div v-if="!inDesktop" class="flex min-w-0 items-center">
         <button
           type="button"
           class="focus-ring relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg transition-transform duration-200 hover:scale-[1.04] active:scale-[0.97]"
@@ -451,7 +457,7 @@ function isRunning(c: Conversation): boolean {
       <!-- Mobile close drawer button -->
       <button
         type="button"
-        class="focus-ring rounded-xl p-1.5 text-fg-faint transition-colors hover:bg-hover hover:text-fg md:hidden"
+        class="focus-ring ml-auto rounded-xl p-1.5 text-fg-faint transition-colors hover:bg-hover hover:text-fg md:hidden"
         aria-label="关闭侧栏"
         @click="emit('close')"
       >

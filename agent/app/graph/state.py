@@ -16,6 +16,7 @@ class AgentState(TypedDict, total=False):
     agent_namespace: str
     persona: str
     profile_context: str
+    timezone: str
     instructions: str
     attachments: list[dict[str, Any]]
     skills: list[dict[str, Any]]
@@ -25,6 +26,8 @@ class AgentState(TypedDict, total=False):
     requested_route: str
     selected_route: str
     selected_model: str
+    thinking_enabled: bool
+    thinking_escalated: bool
     plan: dict[str, Any] | None
     tool_call_count: int
     max_tool_iterations: int

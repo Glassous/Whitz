@@ -388,6 +388,17 @@ async def execute_code(
 
 
 @tool
+async def request_deep_thinking(
+    reason: str,
+) -> str:
+    """当你判断当前任务存在多步复杂推演、矛盾信息核查、复杂代码分析或疑难规划，且当前尚未开启深度思考模式时，调用此工具立即升档开启深度思考模式并在下一轮深入推理。"""
+    return json.dumps(
+        {"thinking_enabled": True, "reason": str(reason or "").strip() or "需要更深入的多步推理"},
+        ensure_ascii=False,
+    )
+
+
+@tool
 async def delegate_subtask(
     role: str,
     task: str,
@@ -407,6 +418,7 @@ def get_builtin_tools(*, include_delegation: bool = True, include_hitl: bool = T
         web_search,
         web_extract,
         skill_view,
+        request_deep_thinking,
     ]
     if include_hitl:
         tools.extend([clarify, execute_code])

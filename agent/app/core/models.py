@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import logging
 import math
 import re
@@ -8,48 +10,38 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 
 import httpx
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from app.core.config import AgentSettings, get_settings
 
 logger = logging.getLogger("whitz.agent.models")
 
+
+class WhitzChatOpenAI(ChatOpenAI):
+    """ChatOpenAI subclass preserving vendor reasoning_content / reasoning deltas."""
+
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: type,
+        base_generation_info: dict | None,
+    ):
+        gen_chunk = super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info)
+        if gen_chunk is not None:
+            choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                delta = choices[0].get("delta") or {}
+                if isinstance(delta, dict):
+                    rc = delta.get("reasoning_content") or delta.get("reasoning")
+                    if isinstance(rc, str) and rc:
+                        gen_chunk.message.additional_kwargs["reasoning_content"] = rc
+        return gen_chunk
+
+
 VALID_ROUTES = ("auto", "default", "fast", "reasoning", "vision")
-_REASONING_KEYWORDS = (
-    "analyze",
-    "analysis",
-    "architect",
-    "compare",
-    "debug",
-    "design",
-    "derive",
-    "explain why",
-    "implement",
-    "optimize",
-    "plan",
-    "proof",
-    "python",
-    "refactor",
-    "research",
-    "step by step",
-    "verify",
-    "分析",
-    "架构",
-    "推理",
-    "设计",
-    "优化",
-    "重构",
-    "排查",
-    "研究",
-    "调研",
-    "对比",
-    "计算",
-    "验证",
-    "代码",
-    "步骤",
-    "方案",
-)
+_TRIVIAL_GREETINGS = frozenset({"hi", "hello", "hey", "你好", "您好", "在吗", "谢谢", "感谢", "ok", "好的", "嗯"})
+_UNSUPPORTED_THINKING_MODELS: set[tuple[str, str]] = set()
 
 
 @dataclass(frozen=True)
@@ -257,15 +249,142 @@ class ModelRouter:
         for msg in reversed(msgs):
             content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
             if isinstance(content, str) and content.strip():
-                last_text = content.strip().lower()
+                last_text = content.strip()
                 break
 
-        if last_text:
-            if any(kw in last_text for kw in _REASONING_KEYWORDS) or len(last_text) > 500:
-                return "reasoning"
-            if len(last_text) < 25 and self.settings.llm_fast_model.strip():
-                return "fast"
+        low = last_text.lower().strip("!！。.~～ ")
+        if low and self.settings.llm_fast_model.strip() and (low in _TRIVIAL_GREETINGS or (len(low) <= 6 and "?" not in low and "？" not in low)):
+            return "fast"
         return "default"
+
+    @staticmethod
+    def _resolve_thinking_style(model_name: str, style: str) -> str:
+        s = (style or "auto").strip().lower()
+        if s in ("deepseek", "qwen", "openai", "none"):
+            return s
+        low = (model_name or "").strip().lower()
+        if not low:
+            return "none"
+        if any(k in low for k in ("o1", "o3", "o4", "gpt-5")):
+            return "openai"
+        if "qwen" in low or "qwq" in low:
+            return "qwen"
+        if "deepseek" in low or "glm" in low:
+            # Always-on reasoners like deepseek-r1 / deepseek-reasoner don't take toggle flags
+            if "reasoner" in low or "-r1" in low or low.endswith("r1"):
+                return "none"
+            return "deepseek"
+        return "none"
+
+    @staticmethod
+    def is_thinking_param_unsupported(ep: ModelEndpoint) -> bool:
+        return (ep.base_url, ep.model) in _UNSUPPORTED_THINKING_MODELS
+
+    @staticmethod
+    def mark_thinking_param_unsupported(ep: ModelEndpoint) -> None:
+        if ep.base_url or ep.model:
+            _UNSUPPORTED_THINKING_MODELS.add((ep.base_url, ep.model))
+
+    @staticmethod
+    def is_unsupported_thinking_param_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        param_hit = any(k in msg for k in ("thinking", "enable_thinking", "reasoning_effort", "extra_body"))
+        reject_hit = any(k in msg for k in ("unknown", "unsupported", "invalid", "unrecognized", "extra_forbidden", "400", "422"))
+        return param_hit and reject_hit
+
+    @staticmethod
+    def _last_user_text(messages: Sequence[BaseMessage | dict[str, Any]] | None) -> str:
+        for msg in reversed(messages or ()):
+            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "type", "")
+            if role in ("user", "human"):
+                content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+                if isinstance(content, str):
+                    return content.strip()
+        return ""
+
+    async def resolve_thinking_decision(
+        self,
+        requested_route: str | None = "auto",
+        messages: Sequence[BaseMessage | dict[str, Any]] | None = None,
+        *,
+        has_images: bool = False,
+    ) -> tuple[bool, str, str]:
+        """Autonomously decide whether to enable thinking mode and which route to use.
+
+        Returns ``(thinking_enabled, route, reason)``.
+        """
+        req = (requested_route or "auto").strip().lower()
+        mode_cfg = (self.settings.llm_thinking_mode or "auto").strip().lower()
+
+        if req == "reasoning":
+            return True, "reasoning", "explicit_reasoning_route"
+        if req == "fast":
+            return False, "fast", "explicit_fast_route"
+        if req == "vision":
+            return False, "vision", "explicit_vision_route"
+        if mode_cfg == "enabled":
+            return True, ("reasoning" if self.settings.llm_reasoning_model.strip() else "default"), "global_enabled"
+        if mode_cfg == "disabled":
+            return False, ("fast" if self.settings.llm_fast_model.strip() else "default"), "global_disabled"
+
+        msgs = messages or []
+        if has_images or self._has_image_content(msgs):
+            ep = self.endpoint_for("vision")
+            return False, ("vision" if (ep.model and ep.supports_vision) else "default"), "multimodal_image"
+
+        user_text = self._last_user_text(msgs)
+        if not user_text:
+            return False, "default", "empty_input"
+
+        low = user_text.lower().strip("!！。.~～ ")
+        if low in _TRIVIAL_GREETINGS or (len(low) <= 8 and "?" not in low and "？" not in low):
+            return False, ("fast" if self.settings.llm_fast_model.strip() else "default"), "trivial_query"
+
+        # Let the AI autonomously decide whether deep thinking is warranted.
+        probe_ep = self.endpoint_for("fast" if self.settings.llm_fast_model.strip() else "default")
+        if (
+            self.settings.llm_adaptive_probe_enabled
+            and probe_ep.base_url
+            and probe_ep.model
+            and not probe_ep.base_url.startswith("http://llm.test")
+        ):
+            try:
+                probe_llm = self.build_chat_model(
+                    probe_ep,
+                    temperature=0.0,
+                    max_tokens=48,
+                    streaming=False,
+                    thinking_enabled=False,
+                )
+                gate_prompt = (
+                    "你是 Whitz 推理策略门控器。请判断下面用户请求是否需要开启深度思考（Thinking）模式。\n"
+                    "- 开启（true）：需要多步逻辑推导、代码编写/排障、数学计算、架构设计、复杂长文档对比、多角度调研或疑难分析。\n"
+                    "- 关闭（false）：常规事实查询、简短问答、日常对话、简单翻译/润色或直接工具检索即可解决的问题。\n"
+                    '只输出单行 JSON：{"thinking": true或false, "route": "reasoning"|"default"|"fast"}'
+                )
+                resp = await asyncio.wait_for(
+                    probe_llm.ainvoke(
+                        [SystemMessage(content=gate_prompt), HumanMessage(content=user_text[:800])]
+                    ),
+                    timeout=6.0,
+                )
+                raw = resp.content if isinstance(resp.content, str) else ""
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start >= 0 and end > start:
+                    parsed = json.loads(raw[start : end + 1])
+                    want_thinking = bool(parsed.get("thinking"))
+                    suggested = str(parsed.get("route") or "").strip().lower()
+                    if want_thinking:
+                        route = "reasoning" if self.settings.llm_reasoning_model.strip() else "default"
+                        return True, route, "ai_probe_thinking"
+                    if suggested == "fast" and self.settings.llm_fast_model.strip():
+                        return False, "fast", "ai_probe_fast"
+                    return False, "default", "ai_probe_direct"
+            except Exception as exc:
+                logger.debug("Adaptive thinking probe skipped (%s)", exc)
+
+        return False, "default", "fallback_direct"
 
     def fallback_chain(self, route: str) -> list[ModelEndpoint]:
         order_map = {
@@ -337,6 +456,8 @@ class ModelRouter:
         temperature: float = 0.3,
         max_tokens: int | None = None,
         streaming: bool = True,
+        thinking_enabled: bool | None = None,
+        include_thinking_params: bool = True,
     ) -> ChatOpenAI:
         kwargs: dict[str, Any] = {
             "model": ep.model or "gpt-4o-mini",
@@ -350,7 +471,19 @@ class ModelRouter:
         }
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
-        return ChatOpenAI(**kwargs)
+        if (
+            include_thinking_params
+            and thinking_enabled is not None
+            and not self.is_thinking_param_unsupported(ep)
+        ):
+            style = self._resolve_thinking_style(ep.model, self.settings.llm_thinking_param_style)
+            if style == "deepseek":
+                kwargs["extra_body"] = {"thinking": {"type": "enabled" if thinking_enabled else "disabled"}}
+            elif style == "qwen":
+                kwargs["extra_body"] = {"enable_thinking": bool(thinking_enabled)}
+            elif style == "openai":
+                kwargs["reasoning_effort"] = "medium" if thinking_enabled else "low"
+        return WhitzChatOpenAI(**kwargs)
 
     async def select_candidates(
         self,

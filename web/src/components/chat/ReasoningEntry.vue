@@ -45,6 +45,7 @@ const TOOL_LABELS: Record<string, string> = {
   memory_propose: "提议写入记忆",
   execute_code: "沙盒代码执行",
   delegate_subtask: "子智能体协作",
+  request_deep_thinking: "开启深度思考",
   list_workspace_files: "查看工作区文件",
   read_workspace_file: "读取工作区文件",
   search_workspace_files: "检索工作区文件",

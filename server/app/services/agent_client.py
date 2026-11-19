@@ -96,6 +96,7 @@ class AgentClient:
         requested_skills: list[str] | None = None,
         persona: str = "",
         profile_context: str | None = None,
+        timezone: str | None = None,
         memory_enabled: bool = False,
         memory_require_confirm: bool = True,
         idempotency_key: str | None = None,
@@ -109,6 +110,7 @@ class AgentClient:
             "input": input_text,
             "model_route": model_route or "auto",
             "persona": persona or "",
+            "timezone": (timezone or "").strip() or "Asia/Shanghai",
             "memory_enabled": bool(memory_enabled),
             "memory_require_confirm": bool(memory_require_confirm),
         }

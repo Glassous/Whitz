@@ -46,6 +46,7 @@ class FakeRouter(ModelRouter):
                 llm_base_url="https://mock.local/v1",
                 llm_api_key="sk-mock",
                 llm_model="mock-gpt",
+                llm_adaptive_probe_enabled=False,
             )
         )
         self.scripted = scripted
@@ -219,3 +220,83 @@ async def test_pre_cancelled_run_emits_run_cancelled():
     assert meta["status"] == "cancelled"
     ev_names = [fields["event"] for _, fields in redis.streams[runner.events_key(run_id)]]
     assert ev_names == ["run.cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_time_injection_message_hygiene_and_thinking_escalation(monkeypatch):
+    from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+    from app.graph.builder import SYSTEM_CONTEXT_MSG_ID, _build_system_prompt, _prepare_llm_messages, format_current_time
+
+    # 1. Time injection works even without profile_context and handles invalid timezone cleanly
+    now_sh = format_current_time("Asia/Shanghai")
+    assert "Asia/Shanghai" in now_sh
+    now_fallback = format_current_time("Invalid/Zone")
+    assert "Asia/Shanghai" in now_fallback
+
+    prompt = _build_system_prompt({"persona": "", "profile_context": "", "timezone": "UTC"}, {})
+    assert "## 当前时间" in prompt
+    assert "UTC" in prompt
+
+    # 2. _prepare_llm_messages keeps system prompt at index 0 and folds oversized older ToolMessages
+    old_tool = ToolMessage(tool_call_id="c1", name="web_search", content="x" * 2000)
+    recent_msgs = [HumanMessage(content=f"q{i}") for i in range(8)]
+    prepared = _prepare_llm_messages([HumanMessage(content="old"), old_tool, *recent_msgs, SystemMessage(id=SYSTEM_CONTEXT_MSG_ID, content="SYS")])
+    assert isinstance(prepared[0], SystemMessage)
+    assert prepared[0].content == "SYS"
+    assert "历史工具输出已折叠" in prepared[2].content
+
+    # 3. request_deep_thinking escalates thinking_enabled in the agent loop
+    redis = FakeRedis()
+    checkpointer = InMemorySaver()
+    seen_thinking: list[bool | None] = []
+
+    class RecordingRouter(ModelRouter):
+        def __init__(self, scripted: ScriptedChatModel) -> None:
+            super().__init__(
+                settings=AgentSettings(
+                    llm_base_url="https://mock.local/v1",
+                    llm_api_key="sk-mock",
+                    llm_model="mock-gpt",
+                    llm_adaptive_probe_enabled=False,
+                )
+            )
+            self.scripted = scripted
+
+        def build_chat_model(self, ep, **kwargs):
+            seen_thinking.append(kwargs.get("thinking_enabled"))
+            return self.scripted
+
+    scripted = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_think_1",
+                        "name": "request_deep_thinking",
+                        "args": {"reason": "发现多源冲突需要深度推演"},
+                    }
+                ],
+            ),
+            AIMessage(content="已完成深度推演并给出最终结论。"),
+        ]
+    )
+    monkeypatch.setattr(runner, "ModelRouter", lambda *a, **kw: RecordingRouter(scripted))
+
+    run_id = uuid.uuid4().hex
+    meta = await runner.execute_run(
+        run_id,
+        {
+            "thread_id": "thread-think-esc",
+            "conversation_id": str(uuid.uuid4()),
+            "user_id": str(uuid.uuid4()),
+            "input": "请核查这个复杂问题",
+            "timezone": "Asia/Shanghai",
+        },
+        redis=redis,
+        checkpointer=checkpointer,
+        settings=AgentSettings(internal_mcp_base_url=""),
+    )
+    assert meta["status"] == "completed"
+    assert seen_thinking == [False, True]
+    assert "深度推演" in meta["output"]

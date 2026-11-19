@@ -41,6 +41,11 @@ class AgentSettings(BaseSettings):
     llm_vision_api_key: str = ""
     llm_vision_model: str = ""
 
+    # Autonomous thinking-mode control
+    llm_thinking_mode: Literal["auto", "enabled", "disabled"] = "auto"
+    llm_thinking_param_style: Literal["auto", "deepseek", "qwen", "openai", "none"] = "auto"
+    llm_adaptive_probe_enabled: bool = True
+
     # Optional Embeddings (OpenAI-compatible /v1/embeddings -> 1536 dims)
     embedding_base_url: str = ""
     embedding_api_key: str = ""

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.errors import GraphInterrupt
@@ -48,15 +51,75 @@ def _emit_node_running(node: str, *, route: str | None = None, model: str | None
     except Exception:
         pass
 
+_WEEKDAYS_ZH = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+
+
+def format_current_time(tz_name: str | None = None) -> str:
+    cleaned = (tz_name or "").strip() or "Asia/Shanghai"
+    try:
+        tz: Any = ZoneInfo(cleaned)
+    except (ZoneInfoNotFoundError, ValueError):
+        cleaned = "Asia/Shanghai"
+        try:
+            tz = ZoneInfo(cleaned)
+        except (ZoneInfoNotFoundError, ValueError):
+            tz = timezone(timedelta(hours=8))
+    now = datetime.now(tz)
+    weekday = _WEEKDAYS_ZH[now.weekday()]
+    return f"{now.strftime('%Y-%m-%d %H:%M:%S')}（{weekday}，{cleaned}）"
+
+
 _BASE_AGENT_PROMPT = """你是 Whitz 智能助理，一个自主决策的多智能体工作台助手。
-你可以根据任务复杂度自主决定：
-1. 简单问题直接简洁、准确作答；
-2. 用户提及已上传文件、文档或全局资料库时，优先使用 `rag_search_workspace` 语义+全文混合检索定位片段，需要精确原文或查看图片时再调用 `read_workspace_file`；
-3. 需要个性化背景时调用 `memory_search`，当用户表达长期偏好或重要个人背景且开启记忆功能时调用 `memory_propose`；
-4. 复杂多步骤任务使用 `todo_list` 维护进度计划，或通过 `delegate_subtask` 委派给 `researcher` / `coder` 子智能体；
-5. 需要实时外部资料时使用 `web_search` / `web_extract`；
-6. 需要精确计算或验证代码时调用 `execute_code`（系统会自动暂停等待用户审批）；遇到关键歧义时调用 `clarify` 向用户追问；
-7. 若技能摘要与当前任务相关，调用 `skill_view` 按需加载完整技能指南后再执行。"""
+你可以根据任务复杂度自主决定下一步行动，并严格遵守以下原则：
+1. 事实与时效性约束：始终以「当前时间」为基准理解“今天/今年/最近/当前”等时间概念；涉及具体日期、外部动态、文件正文、检索结果或代码运行结论时，必须先调用对应工具查证，严禁编造未验证的数据、链接、文件名或行号。
+2. 工具与 RAG 自主选择：
+   - 简单问答直接简洁、准确作答，避免过度铺垫；
+   - 用户提及已上传文件、文档或全局资料库时，优先使用 `rag_search_workspace` 混合检索定位片段，需要完整原文或查看图片时再调用 `read_workspace_file`；若 `rag_search_workspace` 未命中，可主动改用 `list_workspace_files` / `search_workspace_files` 自愈排查；
+   - 需要个性化背景时调用 `memory_search`，当用户表达长期偏好或重要项目背景且开启记忆功能时调用 `memory_propose`；
+   - 需要实时外部资料时使用 `web_search`，摘要不足时再调用 `web_extract` 精读关键页面；
+   - 复杂多步骤任务使用 `todo_list` 维护进度计划，或通过 `delegate_subtask` 委派给 `researcher` / `coder` 子智能体；
+   - 需要精确计算或验证代码时调用 `execute_code`（系统会自动暂停等待用户审批）；遇到关键歧义时调用 `clarify` 向用户追问；
+   - 若技能摘要与当前任务相关，调用 `skill_view` 按需加载完整技能指南后再执行。
+3. 思考模式自主升档：若当前处于常规非思考模式，但你在分析或工具返回中发现逻辑复杂、信息矛盾或需要深度推演，可调用 `request_deep_thinking` 立即开启深度思考模式再继续作答。
+4. 回复质量规范：复杂调研、对比或技术方案采用「核心结论前置 + 清晰分点 + 来源引用」结构；简单问题直击要点、简明自然。"""
+
+
+def _prepare_llm_messages(
+    messages: list[Any],
+    *,
+    recent_keep: int = 8,
+    old_tool_char_limit: int = 1200,
+) -> list[BaseMessage]:
+    """Ensure the fresh system context stays at index 0 and fold stale oversized tool outputs."""
+    sys_msg: SystemMessage | None = None
+    non_sys: list[BaseMessage] = []
+    for m in messages:
+        if isinstance(m, SystemMessage):
+            if getattr(m, "id", None) == SYSTEM_CONTEXT_MSG_ID or sys_msg is None:
+                sys_msg = m
+        else:
+            non_sys.append(m)
+
+    cutoff = max(0, len(non_sys) - recent_keep)
+    prepared: list[BaseMessage] = []
+    if sys_msg is not None:
+        prepared.append(sys_msg)
+
+    for idx, m in enumerate(non_sys):
+        if idx < cutoff and isinstance(m, ToolMessage) and isinstance(m.content, str) and len(m.content) > old_tool_char_limit:
+            folded = m.content[:900] + f"\n... [历史工具输出已折叠，原长 {len(m.content)} 字符]"
+            prepared.append(
+                ToolMessage(
+                    content=folded,
+                    tool_call_id=m.tool_call_id,
+                    name=m.name,
+                    status=getattr(m, "status", "success"),
+                    id=m.id,
+                )
+            )
+        else:
+            prepared.append(m)
+    return prepared
 
 
 def _merge_usage(acc: dict[str, int] | None, msg: AIMessage) -> dict[str, int]:
@@ -76,8 +139,12 @@ def _merge_usage(acc: dict[str, int] | None, msg: AIMessage) -> dict[str, int]:
     return merged
 
 
-def _build_system_prompt(state: AgentState, cfg: dict[str, Any]) -> str:
+def _build_system_prompt(state: AgentState, cfg: dict[str, Any], current_time_str: str | None = None) -> str:
     sections: list[str] = [_BASE_AGENT_PROMPT]
+
+    tz_name = str(state.get("timezone") or cfg.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+    now_str = current_time_str or str(cfg.get("current_time_str") or "").strip() or format_current_time(tz_name)
+    sections.append(f"## 当前时间\n{now_str}")
 
     persona = str(state.get("persona") or "").strip()
     if persona:
@@ -191,19 +258,39 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
     async def context_loader(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         _emit_node_running("context_loader")
         cfg = dict(config.get("configurable") or {})
-        prompt_text = _build_system_prompt(state, cfg)
+        tz_name = str(state.get("timezone") or cfg.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+        now_str = format_current_time(tz_name)
+        if isinstance(config.get("configurable"), dict):
+            config["configurable"]["current_time_str"] = now_str
+
+        prompt_text = _build_system_prompt(state, cfg, current_time_str=now_str)
         sys_msg = SystemMessage(id=SYSTEM_CONTEXT_MSG_ID, content=prompt_text)
+
+        router: ModelRouter = cfg.get("model_router") or ModelRouter()
+        requested_route = str(state.get("requested_route") or cfg.get("requested_route") or "auto")
+        messages = list(state.get("messages") or [])
+        thinking_enabled, resolved_route, _ = await router.resolve_thinking_decision(
+            requested_route,
+            messages,
+        )
+
         return {
             "messages": [sys_msg],
             "tool_call_count": int(state.get("tool_call_count") or 0),
             "memory_extracted": False,
+            "thinking_enabled": thinking_enabled,
+            "thinking_escalated": False,
+            "selected_route": resolved_route,
         }
 
     async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         cfg = dict(config.get("configurable") or {})
         router: ModelRouter = cfg.get("model_router") or ModelRouter()
         mcp_tools: list[BaseTool] = list(cfg.get("mcp_tools") or [])
+        include_thinking_tool = not bool(state.get("thinking_enabled")) and get_settings().llm_thinking_mode != "disabled"
         builtin = get_builtin_tools(include_delegation=True, include_hitl=True)
+        if not include_thinking_tool:
+            builtin = [t for t in builtin if t.name != "request_deep_thinking"]
 
         seen_names: set[str] = set()
         all_tools: list[BaseTool] = []
@@ -212,8 +299,9 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                 seen_names.add(t.name)
                 all_tools.append(t)
 
-        messages = list(state.get("messages") or [])
-        requested_route = str(state.get("requested_route") or cfg.get("requested_route") or "auto")
+        messages = _prepare_llm_messages(list(state.get("messages") or []))
+        requested_route = str(state.get("selected_route") or state.get("requested_route") or cfg.get("requested_route") or "auto")
+        thinking_enabled = bool(state.get("thinking_enabled"))
         candidates = await router.select_candidates(requested_route, messages)
         first_ep = candidates[0] if candidates else None
         _emit_node_running(
@@ -225,16 +313,38 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         last_exc: Exception | None = None
         for ep in candidates:
             try:
-                llm = router.build_chat_model(ep, streaming=True)
+                llm = router.build_chat_model(ep, streaming=True, thinking_enabled=thinking_enabled)
                 bound = llm.bind_tools(all_tools) if all_tools else llm
-                response = await bound.ainvoke(messages, config=config)
-                await router.record_success(ep)
+                try:
+                    response = await bound.ainvoke(messages, config=config)
+                except Exception as inner_exc:
+                    if router.is_unsupported_thinking_param_error(inner_exc):
+                        router.mark_thinking_param_unsupported(ep)
+                        llm = router.build_chat_model(ep, streaming=True, include_thinking_params=False)
+                        bound = llm.bind_tools(all_tools) if all_tools else llm
+                        response = await bound.ainvoke(messages, config=config)
+                    else:
+                        raise
+
+                total_usage = _merge_usage(state.get("usage"), response)
+                has_tool_calls = bool(getattr(response, "tool_calls", None))
                 final_text = response.content if isinstance(response.content, str) else ""
+
+                # Self-heal if model returned empty text without tool calls after tool observations
+                if not has_tool_calls and not final_text.strip():
+                    synthesis_nudge = HumanMessage(
+                        content="请基于以上工具结果或已知信息，为用户整理一份完整、准确的最终回答。"
+                    )
+                    response = await llm.ainvoke([*messages, synthesis_nudge], config=config)
+                    total_usage = _merge_usage(total_usage, response)
+                    final_text = response.content if isinstance(response.content, str) else ""
+
+                await router.record_success(ep)
                 return {
                     "messages": [response],
                     "selected_route": ep.route,
                     "selected_model": ep.model,
-                    "usage": _merge_usage(state.get("usage"), response),
+                    "usage": total_usage,
                     "final_output": final_text if not getattr(response, "tool_calls", None) else state.get("final_output", ""),
                 }
             except GraphInterrupt:
@@ -245,6 +355,73 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                 await router.record_failure(ep)
 
         raise RuntimeError(f"All model endpoints failed: {last_exc}")
+
+    async def _run_single_tool(
+        tc: dict[str, Any],
+        tool_map: dict[str, BaseTool],
+        conv_id: str,
+        config: RunnableConfig,
+    ) -> tuple[ToolMessage, dict[str, Any] | None, bool, bool]:
+        name = str(tc.get("name") or "")
+        call_id = str(tc.get("id") or name)
+        args = dict(tc.get("args") or {})
+        if conv_id and name in (
+            "list_workspace_files",
+            "read_workspace_file",
+            "search_workspace_files",
+            "write_workspace_file",
+        ):
+            args.setdefault("conversation_id", conv_id)
+
+        tool_obj = tool_map.get(name)
+        if tool_obj is None:
+            return (
+                ToolMessage(
+                    tool_call_id=call_id,
+                    name=name,
+                    content=json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False),
+                    status="error",
+                ),
+                None,
+                False,
+                True,
+            )
+        try:
+            res = await tool_obj.ainvoke(args, config=config)
+            content_str = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+            plan_update = None
+            if name == "todo_list":
+                try:
+                    parsed = json.loads(content_str)
+                    if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
+                        plan_update = {"items": parsed["items"]}
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            had_err = False
+            try:
+                parsed_res = json.loads(content_str)
+                if isinstance(parsed_res, dict) and parsed_res.get("error"):
+                    had_err = True
+            except (json.JSONDecodeError, ValueError):
+                pass
+            return (
+                ToolMessage(tool_call_id=call_id, name=name, content=content_str),
+                plan_update,
+                name == "request_deep_thinking",
+                had_err,
+            )
+        except Exception as exc:
+            return (
+                ToolMessage(
+                    tool_call_id=call_id,
+                    name=name,
+                    content=json.dumps({"error": str(exc)}, ensure_ascii=False),
+                    status="error",
+                ),
+                None,
+                False,
+                True,
+            )
 
     async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         _emit_node_running("tools")
@@ -258,52 +435,20 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             tc for tc in pending if tc.get("name") not in HITL_TOOL_NAMES and tc.get("name") not in SUBAGENT_TOOL_NAMES
         ]
         conv_id = str(state.get("conversation_id") or cfg.get("conversation_id") or "")
+
+        results = await asyncio.gather(
+            *[_run_single_tool(tc, tool_map, conv_id, config) for tc in standard_calls]
+        )
+
         out_msgs: list[ToolMessage] = []
         updated_plan = state.get("plan")
-
-        for tc in standard_calls:
-            name = str(tc.get("name") or "")
-            call_id = str(tc.get("id") or name)
-            args = dict(tc.get("args") or {})
-            if conv_id and name in (
-                "list_workspace_files",
-                "read_workspace_file",
-                "search_workspace_files",
-                "write_workspace_file",
-            ):
-                args.setdefault("conversation_id", conv_id)
-
-            tool_obj = tool_map.get(name)
-            if tool_obj is None:
-                out_msgs.append(
-                    ToolMessage(
-                        tool_call_id=call_id,
-                        name=name,
-                        content=json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False),
-                        status="error",
-                    )
-                )
-                continue
-            try:
-                res = await tool_obj.ainvoke(args, config=config)
-                content_str = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
-                if name == "todo_list":
-                    try:
-                        parsed = json.loads(content_str)
-                        if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
-                            updated_plan = {"items": parsed["items"]}
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                out_msgs.append(ToolMessage(tool_call_id=call_id, name=name, content=content_str))
-            except Exception as exc:
-                out_msgs.append(
-                    ToolMessage(
-                        tool_call_id=call_id,
-                        name=name,
-                        content=json.dumps({"error": str(exc)}, ensure_ascii=False),
-                        status="error",
-                    )
-                )
+        escalate_thinking = False
+        for msg, plan_update, req_thinking, had_err in results:
+            out_msgs.append(msg)
+            if plan_update is not None:
+                updated_plan = plan_update
+            if req_thinking or had_err:
+                escalate_thinking = True
 
         updates: dict[str, Any] = {
             "messages": out_msgs,
@@ -311,6 +456,15 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         }
         if updated_plan is not None:
             updates["plan"] = updated_plan
+        if (
+            escalate_thinking
+            and not bool(state.get("thinking_enabled"))
+            and get_settings().llm_thinking_mode != "disabled"
+        ):
+            updates["thinking_enabled"] = True
+            updates["thinking_escalated"] = True
+            if get_settings().llm_reasoning_model.strip():
+                updates["selected_route"] = "reasoning"
         return updates
 
     async def hitl_gate(state: AgentState, config: RunnableConfig) -> dict[str, Any]:

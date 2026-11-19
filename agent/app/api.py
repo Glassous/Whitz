@@ -44,6 +44,7 @@ class CreateRunRequest(BaseModel):
     conversation_history: list[dict[str, str]] = Field(default_factory=list)
     persona: str = ""
     profile_context: str = ""
+    timezone: str = "Asia/Shanghai"
     instructions: str = ""
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     skills: list[dict[str, Any]] = Field(default_factory=list)

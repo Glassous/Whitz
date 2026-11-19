@@ -68,7 +68,7 @@ async def test_model_router_selection_and_circuit_breaker():
     router = ModelRouter(settings=settings, redis_client=redis)
 
     assert router.infer_route("auto", [HumanMessage(content="你好")]) == "fast"
-    assert router.infer_route("auto", [HumanMessage(content="请分析这个系统架构的性能瓶颈与优化方案")]) == "reasoning"
+    assert router.infer_route("auto", [HumanMessage(content="请分析这个系统架构的性能瓶颈与优化方案")]) == "default"
     assert router.infer_route("auto", [HumanMessage(content=[{"type": "image_url", "image_url": {"url": "x"}}])]) == "vision"
     assert router.infer_route("fast", [HumanMessage(content="请分析架构")]) == "fast"
 
@@ -86,3 +86,62 @@ async def test_model_router_selection_and_circuit_breaker():
     assert not await router.is_circuit_open(ep_reasoning)
     candidates_after = await router.select_candidates("reasoning", [HumanMessage(content="分析")])
     assert candidates_after[0].route == "reasoning"
+
+
+@pytest.mark.asyncio
+async def test_autonomous_thinking_decision_and_param_styles(monkeypatch):
+    settings = AgentSettings(
+        llm_base_url="https://api.example.com/v1",
+        llm_api_key="sk-main",
+        llm_model="deepseek-flash",
+        llm_reasoning_model="deepseek-reasoner",
+        llm_fast_model="deepseek-fast",
+    )
+    router = ModelRouter(settings=settings)
+
+    # Explicit overrides & trivial greetings
+    assert (await router.resolve_thinking_decision("reasoning", [HumanMessage(content="hi")]))[:2] == (True, "reasoning")
+    assert (await router.resolve_thinking_decision("fast", [HumanMessage(content="复杂架构设计")]))[:2] == (False, "fast")
+    assert (await router.resolve_thinking_decision("auto", [HumanMessage(content="你好")]))[:2] == (False, "fast")
+
+    # AI probe autonomously decides True for complex queries and False for simple queries
+    class FakeProbeModel:
+        def __init__(self, reply: str) -> None:
+            self.reply = reply
+
+        async def ainvoke(self, msgs):
+            from langchain_core.messages import AIMessage
+
+            return AIMessage(content=self.reply)
+
+    monkeypatch.setattr(router, "build_chat_model", lambda *a, **kw: FakeProbeModel('{"thinking": true, "route": "reasoning"}'))
+    assert (await router.resolve_thinking_decision("auto", [HumanMessage(content="请对比三种分布式锁方案并给出死锁证明")]))[:2] == (True, "reasoning")
+
+    monkeypatch.setattr(router, "build_chat_model", lambda *a, **kw: FakeProbeModel('{"thinking": false, "route": "fast"}'))
+    assert (await router.resolve_thinking_decision("auto", [HumanMessage(content="Python 3.13 是哪天发布的？")]))[:2] == (False, "fast")
+
+    # Restore build_chat_model and check vendor thinking param styles
+    router2 = ModelRouter(settings=settings)
+    m_ds = router2.build_chat_model(router2.endpoint_for("default"), thinking_enabled=True)
+    assert m_ds.extra_body == {"thinking": {"type": "enabled"}}
+
+    qwen_router = ModelRouter(settings=AgentSettings(llm_base_url="https://api.example.com/v1", llm_model="qwen3-32b"))
+    m_qw = qwen_router.build_chat_model(qwen_router.endpoint_for("default"), thinking_enabled=False)
+    assert m_qw.extra_body == {"enable_thinking": False}
+
+    assert ModelRouter.is_unsupported_thinking_param_error(RuntimeError("400 unknown field extra_body.thinking"))
+    ep_ds = router2.endpoint_for("default")
+    router2.mark_thinking_param_unsupported(ep_ds)
+    m_fallback = router2.build_chat_model(ep_ds, thinking_enabled=True)
+    assert not m_fallback.extra_body
+
+    # Check WhitzChatOpenAI preserves delta.reasoning_content
+    from langchain_core.messages import AIMessageChunk
+
+    gen_chunk = m_fallback._convert_chunk_to_generation_chunk(
+        {"choices": [{"delta": {"content": "", "reasoning_content": "逐步推演中..."}}]},
+        AIMessageChunk,
+        None,
+    )
+    assert gen_chunk is not None
+    assert gen_chunk.message.additional_kwargs.get("reasoning_content") == "逐步推演中..."
