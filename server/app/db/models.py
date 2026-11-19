@@ -8,6 +8,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -464,4 +465,106 @@ class FileChunk(Base):
     content: Mapped[str] = mapped_column(Text)
     search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RunTelemetry(Base):
+    """Structured per-run telemetry for quantitative latency, cost, model, and tool analytics."""
+
+    __tablename__ = "run_telemetry"
+    __table_args__ = (
+        Index("ix_run_telemetry_created", "created_at"),
+        Index("ix_run_telemetry_route_created", "model_route", "created_at"),
+        Index("ix_run_telemetry_status_created", "status", "created_at"),
+        Index("ix_run_telemetry_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    model_route: Mapped[str] = mapped_column(String(32), default="auto", server_default="auto")
+    model_name: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    status: Mapped[str] = mapped_column(String(24), default="completed", server_default="completed")
+    ttft_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    tool_calls_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    tool_errors_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    tools_summary: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    skills_used: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OpsAlertRule(Base):
+    """Configurable threshold alert rule for operations monitoring."""
+
+    __tablename__ = "ops_alert_rules"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(120))
+    metric_key: Mapped[str] = mapped_column(String(64), index=True)
+    operator: Mapped[str] = mapped_column(String(8), default="gt", server_default="gt")
+    threshold: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    window_minutes: Mapped[int] = mapped_column(Integer, default=15, server_default="15")
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
+    severity: Mapped[str] = mapped_column(String(16), default="warning", server_default="warning")
+    webhook_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    last_triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class OpsAlertEvent(Base):
+    """Triggered alert event log with acknowledgement state."""
+
+    __tablename__ = "ops_alert_events"
+    __table_args__ = (
+        Index("ix_ops_alert_events_status_created", "status", "created_at"),
+        Index("ix_ops_alert_events_rule_created", "rule_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    rule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ops_alert_rules.id", ondelete="SET NULL"), nullable=True
+    )
+    rule_name: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    metric_key: Mapped[str] = mapped_column(String(64))
+    current_value: Mapped[float] = mapped_column(Float)
+    threshold: Mapped[float] = mapped_column(Float)
+    severity: Mapped[str] = mapped_column(String(16), default="warning", server_default="warning")
+    status: Mapped[str] = mapped_column(String(16), default="firing", server_default="firing")
+    message: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    webhook_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    acked_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvalRun(Base):
+    """Persisted agent evaluation run for quantitative quality & regression tracking."""
+
+    __tablename__ = "eval_runs"
+    __table_args__ = (Index("ix_eval_runs_created", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mode: Mapped[str] = mapped_column(String(24), default="dry-run", server_default="dry-run")
+    dataset_name: Mapped[str] = mapped_column(String(120), default="default", server_default="default")
+    total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    passed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    pass_rate: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    category_scores: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    results: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    git_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    triggered_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

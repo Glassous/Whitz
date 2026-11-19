@@ -17,7 +17,9 @@ type IconName =
   | "alert"
   | "file"
   | "device"
-  | "stop";
+  | "stop"
+  | "chart"
+  | "plus";
 
 const props = withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 18 });
 
@@ -38,6 +40,8 @@ const paths: Record<IconName, string> = {
   file: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6",
   device: "M4 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM2 20h20M12 16v4",
   stop: "M12 22a10 10 0 100-20 10 10 0 000 20zM9 9h6v6H9z",
+  chart: "M3 3v18h18M7 14l4-4 3 3 5-6",
+  plus: "M12 5v14M5 12h14",
 };
 
 const d = computed(() => paths[props.name]);

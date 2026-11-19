@@ -16,6 +16,8 @@ const router = createRouter({
       meta: { requiresAuth: true },
       children: [
         { path: "", name: "overview", component: () => import("../views/OverviewView.vue") },
+        { path: "ops", name: "ops", component: () => import("../views/OpsDashboardView.vue") },
+        { path: "quant", name: "quant", component: () => import("../views/QuantDashboardView.vue") },
         { path: "users", name: "users", component: () => import("../views/UsersView.vue") },
         {
           path: "invite-codes",

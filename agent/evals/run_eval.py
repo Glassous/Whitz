@@ -37,6 +37,7 @@ async def run_dry_eval(dataset: list[dict[str, Any]]) -> dict[str, Any]:
     required_nodes = {"context_loader", "agent", "tools", "hitl_gate", "subagent", "memory_extractor"}
 
     results: list[dict[str, Any]] = []
+    cat_stats: dict[str, dict[str, int]] = {}
     passed = 0
     for case in dataset:
         msgs = [HumanMessage(content=case["input"])]
@@ -50,21 +51,32 @@ async def run_dry_eval(dataset: list[dict[str, Any]]) -> dict[str, Any]:
         ok = route_ok and topo_ok
         if ok:
             passed += 1
+        cat = str(case.get("category") or "general")
+        cs = cat_stats.setdefault(cat, {"total": 0, "passed": 0})
+        cs["total"] += 1
+        if ok:
+            cs["passed"] += 1
         results.append(
             {
                 "id": case["id"],
-                "category": case["category"],
+                "category": cat,
                 "inferred_route": inferred,
                 "expected_route": case.get("expected_route"),
                 "passed": ok,
             }
         )
 
+    category_scores = {
+        cat: {**st, "pass_rate": round(st["passed"] / max(1, st["total"]), 4)}
+        for cat, st in cat_stats.items()
+    }
     return {
         "mode": "dry-run",
+        "dataset_name": "whitz-agent-golden",
         "total": len(dataset),
         "passed": passed,
         "pass_rate": round(passed / max(1, len(dataset)), 4),
+        "category_scores": category_scores,
         "results": results,
     }
 
@@ -113,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Whitz Agent LangSmith evaluations.")
     parser.add_argument("--dry-run", action="store_true", help="Run offline deterministic evals without API keys.")
     parser.add_argument("--dataset-name", default="whitz-agent-golden", help="LangSmith dataset name.")
+    parser.add_argument("--report-url", default="", help="Optional Whitz server eval report URL.")
+    parser.add_argument("--token", default="", help="Optional Bearer token for --report-url.")
     args = parser.parse_args(argv)
 
     dataset = load_dataset()
@@ -120,6 +134,13 @@ def main(argv: list[str] | None = None) -> int:
         report = asyncio.run(run_dry_eval(dataset))
     else:
         report = asyncio.run(run_live_eval(dataset, args.dataset_name))
+
+    if args.report_url and "total" in report:
+        import httpx
+
+        headers = {"Authorization": f"Bearer {args.token}"} if args.token else {}
+        resp = httpx.post(args.report_url, json=report, headers=headers, timeout=10.0)
+        resp.raise_for_status()
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if args.dry_run and report["passed"] != report["total"]:

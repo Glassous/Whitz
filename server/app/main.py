@@ -11,6 +11,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.api.routes import (
     admin,
     admin_membership,
+    admin_ops,
+    admin_quant,
     agent,
     auth,
     chat,
@@ -24,6 +26,7 @@ from app.api.routes import (
     users,
 )
 from app.core.config import get_settings
+from app.core.metrics import metrics_middleware, render_prometheus_metrics
 from app.core.redis import close_redis, get_redis
 from app.db.session import SessionLocal, detect_pgvector, engine
 from app.services import bootstrap
@@ -74,6 +77,8 @@ def create_app() -> FastAPI:
             allowed_hosts.append(mcp_host)
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
+    app.middleware("http")(metrics_middleware)
+
     @app.middleware("http")
     async def request_context(request: Request, call_next):
         request_id = request.headers.get("x-request-id")
@@ -91,6 +96,8 @@ def create_app() -> FastAPI:
     app.include_router(users.router)
     app.include_router(admin.router)
     app.include_router(admin_membership.router)
+    app.include_router(admin_ops.router)
+    app.include_router(admin_quant.router)
     app.include_router(conversations.router)
     app.include_router(files.router)
     app.include_router(library.router)
@@ -117,6 +124,10 @@ def create_app() -> FastAPI:
         except Exception:
             raise HTTPException(503, "database_unavailable")
         return {"status": "ready"}
+
+    @app.get("/metrics", include_in_schema=False)
+    async def prometheus_metrics():
+        return render_prometheus_metrics()
 
     return app
 

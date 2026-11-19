@@ -310,3 +310,183 @@ export interface AdminUserDetail extends AdminUser {
   recent_ledger: AdminLedgerItem[];
   invite_redemptions: InviteRedemption[];
 }
+
+export interface OpsInspection {
+  postgres: {
+    ok: boolean;
+    latency_ms: number | null;
+    pgvector: boolean;
+    active_connections?: number;
+    total_connections?: number;
+    max_connections?: number;
+    connection_pct?: number;
+    database_size_mb?: number;
+    top_tables?: Array<{ name: string; live_rows: number; dead_rows: number }>;
+  };
+  redis: {
+    ok: boolean;
+    latency_ms: number | null;
+    mode?: string;
+    used_memory_mb?: number;
+    maxmemory_mb?: number;
+    memory_pct?: number;
+    connected_clients?: number;
+    hit_rate_pct?: number;
+    arq_queue_depth?: number;
+    arq_in_progress?: number;
+  };
+  agent: {
+    ok: boolean;
+    worker_ok: boolean;
+    latency_ms: number | null;
+    sandbox_mode?: string;
+  };
+  runtime: {
+    active_runs: number;
+    stuck_runs: number;
+    max_concurrent_runs: number;
+    run_max_seconds: number;
+    runs_15m: number;
+    error_rate_15m_pct: number;
+    p95_latency_15m_ms: number;
+    firing_alerts: number;
+  };
+  supported_metrics: Record<string, { label: string; unit: string }>;
+  generated_at: string;
+}
+
+export interface OpsAlertRule {
+  id: string;
+  name: string;
+  metric_key: string;
+  metric_label: string;
+  operator: "gt" | "gte" | "lt" | "lte" | "eq";
+  threshold: number;
+  window_minutes: number;
+  cooldown_minutes: number;
+  severity: "info" | "warning" | "critical";
+  webhook_url: string | null;
+  enabled: boolean;
+  last_triggered_at: string | null;
+  created_at: string;
+}
+
+export interface OpsAlertEvent {
+  id: string;
+  rule_id: string | null;
+  rule_name: string;
+  metric_key: string;
+  current_value: number;
+  threshold: number;
+  severity: "info" | "warning" | "critical";
+  status: "firing" | "acked" | "resolved";
+  message: string;
+  webhook_status: string | null;
+  acked_at: string | null;
+  created_at: string;
+}
+
+export interface OpsAlertsResponse {
+  rules: OpsAlertRule[];
+  events: OpsAlertEvent[];
+  supported_metrics: Record<string, { label: string; unit: string }>;
+}
+
+export interface QuantSummary {
+  window_days: number;
+  latency: {
+    p50_ms: number | null;
+    p95_ms: number | null;
+    p99_ms: number | null;
+    avg_ms: number | null;
+    ttft_p50_ms: number | null;
+    ttft_p95_ms: number | null;
+  };
+  runs: {
+    total: number;
+    completed: number;
+    failed: number;
+    other: number;
+    success_rate_pct: number;
+    avg_tokens_per_run: number;
+    total_tokens: number;
+    total_credits: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    prompt_ratio_pct: number;
+  };
+  daily_latency: Array<{
+    day: string;
+    runs: number;
+    completed: number;
+    failed: number;
+    tokens: number;
+    p50_ms: number | null;
+    p95_ms: number | null;
+  }>;
+  generated_at: string;
+}
+
+export interface QuantModelsTools {
+  window_days: number;
+  routes: Array<{
+    route: string;
+    runs: number;
+    share_pct: number;
+    success_rate_pct: number;
+    total_tokens: number;
+    avg_tokens: number;
+    p95_ms: number | null;
+  }>;
+  models: Array<{
+    model: string;
+    runs: number;
+    total_tokens: number;
+    avg_ms: number | null;
+  }>;
+  tools: Array<{
+    name: string;
+    calls: number;
+    errors: number;
+    error_rate_pct: number;
+    avg_duration_ms: number;
+  }>;
+  skills: Array<{
+    name: string;
+    uses: number;
+  }>;
+  generated_at: string;
+}
+
+export interface QuantRetention {
+  window_days: number;
+  funnel: Array<{ stage: string; count: number; pct: number }>;
+  cohorts: Array<{
+    cohort_day: string;
+    new_users: number;
+    d1_pct: number | null;
+    d3_pct: number | null;
+    d7_pct: number | null;
+  }>;
+  generated_at: string;
+}
+
+export interface EvalRunItem {
+  id: string;
+  mode: string;
+  dataset_name: string;
+  total: number;
+  passed: number;
+  pass_rate: number;
+  category_scores: Record<string, { total: number; passed: number; pass_rate: number }>;
+  results: Array<Record<string, unknown>>;
+  git_sha: string | null;
+  triggered_by: string | null;
+  created_at: string;
+}
+
+export interface QuantEvalsResponse {
+  items: EvalRunItem[];
+  latest: EvalRunItem | null;
+  pass_rate_delta_pct: number | null;
+}

@@ -15,7 +15,7 @@ from app.core.config import get_settings
 from app.core.redis import get_redis
 from app.db.models import Conversation, ConversationFile, Message, User
 from app.db.session import SessionLocal
-from app.services import cos, membership, memory_service, profile_context, skills_service, titles, usage
+from app.services import cos, membership, memory_service, profile_context, skills_service, telemetry, titles, usage
 from app.services.agent_client import AgentClient, AgentError
 
 logger = logging.getLogger("whitz.chat")
@@ -66,6 +66,13 @@ async def _settle_usage(db: AsyncSession, user_id: uuid.UUID, assistant: Message
         )
     elif assistant.status == "completed":
         logger.warning("run completed without token usage message=%s", assistant.id)
+    await telemetry.record_run_telemetry(
+        db,
+        user_id=user_id,
+        conversation_id=assistant.conversation_id,
+        assistant=assistant,
+        run_id=assistant.run_id,
+    )
 
 
 def _normalize_item(item: dict) -> dict:
@@ -191,6 +198,7 @@ class ChatPipeline:
         }
         self.native_reasoning = False
         self.terminal = False
+        self.first_token_at: float | None = None
         if started_at is not None:
             self.started_at = started_at
         elif assistant.created_at is not None:
@@ -446,6 +454,8 @@ class ChatPipeline:
         elif name == "message.delta":
             text = payload.get("delta") or payload.get("text") or ""
             if text:
+                if self.first_token_at is None:
+                    self.first_token_at = time.time()
                 self.buffer.append(text)
                 yield sse("message.delta", {"text": text})
                 await self._flush()
@@ -694,6 +704,11 @@ class ChatPipeline:
             for k in ("route", "model"):
                 if payload.get(k):
                     runtime[k] = payload[k]
+            if self.started_at:
+                now_ts = time.time()
+                runtime.setdefault("duration_ms", max(0, int((now_ts - self.started_at) * 1000)))
+                if self.first_token_at is not None:
+                    runtime.setdefault("ttft_ms", max(0, int((self.first_token_at - self.started_at) * 1000)))
             extra["usage"] = payload.get("usage")
             extra["runtime"] = runtime or payload.get("runtime")
             if self.reasoning:
@@ -730,6 +745,11 @@ class ChatPipeline:
             for key in ("usage", "runtime"):
                 if payload.get(key) is not None:
                     extra[key] = payload.get(key)
+            runtime = dict(extra.get("runtime") or {})
+            if self.started_at:
+                runtime.setdefault("duration_ms", max(0, int((time.time() - self.started_at) * 1000)))
+            if runtime:
+                extra["runtime"] = runtime
             if self.reasoning:
                 extra["reasoning"] = self.reasoning
             if self.plan:

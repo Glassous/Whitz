@@ -19,6 +19,12 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from sse_starlette.sse import EventSourceResponse
 
 from app.core.config import AgentSettings, get_settings
+from app.core.metrics import (
+    AGENT_ARQ_QUEUE_DEPTH,
+    AGENT_RUNS_ENQUEUED_TOTAL,
+    metrics_middleware,
+    render_prometheus_metrics,
+)
 from app.graph.topology import get_graph_topology
 from app.runner import (
     TERMINAL_EVENT_NAMES,
@@ -149,6 +155,18 @@ def create_app(
                 await app.state.pg_pool.close()
 
     app = FastAPI(title="Whitz LangGraph Agent Service", version="0.1.0", lifespan=lifespan)
+    app.middleware("http")(metrics_middleware)
+
+    @app.get("/metrics", include_in_schema=False)
+    async def prometheus_metrics():
+        redis_inst = getattr(app.state, "redis", None)
+        if redis_inst is not None:
+            try:
+                depth = await redis_inst.llen("arq:queue")
+                AGENT_ARQ_QUEUE_DEPTH.set(int(depth or 0))
+            except Exception:
+                pass
+        return render_prometheus_metrics()
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -231,6 +249,7 @@ def create_app(
             await redis.set(f"agent:idemp:{eff_idemp}", run_id, ex=3600)
 
         await arq.enqueue_job("execute_run_job", run_id, payload, _job_id=f"run:{run_id}")
+        AGENT_RUNS_ENQUEUED_TOTAL.labels(route=(body.model_route or "auto").strip() or "auto").inc()
         return {
             "id": run_id,
             "run_id": run_id,
