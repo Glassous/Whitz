@@ -8,12 +8,20 @@ import type {
   OpenCodeProviderInput,
   RuntimeProgress,
   RuntimeStatus,
+  WorkActiveRunSnapshot,
+  WorkAgentInfo,
   WorkApprovalChoice,
   WorkAttachment,
+  WorkCommandInfo,
   WorkConversation,
   WorkConversationDetail,
   WorkEvent,
+  WorkLspStatus,
+  WorkMcpServerInfo,
+  WorkMcpServerInput,
   WorkMessage,
+  WorkSessionDiffItem,
+  WorkSessionPrefsPatch,
   WorkSettings,
   WorkSettingsPatch,
   WorkSkillItem,
@@ -58,11 +66,23 @@ export const IPC = {
   workRename: "work:rename",
   workPin: "work:pin",
   workDelete: "work:delete",
+  workSetPrefs: "work:set-prefs",
+  workActiveRuns: "work:active-runs",
   workSend: "work:send",
   workSteer: "work:steer",
   workStop: "work:stop",
   workApprove: "work:approve",
   workClarify: "work:clarify",
+  workFork: "work:fork",
+  workRevert: "work:revert",
+  workUnrevert: "work:unrevert",
+  workCompact: "work:compact",
+  workInitAgents: "work:init-agents",
+  workRunCommand: "work:run-command",
+  workRunShell: "work:run-shell",
+  workSessionDiff: "work:session-diff",
+  workAgentsList: "work:agents-list",
+  workCommandsList: "work:commands-list",
   workTestModel: "work:test-model",
   workSettingsGet: "work:settings-get",
   workSettingsSave: "work:settings-save",
@@ -77,6 +97,12 @@ export const IPC = {
   opencodeWriteWhitz: "opencode:write-whitz",
   opencodeRemoveWhitz: "opencode:remove-whitz",
   opencodeOpenConfigDir: "opencode:open-config-dir",
+  opencodeMcpList: "opencode:mcp-list",
+  opencodeMcpUpsert: "opencode:mcp-upsert",
+  opencodeMcpDelete: "opencode:mcp-delete",
+  opencodeMcpToggle: "opencode:mcp-toggle",
+  opencodeLspStatus: "opencode:lsp-status",
+  opencodeVcsInfo: "opencode:vcs-info",
   gatewayStatus: "gateway:status",
 
   workspaceList: "workspace:list",
@@ -208,20 +234,47 @@ export interface WorkApi {
     rename(id: string, title: string): Promise<void>;
     pin(id: string, isPinned: boolean): Promise<void>;
     delete(id: string): Promise<void>;
+    setPrefs(id: string, prefs: WorkSessionPrefsPatch): Promise<WorkConversation>;
+    activeRuns(): Promise<WorkActiveRunSnapshot[]>;
     send(
       conversationId: string,
       content: string,
-      options?: { skillNames?: string[]; attachments?: WorkAttachment[] },
+      options?: {
+        skillNames?: string[];
+        attachments?: WorkAttachment[];
+        modelRef?: string | null;
+        agentName?: string | null;
+        variant?: string | null;
+      },
     ): Promise<{ run_id: string | null }>;
     steer(conversationId: string, content: string): Promise<void>;
     stop(conversationId: string): Promise<void>;
     approve(conversationId: string, requestId: string, generation: number, choice: WorkApprovalChoice): Promise<void>;
     clarify(conversationId: string, requestId: string, generation: number, answer: string): Promise<void>;
+    fork(conversationId: string, messageId?: string | null): Promise<WorkConversation>;
+    revert(conversationId: string, messageId: string): Promise<WorkConversationDetail>;
+    unrevert(conversationId: string): Promise<WorkConversationDetail>;
+    compact(conversationId: string, modelRef?: string | null): Promise<void>;
+    initAgents(conversationId: string, modelRef?: string | null): Promise<void>;
+    runCommand(
+      conversationId: string,
+      command: string,
+      args: string,
+      options?: { modelRef?: string | null; agentName?: string | null; variant?: string | null },
+    ): Promise<{ run_id: string | null }>;
+    runShell(
+      conversationId: string,
+      command: string,
+      options?: { agentName?: string | null; modelRef?: string | null },
+    ): Promise<{ run_id: string | null }>;
+    sessionDiff(conversationId: string): Promise<WorkSessionDiffItem[]>;
+    agents(workspacePath?: string | null): Promise<WorkAgentInfo[]>;
+    commands(workspacePath?: string | null): Promise<WorkCommandInfo[]>;
     settings(): Promise<WorkSettings>;
     saveSettings(patch: WorkSettingsPatch): Promise<WorkSettings>;
     testModel(): Promise<{ ok: boolean; latency_ms: number | null; model: string | null; detail: string | null }>;
     export(id: string): Promise<{ path: string }>;
-    skills(): Promise<WorkSkillItem[]>;
+    skills(workspacePath?: string | null): Promise<WorkSkillItem[]>;
     pickAttachments(): Promise<WorkAttachment[]>;
   };
 
@@ -233,6 +286,12 @@ export interface WorkApi {
     writeWhitzProvider(): Promise<OpenCodeConfigSnapshot>;
     removeWhitzProvider(): Promise<OpenCodeConfigSnapshot>;
     openConfigDir(): Promise<void>;
+    mcpList(workspacePath?: string | null): Promise<WorkMcpServerInfo[]>;
+    upsertMcp(input: WorkMcpServerInput): Promise<WorkMcpServerInfo[]>;
+    deleteMcp(name: string): Promise<WorkMcpServerInfo[]>;
+    toggleMcp(name: string, connect: boolean, workspacePath?: string | null): Promise<WorkMcpServerInfo[]>;
+    lspStatus(workspacePath?: string | null): Promise<WorkLspStatus[]>;
+    vcsInfo(workspacePath?: string | null): Promise<{ branch: string | null }>;
     gatewayStatus(): Promise<LocalGatewayStatus>;
   };
 

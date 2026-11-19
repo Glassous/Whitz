@@ -17,6 +17,9 @@ interface ConversationRow {
   opencode_session_id: string | null;
   workspace_path: string | null;
   is_pinned: number;
+  model_ref: string | null;
+  agent_name: string | null;
+  variant: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -38,6 +41,7 @@ interface MessageRow {
   tool_name: string | null;
   tool_payload: string | null;
   run_id: string | null;
+  reverted: number;
   created_at: string;
 }
 
@@ -49,8 +53,12 @@ function toConversation(row: ConversationRow): WorkConversation {
   return {
     id: row.id,
     title: row.title,
+    opencode_session_id: row.opencode_session_id ?? null,
     workspace_path: row.workspace_path ?? null,
     is_pinned: Boolean(row.is_pinned),
+    model_ref: row.model_ref ?? null,
+    agent_name: row.agent_name ?? null,
+    variant: row.variant ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -74,6 +82,7 @@ function toMessage(row: MessageRow): WorkMessage {
     tool_name: row.tool_name,
     tool_payload: payload,
     run_id: row.run_id ?? null,
+    reverted: Boolean(row.reverted),
     created_at: row.created_at,
   };
 }
@@ -83,14 +92,14 @@ export function listConversations(workspacePath?: string | null): WorkConversati
     workspacePath !== undefined && workspacePath !== null && workspacePath !== ""
       ? (getDb()
           .prepare(
-            `SELECT id, title, opencode_session_id, workspace_path, is_pinned, created_at, updated_at
+            `SELECT id, title, opencode_session_id, workspace_path, is_pinned, model_ref, agent_name, variant, created_at, updated_at
              FROM conversations WHERE archived = 0 AND workspace_path = ?
              ORDER BY is_pinned DESC, updated_at DESC`,
           )
           .all(path.resolve(workspacePath)) as ConversationRow[])
       : (getDb()
           .prepare(
-            `SELECT id, title, opencode_session_id, workspace_path, is_pinned, created_at, updated_at
+            `SELECT id, title, opencode_session_id, workspace_path, is_pinned, model_ref, agent_name, variant, created_at, updated_at
              FROM conversations WHERE archived = 0
              ORDER BY is_pinned DESC, updated_at DESC`,
           )
@@ -98,22 +107,39 @@ export function listConversations(workspacePath?: string | null): WorkConversati
   return rows.map(toConversation);
 }
 
-export function createConversation(title = "新的工作区对话", workspacePath?: string | null): WorkConversation {
+export function createConversation(
+  title = "新的工作区对话",
+  workspacePath?: string | null,
+  init?: {
+    opencode_session_id?: string | null;
+    model_ref?: string | null;
+    agent_name?: string | null;
+    variant?: string | null;
+  },
+): WorkConversation {
   const id = crypto.randomUUID();
   const stamp = now();
   const cleanTitle = title.trim() || "新的工作区对话";
   const resolvedWorkspace = workspacePath ? path.resolve(workspacePath) : getActiveWorkspacePath();
+  const opencodeSessionId = init?.opencode_session_id ?? null;
+  const modelRef = init?.model_ref ?? null;
+  const agentName = init?.agent_name ?? null;
+  const variant = init?.variant ?? null;
   getDb()
     .prepare(
-      `INSERT INTO conversations (id, title, opencode_session_id, workspace_path, is_pinned, created_at, updated_at, archived)
-       VALUES (?, ?, NULL, ?, 0, ?, ?, 0)`,
+      `INSERT INTO conversations (id, title, opencode_session_id, workspace_path, is_pinned, model_ref, agent_name, variant, created_at, updated_at, archived)
+       VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 0)`,
     )
-    .run(id, cleanTitle, resolvedWorkspace, stamp, stamp);
+    .run(id, cleanTitle, opencodeSessionId, resolvedWorkspace, modelRef, agentName, variant, stamp, stamp);
   return {
     id,
     title: cleanTitle,
+    opencode_session_id: opencodeSessionId,
     workspace_path: resolvedWorkspace,
     is_pinned: false,
+    model_ref: modelRef,
+    agent_name: agentName,
+    variant,
     created_at: stamp,
     updated_at: stamp,
   };
@@ -122,11 +148,26 @@ export function createConversation(title = "新的工作区对话", workspacePat
 export function getConversationMeta(id: string): ConversationRow | null {
   const row = getDb()
     .prepare(
-      `SELECT id, title, opencode_session_id, workspace_path, is_pinned, created_at, updated_at
+      `SELECT id, title, opencode_session_id, workspace_path, is_pinned, model_ref, agent_name, variant, created_at, updated_at
        FROM conversations WHERE id = ? AND archived = 0`,
     )
     .get(id) as ConversationRow | undefined;
   return row ?? null;
+}
+
+export function setConversationPrefs(
+  id: string,
+  prefs: { model_ref?: string | null; agent_name?: string | null; variant?: string | null },
+): WorkConversation {
+  const row = getConversationMeta(id);
+  if (!row) throw new Error("对话不存在");
+  const nextModel = prefs.model_ref !== undefined ? prefs.model_ref : row.model_ref;
+  const nextAgent = prefs.agent_name !== undefined ? prefs.agent_name : row.agent_name;
+  const nextVariant = prefs.variant !== undefined ? prefs.variant : row.variant;
+  getDb()
+    .prepare(`UPDATE conversations SET model_ref = ?, agent_name = ?, variant = ? WHERE id = ?`)
+    .run(nextModel ?? null, nextAgent ?? null, nextVariant ?? null, id);
+  return toConversation(getConversationMeta(id)!);
 }
 
 export function setOpenCodeSession(conversationId: string, sessionId: string): void {
@@ -158,20 +199,66 @@ export function getConversation(id: string): WorkConversationDetail | null {
   if (!row) return null;
   const rows = getDb()
     .prepare(
-      `SELECT id, conversation_id, role, content, status, tool_name, tool_payload, run_id, created_at
+      `SELECT id, conversation_id, role, content, status, tool_name, tool_payload, run_id, reverted, created_at
        FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC`,
     )
     .all(id) as MessageRow[];
-  const messages = rows.map(toMessage);
-  const streaming = [...messages]
+  const allMessages = rows.map(toMessage);
+  const activeMessages = allMessages.filter((m) => !m.reverted);
+  const revertedCount = allMessages.length - activeMessages.length;
+  const streaming = [...activeMessages]
     .reverse()
     .find((m) => m.role === "assistant" && (m.status === "streaming" || m.status === "waiting"));
   return {
     conversation: toConversation(row),
-    messages,
+    messages: activeMessages,
     active_run_id: streaming?.run_id ?? null,
     active_run_status: streaming?.status ?? null,
+    reverted_count: revertedCount,
   };
+}
+
+export function getMessageRow(id: string): WorkMessage | null {
+  const row = getDb()
+    .prepare(
+      `SELECT id, conversation_id, role, content, status, tool_name, tool_payload, run_id, reverted, created_at
+       FROM messages WHERE id = ?`,
+    )
+    .get(id) as MessageRow | undefined;
+  return row ? toMessage(row) : null;
+}
+
+export function markMessagesRevertedFrom(conversationId: string, fromMessageId: string): void {
+  const rows = getDb()
+    .prepare(`SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC`)
+    .all(conversationId) as Array<{ id: string }>;
+  const idx = rows.findIndex((r) => r.id === fromMessageId);
+  if (idx < 0) return;
+  const targetIds = rows.slice(idx).map((r) => r.id);
+  const stmt = getDb().prepare(`UPDATE messages SET reverted = 1 WHERE id = ?`);
+  for (const mid of targetIds) stmt.run(mid);
+}
+
+export function unrevertAllMessages(conversationId: string): void {
+  getDb().prepare(`UPDATE messages SET reverted = 0 WHERE conversation_id = ?`).run(conversationId);
+}
+
+export function copyMessagesUpTo(sourceConvId: string, targetConvId: string, upToMessageId?: string | null): void {
+  const rows = getDb()
+    .prepare(
+      `SELECT id, conversation_id, role, content, status, tool_name, tool_payload, run_id, reverted, created_at
+       FROM messages WHERE conversation_id = ? AND reverted = 0 ORDER BY created_at ASC, rowid ASC`,
+    )
+    .all(sourceConvId) as MessageRow[];
+  const limitIdx = upToMessageId ? rows.findIndex((r) => r.id === upToMessageId) : rows.length - 1;
+  const slice = limitIdx >= 0 ? rows.slice(0, limitIdx + 1) : rows;
+  const insert = getDb().prepare(
+    `INSERT INTO messages (id, conversation_id, role, content, status, tool_name, tool_payload, run_id, reverted, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+  );
+  for (const r of slice) {
+    insert.run(crypto.randomUUID(), targetConvId, r.role, r.content, r.status, r.tool_name, r.tool_payload, r.run_id, r.created_at);
+  }
 }
 
 export function addMessage(input: {
@@ -250,11 +337,15 @@ export function appendMessageContent(id: string, delta: string): void {
   getDb().prepare(`UPDATE messages SET content = content || ? WHERE id = ?`).run(delta, id);
 }
 
+export function deleteMessage(id: string): void {
+  getDb().prepare(`DELETE FROM messages WHERE id = ?`).run(id);
+}
+
 export function findRunningTool(conversationId: string, tool: string, toolCallId?: string | null): WorkMessage | null {
   const rows = getDb()
     .prepare(
-      `SELECT id, conversation_id, role, content, status, tool_name, tool_payload, run_id, created_at
-       FROM messages WHERE conversation_id = ? AND role = 'tool' AND status = 'running' ORDER BY created_at DESC, rowid DESC LIMIT 20`,
+      `SELECT id, conversation_id, role, content, status, tool_name, tool_payload, run_id, reverted, created_at
+       FROM messages WHERE conversation_id = ? AND role = 'tool' AND status = 'running' AND reverted = 0 ORDER BY created_at DESC, rowid DESC LIMIT 20`,
     )
     .all(conversationId) as MessageRow[];
   if (toolCallId) {

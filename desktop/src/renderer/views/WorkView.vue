@@ -1,65 +1,76 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import type { WorkAttachment } from "@shared/work-types";
-import { useDesktopStore } from "../stores/desktop";
 import { useRuntimeStore } from "../stores/runtime";
 import { useWorkStore } from "../stores/work";
-import BaseButton from "@web/components/ui/BaseButton.vue";
 import WorkSidebar from "../components/work/WorkSidebar.vue";
 import WorkMessageList from "../components/work/WorkMessageList.vue";
 import WorkComposer from "../components/work/WorkComposer.vue";
 import WorkInspectorPanel from "../components/work/WorkInspectorPanel.vue";
 import ApprovalSheet from "../components/work/ApprovalSheet.vue";
+import BaseButton from "@web/components/ui/BaseButton.vue";
+
+const PANEL_WIDTH_STORAGE_KEY = "whitz_work_panel_width";
+const DEFAULT_PANEL_WIDTH = 360;
+const MIN_PANEL_WIDTH = 320;
+const MAX_PANEL_WIDTH = 620;
 
 const router = useRouter();
-const desktop = useDesktopStore();
 const runtime = useRuntimeStore();
 const work = useWorkStore();
 
-const sidebarOpen = ref(false);
-const drawerDragProgress = ref<number | null>(null);
 const composerRef = ref<InstanceType<typeof WorkComposer> | null>(null);
+const messageListRef = ref<InstanceType<typeof WorkMessageList> | null>(null);
 
-const PANEL_WIDTH_KEY = "whitz_work_panel_width";
-const DEFAULT_PANEL_WIDTH = 360;
-const MIN_PANEL_WIDTH = 300;
+const isDesktop = ref(typeof window !== "undefined" ? window.innerWidth >= 768 : true);
+const sidebarOpen = ref(false);
+const sidebarCollapsed = ref(false);
+const drawerDragProgress = ref<number | null>(null);
 
-function maxPanelWidth(): number {
-  if (typeof window === "undefined") return 820;
-  return Math.max(MIN_PANEL_WIDTH, Math.floor(Math.min(820, window.innerWidth * 0.56)));
-}
-
-function clampPanelWidth(w: number): number {
-  return Math.round(Math.max(MIN_PANEL_WIDTH, Math.min(maxPanelWidth(), w)));
-}
+const showInspector = computed({
+  get: () => work.inspectorOpen,
+  set: (v: boolean) => work.setInspectorOpen(v),
+});
+const mobileInspectorOpen = ref(false);
 
 function loadPanelWidth(): number {
   if (typeof window === "undefined") return DEFAULT_PANEL_WIDTH;
-  try {
-    const raw = window.localStorage.getItem(PANEL_WIDTH_KEY);
-    const parsed = raw ? Number(raw) : DEFAULT_PANEL_WIDTH;
-    return Number.isFinite(parsed) && parsed > 0 ? clampPanelWidth(parsed) : clampPanelWidth(DEFAULT_PANEL_WIDTH);
-  } catch {
-    return DEFAULT_PANEL_WIDTH;
-  }
-}
-
-function savePanelWidth(width: number) {
-  try {
-    window.localStorage.setItem(PANEL_WIDTH_KEY, String(width));
-  } catch {
-    /* ignore */
-  }
+  const raw = Number(window.localStorage.getItem(PANEL_WIDTH_STORAGE_KEY));
+  return Number.isFinite(raw) ? Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, raw)) : DEFAULT_PANEL_WIDTH;
 }
 
 const panelWidth = ref<number>(loadPanelWidth());
 const isResizingPanel = ref(false);
 let resizeStartX = 0;
 let resizeStartWidth = DEFAULT_PANEL_WIDTH;
+let mediaQuery: MediaQueryList | null = null;
 
-function onPanelResizePointerDown(e: PointerEvent) {
-  if (!work.inspectorOpen) return;
+function onMediaChange(e: MediaQueryListEvent) {
+  isDesktop.value = e.matches;
+  if (e.matches) sidebarOpen.value = false;
+}
+
+function onSidebarToggleClick() {
+  if (isDesktop.value) sidebarCollapsed.value = !sidebarCollapsed.value;
+  else sidebarOpen.value = !sidebarOpen.value;
+}
+
+function onInspectorToggleClick() {
+  if (window.innerWidth >= 1024) {
+    showInspector.value = !showInspector.value;
+  } else {
+    mobileInspectorOpen.value = !mobileInspectorOpen.value;
+  }
+}
+
+function clampPanelWidth(w: number): number {
+  const maxByViewport = typeof window !== "undefined" ? Math.max(MIN_PANEL_WIDTH, window.innerWidth - 420) : MAX_PANEL_WIDTH;
+  return Math.round(Math.min(Math.min(MAX_PANEL_WIDTH, maxByViewport), Math.max(MIN_PANEL_WIDTH, w)));
+}
+
+function onResizePointerDown(e: PointerEvent) {
+  if (!showInspector.value) return;
   const target = e.currentTarget as HTMLElement;
   target.setPointerCapture(e.pointerId);
   isResizingPanel.value = true;
@@ -67,296 +78,360 @@ function onPanelResizePointerDown(e: PointerEvent) {
   resizeStartWidth = panelWidth.value;
 }
 
-function onPanelResizePointerMove(e: PointerEvent) {
+function onResizePointerMove(e: PointerEvent) {
   if (!isResizingPanel.value) return;
-  const delta = resizeStartX - e.clientX;
-  panelWidth.value = clampPanelWidth(resizeStartWidth + delta);
+  panelWidth.value = clampPanelWidth(resizeStartWidth + (resizeStartX - e.clientX));
 }
 
-function onPanelResizePointerUp(e: PointerEvent) {
+function onResizePointerUp(e: PointerEvent) {
   if (!isResizingPanel.value) return;
   isResizingPanel.value = false;
   const target = e.currentTarget as HTMLElement;
-  if (target.hasPointerCapture(e.pointerId)) {
-    target.releasePointerCapture(e.pointerId);
-  }
-  savePanelWidth(panelWidth.value);
-}
-
-function onWindowResize() {
-  panelWidth.value = clampPanelWidth(panelWidth.value);
-}
-
-function onSidebarToggleClick() {
-  if (window.innerWidth >= 768) {
-    desktop.toggleSidebarCollapsed();
-  } else {
-    sidebarOpen.value = true;
+  if (target.hasPointerCapture(e.pointerId)) target.releasePointerCapture(e.pointerId);
+  try {
+    window.localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, String(panelWidth.value));
+  } catch {
+    /* ignore */
   }
 }
 
-function onGlobalKeydown(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
-    e.preventDefault();
-    onSidebarToggleClick();
+const currentProjectName = computed(() => {
+  const p = work.current?.conversation.workspace_path || work.activeWorkspace?.path;
+  if (!p) return null;
+  return p.split(/[\\/]/).filter(Boolean).pop() || p;
+});
+
+const composerDisabled = computed(() => !runtime.installed || runtime.status?.state === "disabled");
+
+const statusSummary = computed(() => {
+  const s = runtime.status?.state;
+  if (!runtime.installed) return { label: "需安装 OpenCode", tone: "var(--warning)" };
+  if (s === "ready") return { label: "就绪", tone: "var(--success)" };
+  if (s === "starting") return { label: "启动中", tone: "var(--warning)" };
+  if (s === "error") return { label: "连接异常", tone: "var(--danger)" };
+  return { label: "未运行", tone: "var(--fg-faint)" };
+});
+
+const usageLabel = computed(() => {
+  const u = work.usage;
+  if (!u || !u.total) return "";
+  const formatted = u.total >= 1000 ? `${(u.total / 1000).toFixed(1)}k` : String(u.total);
+  if (u.context_limit && u.context_limit > 0) {
+    const pct = Math.min(100, Math.round((u.total / u.context_limit) * 100));
+    return `${formatted} tokens (${pct}%)`;
+  }
+  return `${formatted} tokens`;
+});
+
+async function handleSend(payload: {
+  text: string;
+  skills: string[];
+  attachments: WorkAttachment[];
+  modelRef: string | null;
+  agentName: string | null;
+  variant: string | null;
+}) {
+  try {
+    await work.send(payload.text, {
+      skillNames: payload.skills,
+      attachments: payload.attachments,
+      modelRef: payload.modelRef,
+      agentName: payload.agentName,
+      variant: payload.variant,
+    });
+  } catch (err) {
+    work.error = err instanceof Error ? err.message : "发送失败";
   }
 }
 
-onMounted(async () => {
-  desktop.syncSidebarCollapsedFromStorage();
-  window.addEventListener("keydown", onGlobalKeydown);
-  window.addEventListener("resize", onWindowResize);
-  await work.loadWorkspaceState();
-  await work.loadList();
-  if (!work.current && work.conversations[0]) await work.select(work.conversations[0].id);
-  if (runtime.ready) void work.loadSkills();
-});
-
-onBeforeUnmount(() => {
-  window.removeEventListener("keydown", onGlobalKeydown);
-  window.removeEventListener("resize", onWindowResize);
-});
-
-watch(
-  () => runtime.ready,
-  (ready) => {
-    if (ready) void work.loadSkills();
-  },
-);
-
-const title = computed(() => work.current?.conversation.title ?? "本地工作台");
-const blockedReason = computed(() => {
-  if (!runtime.installed) return "尚未检测到本机 OpenCode CLI";
-  if (runtime.status?.state === "disabled") return "Whitz Work 已被远程策略禁用";
-  if (runtime.settings?.model.mode === "builtin" && !desktop.loggedIn) {
-    return "「Whitz 内置」模型需要登录账号，请在 Work 设置中改用本机 OpenCode 模型";
+async function handleCommand(cmd: { name: string; args: string }) {
+  try {
+    if (cmd.name === "compact") {
+      await work.compact(work.current?.conversation.model_ref);
+      return;
+    }
+    if (cmd.name === "undo") {
+      const lastUser = [...work.messages].reverse().find((m) => m.role === "user");
+      if (lastUser) await work.revert(lastUser.id);
+      return;
+    }
+    if (cmd.name === "redo") {
+      await work.unrevert();
+      return;
+    }
+    if (cmd.name === "fork") {
+      await work.fork();
+      return;
+    }
+    if (cmd.name === "init") {
+      await work.initAgentsMd(work.current?.conversation.model_ref);
+      return;
+    }
+    await work.runSlashCommand(cmd.name, cmd.args, {
+      modelRef: work.current?.conversation.model_ref,
+      agentName: work.current?.conversation.agent_name,
+      variant: work.current?.conversation.variant,
+    });
+  } catch (err) {
+    work.error = err instanceof Error ? err.message : "指令执行失败";
   }
-  return null;
-});
-const disabled = computed(() => Boolean(blockedReason.value));
-const isQuotaError = computed(() => Boolean(work.error && (work.error.includes("402") || work.error.includes("额度"))));
-
-async function send(payload: { content: string; skillNames: string[]; attachments: WorkAttachment[] }) {
-  await work.send(payload.content, {
-    skillNames: payload.skillNames,
-    attachments: payload.attachments,
-  });
 }
 
-async function steer(content: string) {
-  await work.steer(content);
+async function handleShell(cmd: string) {
+  try {
+    await work.runShellCommand(cmd, {
+      agentName: work.current?.conversation.agent_name,
+      modelRef: work.current?.conversation.model_ref,
+    });
+  } catch (err) {
+    work.error = err instanceof Error ? err.message : "命令执行失败";
+  }
 }
 
-const runtimeStatusLabel = computed(() => {
-  if (!runtime.installed) return "OpenCode 未检测";
-  const state = runtime.status?.state;
-  if (state === "ready") return "OpenCode 就绪";
-  if (state === "starting") return "OpenCode 启动中";
-  if (state === "error") return "OpenCode 重连中";
-  if (state === "disabled") return "OpenCode 已禁用";
-  return "OpenCode 待命";
-});
+async function handleRevert(messageId: string) {
+  try {
+    await work.revert(messageId);
+  } catch (err) {
+    work.error = err instanceof Error ? err.message : "撤回失败";
+  }
+}
 
-const runtimeStatusColor = computed(() => {
-  if (runtime.ready) return "var(--success)";
-  const state = runtime.status?.state;
-  if (state === "error") return "var(--danger)";
-  if (state === "starting") return "var(--warning)";
-  return "var(--fg-faint)";
-});
+async function handleFork(messageId: string) {
+  try {
+    await work.fork(messageId);
+  } catch (err) {
+    work.error = err instanceof Error ? err.message : "分支对话失败";
+  }
+}
 
-function insertPathToComposer(relPath: string) {
+function handleInsertPath(relPath: string) {
   composerRef.value?.insertPath(relPath);
 }
 
-async function exportConversation() {
-  if (!work.current) return;
-  const result = await window.whitzDesktop?.work.export(work.current.conversation.id);
-  if (result?.path) window.alert(`已导出到：${result.path}`);
-}
+onMounted(async () => {
+  if (typeof window !== "undefined") {
+    mediaQuery = window.matchMedia("(min-width: 768px)");
+    isDesktop.value = mediaQuery.matches;
+    mediaQuery.addEventListener("change", onMediaChange);
+  }
+  work.bindEvents();
+  await runtime.init().catch(() => undefined);
+  await Promise.all([work.loadWorkspaceState(), work.loadList(), work.syncActiveRuns()]);
+  if (!work.current && work.conversations.length) {
+    await work.select(work.conversations[0].id).catch(() => undefined);
+  }
+});
+
+onBeforeUnmount(() => {
+  mediaQuery?.removeEventListener("change", onMediaChange);
+});
 </script>
 
 <template>
-  <div v-if="!desktop.workEnabled" class="work-glow flex h-full items-center justify-center px-8">
-    <section class="max-w-[520px] rounded-3xl border border-line bg-canvas/85 p-8 shadow-[var(--shadow)]">
-      <p class="text-[11px] font-medium uppercase tracking-[0.18em] text-fg-faint">Whitz Work</p>
-      <h1 class="mt-3 text-[22px] font-semibold text-fg">该模式当前不可用</h1>
-      <p class="mt-2 text-[13.5px] leading-relaxed text-fg-muted">
-        {{ desktop.policy?.disabled_reason || "服务端策略已关闭 Work 模式。本地智能体不会启动，你仍可以正常使用 Chat。" }}
-      </p>
-      <div class="mt-5 flex gap-2.5">
-        <BaseButton @click="router.push({ name: 'chat-gate' })">使用 Chat</BaseButton>
-        <BaseButton variant="secondary" @click="router.push({ name: 'work-settings' })">查看策略</BaseButton>
-      </div>
-    </section>
-  </div>
-
-  <div v-else class="flex h-full min-h-0 overflow-hidden bg-canvas">
-    <div
-      v-if="sidebarOpen"
-      class="fixed inset-0 z-30 bg-black/40 md:hidden"
-      :style="drawerDragProgress !== null ? { opacity: drawerDragProgress, transition: 'none' } : undefined"
-      @click="sidebarOpen = false"
-    />
+  <div class="relative flex h-full w-full overflow-hidden bg-canvas text-fg">
+    <!-- Mobile Sidebar Backdrop -->
+    <Transition
+      enter-active-class="transition duration-250 ease-out"
+      enter-from-class="opacity-0"
+      enter-to-class="opacity-100"
+      leave-active-class="transition duration-200 ease-in"
+      leave-from-class="opacity-100"
+      leave-to-class="opacity-0"
+    >
+      <div
+        v-if="sidebarOpen"
+        class="fixed inset-0 z-30 bg-black/40 md:hidden"
+        :style="drawerDragProgress !== null ? { opacity: drawerDragProgress, transition: 'none' } : undefined"
+        @click="sidebarOpen = false"
+      />
+    </Transition>
 
     <WorkSidebar
       :open="sidebarOpen"
+      :collapsed="sidebarCollapsed"
       @close="sidebarOpen = false"
       @drag-progress="drawerDragProgress = $event"
     />
 
-    <div class="flex min-w-0 flex-1 flex-col">
-      <!-- Top Header -->
-      <header class="flex h-13 shrink-0 items-center justify-between gap-2.5 border-b border-line px-3.5">
-        <div class="flex min-w-0 flex-1 items-center gap-2.5">
+    <main class="relative flex min-w-0 flex-1 overflow-hidden">
+      <!-- Fixed Right Panel Toggle (Matches ChatView.vue exact top-right icon) -->
+      <button
+        type="button"
+        class="focus-ring absolute right-3.5 top-3.5 z-30 inline-flex h-10 w-10 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
+        :aria-label="showInspector ? '收起工作台面板' : '展开工作台面板'"
+        :title="showInspector ? '收起工作台面板' : '展开工作台面板'"
+        @click="onInspectorToggleClick"
+      >
+        <svg class="h-[21px] w-[21px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v14H3zM15 5v14" />
+        </svg>
+        <span
+          v-if="(work.sessionDiffs.length || work.gitStatus.changes.length) && !showInspector"
+          class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-accent"
+          aria-hidden="true"
+        />
+      </button>
+
+      <!-- Main Conversation Column (Matches ChatView.vue, Non-overlapping Clean Header) -->
+      <div class="relative flex min-w-0 flex-1 flex-col">
+        <header class="relative z-20 flex h-13 shrink-0 items-center gap-2.5 bg-canvas px-3.5" :class="showInspector ? 'pr-4' : 'pr-14'">
           <button
             type="button"
-            class="focus-ring flex h-9.5 w-9.5 shrink-0 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
-            :aria-label="desktop.sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
-            :title="desktop.sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
+            class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
+            :aria-label="sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
             @click="onSidebarToggleClick"
           >
-            <svg class="h-[20px] w-[20px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <svg class="h-[21px] w-[21px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
               <path stroke-linecap="round" d="M4 8.5h16M4 15.5h10" />
             </svg>
           </button>
 
-          <h2 class="truncate text-[14.5px] font-semibold text-fg">{{ title }}</h2>
+          <h1 class="min-w-0 flex-1 truncate text-[15px] font-semibold text-fg">
+            {{ work.current?.conversation.title ?? "OpenCode 工作台" }}
+          </h1>
 
-          <button
-            type="button"
-            class="focus-ring hidden shrink-0 items-center gap-1.5 rounded-full border border-line bg-surface/60 px-2.5 py-0.5 text-[11px] text-fg-muted transition-colors hover:border-line-strong hover:text-fg sm:inline-flex"
-            :title="work.activeWorkspace?.path || '点击选择本地工作区'"
-            @click="work.pickWorkspace()"
-          >
-            <span
-              class="h-1.5 w-1.5 rounded-full"
-              :style="{ background: work.activeWorkspace ? 'var(--work-accent)' : 'var(--fg-faint)' }"
-            />
-            <span class="max-w-[160px] truncate">
-              {{ work.activeWorkspace ? work.activeWorkspace.name : "选择工作区" }}
-            </span>
-          </button>
-
-          <span
-            class="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-line bg-surface/45 px-2.5 py-0.5 text-[11px]"
-            :style="{ color: runtimeStatusColor }"
-            :title="runtime.status?.detail || runtime.status?.exe_path || runtimeStatusLabel"
-          >
-            <span
-              class="h-1.5 w-1.5 rounded-full"
-              :class="{ 'work-dot-live': runtime.ready }"
-              :style="{ background: runtimeStatusColor }"
-            />
-            {{ runtimeStatusLabel }}
-          </span>
-        </div>
-
-        <div class="flex shrink-0 items-center gap-1.5">
-          <BaseButton v-if="work.current" size="sm" variant="ghost" @click="exportConversation">导出</BaseButton>
-          <BaseButton size="sm" variant="ghost" @click="router.push({ name: 'work-settings' })">设置</BaseButton>
-          <button
-            type="button"
-            class="focus-ring inline-flex h-9 w-9 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
-            :aria-label="work.inspectorOpen ? '收起工作区面板' : '展开工作区面板'"
-            :title="work.inspectorOpen ? '收起工作区面板' : '展开工作区面板'"
-            @click="work.setInspectorOpen(!work.inspectorOpen)"
-          >
-            <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v14H3zM15 5v14" />
-            </svg>
-          </button>
-        </div>
-      </header>
-
-      <!-- Not Installed Gate -->
-      <div v-if="!runtime.installed" class="flex min-h-0 flex-1 items-center justify-center px-8">
-        <section class="max-w-[560px] rounded-2xl border border-line bg-canvas p-7 text-center">
-          <h3 class="text-[17px] font-semibold text-fg">未检测到本机 OpenCode CLI</h3>
-          <p class="mt-2 text-[13px] leading-relaxed text-fg-muted">
-            Whitz Work 直接调用并复用你电脑上已有的 OpenCode（本应用不内置安装器）。请先安装 OpenCode 或手动指定已有可执行文件。
-          </p>
-          <div class="mt-5 flex flex-wrap justify-center gap-2.5">
-            <BaseButton :loading="runtime.busy" @click="runtime.redetect()">重新检测</BaseButton>
-            <BaseButton variant="secondary" @click="router.push({ name: 'work-setup' })">查看安装指引</BaseButton>
-            <BaseButton variant="ghost" @click="router.push({ name: 'work-settings' })">指定已有路径</BaseButton>
-          </div>
-        </section>
-      </div>
-
-      <template v-else>
-        <div
-          v-if="work.error"
-          class="flex items-center justify-between gap-3 border-b border-line bg-danger-weak/50 px-5 py-2 text-[12px] text-danger"
-        >
-          <span class="min-w-0 flex-1">{{ work.error }}</span>
+          <!-- Minimal Live Status & Context Telemetry -->
           <div class="flex shrink-0 items-center gap-2">
             <button
-              v-if="isQuotaError"
+              v-if="usageLabel"
               type="button"
-              class="rounded-md bg-canvas px-2 py-0.5 text-[11px] font-medium text-fg hover:bg-hover"
-              @click="router.push({ name: 'work-settings' })"
+              class="hidden whitespace-nowrap rounded-full bg-surface/80 px-2.5 py-1 text-[11px] tabular-nums text-fg-faint transition-colors hover:text-fg sm:inline"
+              title="点击压缩当前上下文 (/compact)"
+              @click="handleCommand({ name: 'compact', args: '' })"
             >
-              切换自带 Key
+              {{ usageLabel }} · 压缩
             </button>
-            <button type="button" class="text-[11px] hover:opacity-75" @click="work.error = null">关闭</button>
+
+            <button
+              v-if="!runtime.ready || !runtime.installed"
+              type="button"
+              class="flex whitespace-nowrap items-center gap-1.5 rounded-full bg-surface/85 px-2.5 py-1 text-[11.5px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+              @click="router.push({ name: runtime.installed ? 'work-settings' : 'work-setup' })"
+            >
+              <span class="h-1.5 w-1.5 rounded-full" :style="{ background: statusSummary.tone }" />
+              <span>{{ statusSummary.label }}</span>
+            </button>
           </div>
+        </header>
+
+        <!-- Runtime Setup Notice -->
+        <div
+          v-if="!runtime.installed"
+          class="mx-auto mt-2 flex w-full max-w-4xl items-center justify-between gap-3 rounded-2xl bg-surface px-4 py-2.5 text-[12.5px] text-fg-muted"
+        >
+          <span>尚未检测到本机 OpenCode CLI，安装或指定路径后即可使用 Work。</span>
+          <BaseButton size="sm" @click="router.push({ name: 'work-setup' })">配置指引</BaseButton>
         </div>
 
+        <!-- Message List -->
         <WorkMessageList
+          ref="messageListRef"
           :messages="work.messages"
           :active-assistant-id="work.activeAssistantId"
           :streaming="work.streaming"
-          @open-file="work.openFilePreview($event)"
+          :reverted-count="work.current?.reverted_count ?? 0"
+          :project-name="currentProjectName"
+          @open-file="work.openFilePreview"
+          @revert="handleRevert"
+          @unrevert="work.unrevert()"
+          @fork="handleFork"
         />
 
-        <WorkComposer
-          ref="composerRef"
-          :streaming="work.streaming"
-          :sending="work.sending"
-          :disabled="disabled"
-          :disabled-reason="blockedReason"
-          @send="send"
-          @steer="steer"
-          @stop="work.stop()"
-        />
-      </template>
-    </div>
+        <!-- Progressive Blur Bottom + Inline Approvals + Error + Composer (Aligned with ChatView.vue) -->
+        <div class="progressive-blur-bottom pointer-events-none absolute inset-x-0 bottom-0 z-10 h-24 sm:h-28" />
+        <div class="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-transparent px-3 pb-4 pt-2 sm:px-6 sm:pb-5">
+          <div class="pointer-events-auto mx-auto w-full max-w-4xl space-y-2.5">
+            <ApprovalSheet
+              v-if="work.pendingControl"
+              :kind="work.pendingControl.kind"
+              :tool="work.pendingControl.tool"
+              :preview="work.pendingControl.preview"
+              :choices="work.pendingControl.choices"
+              :queue-count="work.pendingCount"
+              @approve="work.approve"
+              @clarify="work.clarify"
+            />
 
-    <!-- Resizable Workbench Inspector Panel -->
-    <div
-      v-if="work.inspectorOpen"
-      class="relative hidden h-full shrink-0 lg:flex"
-      :style="{ width: `${panelWidth}px` }"
-    >
-      <div
-        role="separator"
-        tabindex="0"
-        aria-orientation="vertical"
-        aria-label="调整工作区面板宽度"
-        class="group/sep absolute inset-y-0 left-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize"
-        @pointerdown="onPanelResizePointerDown"
-        @pointermove="onPanelResizePointerMove"
-        @pointerup="onPanelResizePointerUp"
-        @pointercancel="onPanelResizePointerUp"
-      >
-        <div class="mx-auto h-full w-px bg-transparent transition-colors group-hover/sep:bg-[var(--work-accent)]" />
+            <div
+              v-if="work.error"
+              class="flex items-center justify-between gap-3 rounded-2xl bg-danger-weak px-3.5 py-2 text-[12.5px] text-danger"
+            >
+              <span class="min-w-0 flex-1 truncate">{{ work.error }}</span>
+              <button type="button" class="shrink-0 opacity-75 hover:opacity-100" @click="work.error = null">关闭</button>
+            </div>
+
+            <WorkComposer
+              ref="composerRef"
+              :streaming="work.streaming"
+              :disabled="composerDisabled"
+              :model-ref="work.current?.conversation.model_ref ?? null"
+              :agent-name="work.current?.conversation.agent_name ?? null"
+              :variant="work.current?.conversation.variant ?? null"
+              @send="handleSend"
+              @steer="work.steer"
+              @stop="work.stop"
+              @command="handleCommand"
+              @shell="handleShell"
+              @update:prefs="work.setSessionPrefs"
+            />
+          </div>
+        </div>
       </div>
 
-      <WorkInspectorPanel
-        @insert-path="insertPathToComposer"
-        @close="work.setInspectorOpen(false)"
-      />
-    </div>
-  </div>
+      <!-- Desktop Resizable Right Inspector Panel (Matches ChatView.vue PlanPanel aside) -->
+      <aside
+        class="relative hidden h-full shrink-0 overflow-hidden bg-sidebar lg:block"
+        :class="[
+          showInspector ? 'opacity-100' : 'pointer-events-none opacity-0',
+          isResizingPanel ? 'transition-none' : 'transition-[width,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
+        ]"
+        :style="{ width: showInspector ? `${panelWidth}px` : '0px' }"
+        :aria-hidden="!showInspector"
+      >
+        <div
+          v-if="showInspector"
+          role="separator"
+          tabindex="0"
+          aria-orientation="vertical"
+          aria-label="调整工作台面板宽度"
+          class="group absolute inset-y-0 left-0 z-30 flex w-2.5 cursor-col-resize touch-none select-none items-center justify-center transition-colors hover:bg-hover/60"
+          @pointerdown="onResizePointerDown"
+          @pointermove="onResizePointerMove"
+          @pointerup="onResizePointerUp"
+          @pointercancel="onResizePointerUp"
+        >
+          <span
+            class="h-10 w-0.5 rounded-full transition-colors"
+            :class="isResizingPanel ? 'bg-accent' : 'bg-transparent group-hover:bg-line-strong'"
+          />
+        </div>
+        <div class="h-full" :style="{ width: `${panelWidth}px` }">
+          <WorkInspectorPanel
+            @insert-path="handleInsertPath"
+            @close="showInspector = false"
+          />
+        </div>
+      </aside>
+    </main>
 
-  <ApprovalSheet
-    v-if="work.pendingControl"
-    :kind="work.pendingControl.kind"
-    :tool="work.pendingControl.tool"
-    :preview="work.pendingControl.preview"
-    :choices="work.pendingControl.choices"
-    @approve="work.approve"
-    @clarify="work.clarify"
-  />
+    <!-- Mobile Inspector Drawer -->
+    <Transition
+      enter-active-class="transition duration-250 ease-out"
+      enter-from-class="opacity-0"
+      enter-to-class="opacity-100"
+      leave-active-class="transition duration-200 ease-in"
+      leave-from-class="opacity-100"
+      leave-to-class="opacity-0"
+    >
+      <div v-if="mobileInspectorOpen" class="fixed inset-0 z-40 lg:hidden">
+        <div class="absolute inset-0 bg-black/40" @click="mobileInspectorOpen = false" />
+        <div class="absolute inset-y-0 right-0 w-[min(360px,90dvw)] bg-sidebar shadow-2xl">
+          <WorkInspectorPanel
+            @insert-path="handleInsertPath"
+            @close="mobileInspectorOpen = false"
+          />
+        </div>
+      </div>
+    </Transition>
+  </div>
 </template>

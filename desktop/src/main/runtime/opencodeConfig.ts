@@ -9,6 +9,9 @@ import type {
   OpenCodePermissionPreset,
   OpenCodeProviderInfo,
   OpenCodeProviderInput,
+  WorkMcpServerConfig,
+  WorkMcpServerInfo,
+  WorkMcpServerInput,
 } from "../../shared/work-types";
 import { localGatewayBaseUrl } from "./localOpenAIGateway";
 
@@ -233,6 +236,38 @@ function permissionConfigForPreset(preset: Exclude<OpenCodePermissionPreset, "cu
   };
 }
 
+export function syncFullCommandPermissionOnDisk(enabled: boolean): void {
+  const { doc } = readOpenCodeJsonDoc();
+  if (enabled) {
+    if (doc.permission === "allow") return;
+    const base: Record<string, unknown> = isRecord(doc.permission)
+      ? { ...doc.permission }
+      : {
+          edit: doc.permission === "ask" ? "ask" : "ask",
+          webfetch: "allow",
+          external_directory: "ask",
+        };
+    base.bash = "allow";
+    doc.permission = base;
+    writeOpenCodeJsonDoc(doc);
+    return;
+  }
+  if (isRecord(doc.permission) && doc.permission.bash === "allow") {
+    doc.permission = {
+      ...doc.permission,
+      bash: {
+        "*": "ask",
+        "git status*": "allow",
+        "git diff*": "allow",
+        "git log*": "allow",
+        "ls *": "allow",
+        "dir *": "allow",
+      },
+    };
+    writeOpenCodeJsonDoc(doc);
+  }
+}
+
 export interface LiveProviderPayload {
   all?: Array<{
     id: string;
@@ -240,12 +275,123 @@ export interface LiveProviderPayload {
     source?: "env" | "config" | "custom" | "api";
     key?: string;
     options?: Record<string, unknown>;
-    models?: Record<string, { id?: string; name?: string; api?: { npm?: string; url?: string } }>;
+    models?: Record<
+      string,
+      {
+        id?: string;
+        name?: string;
+        api?: { npm?: string; url?: string };
+        variants?: Record<string, unknown>;
+        limit?: { context?: number; output?: number };
+        capabilities?: {
+          reasoning?: boolean;
+          attachment?: boolean;
+          input?: { text?: boolean; image?: boolean; pdf?: boolean };
+        };
+      }
+    >;
   }>;
   connected?: string[];
 }
 
-export function buildConfigSnapshot(live?: LiveProviderPayload | null): OpenCodeConfigSnapshot {
+function parseMcpEntry(raw: unknown): WorkMcpServerConfig | null {
+  if (!isRecord(raw)) return null;
+  const type = raw.type === "remote" ? "remote" : "local";
+  const enabled = typeof raw.enabled === "boolean" ? raw.enabled : true;
+  if (type === "remote") {
+    return {
+      type: "remote",
+      url: typeof raw.url === "string" ? raw.url : "",
+      headers: isRecord(raw.headers)
+        ? Object.fromEntries(Object.entries(raw.headers).map(([k, v]) => [k, String(v ?? "")]))
+        : undefined,
+      enabled,
+    };
+  }
+  const command = Array.isArray(raw.command) ? raw.command.map(String).filter(Boolean) : [];
+  const environment = isRecord(raw.environment)
+    ? Object.fromEntries(Object.entries(raw.environment).map(([k, v]) => [k, String(v ?? "")]))
+    : undefined;
+  return { type: "local", command, environment, enabled };
+}
+
+export function listMcpServersFromDisk(liveStatus?: Record<string, { status: string; error?: string }> | null): WorkMcpServerInfo[] {
+  const { doc } = readOpenCodeJsonDoc();
+  const diskMcp = isRecord(doc.mcp) ? doc.mcp : {};
+  const names = new Set<string>([...Object.keys(diskMcp), ...Object.keys(liveStatus ?? {})]);
+  const out: WorkMcpServerInfo[] = [];
+  for (const name of names) {
+    const cfg = parseMcpEntry(diskMcp[name]);
+    const live = liveStatus?.[name];
+    const rawStatus = live?.status;
+    const status: WorkMcpServerInfo["status"] =
+      rawStatus === "connected" ||
+      rawStatus === "disabled" ||
+      rawStatus === "failed" ||
+      rawStatus === "needs_auth" ||
+      rawStatus === "needs_client_registration"
+        ? rawStatus
+        : cfg?.enabled === false
+          ? "disabled"
+          : "configured";
+    out.push({
+      name,
+      status,
+      error: live?.error ?? null,
+      config: cfg,
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function upsertMcpOnDisk(input: WorkMcpServerInput): WorkMcpServerInfo[] {
+  const name = input.name.trim();
+  if (!name || !/^[a-zA-Z0-9._-]+$/.test(name)) {
+    throw new Error("MCP 名称仅支持字母、数字、点、下划线或短横线");
+  }
+  const { doc } = readOpenCodeJsonDoc();
+  const mcp = isRecord(doc.mcp) ? { ...doc.mcp } : {};
+  if (input.type === "remote") {
+    const url = (input.url ?? "").trim();
+    if (!url) throw new Error("请填写远程 MCP Server URL");
+    mcp[name] = {
+      type: "remote",
+      url,
+      ...(input.headers && Object.keys(input.headers).length ? { headers: input.headers } : {}),
+      enabled: input.enabled ?? true,
+    };
+  } else {
+    const command = (input.command ?? []).map((s) => s.trim()).filter(Boolean);
+    if (!command.length) throw new Error("请填写本地 MCP 启动命令（如 npx -y ...）");
+    mcp[name] = {
+      type: "local",
+      command,
+      ...(input.environment && Object.keys(input.environment).length ? { environment: input.environment } : {}),
+      enabled: input.enabled ?? true,
+    };
+  }
+  doc.mcp = mcp;
+  writeOpenCodeJsonDoc(doc);
+  return listMcpServersFromDisk();
+}
+
+export function deleteMcpFromDisk(name: string): WorkMcpServerInfo[] {
+  const clean = name.trim();
+  if (!clean) throw new Error("缺少 MCP 名称");
+  const { doc } = readOpenCodeJsonDoc();
+  if (isRecord(doc.mcp)) {
+    const mcp = { ...doc.mcp };
+    delete mcp[clean];
+    doc.mcp = mcp;
+    writeOpenCodeJsonDoc(doc);
+  }
+  return listMcpServersFromDisk();
+}
+
+export function buildConfigSnapshot(
+  live?: LiveProviderPayload | null,
+  liveMcp?: Record<string, { status: string; error?: string }> | null,
+): OpenCodeConfigSnapshot {
   const { doc } = readOpenCodeJsonDoc();
   const files = opencodeFiles();
   const auth = readAuthJson();
@@ -254,16 +400,27 @@ export function buildConfigSnapshot(live?: LiveProviderPayload | null): OpenCode
   const whitzPortMatches = whitzInfo.configured && normalizeUrlBase(whitzInfo.baseURL) === normalizeUrlBase(gatewayUrl);
 
   const providerMap = new Map<string, OpenCodeProviderInfo>();
+  const modelMeta = new Map<
+    string,
+    { variants?: string[]; context_limit?: number | null; supports_image?: boolean; supports_pdf?: boolean; reasoning?: boolean }
+  >();
 
   const diskProviders = isRecord(doc.provider) ? doc.provider : {};
   for (const [id, rawEntry] of Object.entries(diskProviders)) {
     if (!isRecord(rawEntry)) continue;
     const opts = isRecord(rawEntry.options) ? rawEntry.options : {};
     const rawModels = isRecord(rawEntry.models) ? rawEntry.models : {};
-    const models = Object.entries(rawModels).map(([mid, mval]) => ({
-      id: mid,
-      name: isRecord(mval) && typeof mval.name === "string" && mval.name ? mval.name : mid,
-    }));
+    const models = Object.entries(rawModels).map(([mid, mval]) => {
+      if (isRecord(mval)) {
+        const variants = isRecord(mval.variants) ? Object.keys(mval.variants) : undefined;
+        const limit = isRecord(mval.limit) && typeof mval.limit.context === "number" ? mval.limit.context : null;
+        modelMeta.set(`${id}/${mid}`, { variants, context_limit: limit });
+      }
+      return {
+        id: mid,
+        name: isRecord(mval) && typeof mval.name === "string" && mval.name ? mval.name : mid,
+      };
+    });
     providerMap.set(id, {
       id,
       name: typeof rawEntry.name === "string" && rawEntry.name ? rawEntry.name : id,
@@ -280,10 +437,23 @@ export function buildConfigSnapshot(live?: LiveProviderPayload | null): OpenCode
   for (const item of live?.all ?? []) {
     const isConnected = connectedSet.has(item.id) || providerMap.has(item.id);
     if (!isConnected && item.id !== "whitz") continue;
-    const liveModels = Object.entries(item.models ?? {}).map(([mid, m]) => ({
-      id: mid,
-      name: m?.name || mid,
-    }));
+    const liveModels = Object.entries(item.models ?? {}).map(([mid, m]) => {
+      const ref = `${item.id}/${mid}`;
+      const prevMeta = modelMeta.get(ref);
+      const variants = m?.variants && typeof m.variants === "object" ? Object.keys(m.variants) : prevMeta?.variants;
+      const contextLimit = typeof m?.limit?.context === "number" ? m.limit.context : (prevMeta?.context_limit ?? null);
+      modelMeta.set(ref, {
+        variants: variants?.length ? variants : prevMeta?.variants,
+        context_limit: contextLimit,
+        supports_image: Boolean(m?.capabilities?.input?.image),
+        supports_pdf: Boolean(m?.capabilities?.input?.pdf),
+        reasoning: Boolean(m?.capabilities?.reasoning),
+      });
+      return {
+        id: mid,
+        name: m?.name || mid,
+      };
+    });
     const existing = providerMap.get(item.id);
     const mergedModels = existing ? [...existing.models] : [];
     const seen = new Set(mergedModels.map((m) => m.id));
@@ -321,13 +491,20 @@ export function buildConfigSnapshot(live?: LiveProviderPayload | null): OpenCode
   const availableModels: OpenCodeModelOption[] = [];
   for (const p of providers) {
     for (const m of p.models) {
+      const ref = `${p.id}/${m.id}`;
+      const meta = modelMeta.get(ref);
       availableModels.push({
-        ref: `${p.id}/${m.id}`,
+        ref,
         label: `${p.name || p.id} / ${m.name || m.id}`,
         providerID: p.id,
         modelID: m.id,
         connected: p.connected,
         is_whitz: p.id === "whitz" || p.id === whitzInfo.providerId,
+        variants: meta?.variants,
+        context_limit: meta?.context_limit ?? null,
+        supports_image: meta?.supports_image,
+        supports_pdf: meta?.supports_pdf,
+        reasoning: meta?.reasoning,
       });
     }
   }
@@ -344,6 +521,7 @@ export function buildConfigSnapshot(live?: LiveProviderPayload | null): OpenCode
     permission_preset: permissionPresetFrom(doc.permission),
     providers,
     available_models: availableModels,
+    mcp_servers: listMcpServersFromDisk(liveMcp),
     agents_md: readOpenCodeAgentsMd(),
     raw_json: `${JSON.stringify(doc, null, 2)}\n`,
   };
@@ -418,11 +596,14 @@ export function upsertProviderOnDisk(input: OpenCodeProviderInput): OpenCodeConf
     nextOpts.setCacheKey = input.setCacheKey;
   }
 
-  const nextModels: Record<string, { name: string }> = {};
+  const nextModels: Record<string, { name: string; variants?: Record<string, Record<string, unknown>> }> = {};
   for (const m of input.models) {
     const mid = m.id.trim();
     if (!mid) continue;
-    nextModels[mid] = { name: (m.name || mid).trim() };
+    nextModels[mid] = {
+      name: (m.name || mid).trim(),
+      ...(m.variants && Object.keys(m.variants).length ? { variants: m.variants } : {}),
+    };
   }
 
   const existingModels = isRecord(existing.models) ? existing.models : {};

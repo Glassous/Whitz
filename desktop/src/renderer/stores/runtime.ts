@@ -4,9 +4,13 @@ import type {
   LocalGatewayStatus,
   OpenCodeConfigSavePatch,
   OpenCodeConfigSnapshot,
+  OpenCodeModelOption,
   OpenCodeProviderInput,
   RuntimeProgress,
   RuntimeStatus,
+  WorkLspStatus,
+  WorkMcpServerInfo,
+  WorkMcpServerInput,
   WorkSettings,
   WorkSettingsPatch,
 } from "@shared/work-types";
@@ -22,6 +26,8 @@ export const useRuntimeStore = defineStore("runtime", () => {
   const progress = ref<RuntimeProgress | null>(null);
   const settings = ref<WorkSettings | null>(null);
   const opencodeConfig = ref<OpenCodeConfigSnapshot | null>(null);
+  const mcpServers = ref<WorkMcpServerInfo[]>([]);
+  const lspStatuses = ref<WorkLspStatus[]>([]);
   const busy = ref(false);
   const error = ref<string | null>(null);
 
@@ -29,6 +35,15 @@ export const useRuntimeStore = defineStore("runtime", () => {
   const installed = computed(() => Boolean(status.value?.installed));
   const installing = computed(() => false);
   const gateway = computed<LocalGatewayStatus | null>(() => status.value?.gateway ?? null);
+
+  const allModels = computed<OpenCodeModelOption[]>(() => opencodeConfig.value?.available_models ?? []);
+  const enabledModels = computed<OpenCodeModelOption[]>(() => {
+    const all = allModels.value;
+    const whitelist = settings.value?.model.enabled_models ?? null;
+    if (whitelist === null) return all;
+    const allowed = new Set(whitelist);
+    return all.filter((m) => allowed.has(m.ref));
+  });
 
   function apply(result: { status: RuntimeStatus }) {
     status.value = result.status;
@@ -40,9 +55,13 @@ export const useRuntimeStore = defineStore("runtime", () => {
     status.value = result.status;
     settings.value = await api.work.settings();
     opencodeConfig.value = await api.opencode.config().catch(() => null);
+    mcpServers.value = opencodeConfig.value?.mcp_servers ?? (await api.opencode.mcpList().catch(() => []));
     api.onRuntimeStatus((next) => {
       status.value = next.status;
-      if (next.status.state === "ready") progress.value = null;
+      if (next.status.state === "ready") {
+        progress.value = null;
+        void loadOpenCodeConfig().catch(() => undefined);
+      }
     });
     api.onRuntimeProgress((next) => {
       progress.value = next;
@@ -112,7 +131,41 @@ export const useRuntimeStore = defineStore("runtime", () => {
 
   async function loadOpenCodeConfig() {
     opencodeConfig.value = await bridge().opencode.config();
+    if (opencodeConfig.value?.mcp_servers) {
+      mcpServers.value = opencodeConfig.value.mcp_servers;
+    }
     return opencodeConfig.value;
+  }
+
+  async function loadMcpServers(workspacePath?: string | null) {
+    mcpServers.value = await bridge().opencode.mcpList(workspacePath);
+    return mcpServers.value;
+  }
+
+  async function upsertMcpServer(input: WorkMcpServerInput) {
+    mcpServers.value = await bridge().opencode.upsertMcp(input);
+    await loadOpenCodeConfig().catch(() => undefined);
+    return mcpServers.value;
+  }
+
+  async function deleteMcpServer(name: string) {
+    mcpServers.value = await bridge().opencode.deleteMcp(name);
+    await loadOpenCodeConfig().catch(() => undefined);
+    return mcpServers.value;
+  }
+
+  async function toggleMcpServer(name: string, connect: boolean, workspacePath?: string | null) {
+    mcpServers.value = await bridge().opencode.toggleMcp(name, connect, workspacePath);
+    return mcpServers.value;
+  }
+
+  async function loadLspStatus(workspacePath?: string | null) {
+    lspStatuses.value = await bridge().opencode.lspStatus(workspacePath).catch(() => []);
+    return lspStatuses.value;
+  }
+
+  async function setEnabledModels(refs: string[] | null) {
+    return saveSettings({ enabled_models: refs });
   }
 
   async function saveOpenCodeConfig(patch: OpenCodeConfigSavePatch) {
@@ -162,6 +215,10 @@ export const useRuntimeStore = defineStore("runtime", () => {
     progress,
     settings,
     opencodeConfig,
+    mcpServers,
+    lspStatuses,
+    allModels,
+    enabledModels,
     busy,
     error,
     ready,
@@ -175,7 +232,13 @@ export const useRuntimeStore = defineStore("runtime", () => {
     restart,
     loadSettings,
     saveSettings,
+    setEnabledModels,
     loadOpenCodeConfig,
+    loadMcpServers,
+    upsertMcpServer,
+    deleteMcpServer,
+    toggleMcpServer,
+    loadLspStatus,
     saveOpenCodeConfig,
     upsertOpenCodeProvider,
     deleteOpenCodeProvider,

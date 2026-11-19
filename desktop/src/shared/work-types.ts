@@ -59,8 +59,12 @@ export interface WorkAttachment {
 export interface WorkConversation {
   id: string;
   title: string;
+  opencode_session_id?: string | null;
   workspace_path: string | null;
   is_pinned: boolean;
+  model_ref?: string | null;
+  agent_name?: string | null;
+  variant?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -74,7 +78,41 @@ export interface WorkMessage {
   tool_name: string | null;
   tool_payload: Record<string, unknown> | null;
   run_id: string | null;
+  reverted?: boolean;
   created_at: string;
+}
+
+export interface WorkTokenUsage {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache_read: number;
+  cache_write: number;
+  cost: number;
+  total: number;
+  context_limit: number | null;
+}
+
+export interface WorkPendingControl {
+  kind: "approval" | "clarify";
+  request_id: string;
+  execution_generation: number;
+  tool: string | null;
+  preview: unknown;
+  choices?: string[] | null;
+}
+
+export interface WorkActiveRunSnapshot {
+  conversation_id: string;
+  run_id: string;
+  assistant_id: string;
+  status: "streaming" | "waiting";
+  content: string;
+  reasoning: Array<Record<string, unknown>>;
+  plan: Record<string, unknown> | null;
+  pending_control: WorkPendingControl | null;
+  pending_controls?: WorkPendingControl[];
+  usage: WorkTokenUsage | null;
 }
 
 export interface WorkConversationDetail {
@@ -82,6 +120,7 @@ export interface WorkConversationDetail {
   messages: WorkMessage[];
   active_run_id: string | null;
   active_run_status: string | null;
+  reverted_count?: number;
 }
 
 /** Mirror of the cloud SSE contract used by web/src/stores/chat.ts. */
@@ -97,6 +136,12 @@ export interface WorkModelSettings {
   builtin_model: string;
   custom_opencode_exe: string;
   active_model_label: string;
+  /** null = not filtered yet (show all available); array = explicit whitelist shown in composer */
+  enabled_models: string[] | null;
+  default_composer_model: string;
+  default_agent: string;
+  default_variant: string;
+  full_command_mode: boolean;
 }
 
 export interface WorkSettings {
@@ -109,6 +154,11 @@ export interface WorkSettingsPatch {
   mode?: WorkAccessMode;
   builtin_model?: string;
   custom_opencode_exe?: string;
+  enabled_models?: string[] | null;
+  default_composer_model?: string;
+  default_agent?: string;
+  default_variant?: string;
+  full_command_mode?: boolean;
 }
 
 export interface LocalGatewayStatus {
@@ -139,6 +189,17 @@ export interface OpenCodeModelOption {
   modelID: string;
   connected: boolean;
   is_whitz: boolean;
+  variants?: string[];
+  context_limit?: number | null;
+  supports_image?: boolean;
+  supports_pdf?: boolean;
+  reasoning?: boolean;
+}
+
+export interface OpenCodeProviderModelInput {
+  id: string;
+  name?: string;
+  variants?: Record<string, Record<string, unknown>>;
 }
 
 export interface OpenCodeProviderInput {
@@ -148,8 +209,77 @@ export interface OpenCodeProviderInput {
   baseURL?: string;
   apiKey?: string;
   clearApiKey?: boolean;
-  models: Array<{ id: string; name?: string }>;
+  models: OpenCodeProviderModelInput[];
   setCacheKey?: boolean;
+}
+
+export interface WorkAgentInfo {
+  name: string;
+  description?: string;
+  mode: "primary" | "subagent" | "all";
+  native?: boolean;
+  hidden?: boolean;
+  color?: string;
+  model?: { providerID: string; modelID: string } | null;
+  variant?: string | null;
+}
+
+export interface WorkCommandInfo {
+  name: string;
+  description?: string;
+  agent?: string;
+  model?: string;
+  source?: "command" | "mcp" | "skill";
+  template?: string;
+  hints?: string[];
+}
+
+export interface WorkMcpServerConfig {
+  type: "local" | "remote";
+  command?: string[];
+  environment?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  enabled?: boolean;
+}
+
+export interface WorkMcpServerInfo {
+  name: string;
+  status: "connected" | "disabled" | "failed" | "needs_auth" | "needs_client_registration" | "configured";
+  error?: string | null;
+  config: WorkMcpServerConfig | null;
+}
+
+export interface WorkMcpServerInput {
+  name: string;
+  type: "local" | "remote";
+  command?: string[];
+  environment?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  enabled?: boolean;
+}
+
+export interface WorkLspStatus {
+  id: string;
+  name: string;
+  root: string;
+  status: "connected" | "error";
+}
+
+export interface WorkSessionDiffItem {
+  file: string;
+  before?: string;
+  after?: string;
+  additions?: number;
+  deletions?: number;
+  status?: "added" | "deleted" | "modified";
+}
+
+export interface WorkSessionPrefsPatch {
+  model_ref?: string | null;
+  agent_name?: string | null;
+  variant?: string | null;
 }
 
 export interface OpenCodeConfigSnapshot {
@@ -164,6 +294,7 @@ export interface OpenCodeConfigSnapshot {
   permission_preset: OpenCodePermissionPreset;
   providers: OpenCodeProviderInfo[];
   available_models: OpenCodeModelOption[];
+  mcp_servers: WorkMcpServerInfo[];
   agents_md: string;
   raw_json: string;
 }
@@ -284,6 +415,9 @@ export interface WorkSendInput {
   conversation_id: string;
   content: string;
   skill_names?: string[];
+  model_ref?: string | null;
+  agent_name?: string | null;
+  variant?: string | null;
 }
 
 export interface WorkRunRef {

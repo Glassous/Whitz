@@ -70,12 +70,24 @@ function migrate(conn: Database.Database): void {
   if (!convNames.has("opencode_session_id")) {
     conn.exec("ALTER TABLE conversations ADD COLUMN opencode_session_id TEXT");
   }
+  if (!convNames.has("model_ref")) {
+    conn.exec("ALTER TABLE conversations ADD COLUMN model_ref TEXT");
+  }
+  if (!convNames.has("agent_name")) {
+    conn.exec("ALTER TABLE conversations ADD COLUMN agent_name TEXT");
+  }
+  if (!convNames.has("variant")) {
+    conn.exec("ALTER TABLE conversations ADD COLUMN variant TEXT");
+  }
   conn.exec("CREATE INDEX IF NOT EXISTS ix_conversations_workspace ON conversations(workspace_path, updated_at)");
 
   const msgCols = conn.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
   const msgNames = new Set(msgCols.map((c) => c.name));
   if (!msgNames.has("run_id")) {
     conn.exec("ALTER TABLE messages ADD COLUMN run_id TEXT");
+  }
+  if (!msgNames.has("reverted")) {
+    conn.exec("ALTER TABLE messages ADD COLUMN reverted INTEGER NOT NULL DEFAULT 0");
   }
 }
 

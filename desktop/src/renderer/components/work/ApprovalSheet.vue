@@ -8,6 +8,7 @@ const props = defineProps<{
   tool: string | null;
   preview: unknown;
   choices?: string[] | null;
+  queueCount?: number;
 }>();
 
 const emit = defineEmits<{
@@ -48,59 +49,68 @@ function submitClarify(val?: string) {
 </script>
 
 <template>
-  <div class="pointer-events-none fixed inset-x-0 bottom-7 z-40 flex justify-center px-6">
-    <div class="pointer-events-auto w-full max-w-[720px] rounded-2xl border border-line bg-canvas p-4 shadow-[var(--shadow)]">
+  <div
+    class="w-full rounded-2xl bg-canvas p-4 dark:bg-[#1a1a19]"
+    style="box-shadow: var(--shadow)"
+  >
+    <div class="flex items-center justify-between gap-2">
       <div class="flex items-center gap-2">
-        <span class="h-1.5 w-1.5 rounded-full" style="background: var(--work-accent)"></span>
-        <p class="text-[12px] font-medium uppercase tracking-[0.14em] text-fg-faint">
-          {{ kind === "approval" ? "本地执行审批" : "需要你的补充信息" }}
+        <span class="h-1.5 w-1.5 rounded-full" style="background: var(--work-accent)" />
+        <p class="text-[11.5px] font-medium uppercase tracking-[0.14em] text-fg-faint">
+          {{ kind === "approval" ? "需要授权执行" : "需要你的补充信息" }}
         </p>
       </div>
-
-      <template v-if="kind === 'approval'">
-        <p class="mt-2 text-[13.5px] text-fg">
-          OpenCode 请求执行 <span class="font-semibold">{{ tool ?? "工具" }}</span>
-        </p>
-        <pre
-          v-if="previewText"
-          class="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-code px-3 py-2 font-mono text-[11.5px] leading-relaxed text-[#d6d5ce]"
-        >{{ previewText }}</pre>
-        <div class="mt-3.5 flex flex-wrap gap-2">
-          <BaseButton
-            v-for="opt in approvalOptions"
-            :key="opt.choice"
-            size="sm"
-            :variant="opt.variant"
-            @click="emit('approve', opt.choice)"
-          >
-            {{ opt.label }}
-          </BaseButton>
-        </div>
-      </template>
-
-      <template v-else>
-        <p class="mt-2 text-[13.5px] text-fg">{{ previewText || "请补充必要信息后继续。" }}</p>
-        <div v-if="choices?.length" class="mt-3 flex flex-wrap gap-2">
-          <BaseButton
-            v-for="option in choices"
-            :key="option"
-            size="sm"
-            variant="secondary"
-            @click="submitClarify(option)"
-          >
-            {{ option }}
-          </BaseButton>
-        </div>
-        <form class="mt-3 flex items-end gap-2" @submit.prevent="submitClarify()">
-          <input
-            v-model="answer"
-            type="text"
-            class="focus-ring min-w-0 flex-1 rounded-xl border border-line bg-canvas px-3 py-2 text-[13px] text-fg placeholder:text-fg-faint"
-            placeholder="输入补充回答"
-          />
-          <BaseButton type="submit" size="sm" :disabled="!answer.trim()">提交</BaseButton>
-        </form>
-      </template>
+      <span
+        v-if="queueCount && queueCount > 1"
+        class="rounded-full bg-surface px-2 py-0.5 text-[11px] font-medium tabular-nums text-fg-muted"
+      >
+        还有 {{ queueCount }} 项待确认
+      </span>
     </div>
+
+    <template v-if="kind === 'approval'">
+      <p class="mt-2 text-[13.5px] text-fg">
+        OpenCode 请求调用 <span class="font-semibold">{{ tool ?? "工具" }}</span>
+      </p>
+      <pre
+        v-if="previewText"
+        class="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-code px-3 py-2 font-mono text-[11.5px] leading-relaxed text-[#d6d5ce]"
+      >{{ previewText }}</pre>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <BaseButton
+          v-for="opt in approvalOptions"
+          :key="opt.choice"
+          size="sm"
+          :variant="opt.variant"
+          @click="emit('approve', opt.choice)"
+        >
+          {{ opt.label }}
+        </BaseButton>
+      </div>
+    </template>
+
+    <template v-else>
+      <p class="mt-2 text-[13.5px] text-fg">{{ previewText || "请补充必要信息后继续。" }}</p>
+      <div v-if="choices?.length" class="mt-3 flex flex-wrap gap-2">
+        <BaseButton
+          v-for="option in choices"
+          :key="option"
+          size="sm"
+          variant="secondary"
+          @click="submitClarify(option)"
+        >
+          {{ option }}
+        </BaseButton>
+      </div>
+      <form class="mt-3 flex items-end gap-2" @submit.prevent="submitClarify()">
+        <input
+          v-model="answer"
+          type="text"
+          class="focus-ring min-w-0 flex-1 rounded-xl bg-surface px-3 py-2 text-[13px] text-fg placeholder:text-fg-faint"
+          placeholder="输入补充回答"
+        />
+        <BaseButton type="submit" size="sm" :disabled="!answer.trim()">提交</BaseButton>
+      </form>
+    </template>
   </div>
 </template>
