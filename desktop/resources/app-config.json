@@ -3,7 +3,6 @@
   "devApiBase": "http://localhost:8001/api",
   "appOrigin": "app://whitz",
   "updateFeed": "",
-  "hermesInstallTag": "",
   "workModeDefault": true,
   "requestTimeoutMs": 30000
 }

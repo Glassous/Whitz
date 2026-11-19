@@ -20,6 +20,30 @@ export const useDesktopStore = defineStore("desktop", () => {
     forced_offline: false,
   });
   const ready = ref(false);
+  const sidebarCollapsed = ref(
+    typeof window !== "undefined" ? window.localStorage.getItem("whitz_sidebar_collapsed") === "1" : false,
+  );
+
+  function setSidebarCollapsed(next: boolean) {
+    sidebarCollapsed.value = next;
+    try {
+      window.localStorage.setItem("whitz_sidebar_collapsed", next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function toggleSidebarCollapsed() {
+    setSidebarCollapsed(!sidebarCollapsed.value);
+  }
+
+  function syncSidebarCollapsedFromStorage() {
+    try {
+      sidebarCollapsed.value = window.localStorage.getItem("whitz_sidebar_collapsed") === "1";
+    } catch {
+      /* ignore */
+    }
+  }
 
   const loggedIn = computed(() => Boolean(session.value));
   const online = computed(() => connectivity.value.online && !connectivity.value.forced_offline);
@@ -80,10 +104,14 @@ export const useDesktopStore = defineStore("desktop", () => {
     policy,
     connectivity,
     ready,
+    sidebarCollapsed,
     loggedIn,
     online,
     workEnabled,
     user,
+    setSidebarCollapsed,
+    toggleSidebarCollapsed,
+    syncSidebarCollapsedFromStorage,
     init,
     refreshPolicy,
     refreshConnectivity,

@@ -66,6 +66,7 @@ async function start() {
       await runtime.init();
       const work = useWorkStore();
       work.bindEvents();
+      await work.loadWorkspaceState();
       await work.loadList();
     },
   });

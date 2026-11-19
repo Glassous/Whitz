@@ -1,5 +1,6 @@
 import { app } from "electron";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 export interface AppConfig {
@@ -7,7 +8,6 @@ export interface AppConfig {
   devApiBase: string;
   appOrigin: string;
   updateFeed: string;
-  hermesInstallTag: string;
   workModeDefault: boolean;
   requestTimeoutMs: number;
 }
@@ -17,7 +17,6 @@ const DEFAULTS: AppConfig = {
   devApiBase: "http://localhost:8001/api",
   appOrigin: "app://whitz",
   updateFeed: "",
-  hermesInstallTag: "",
   workModeDefault: true,
   requestTimeoutMs: 30000,
 };
@@ -63,24 +62,39 @@ export interface StoragePaths {
   root: string;
   db: string;
   logs: string;
-  hermesRoot: string;
-  hermesHome: string;
-  hermesRuntime: string;
-  hermesProfiles: string;
+  opencodeConfigDir: string;
+  opencodeDataDir: string;
   secrets: string;
+}
+
+export function resolveOpenCodeConfigDir(): string {
+  const customDir = process.env.OPENCODE_CONFIG_DIR?.trim();
+  if (customDir) return path.resolve(customDir);
+  const customFile = process.env.OPENCODE_CONFIG?.trim();
+  if (customFile) return path.dirname(path.resolve(customFile));
+  const xdg = process.env.XDG_CONFIG_HOME?.trim();
+  if (xdg) return path.join(path.resolve(xdg), "opencode");
+  return path.join(os.homedir(), ".config", "opencode");
+}
+
+export function resolveOpenCodeDataDir(): string {
+  const xdgData = process.env.XDG_DATA_HOME?.trim();
+  if (xdgData) return path.join(path.resolve(xdgData), "opencode");
+  const dotShare = path.join(os.homedir(), ".local", "share", "opencode");
+  if (fs.existsSync(dotShare)) return dotShare;
+  const localShare = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "opencode") : "";
+  if (localShare && fs.existsSync(localShare)) return localShare;
+  return dotShare;
 }
 
 export function storagePaths(): StoragePaths {
   const root = app.getPath("userData");
-  const hermesRoot = path.join(root, "hermes");
   return {
     root,
     db: path.join(root, "work.db"),
     logs: path.join(root, "logs"),
-    hermesRoot,
-    hermesHome: path.join(hermesRoot, "home"),
-    hermesRuntime: path.join(hermesRoot, "runtime"),
-    hermesProfiles: path.join(hermesRoot, "profiles"),
+    opencodeConfigDir: resolveOpenCodeConfigDir(),
+    opencodeDataDir: resolveOpenCodeDataDir(),
     secrets: path.join(root, "secrets.json"),
   };
 }

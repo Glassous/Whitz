@@ -4,13 +4,24 @@ import type {
   ConnectivityState,
   DesktopInfo,
   DesktopSession,
+  LocalGatewayStatus,
+  OpenCodeConfigSavePatch,
+  OpenCodeConfigSnapshot,
+  OpenCodeProviderInput,
   RuntimeProgress,
   RuntimeStatus,
+  WorkApprovalChoice,
+  WorkAttachment,
   WorkConversation,
   WorkConversationDetail,
   WorkEvent,
   WorkSettings,
   WorkSettingsPatch,
+  WorkSkillItem,
+  WorkWorkspace,
+  WorkspaceEntry,
+  WorkspaceFileContent,
+  WorkspaceGitStatus,
 } from "../shared/work-types";
 
 function cleanError(err: unknown): Error {
@@ -64,32 +75,62 @@ const api: WorkApi = {
 
   runtime: {
     status: () => invoke<RuntimeStatusResult>(IPC.runtimeStatus),
-    install: () => invoke<RuntimeStatusResult>(IPC.runtimeInstall),
+    redetect: () => invoke<RuntimeStatusResult>(IPC.runtimeRedetect),
     start: () => invoke<RuntimeStatusResult>(IPC.runtimeStart),
     stop: () => invoke<RuntimeStatusResult>(IPC.runtimeStop),
     restart: () => invoke<RuntimeStatusResult>(IPC.runtimeRestart),
     openLogs: () => invoke<void>(IPC.runtimeOpenLogs),
+    pickExe: () => invoke<string | null>(IPC.runtimePickExe),
   },
 
   work: {
-    list: () => invoke<WorkConversation[]>(IPC.workList),
-    create: (title) => invoke<WorkConversation>(IPC.workCreate, title),
+    list: (workspacePath) => invoke<WorkConversation[]>(IPC.workList, workspacePath),
+    create: (title, workspacePath) => invoke<WorkConversation>(IPC.workCreate, title, workspacePath),
     get: (id) => invoke<WorkConversationDetail>(IPC.workGet, id),
     rename: (id, title) => invoke<void>(IPC.workRename, id, title),
+    pin: (id, isPinned) => invoke<void>(IPC.workPin, id, isPinned),
     delete: (id) => invoke<void>(IPC.workDelete, id),
-    send: (conversationId, content, skillNames) =>
-      invoke<{ run_id: string | null }>(IPC.workSend, conversationId, content, skillNames),
+    send: (conversationId, content, options) =>
+      invoke<{ run_id: string | null }>(IPC.workSend, conversationId, content, options),
+    steer: (conversationId, content) => invoke<void>(IPC.workSteer, conversationId, content),
     stop: (conversationId) => invoke<void>(IPC.workStop, conversationId),
-    approve: (conversationId, requestId, generation, choice) =>
+    approve: (conversationId, requestId, generation, choice: WorkApprovalChoice) =>
       invoke<void>(IPC.workApprove, conversationId, requestId, generation, choice),
     clarify: (conversationId, requestId, generation, answer) =>
       invoke<void>(IPC.workClarify, conversationId, requestId, generation, answer),
     settings: () => invoke<WorkSettings>(IPC.workSettingsGet),
     saveSettings: (patch: WorkSettingsPatch) => invoke<WorkSettings>(IPC.workSettingsSave, patch),
-    clearKey: () => invoke<WorkSettings>(IPC.workSettingsClearKey),
     testModel: () =>
       invoke<{ ok: boolean; latency_ms: number | null; model: string | null; detail: string | null }>(IPC.workTestModel),
     export: (id) => invoke<{ path: string }>(IPC.workExport, id),
+    skills: () => invoke<WorkSkillItem[]>(IPC.workSkillsList),
+    pickAttachments: () => invoke<WorkAttachment[]>(IPC.workPickAttachments),
+  },
+
+  opencode: {
+    config: () => invoke<OpenCodeConfigSnapshot>(IPC.opencodeConfigGet),
+    saveConfig: (patch: OpenCodeConfigSavePatch) => invoke<OpenCodeConfigSnapshot>(IPC.opencodeConfigSave, patch),
+    upsertProvider: (input: OpenCodeProviderInput) =>
+      invoke<OpenCodeConfigSnapshot>(IPC.opencodeProviderUpsert, input),
+    deleteProvider: (id: string) => invoke<OpenCodeConfigSnapshot>(IPC.opencodeProviderDelete, id),
+    writeWhitzProvider: () => invoke<OpenCodeConfigSnapshot>(IPC.opencodeWriteWhitz),
+    removeWhitzProvider: () => invoke<OpenCodeConfigSnapshot>(IPC.opencodeRemoveWhitz),
+    openConfigDir: () => invoke<void>(IPC.opencodeOpenConfigDir),
+    gatewayStatus: () => invoke<LocalGatewayStatus>(IPC.gatewayStatus),
+  },
+
+  workspace: {
+    list: () => invoke<WorkWorkspace[]>(IPC.workspaceList),
+    active: () => invoke<WorkWorkspace | null>(IPC.workspaceActive),
+    pick: () => invoke<WorkWorkspace | null>(IPC.workspacePick),
+    select: (workspacePath) => invoke<WorkWorkspace | null>(IPC.workspaceSelect, workspacePath),
+    remove: (workspacePath) => invoke<void>(IPC.workspaceRemove, workspacePath),
+    openExplorer: (targetPath) => invoke<void>(IPC.workspaceOpenExplorer, targetPath),
+    tree: (relDir, includeHidden) => invoke<WorkspaceEntry[]>(IPC.workspaceFsTree, relDir, includeHidden),
+    searchFiles: (query) => invoke<string[]>(IPC.workspaceFsSearch, query),
+    read: (relPath) => invoke<WorkspaceFileContent>(IPC.workspaceFsRead, relPath),
+    gitStatus: () => invoke<WorkspaceGitStatus>(IPC.workspaceGitStatus),
+    gitDiff: (relPath) => invoke<string>(IPC.workspaceGitDiff, relPath),
   },
 
   net: {

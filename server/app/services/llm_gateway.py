@@ -181,13 +181,14 @@ async def proxy_stream(user: User, body: dict) -> AsyncIterator[bytes]:
                 headers={
                     "Authorization": f"Bearer {get_settings().llm_api_key}",
                     "Accept": "text/event-stream",
+                    "Accept-Encoding": "identity",
                 },
                 json=payload,
             ) as resp:
                 if resp.status_code >= 400:
                     detail = (await resp.aread()).decode("utf-8", "ignore")[:400]
                     raise HTTPException(resp.status_code, detail)
-                async for chunk in resp.aiter_raw():
+                async for chunk in resp.aiter_bytes():
                     yield chunk
                     output_chars += chunk.count(b"content")
                     if b'"usage"' in chunk:

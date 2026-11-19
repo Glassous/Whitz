@@ -18,8 +18,8 @@ import {
   resetPassword,
   sendCode,
 } from "../auth/authService";
-import { getStatus, restartRuntime, runtimeEvents, startRuntime, stopRuntime } from "../runtime/hermesRuntime";
-import { autoDetectRuntime, installRuntime } from "../runtime/installer";
+import { ensureAutoStarted, getStatus, restartRuntime, runtimeEvents, startRuntime, stopRuntime } from "../runtime/opencodeRuntime";
+import { autoDetectRuntime, pickOpenCodeExe, redetectRuntime } from "../runtime/installer";
 import { setWorkEventSink } from "../work/runner";
 import { getMainWindow } from "../window";
 import { checkForUpdates, quitAndInstall } from "../updater";
@@ -80,12 +80,15 @@ export function registerIpc(): void {
 
   handle(IPC.runtimeStatus, () => {
     autoDetectRuntime();
+    void ensureAutoStarted();
     return { status: getStatus(), policy: getPolicy() };
   });
-  handle(IPC.runtimeInstall, async () => {
-    const result = await installRuntime((progress) => runtimeEvents.emit("progress", progress));
-    if (!result.ok) throw new Error(result.message);
-    return { status: getStatus(), policy: getPolicy() };
+  handle(IPC.runtimeRedetect, () => {
+    redetectRuntime();
+    const status = getStatus();
+    runtimeEvents.emit("status", status);
+    void ensureAutoStarted();
+    return { status, policy: getPolicy() };
   });
   handle(IPC.runtimeStart, async () => {
     await startRuntime();
@@ -104,6 +107,7 @@ export function registerIpc(): void {
     fs.mkdirSync(dir, { recursive: true });
     await shell.openPath(dir);
   });
+  handle(IPC.runtimePickExe, () => pickOpenCodeExe());
 
   handle(IPC.connectivityGet, () => getConnectivity());
   handle(IPC.connectivityCheck, () => checkConnectivity());
@@ -113,8 +117,16 @@ export function registerIpc(): void {
     broadcast(IPC_EVENTS.workEvent, { conversationId, event });
   });
 
-  authEvents.on("changed", (session) => broadcast(IPC_EVENTS.authChanged, session));
-  policyEvents.on("changed", (policy) => broadcast(IPC_EVENTS.policyChanged, policy));
+  authEvents.on("changed", (session) => {
+    broadcast(IPC_EVENTS.authChanged, session);
+    runtimeEvents.emit("status", getStatus());
+    if (session) void ensureAutoStarted();
+  });
+  policyEvents.on("changed", (policy) => {
+    broadcast(IPC_EVENTS.policyChanged, policy);
+    if (policy.enabled) void ensureAutoStarted();
+    else void stopRuntime(true);
+  });
   runtimeEvents.on("status", (status) => broadcast(IPC_EVENTS.runtimeStatus, { status, policy: getPolicy() }));
   runtimeEvents.on("progress", (progress) => broadcast(IPC_EVENTS.runtimeProgress, progress));
   connectivityEvents.on("changed", (state) => broadcast(IPC_EVENTS.connectivityChanged, state));

@@ -116,3 +116,53 @@ async def test_sanitize_body_pins_model_and_caps_tokens(monkeypatch):
     body = llm_gateway.sanitize_body({"model": "gpt-4.1", "max_tokens": 9999, "messages": []})
     assert body["model"] == "upstream-model"
     assert body["max_tokens"] == 128
+
+
+@pytest.mark.asyncio
+async def test_proxy_stream_decompresses_gzip_and_requests_identity(monkeypatch):
+    import gzip
+    import httpx
+    from app.services import llm_gateway
+
+    sse_payload = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+    gzipped = gzip.compress(sse_payload)
+    captured_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_headers.update({k.lower(): v for k, v in request.headers.items()})
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream", "Content-Encoding": "gzip"},
+            content=gzipped,
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(llm_gateway, "client", lambda: httpx.AsyncClient(transport=transport))
+    monkeypatch.setattr(
+        llm_gateway,
+        "get_settings",
+        lambda: SimpleNamespace(
+            llm_api_key="sk-test",
+            llm_base_url="https://upstream.test/v1",
+            desktop_llm_base_url="",
+            desktop_llm_model_alias="whitz-default",
+            desktop_llm_upstream_model="",
+            desktop_llm_max_tokens=128,
+            llm_model="upstream-model",
+        ),
+    )
+
+    settled: list[int] = []
+
+    async def fake_settle(_user_id, tokens: int):
+        settled.append(tokens)
+
+    monkeypatch.setattr(llm_gateway, "_settle", fake_settle)
+
+    user = SimpleNamespace(id="00000000-0000-0000-0000-000000000001")
+    chunks = [chunk async for chunk in llm_gateway.proxy_stream(user, {"messages": [{"role": "user", "content": "hi"}]})]
+    combined = b"".join(chunks)
+    assert captured_headers.get("accept-encoding") == "identity"
+    assert combined == sse_payload
+    assert settled
+

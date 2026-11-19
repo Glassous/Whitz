@@ -2,14 +2,25 @@ import type {
   ConnectivityState,
   DesktopInfo,
   DesktopSession,
+  LocalGatewayStatus,
+  OpenCodeConfigSavePatch,
+  OpenCodeConfigSnapshot,
+  OpenCodeProviderInput,
   RuntimeProgress,
   RuntimeStatus,
+  WorkApprovalChoice,
+  WorkAttachment,
   WorkConversation,
   WorkConversationDetail,
   WorkEvent,
   WorkMessage,
   WorkSettings,
   WorkSettingsPatch,
+  WorkSkillItem,
+  WorkWorkspace,
+  WorkspaceEntry,
+  WorkspaceFileContent,
+  WorkspaceGitStatus,
 } from "./work-types";
 
 export const IPC = {
@@ -34,26 +45,51 @@ export const IPC = {
   policyRefresh: "policy:refresh",
 
   runtimeStatus: "runtime:status",
-  runtimeInstall: "runtime:install",
+  runtimeRedetect: "runtime:redetect",
   runtimeStart: "runtime:start",
   runtimeStop: "runtime:stop",
   runtimeRestart: "runtime:restart",
   runtimeOpenLogs: "runtime:open-logs",
+  runtimePickExe: "runtime:pick-exe",
 
   workList: "work:list",
   workCreate: "work:create",
   workGet: "work:get",
   workRename: "work:rename",
+  workPin: "work:pin",
   workDelete: "work:delete",
   workSend: "work:send",
+  workSteer: "work:steer",
   workStop: "work:stop",
   workApprove: "work:approve",
   workClarify: "work:clarify",
   workTestModel: "work:test-model",
   workSettingsGet: "work:settings-get",
   workSettingsSave: "work:settings-save",
-  workSettingsClearKey: "work:settings-clear-key",
   workExport: "work:export",
+  workSkillsList: "work:skills-list",
+  workPickAttachments: "work:pick-attachments",
+
+  opencodeConfigGet: "opencode:config-get",
+  opencodeConfigSave: "opencode:config-save",
+  opencodeProviderUpsert: "opencode:provider-upsert",
+  opencodeProviderDelete: "opencode:provider-delete",
+  opencodeWriteWhitz: "opencode:write-whitz",
+  opencodeRemoveWhitz: "opencode:remove-whitz",
+  opencodeOpenConfigDir: "opencode:open-config-dir",
+  gatewayStatus: "gateway:status",
+
+  workspaceList: "workspace:list",
+  workspaceActive: "workspace:active",
+  workspacePick: "workspace:pick",
+  workspaceSelect: "workspace:select",
+  workspaceRemove: "workspace:remove",
+  workspaceOpenExplorer: "workspace:open-explorer",
+  workspaceFsTree: "workspace:fs-tree",
+  workspaceFsSearch: "workspace:fs-search",
+  workspaceFsRead: "workspace:fs-read",
+  workspaceGitStatus: "workspace:git-status",
+  workspaceGitDiff: "workspace:git-diff",
 
   connectivityGet: "net:get",
   connectivityForceOffline: "net:force-offline",
@@ -157,28 +193,61 @@ export interface WorkApi {
 
   runtime: {
     status(): Promise<RuntimeStatusResult>;
-    install(): Promise<RuntimeStatusResult>;
+    redetect(): Promise<RuntimeStatusResult>;
     start(): Promise<RuntimeStatusResult>;
     stop(): Promise<RuntimeStatusResult>;
     restart(): Promise<RuntimeStatusResult>;
     openLogs(): Promise<void>;
+    pickExe(): Promise<string | null>;
   };
 
   work: {
-    list(): Promise<WorkConversation[]>;
-    create(title?: string): Promise<WorkConversation>;
+    list(workspacePath?: string | null): Promise<WorkConversation[]>;
+    create(title?: string, workspacePath?: string | null): Promise<WorkConversation>;
     get(id: string): Promise<WorkConversationDetail>;
     rename(id: string, title: string): Promise<void>;
+    pin(id: string, isPinned: boolean): Promise<void>;
     delete(id: string): Promise<void>;
-    send(conversationId: string, content: string, skillNames?: string[]): Promise<{ run_id: string | null }>;
+    send(
+      conversationId: string,
+      content: string,
+      options?: { skillNames?: string[]; attachments?: WorkAttachment[] },
+    ): Promise<{ run_id: string | null }>;
+    steer(conversationId: string, content: string): Promise<void>;
     stop(conversationId: string): Promise<void>;
-    approve(conversationId: string, requestId: string, generation: number, choice: "once" | "always" | "deny"): Promise<void>;
+    approve(conversationId: string, requestId: string, generation: number, choice: WorkApprovalChoice): Promise<void>;
     clarify(conversationId: string, requestId: string, generation: number, answer: string): Promise<void>;
     settings(): Promise<WorkSettings>;
     saveSettings(patch: WorkSettingsPatch): Promise<WorkSettings>;
-    clearKey(): Promise<WorkSettings>;
     testModel(): Promise<{ ok: boolean; latency_ms: number | null; model: string | null; detail: string | null }>;
     export(id: string): Promise<{ path: string }>;
+    skills(): Promise<WorkSkillItem[]>;
+    pickAttachments(): Promise<WorkAttachment[]>;
+  };
+
+  opencode: {
+    config(): Promise<OpenCodeConfigSnapshot>;
+    saveConfig(patch: OpenCodeConfigSavePatch): Promise<OpenCodeConfigSnapshot>;
+    upsertProvider(input: OpenCodeProviderInput): Promise<OpenCodeConfigSnapshot>;
+    deleteProvider(id: string): Promise<OpenCodeConfigSnapshot>;
+    writeWhitzProvider(): Promise<OpenCodeConfigSnapshot>;
+    removeWhitzProvider(): Promise<OpenCodeConfigSnapshot>;
+    openConfigDir(): Promise<void>;
+    gatewayStatus(): Promise<LocalGatewayStatus>;
+  };
+
+  workspace: {
+    list(): Promise<WorkWorkspace[]>;
+    active(): Promise<WorkWorkspace | null>;
+    pick(): Promise<WorkWorkspace | null>;
+    select(workspacePath: string): Promise<WorkWorkspace | null>;
+    remove(workspacePath: string): Promise<void>;
+    openExplorer(targetPath?: string): Promise<void>;
+    tree(relDir?: string, includeHidden?: boolean): Promise<WorkspaceEntry[]>;
+    searchFiles(query: string): Promise<string[]>;
+    read(relPath: string): Promise<WorkspaceFileContent>;
+    gitStatus(): Promise<WorkspaceGitStatus>;
+    gitDiff(relPath?: string): Promise<string>;
   };
 
   net: {

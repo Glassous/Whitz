@@ -77,8 +77,11 @@ const selectedSkills = ref<string[]>([]);
 const pendingBusyIds = ref<Set<string>>(new Set());
 const pendingErrors = ref<Record<string, string>>({});
 
+const SIDEBAR_COLLAPSED_KEY = "whitz_sidebar_collapsed";
 const sidebarOpen = ref(false);
-const sidebarCollapsed = ref(false);
+const sidebarCollapsed = ref(
+  typeof window !== "undefined" ? window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1" : false,
+);
 const drawerDragProgress = ref<number | null>(null);
 const mobileStepsOpen = ref(false);
 const isDesktop = ref(typeof window !== "undefined" ? window.innerWidth >= 768 : true);
@@ -136,6 +139,11 @@ function onPanelResizeKeydown(e: KeyboardEvent) {
 
 function setSidebarCollapsed(next: boolean) {
   sidebarCollapsed.value = next;
+  try {
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
 }
 
 function toggleSidebarCollapsed() {

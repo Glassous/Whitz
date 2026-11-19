@@ -58,7 +58,7 @@ async function start() {
         </span>
       </div>
       <p class="mt-2.5 truncate text-[12.5px] text-fg" :title="runtime.status?.version ?? ''">
-        Hermes {{ runtime.status?.version ?? "未安装" }}
+        OpenCode {{ runtime.status?.version ?? "未安装" }}
       </p>
       <p class="mt-0.5 truncate text-[11.5px] text-fg-faint">
         {{ runtime.status?.model || "未选择模型" }}

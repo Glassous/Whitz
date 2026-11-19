@@ -1,13 +1,32 @@
 import crypto from "node:crypto";
+import path from "node:path";
 import { getDb } from "./db";
-import type { WorkConversation, WorkConversationDetail, WorkMessage, WorkRole } from "../../shared/work-types";
+import type {
+  WorkConversation,
+  WorkConversationDetail,
+  WorkMessage,
+  WorkRole,
+  WorkWorkspace,
+} from "../../shared/work-types";
+
+const ACTIVE_WORKSPACE_KV = "active_workspace_path";
 
 interface ConversationRow {
   id: string;
   title: string;
-  hermes_session_id: string | null;
+  opencode_session_id: string | null;
+  workspace_path: string | null;
+  is_pinned: number;
   created_at: string;
   updated_at: string;
+}
+
+interface WorkspaceRow {
+  id: string;
+  path: string;
+  name: string;
+  last_opened_at: string;
+  created_at: string;
 }
 
 interface MessageRow {
@@ -18,12 +37,23 @@ interface MessageRow {
   status: WorkMessage["status"];
   tool_name: string | null;
   tool_payload: string | null;
-  hermes_run_id: string | null;
+  run_id: string | null;
   created_at: string;
 }
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function toConversation(row: ConversationRow): WorkConversation {
+  return {
+    id: row.id,
+    title: row.title,
+    workspace_path: row.workspace_path ?? null,
+    is_pinned: Boolean(row.is_pinned),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
 }
 
 function toMessage(row: MessageRow): WorkMessage {
@@ -43,95 +73,116 @@ function toMessage(row: MessageRow): WorkMessage {
     status: row.status,
     tool_name: row.tool_name,
     tool_payload: payload,
-    hermes_run_id: row.hermes_run_id,
+    run_id: row.run_id ?? null,
     created_at: row.created_at,
   };
 }
 
-export function listConversations(): WorkConversation[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT id, title, hermes_session_id, created_at, updated_at
-       FROM conversations WHERE archived = 0 ORDER BY updated_at DESC`,
-    )
-    .all() as ConversationRow[];
-  return rows.map((row) => ({
-    id: row.id,
-    title: row.title,
-    created_at: row.created_at,
-    updated_at: row.updated_at,
-  }));
+export function listConversations(workspacePath?: string | null): WorkConversation[] {
+  const rows =
+    workspacePath !== undefined && workspacePath !== null && workspacePath !== ""
+      ? (getDb()
+          .prepare(
+            `SELECT id, title, opencode_session_id, workspace_path, is_pinned, created_at, updated_at
+             FROM conversations WHERE archived = 0 AND workspace_path = ?
+             ORDER BY is_pinned DESC, updated_at DESC`,
+          )
+          .all(path.resolve(workspacePath)) as ConversationRow[])
+      : (getDb()
+          .prepare(
+            `SELECT id, title, opencode_session_id, workspace_path, is_pinned, created_at, updated_at
+             FROM conversations WHERE archived = 0
+             ORDER BY is_pinned DESC, updated_at DESC`,
+          )
+          .all() as ConversationRow[]);
+  return rows.map(toConversation);
 }
 
-export function createConversation(title = "新的本地对话"): WorkConversation {
+export function createConversation(title = "新的工作区对话", workspacePath?: string | null): WorkConversation {
   const id = crypto.randomUUID();
   const stamp = now();
+  const cleanTitle = title.trim() || "新的工作区对话";
+  const resolvedWorkspace = workspacePath ? path.resolve(workspacePath) : getActiveWorkspacePath();
   getDb()
     .prepare(
-      `INSERT INTO conversations (id, title, hermes_session_id, created_at, updated_at, archived)
-       VALUES (?, ?, NULL, ?, ?, 0)`,
+      `INSERT INTO conversations (id, title, opencode_session_id, workspace_path, is_pinned, created_at, updated_at, archived)
+       VALUES (?, ?, NULL, ?, 0, ?, ?, 0)`,
     )
-    .run(id, title.trim() || "新的本地对话", stamp, stamp);
-  return { id, title: title.trim() || "新的本地对话", created_at: stamp, updated_at: stamp };
+    .run(id, cleanTitle, resolvedWorkspace, stamp, stamp);
+  return {
+    id,
+    title: cleanTitle,
+    workspace_path: resolvedWorkspace,
+    is_pinned: false,
+    created_at: stamp,
+    updated_at: stamp,
+  };
 }
 
 export function getConversationMeta(id: string): ConversationRow | null {
   const row = getDb()
-    .prepare(`SELECT id, title, hermes_session_id, created_at, updated_at FROM conversations WHERE id = ? AND archived = 0`)
+    .prepare(
+      `SELECT id, title, opencode_session_id, workspace_path, is_pinned, created_at, updated_at
+       FROM conversations WHERE id = ? AND archived = 0`,
+    )
     .get(id) as ConversationRow | undefined;
   return row ?? null;
 }
 
-export function getConversation(id: string): WorkConversationDetail | null {
-  const conversation = getConversationMeta(id);
-  if (!conversation) return null;
-  const rows = getDb()
-    .prepare(`SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC`)
-    .all(id) as MessageRow[];
-  const messages = rows.map(toMessage);
-  const lastAssistantRun = [...messages].reverse().find((m) => m.role === "assistant")?.hermes_run_id ?? null;
-  return {
-    conversation: {
-      id: conversation.id,
-      title: conversation.title,
-      created_at: conversation.created_at,
-      updated_at: conversation.updated_at,
-    },
-    messages,
-    active_run_id: lastAssistantRun,
-    active_run_status: null,
-  };
+export function setOpenCodeSession(conversationId: string, sessionId: string): void {
+  getDb()
+    .prepare(`UPDATE conversations SET opencode_session_id = ?, updated_at = ? WHERE id = ?`)
+    .run(sessionId, now(), conversationId);
+}
+
+export function touchConversation(conversationId: string): void {
+  getDb().prepare(`UPDATE conversations SET updated_at = ? WHERE id = ?`).run(now(), conversationId);
 }
 
 export function renameConversation(id: string, title: string): void {
   getDb()
     .prepare(`UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?`)
-    .run(title.trim().slice(0, 120) || "未命名对话", now(), id);
+    .run(title.trim() || "未命名对话", now(), id);
+}
+
+export function pinConversation(id: string, isPinned: boolean): void {
+  getDb().prepare(`UPDATE conversations SET is_pinned = ? WHERE id = ?`).run(isPinned ? 1 : 0, id);
 }
 
 export function deleteConversation(id: string): void {
   getDb().prepare(`DELETE FROM conversations WHERE id = ?`).run(id);
 }
 
-export function setHermesSession(id: string, sessionId: string): void {
-  getDb()
-    .prepare(`UPDATE conversations SET hermes_session_id = ?, updated_at = ? WHERE id = ?`)
-    .run(sessionId, now(), id);
-}
-
-export function touchConversation(id: string): void {
-  getDb().prepare(`UPDATE conversations SET updated_at = ? WHERE id = ?`).run(now(), id);
+export function getConversation(id: string): WorkConversationDetail | null {
+  const row = getConversationMeta(id);
+  if (!row) return null;
+  const rows = getDb()
+    .prepare(
+      `SELECT id, conversation_id, role, content, status, tool_name, tool_payload, run_id, created_at
+       FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC`,
+    )
+    .all(id) as MessageRow[];
+  const messages = rows.map(toMessage);
+  const streaming = [...messages]
+    .reverse()
+    .find((m) => m.role === "assistant" && (m.status === "streaming" || m.status === "waiting"));
+  return {
+    conversation: toConversation(row),
+    messages,
+    active_run_id: streaming?.run_id ?? null,
+    active_run_status: streaming?.status ?? null,
+  };
 }
 
 export function addMessage(input: {
+  id?: string;
   conversation_id: string;
   role: WorkRole;
   content?: string;
   status?: WorkMessage["status"];
   tool_name?: string | null;
   tool_payload?: Record<string, unknown> | null;
-  hermes_run_id?: string | null;
-  id?: string;
+  run_id?: string | null;
 }): WorkMessage {
   const message: WorkMessage = {
     id: input.id ?? crypto.randomUUID(),
@@ -141,12 +192,12 @@ export function addMessage(input: {
     status: input.status ?? "completed",
     tool_name: input.tool_name ?? null,
     tool_payload: input.tool_payload ?? null,
-    hermes_run_id: input.hermes_run_id ?? null,
+    run_id: input.run_id ?? null,
     created_at: now(),
   };
   getDb()
     .prepare(
-      `INSERT INTO messages (id, conversation_id, role, content, status, tool_name, tool_payload, hermes_run_id, created_at)
+      `INSERT INTO messages (id, conversation_id, role, content, status, tool_name, tool_payload, run_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
@@ -157,7 +208,7 @@ export function addMessage(input: {
       message.status,
       message.tool_name,
       message.tool_payload ? JSON.stringify(message.tool_payload) : null,
-      message.hermes_run_id,
+      message.run_id,
       message.created_at,
     );
   touchConversation(message.conversation_id);
@@ -166,7 +217,7 @@ export function addMessage(input: {
 
 export function updateMessage(
   id: string,
-  patch: Partial<Pick<WorkMessage, "content" | "status" | "tool_name" | "tool_payload" | "hermes_run_id">>,
+  patch: Partial<Pick<WorkMessage, "content" | "status" | "tool_name" | "tool_payload" | "run_id">>,
 ): void {
   const fields: string[] = [];
   const values: unknown[] = [];
@@ -186,9 +237,9 @@ export function updateMessage(
     fields.push("tool_payload = ?");
     values.push(patch.tool_payload ? JSON.stringify(patch.tool_payload) : null);
   }
-  if (patch.hermes_run_id !== undefined) {
-    fields.push("hermes_run_id = ?");
-    values.push(patch.hermes_run_id);
+  if (patch.run_id !== undefined) {
+    fields.push("run_id = ?");
+    values.push(patch.run_id);
   }
   if (!fields.length) return;
   values.push(id);
@@ -199,18 +250,21 @@ export function appendMessageContent(id: string, delta: string): void {
   getDb().prepare(`UPDATE messages SET content = content || ? WHERE id = ?`).run(delta, id);
 }
 
-export function getMessage(id: string): WorkMessage | null {
-  const row = getDb().prepare(`SELECT * FROM messages WHERE id = ?`).get(id) as MessageRow | undefined;
-  return row ? toMessage(row) : null;
-}
-
-export function findRunningTool(conversationId: string, tool: string): WorkMessage | null {
-  const row = getDb()
+export function findRunningTool(conversationId: string, tool: string, toolCallId?: string | null): WorkMessage | null {
+  const rows = getDb()
     .prepare(
-      `SELECT * FROM messages WHERE conversation_id = ? AND role = 'tool' AND tool_name = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1`,
+      `SELECT id, conversation_id, role, content, status, tool_name, tool_payload, run_id, created_at
+       FROM messages WHERE conversation_id = ? AND role = 'tool' AND status = 'running' ORDER BY created_at DESC, rowid DESC LIMIT 20`,
     )
-    .get(conversationId, tool) as MessageRow | undefined;
-  return row ? toMessage(row) : null;
+    .all(conversationId) as MessageRow[];
+  if (toolCallId) {
+    for (const row of rows) {
+      const parsed = toMessage(row);
+      if (parsed.tool_payload?.tool_call_id === toolCallId) return parsed;
+    }
+  }
+  const byName = rows.find((r) => r.tool_name === tool);
+  return byName ? toMessage(byName) : null;
 }
 
 export function getKv(key: string): string | null {
@@ -224,7 +278,59 @@ export function setKv(key: string, value: string): void {
     .run(key, value);
 }
 
-export function conversationCount(): number {
-  const row = getDb().prepare(`SELECT COUNT(*) AS count FROM conversations WHERE archived = 0`).get() as { count: number };
-  return row.count;
+export function deleteKv(key: string): void {
+  getDb().prepare(`DELETE FROM kv WHERE key = ?`).run(key);
+}
+
+export function listWorkspaces(): WorkWorkspace[] {
+  return getDb()
+    .prepare(`SELECT id, path, name, last_opened_at, created_at FROM workspaces ORDER BY last_opened_at DESC`)
+    .all() as WorkspaceRow[];
+}
+
+export function getWorkspaceByPath(dirPath: string): WorkWorkspace | null {
+  const resolved = path.resolve(dirPath);
+  const row = getDb()
+    .prepare(`SELECT id, path, name, last_opened_at, created_at FROM workspaces WHERE path = ?`)
+    .get(resolved) as WorkspaceRow | undefined;
+  return row ?? null;
+}
+
+export function upsertWorkspace(dirPath: string): WorkWorkspace {
+  const resolved = path.resolve(dirPath);
+  const name = path.basename(resolved) || resolved;
+  const stamp = now();
+  const existing = getWorkspaceByPath(resolved);
+  if (existing) {
+    getDb()
+      .prepare(`UPDATE workspaces SET name = ?, last_opened_at = ? WHERE id = ?`)
+      .run(name, stamp, existing.id);
+    return { ...existing, name, last_opened_at: stamp };
+  }
+  const id = crypto.randomUUID();
+  getDb()
+    .prepare(`INSERT INTO workspaces (id, path, name, last_opened_at, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .run(id, resolved, name, stamp, stamp);
+  return { id, path: resolved, name, last_opened_at: stamp, created_at: stamp };
+}
+
+export function removeWorkspace(dirPath: string): void {
+  const resolved = path.resolve(dirPath);
+  getDb().prepare(`DELETE FROM workspaces WHERE path = ?`).run(resolved);
+  if (getActiveWorkspacePath() === resolved) {
+    deleteKv(ACTIVE_WORKSPACE_KV);
+  }
+}
+
+export function getActiveWorkspacePath(): string | null {
+  const val = getKv(ACTIVE_WORKSPACE_KV);
+  return val && val.trim() ? val.trim() : null;
+}
+
+export function setActiveWorkspacePath(dirPath: string | null): void {
+  if (!dirPath) {
+    deleteKv(ACTIVE_WORKSPACE_KV);
+    return;
+  }
+  setKv(ACTIVE_WORKSPACE_KV, path.resolve(dirPath));
 }

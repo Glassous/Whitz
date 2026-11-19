@@ -1,181 +1,94 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { loadConfig, storagePaths } from "../config";
-import { scoped } from "../logger";
-import type { RuntimeProgress } from "../../shared/work-types";
-
-const logger = scoped("runtime:install");
-const INSTALL_URL = process.env.WHITZ_HERMES_INSTALL_URL || "https://hermes-agent.nousresearch.com/install.ps1";
+import { dialog } from "electron";
+import { getWorkSettings } from "../work/settings";
+import { getMainWindow } from "../window";
+import type { RuntimeSource } from "../../shared/work-types";
 
 export interface RuntimeMeta {
   version: string;
   dir: string;
   exe: string;
   installed_at: string;
+  source: RuntimeSource;
 }
 
-function metaFile(): string {
-  return path.join(storagePaths().hermesRuntime, "current.json");
+function resolveWrapperToExe(candidate: string): string {
+  const lower = candidate.toLowerCase();
+  if (lower.endsWith(".exe")) return candidate;
+  const dir = path.dirname(candidate);
+  const directExe = path.join(dir, "opencode.exe");
+  if (fs.existsSync(directExe)) return directExe;
+  const npmNative = path.join(dir, "node_modules", "opencode-ai", "bin", "opencode.exe");
+  if (fs.existsSync(npmNative)) return npmNative;
+  const npmCmdDir = path.join(dir, "..", "node_modules", "opencode-ai", "bin", "opencode.exe");
+  if (fs.existsSync(npmCmdDir)) return path.resolve(npmCmdDir);
+  return candidate;
 }
 
-export function readRuntimeMeta(): RuntimeMeta | null {
+export function findOpenCodeInPath(): { exe: string; source: RuntimeSource } | null {
   try {
-    const file = metaFile();
-    if (!fs.existsSync(file)) return null;
-    const meta = JSON.parse(fs.readFileSync(file, "utf-8")) as RuntimeMeta;
-    if (!meta.exe || !fs.existsSync(meta.exe)) return null;
-    return meta;
+    const cmd = process.platform === "win32" ? "where.exe" : "which";
+    const out = execFileSync(cmd, ["opencode"], { encoding: "utf-8", windowsHide: true, timeout: 4000 });
+    for (const line of out.split(/\r?\n/)) {
+      const candidate = line.trim();
+      if (!candidate || !fs.existsSync(candidate)) continue;
+      const resolved = resolveWrapperToExe(candidate);
+      if (fs.existsSync(resolved)) {
+        const lower = resolved.toLowerCase();
+        const source: RuntimeSource = lower.includes("scoop")
+          ? "scoop"
+          : lower.includes("winget")
+            ? "winget"
+            : lower.includes("node_modules")
+              ? "npm"
+              : "system";
+        return { exe: resolved, source };
+      }
+    }
   } catch {
-    return null;
-  }
-}
-
-function writeRuntimeMeta(meta: RuntimeMeta): void {
-  fs.mkdirSync(path.dirname(metaFile()), { recursive: true });
-  fs.writeFileSync(metaFile(), JSON.stringify(meta, null, 2), "utf-8");
-}
-
-const EXE_NAMES = ["hermes.exe", "hermes.cmd", "hermes.bat"];
-
-export function findHermesExe(root: string, maxDepth = 4): string | null {
-  if (!root || !fs.existsSync(root)) return null;
-  const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
-  while (queue.length) {
-    const current = queue.shift()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(current.dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const full = path.join(current.dir, entry.name);
-      if (entry.isFile() && EXE_NAMES.includes(entry.name.toLowerCase())) return full;
-    }
-    if (current.depth >= maxDepth) continue;
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name === "node_modules" || entry.name === "site-packages" || entry.name === "__pycache__") continue;
-      queue.push({ dir: path.join(current.dir, entry.name), depth: current.depth + 1 });
-    }
+    /* not on PATH */
   }
   return null;
 }
 
-export interface InstallResult {
-  ok: boolean;
-  meta: RuntimeMeta | null;
-  message: string;
-  log: string[];
-}
-
-function quote(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function parseProgress(line: string): number | null {
-  const match = /(\d{1,3})\s*%/.exec(line);
-  if (!match) return null;
-  return Math.min(100, Math.max(0, Number.parseInt(match[1], 10)));
-}
-
-export async function installRuntime(
-  onProgress: (progress: RuntimeProgress) => void,
-): Promise<InstallResult> {
-  const config = loadConfig();
-  const paths = storagePaths();
+export function findOpenCodeCandidates(): Array<{ exe: string; source: RuntimeSource }> {
+  const home = os.homedir();
+  const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
+  const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
   if (process.platform !== "win32") {
-    return { ok: false, meta: null, message: "当前版本仅支持 Windows", log: [] };
+    return [
+      { exe: path.join(home, ".opencode", "bin", "opencode"), source: "system" },
+      { exe: "/usr/local/bin/opencode", source: "system" },
+      { exe: "/opt/homebrew/bin/opencode", source: "system" },
+    ];
   }
-  const tag = config.hermesInstallTag.trim();
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const installDir = path.join(paths.hermesRuntime, tag || stamp);
-  fs.mkdirSync(installDir, { recursive: true });
-  fs.mkdirSync(paths.hermesHome, { recursive: true });
-
-  onProgress({ phase: "check", percent: 2, message: "正在准备安装 Hermes Agent…" });
-
-  const args = [
-    `-HermesHome ${quote(paths.hermesHome)}`,
-    `-InstallDir ${quote(installDir)}`,
-    "-SkipSetup",
+  return [
+    { exe: path.join(appData, "npm", "node_modules", "opencode-ai", "bin", "opencode.exe"), source: "npm" },
+    { exe: path.join(home, ".opencode", "bin", "opencode.exe"), source: "system" },
+    { exe: path.join(home, "scoop", "apps", "opencode", "current", "opencode.exe"), source: "scoop" },
+    { exe: path.join(home, "scoop", "shims", "opencode.exe"), source: "scoop" },
+    { exe: path.join(localAppData, "Microsoft", "WinGet", "Links", "opencode.exe"), source: "winget" },
+    { exe: path.join(appData, "npm", "opencode.cmd"), source: "npm" },
   ];
-  if (tag) args.unshift(`-Tag ${quote(tag)}`);
-  const script = `& ([scriptblock]::Create((irm ${quote(INSTALL_URL)}))) ${args.join(" ")}`;
-
-  const log: string[] = [];
-  const result = await new Promise<{ code: number | null; error: string | null }>((resolve) => {
-    const child = spawn(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-      { windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8" } },
-    );
-    const timer = setTimeout(() => {
-      child.kill();
-      resolve({ code: null, error: "安装超时，请检查网络后重试" });
-    }, 30 * 60 * 1000);
-
-    const handle = (chunk: Buffer) => {
-      const text = chunk.toString("utf-8");
-      for (const line of text.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        log.push(trimmed);
-        if (log.length > 400) log.shift();
-        const percent = parseProgress(trimmed);
-        onProgress({
-          phase: percent !== null ? "download" : "extract",
-          percent: percent ?? 20,
-          message: trimmed.slice(0, 160),
-          log_line: trimmed,
-        });
-      }
-    };
-    child.stdout.on("data", handle);
-    child.stderr.on("data", handle);
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({ code: null, error: err.message });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, error: null });
-    });
-  });
-
-  if (result.error || result.code !== 0) {
-    logger.error("install failed", result.error ?? `exit ${result.code}`, log.slice(-5));
-    onProgress({ phase: "error", percent: 100, message: result.error ?? "安装失败，请重试" });
-    return { ok: false, meta: null, message: result.error ?? "安装失败，请重试", log };
-  }
-
-  onProgress({ phase: "configure", percent: 92, message: "正在校验运行时…" });
-  const exe = findHermesExe(installDir);
-  if (!exe) {
-    onProgress({ phase: "error", percent: 100, message: "未找到 hermes 可执行文件" });
-    return { ok: false, meta: null, message: "未找到 hermes 可执行文件", log };
-  }
-  const version = await readVersion(exe);
-  const meta: RuntimeMeta = {
-    version,
-    dir: installDir,
-    exe,
-    installed_at: new Date().toISOString(),
-  };
-  writeRuntimeMeta(meta);
-  onProgress({ phase: "done", percent: 100, message: `Hermes ${version} 安装完成` });
-  return { ok: true, meta, message: "安装完成", log };
 }
 
 export function readVersion(exe: string): Promise<string> {
   return new Promise((resolve) => {
-    const child = spawn(exe, ["version"], { windowsHide: true });
+    const batch = /\.(cmd|bat)$/i.test(exe);
+    const child = batch
+      ? spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `""${exe}" --version"`], {
+          windowsHide: true,
+          windowsVerbatimArguments: true,
+        })
+      : spawn(exe, ["--version"], { windowsHide: true });
     let out = "";
     const timer = setTimeout(() => {
       child.kill();
       resolve("unknown");
-    }, 20_000);
+    }, 15_000);
     child.stdout.on("data", (chunk: Buffer) => {
       out += chunk.toString("utf-8");
     });
@@ -194,17 +107,94 @@ export function readVersion(exe: string): Promise<string> {
   });
 }
 
-export function autoDetectRuntime(): RuntimeMeta | null {
-  const existing = readRuntimeMeta();
-  if (existing) return existing;
-  const exe = findHermesExe(storagePaths().hermesRuntime);
-  if (!exe) return null;
+let cachedMeta: RuntimeMeta | null | undefined;
+const versionProbeInFlight = new Set<string>();
+
+function probeExeVersionAsync(exe: string, onUpdated?: () => void): void {
+  if (versionProbeInFlight.has(exe)) return;
+  versionProbeInFlight.add(exe);
+  void readVersion(exe)
+    .then((version) => {
+      if (cachedMeta && cachedMeta.exe === exe && version && version !== "unknown") {
+        cachedMeta.version = version;
+        onUpdated?.();
+      }
+    })
+    .finally(() => versionProbeInFlight.delete(exe));
+}
+
+function buildMeta(exe: string, source: RuntimeSource, onUpdated?: () => void): RuntimeMeta {
+  let installedAt = new Date().toISOString();
+  try {
+    installedAt = fs.statSync(exe).mtime.toISOString();
+  } catch {
+    /* ignore */
+  }
   const meta: RuntimeMeta = {
-    version: "unknown",
+    version: "local",
     dir: path.dirname(exe),
     exe,
-    installed_at: new Date().toISOString(),
+    installed_at: installedAt,
+    source,
   };
-  writeRuntimeMeta(meta);
+  cachedMeta = meta;
+  probeExeVersionAsync(exe, onUpdated);
   return meta;
+}
+
+export function resetRuntimeDetectCache(): void {
+  cachedMeta = undefined;
+}
+
+export function autoDetectRuntime(onVersionUpdated?: () => void): RuntimeMeta | null {
+  const custom = getWorkSettings().model.custom_opencode_exe?.trim();
+  if (custom) {
+    const resolvedCustom = resolveWrapperToExe(custom);
+    if (fs.existsSync(resolvedCustom)) {
+      if (cachedMeta && cachedMeta.exe === resolvedCustom && cachedMeta.source === "custom") {
+        return cachedMeta;
+      }
+      return buildMeta(resolvedCustom, "custom", onVersionUpdated);
+    }
+  }
+
+  if (cachedMeta !== undefined) {
+    if (cachedMeta && !fs.existsSync(cachedMeta.exe)) {
+      cachedMeta = undefined;
+    } else {
+      return cachedMeta;
+    }
+  }
+
+  const fromPath = findOpenCodeInPath();
+  if (fromPath) {
+    return buildMeta(fromPath.exe, fromPath.source, onVersionUpdated);
+  }
+
+  for (const candidate of findOpenCodeCandidates()) {
+    if (fs.existsSync(candidate.exe)) {
+      const resolved = resolveWrapperToExe(candidate.exe);
+      return buildMeta(resolved, candidate.source, onVersionUpdated);
+    }
+  }
+
+  cachedMeta = null;
+  return null;
+}
+
+export function redetectRuntime(onVersionUpdated?: () => void): RuntimeMeta | null {
+  resetRuntimeDetectCache();
+  return autoDetectRuntime(onVersionUpdated);
+}
+
+export async function pickOpenCodeExe(): Promise<string | null> {
+  const win = getMainWindow();
+  const options = {
+    title: "选择本机 opencode 可执行文件",
+    properties: ["openFile"] as Array<"openFile">,
+    filters: process.platform === "win32" ? [{ name: "OpenCode CLI", extensions: ["exe", "cmd"] }] : undefined,
+  };
+  const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
 }

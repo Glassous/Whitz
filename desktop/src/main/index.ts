@@ -8,7 +8,8 @@ import { initLogger, scoped } from "./logger";
 import { APP_ORIGIN, loadConfig } from "./config";
 import { refreshPolicy } from "./policy/policyService";
 import { startConnectivityWatch, stopConnectivityWatch } from "./net/connectivity";
-import { getStatus, stopRuntime } from "./runtime/hermesRuntime";
+import { ensureLocalOpenAIGateway, stopLocalOpenAIGateway } from "./runtime/localOpenAIGateway";
+import { ensureAutoStarted, getStatus, stopRuntime } from "./runtime/opencodeRuntime";
 import { closeDb } from "./work/db";
 import { initUpdater } from "./updater";
 
@@ -33,7 +34,10 @@ if (!app.requestSingleInstanceLock()) {
     createMainWindow();
     createTray();
     startConnectivityWatch();
-    void refreshPolicy();
+    await ensureLocalOpenAIGateway().catch(() => undefined);
+    void refreshPolicy().finally(() => {
+      void ensureAutoStarted();
+    });
     initUpdater();
 
     app.on("activate", () => createMainWindow());
@@ -50,9 +54,10 @@ if (!app.requestSingleInstanceLock()) {
     if (quitting) return;
     quitting = true;
     stopConnectivityWatch();
+    stopLocalOpenAIGateway();
     if (getStatus().running) {
       event.preventDefault();
-      void stopRuntime()
+      void stopRuntime(true)
         .catch(() => undefined)
         .finally(() => {
           closeDb();
@@ -60,6 +65,7 @@ if (!app.requestSingleInstanceLock()) {
         });
       return;
     }
+    void stopRuntime(true).catch(() => undefined);
     closeDb();
   });
 }

@@ -52,7 +52,7 @@ async function retry() {
         <template v-else>
           云端会话、文件工作区、技能与内置模型额度需要 Whitz 账号。未登录时仍可以使用
           <span class="font-medium" style="color: var(--work-accent)">Whitz Work</span>
-          ，把本机当作一个普通 Hermes Agent。
+          ，搭配本机 OpenCode 直接在本地开展编码工作。
         </template>
       </p>
 

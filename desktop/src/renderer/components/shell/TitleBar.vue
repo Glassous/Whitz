@@ -3,10 +3,12 @@ import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { chromeBack } from "@web/host/chrome";
 import { useDesktopStore } from "../../stores/desktop";
+import { useWorkStore } from "../../stores/work";
 
 const route = useRoute();
 const router = useRouter();
 const desktop = useDesktopStore();
+const work = useWorkStore();
 
 const inWork = computed(() => typeof route.name === "string" && route.name.startsWith("work"));
 const online = computed(() => desktop.online);
@@ -70,6 +72,14 @@ async function toggleOffline() {
         Work
       </button>
     </div>
+
+    <span
+      v-if="inWork && work.activeWorkspace"
+      class="no-drag hidden max-w-[220px] truncate rounded-full border border-line/80 bg-surface/60 px-2.5 py-0.5 text-[11px] text-fg-muted md:inline-block"
+      :title="work.activeWorkspace.path"
+    >
+      {{ work.activeWorkspace.name }}
+    </span>
 
     <div class="flex-1"></div>
 

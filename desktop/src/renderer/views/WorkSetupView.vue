@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { clearChromeBack, setChromeBack } from "@web/host/chrome";
 import { useDesktopStore } from "../stores/desktop";
@@ -11,26 +11,48 @@ const router = useRouter();
 const desktop = useDesktopStore();
 const runtime = useRuntimeStore();
 let chromeBackToken: number | null = null;
+const copied = ref(false);
+
+const INSTALL_CMD = "npm install -g opencode-ai";
 
 onMounted(() => {
   chromeBackToken = setChromeBack({ label: "返回工作台", run: () => void router.push({ name: "work" }) });
+  void runtime.redetect().catch(() => undefined);
 });
 
 onBeforeUnmount(() => {
   if (chromeBackToken !== null) clearChromeBack(chromeBackToken);
 });
 
-const progress = computed(() => runtime.progress);
 const installed = computed(() => runtime.installed);
-const percent = computed(() => Math.round(progress.value?.percent ?? (installed.value ? 100 : 0)));
 
-async function install() {
-  await runtime.install().catch(() => undefined);
+async function copyInstallCmd() {
+  try {
+    await navigator.clipboard.writeText(INSTALL_CMD);
+    copied.value = true;
+    setTimeout(() => {
+      copied.value = false;
+    }, 1800);
+  } catch {
+    /* ignore */
+  }
 }
 
-async function finish() {
-  await runtime.start().catch(() => undefined);
-  if (runtime.ready) void router.push({ name: "work" });
+function openOfficialSite() {
+  void window.whitzDesktop?.openExternal("https://opencode.ai/");
+}
+
+async function pickExe() {
+  const picked = await runtime.pickExe();
+  if (picked) {
+    await runtime.saveSettings({ custom_opencode_exe: picked });
+    await runtime.redetect();
+  }
+}
+
+function finish() {
+  void runtime.start().catch(() => undefined);
+  void router.push({ name: "work" });
 }
 </script>
 
@@ -40,11 +62,11 @@ async function finish() {
       <header class="animate-rise">
         <div class="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-fg-faint">
           <span class="h-1.5 w-1.5 rounded-full" style="background: var(--work-accent)"></span>
-          Whitz Work · 本地
+          Whitz Work · 本机 OpenCode 连接
         </div>
-        <h1 class="mt-3 text-[26px] font-semibold tracking-tight text-fg">先准备好你的本地智能体</h1>
-        <p class="mt-2 max-w-[620px] text-[14px] leading-relaxed text-fg-muted">
-          Work 模式在本机运行完整的 Hermes Agent，对话与记忆只保存在这台电脑。首次使用需要安装运行时，之后可离线启动。
+        <h1 class="mt-3 text-[26px] font-semibold tracking-tight text-fg">连接本机已安装的 OpenCode</h1>
+        <p class="mt-2 max-w-[660px] text-[14px] leading-relaxed text-fg-muted">
+          Whitz Work 不内置安装 OpenCode，直接连接你电脑上的 OpenCode CLI 与配置文件（<code class="rounded bg-surface px-1 py-0.5 text-[12px]">~/.config/opencode/opencode.json</code>）；本地会话与工作区记录保留在电脑，不上传云端。
         </p>
       </header>
 
@@ -60,53 +82,51 @@ async function finish() {
         <section class="mt-8 rounded-2xl border border-line bg-canvas p-6">
           <div class="flex items-start justify-between gap-6">
             <div>
-              <h2 class="text-[15px] font-semibold text-fg">1 · 安装本地运行时</h2>
+              <h2 class="text-[15px] font-semibold text-fg">1 · 检测本机 OpenCode</h2>
               <p class="mt-1 text-[12.5px] text-fg-muted">
-                Hermes Agent · MIT 开源 · 安装到 <code class="rounded bg-surface px-1 py-0.5 text-[11px]">%LOCALAPPDATA%\\Whitz\\hermes</code>
+                配置目录：<code class="rounded bg-surface px-1.5 py-0.5 text-[11px]">{{ runtime.status?.home_dir ?? "~/.config/opencode" }}</code>
               </p>
             </div>
             <span
-              class="rounded-full border px-2.5 py-1 text-[11px]"
-              :class="installed ? 'border-line text-success' : 'border-line text-fg-muted'"
+              class="shrink-0 rounded-full border border-line px-2.5 py-1 text-[11px]"
+              :class="installed ? 'text-success' : 'text-warning'"
             >
-              {{ installed ? `已安装 ${runtime.status?.version ?? ""}` : "未安装" }}
+              {{ installed ? `已检测到 ${runtime.status?.version ?? ""}` : "未检测到" }}
             </span>
           </div>
 
-          <div v-if="runtime.installing || progress" class="mt-5">
-            <div class="h-1.5 overflow-hidden rounded-full bg-surface">
-              <div
-                class="h-full rounded-full transition-[width] duration-300"
-                :style="{
-                  width: `${percent}%`,
-                  background: progress?.phase === 'error' ? 'var(--danger)' : 'var(--work-accent)',
-                }"
-              ></div>
+          <div v-if="installed" class="mt-4 rounded-xl border border-line bg-surface/40 px-4 py-3 text-[12px]">
+            <p class="text-fg-muted">可执行路径：</p>
+            <p class="mt-0.5 break-all font-mono text-[11.5px] text-fg">{{ runtime.status?.exe_path }}</p>
+          </div>
+
+          <div v-else class="mt-4 rounded-xl border border-line bg-surface/50 p-4 text-[12.5px]">
+            <p class="font-medium text-fg">请先在本机安装 OpenCode（本应用仅做调用，不内置安装器）：</p>
+            <p class="mt-1.5 text-fg-muted">在终端执行以下命令完成安装后点击「重新检测」：</p>
+            <div class="mt-2.5 flex flex-wrap items-center gap-2 rounded-xl bg-code px-3 py-2 font-mono text-[11.5px] text-[#e6e5e0]">
+              <span class="min-w-0 flex-1 break-all">{{ INSTALL_CMD }}</span>
+              <button
+                type="button"
+                class="shrink-0 rounded-lg bg-white/10 px-2.5 py-1 text-[11px] text-white hover:bg-white/20"
+                @click="copyInstallCmd"
+              >
+                {{ copied ? "已复制" : "复制命令" }}
+              </button>
             </div>
-            <p class="mt-2 text-[12px]" :class="progress?.phase === 'error' ? 'text-danger' : 'text-fg-muted'">
-              {{ progress?.message || "准备中…" }} · {{ percent }}%
-            </p>
           </div>
 
           <div class="mt-5 flex flex-wrap items-center gap-3">
-            <BaseButton v-if="!installed" :loading="runtime.busy" :disabled="runtime.installing" @click="install">
-              {{ runtime.installing ? "正在安装…" : "下载并安装" }}
-            </BaseButton>
-            <BaseButton v-else variant="secondary" :loading="runtime.busy" @click="install">检查更新 / 重装</BaseButton>
-            <BaseButton variant="ghost" @click="runtime.status && router.push({ name: 'work-settings' })">
-              高级设置
-            </BaseButton>
-            <span v-if="runtime.error" class="text-[12px] text-danger">{{ runtime.error }}</span>
+            <BaseButton :loading="runtime.busy" @click="runtime.redetect()">重新检测</BaseButton>
+            <BaseButton variant="secondary" @click="pickExe">手动选择 opencode.exe</BaseButton>
+            <BaseButton v-if="!installed" variant="ghost" @click="openOfficialSite">打开 OpenCode 官网</BaseButton>
+            <BaseButton variant="ghost" @click="router.push({ name: 'work-settings' })">Work 设置</BaseButton>
           </div>
-          <p class="mt-3 text-[11.5px] text-fg-faint">
-            安装过程通过官方安装器准备 uv / Python / Node 依赖，需要一次联网；失败会自动保留日志供诊断。
-          </p>
         </section>
 
         <section class="mt-5 rounded-2xl border border-line bg-canvas p-6">
-          <h2 class="text-[15px] font-semibold text-fg">2 · 选择模型</h2>
+          <h2 class="text-[15px] font-semibold text-fg">2 · OpenCode 模型配置与 Whitz 本机服务</h2>
           <p class="mt-1 text-[12.5px] text-fg-muted">
-            登录后可用账号额度；未登录时可接入自己的 OpenAI / Anthropic / Google 原生协议或任意兼容端点。
+            可直接使用本机已配置的 Provider，或接入 Whitz 常驻的本地 OpenAI 服务与 Chat 共享额度（支持一键写入 <code class="rounded bg-surface px-1 py-0.5 text-[11px]">opencode.json</code>）。
           </p>
           <div class="mt-5">
             <ModelForm v-if="runtime.settings" :settings="runtime.settings" />
@@ -115,14 +135,12 @@ async function finish() {
         </section>
 
         <section class="mt-5 rounded-2xl border border-line bg-canvas p-6">
-          <h2 class="text-[15px] font-semibold text-fg">3 · 启动本地智能体</h2>
+          <h2 class="text-[15px] font-semibold text-fg">3 · 进入工作台</h2>
           <p class="mt-1 text-[12.5px] text-fg-muted">
-            运行时只监听 127.0.0.1 的随机端口，外部无法访问；退出应用时会清理子进程。
+            OpenCode 服务自动常驻本机 127.0.0.1 随机端口，工作区代码与会话只保留在本机。
           </p>
           <div class="mt-4 flex flex-wrap items-center gap-3">
-            <BaseButton size="lg" :loading="runtime.busy" :disabled="!installed" @click="finish">
-              {{ runtime.ready ? "进入 Work" : "启动并进入 Work" }}
-            </BaseButton>
+            <BaseButton size="lg" :disabled="!installed" @click="finish">进入 Work</BaseButton>
             <span v-if="runtime.status?.detail" class="text-[12px] text-fg-faint">{{ runtime.status.detail }}</span>
           </div>
         </section>
