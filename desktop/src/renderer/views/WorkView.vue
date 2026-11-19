@@ -204,6 +204,15 @@ async function handleFork(messageId: string) {
   }
 }
 
+function handleOpenSteps(messageId: string) {
+  work.selectTurn(messageId);
+  if (isDesktop.value) {
+    showInspector.value = true;
+  } else {
+    mobileInspectorOpen.value = true;
+  }
+}
+
 function handleInsertPath(relPath: string) {
   composerRef.value?.insertPath(relPath);
 }
@@ -326,8 +335,10 @@ onBeforeUnmount(() => {
         <!-- Message List -->
         <WorkMessageList
           ref="messageListRef"
+          :conversation-id="work.activeConversationId"
           :messages="work.messages"
           :active-assistant-id="work.activeAssistantId"
+          :selected-turn-id="work.selectedTurnId"
           :streaming="work.streaming"
           :reverted-count="work.current?.reverted_count ?? 0"
           :project-name="currentProjectName"
@@ -335,6 +346,7 @@ onBeforeUnmount(() => {
           @revert="handleRevert"
           @unrevert="work.unrevert()"
           @fork="handleFork"
+          @steps="handleOpenSteps"
         />
 
         <!-- Progressive Blur Bottom + Inline Approvals + Error + Composer (Aligned with ChatView.vue) -->

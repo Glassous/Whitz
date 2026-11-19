@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import type { WorkTimelineItem } from "@shared/work-types";
 import { useRuntimeStore } from "../../stores/runtime";
 import { useWorkStore, type WorkInspectorTab } from "../../stores/work";
 import BaseButton from "@web/components/ui/BaseButton.vue";
 import WorkspaceTreeNode from "./WorkspaceTreeNode.vue";
 import WorkFilePreview from "./WorkFilePreview.vue";
+
+const NEAR_BOTTOM_PX = 120;
 
 const emit = defineEmits<{
   insertPath: [string];
@@ -18,22 +21,162 @@ const work = useWorkStore();
 
 const diffScope = ref<"session" | "git">("session");
 const selectedSessionDiffFile = ref<string | null>(null);
+const stepsScroller = ref<HTMLElement | null>(null);
+const stepsAutoFollow = ref(true);
+let stepsProgrammaticUntil = 0;
 
 const tabs: Array<{ key: WorkInspectorTab; label: string }> = [
+  { key: "steps", label: "步骤" },
   { key: "files", label: "文件" },
   { key: "git", label: "变更" },
-  { key: "plan", label: "计划" },
   { key: "runtime", label: "运行" },
 ];
 
+const assistantTurns = computed(() => work.messages.filter((m) => m.role === "assistant"));
+const activeTurnIndex = computed(() => {
+  if (!assistantTurns.value.length) return -1;
+  if (work.selectedTurnId) {
+    const idx = assistantTurns.value.findIndex((m) => m.id === work.selectedTurnId);
+    if (idx >= 0) return idx;
+  }
+  return assistantTurns.value.length - 1;
+});
+const activeTurn = computed(() =>
+  activeTurnIndex.value >= 0 ? assistantTurns.value[activeTurnIndex.value] : null,
+);
+const selectedTimeline = computed<WorkTimelineItem[]>(() =>
+  activeTurn.value ? work.getTurnTimeline(activeTurn.value, work.messages) : [],
+);
+
 const rootEntries = computed(() => work.childrenByDir[""] ?? []);
 const planItems = computed(() => {
-  const items = (work.plan?.items ?? []) as Array<Record<string, unknown>>;
+  const turnPlan = activeTurn.value?.tool_payload?.plan as { items?: Array<Record<string, unknown>> } | undefined;
+  const items = turnPlan?.items ?? ((work.plan?.items ?? []) as Array<Record<string, unknown>>);
   return Array.isArray(items) ? items : [];
 });
 
 const activeBranch = computed(() => work.vcsBranch || work.gitStatus.branch || null);
 const totalChangesBadge = computed(() => work.sessionDiffs.length || work.gitStatus.changes.length);
+
+function toolDisplayLabel(name: string | null | undefined): string {
+  const map: Record<string, string> = {
+    read: "读取文件",
+    read_file: "读取文件",
+    write: "写入文件",
+    write_file: "写入文件",
+    edit: "编辑文件",
+    multiedit: "批量编辑",
+    apply_patch: "应用补丁",
+    patch: "修改补丁",
+    glob: "文件匹配",
+    grep: "全文搜索",
+    list: "目录浏览",
+    search_files: "搜索工作区",
+    bash: "终端命令",
+    terminal: "终端命令",
+    execute_code: "代码执行",
+    webfetch: "抓取网页",
+    websearch: "网页检索",
+    web_search: "网页检索",
+    web_extract: "网页提取",
+    todowrite: "任务计划",
+    todo_list: "任务计划",
+    task: "子任务委派",
+    skill: "读取技能",
+  };
+  return (name && map[name]) || name || "工具调用";
+}
+
+function extractItemFilePath(item: WorkTimelineItem): string | null {
+  const tool = item.tool ?? "";
+  if (!["read", "write", "edit", "read_file", "write_file", "patch"].includes(tool)) return null;
+  const rawArgs = item.args;
+  if (!rawArgs) return null;
+  if (typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
+    const obj = rawArgs as Record<string, unknown>;
+    const p = obj.filePath ?? obj.path ?? obj.file_path ?? obj.target_file;
+    if (typeof p === "string" && p.trim()) return p.trim();
+  }
+  const raw = typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs);
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const p = parsed.filePath ?? parsed.path ?? parsed.file_path ?? parsed.target_file;
+    if (typeof p === "string" && p.trim()) return p.trim();
+  } catch {
+    const match = /["']?([a-zA-Z0-9_.\-\\/]+\.[a-zA-Z0-9]+)["']?/.exec(raw);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function formatPayloadValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function toolSummary(item: WorkTimelineItem): string {
+  if (item.title && item.title.trim()) return item.title.trim();
+  if (!item.args) return "";
+  const text = typeof item.args === "string" ? item.args : JSON.stringify(item.args);
+  return text.replace(/\s+/g, " ").slice(0, 90);
+}
+
+function previewStepFile(relPath: string) {
+  void work.openFilePreview(relPath);
+  work.inspectorTab = "files";
+}
+
+function stepDotColor(status?: string): string {
+  if (status === "running") return "var(--warning)";
+  if (status === "failed") return "var(--danger)";
+  return "var(--success)";
+}
+
+function switchTurn(delta: number) {
+  const next = activeTurnIndex.value + delta;
+  if (next < 0 || next >= assistantTurns.value.length) return;
+  work.selectedTurnId = assistantTurns.value[next].id;
+}
+
+function onStepsScroll() {
+  const el = stepsScroller.value;
+  if (!el || performance.now() < stepsProgrammaticUntil) return;
+  stepsAutoFollow.value = el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
+}
+
+function onStepsWheel(e: WheelEvent) {
+  if (e.deltaY < 0) stepsAutoFollow.value = false;
+}
+
+watch(
+  () => {
+    const last = selectedTimeline.value[selectedTimeline.value.length - 1];
+    return [
+      activeTurn.value?.id ?? "",
+      selectedTimeline.value.length,
+      last?.text?.length ?? 0,
+      last?.status ?? "",
+      work.inspectorTab,
+    ] as const;
+  },
+  ([turnId, , , , tab], prev) => {
+    if (tab !== "steps") return;
+    if (prev && turnId !== prev[0]) stepsAutoFollow.value = true;
+    if (!stepsAutoFollow.value) return;
+    void nextTick(() => {
+      const el = stepsScroller.value;
+      if (!el || !stepsAutoFollow.value) return;
+      stepsProgrammaticUntil = performance.now() + 45;
+      el.scrollTop = el.scrollHeight;
+    });
+  },
+  { flush: "post" },
+);
 
 const activeSessionDiff = computed(() => {
   if (!selectedSessionDiffFile.value) return null;
@@ -114,16 +257,16 @@ watch(
         >
           <span>{{ tab.label }}</span>
           <span
-            v-if="tab.key === 'git' && totalChangesBadge > 0"
+            v-if="tab.key === 'steps' && selectedTimeline.length"
+            class="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-surface px-1 text-[10px] leading-none tabular-nums text-fg"
+          >
+            {{ selectedTimeline.length }}
+          </span>
+          <span
+            v-else-if="tab.key === 'git' && totalChangesBadge > 0"
             class="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-surface px-1 text-[10px] leading-none tabular-nums text-fg"
           >
             {{ totalChangesBadge }}
-          </span>
-          <span
-            v-else-if="tab.key === 'plan' && planItems.length"
-            class="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-surface px-1 text-[10px] leading-none tabular-nums text-fg"
-          >
-            {{ planItems.length }}
           </span>
         </button>
       </div>
@@ -141,8 +284,172 @@ watch(
       </button>
     </div>
 
-    <!-- Tab 1: Workspace Files -->
-    <div v-if="work.inspectorTab === 'files'" class="flex min-h-0 flex-1 flex-col gap-2.5 p-3">
+    <!-- Tab 1: Chronological Steps & Deep Thinking + Plan -->
+    <div
+      v-if="work.inspectorTab === 'steps'"
+      ref="stepsScroller"
+      class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto custom-scrollbar p-3"
+      @scroll.passive="onStepsScroll"
+      @wheel.passive="onStepsWheel"
+    >
+      <!-- Turn switcher when conversation has multiple turns -->
+      <div
+        v-if="assistantTurns.length > 1"
+        class="flex items-center justify-between gap-2 rounded-xl bg-canvas/75 px-3 py-1.5 text-[11.5px] text-fg-muted"
+      >
+        <span>第 {{ activeTurnIndex + 1 }} / {{ assistantTurns.length }} 轮</span>
+        <div class="flex items-center gap-1">
+          <button
+            type="button"
+            class="rounded-md px-1.5 py-0.5 transition-colors hover:bg-hover hover:text-fg disabled:opacity-35"
+            :disabled="activeTurnIndex <= 0"
+            @click="switchTurn(-1)"
+          >
+            上一轮
+          </button>
+          <button
+            type="button"
+            class="rounded-md px-1.5 py-0.5 transition-colors hover:bg-hover hover:text-fg disabled:opacity-35"
+            :disabled="activeTurnIndex >= assistantTurns.length - 1"
+            @click="switchTurn(1)"
+          >
+            下一轮
+          </button>
+        </div>
+      </div>
+
+      <!-- Task Plan / Todos -->
+      <section v-if="planItems.length" class="rounded-2xl bg-canvas/85 p-3.5">
+        <div class="flex items-center justify-between">
+          <span class="text-[11px] font-medium uppercase tracking-[0.14em] text-fg-faint">任务计划</span>
+          <span class="text-[11px] tabular-nums text-fg-faint">{{ planItems.length }} 步</span>
+        </div>
+        <ol class="mt-2.5 space-y-2">
+          <li v-for="(item, index) in planItems" :key="String(item.id ?? index)" class="flex items-start gap-2">
+            <span
+              class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
+              :style="{
+                background:
+                  item.status === 'completed'
+                    ? 'var(--success)'
+                    : item.status === 'in_progress'
+                      ? 'var(--work-accent)'
+                      : 'var(--line-strong)',
+              }"
+            />
+            <span
+              class="text-[12px] leading-relaxed"
+              :class="item.status === 'completed' ? 'text-fg-faint line-through' : 'text-fg-muted'"
+            >
+              {{ String(item.content ?? "") }}
+            </span>
+          </li>
+        </ol>
+      </section>
+
+      <!-- Subagents -->
+      <section v-if="work.subagents.length" class="rounded-2xl bg-canvas/85 p-3.5">
+        <div class="flex items-center justify-between">
+          <span class="text-[11px] font-medium uppercase tracking-[0.14em] text-fg-faint">子代理委派</span>
+          <span class="text-[11px] tabular-nums text-fg-faint">{{ work.subagents.length }}</span>
+        </div>
+        <div class="mt-2.5 space-y-2">
+          <div v-for="sub in work.subagents" :key="sub.id" class="rounded-xl bg-surface/65 px-3 py-2 text-[12px]">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-medium text-fg">{{ sub.goal }}</span>
+              <span class="text-[10.5px] text-fg-faint">{{ sub.status }}</span>
+            </div>
+            <p v-if="sub.summary" class="mt-1 text-[11.5px] text-fg-muted">{{ sub.summary }}</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Chronological Execution Timeline -->
+      <div v-if="!selectedTimeline.length && !planItems.length" class="flex flex-1 flex-col items-center justify-center rounded-2xl bg-canvas/55 p-6 text-center">
+        <p class="text-[13px] font-medium text-fg">暂无执行步骤</p>
+        <p class="mt-1.5 text-[12px] leading-relaxed text-fg-faint">
+          深度思考过程、过程说明与终端/文件工具调用会按时间顺序实时显示在这里，主对话区仅保留最终结果。
+        </p>
+      </div>
+
+      <template v-else>
+        <template v-for="item in selectedTimeline" :key="item.id">
+          <!-- Deep Thinking Block -->
+          <details
+            v-if="item.kind === 'thinking'"
+            class="disclosure-card rounded-2xl bg-canvas/85 text-[12px]"
+            open
+          >
+            <summary class="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2 select-none">
+              <span
+                class="h-1.5 w-1.5 shrink-0 rounded-full"
+                :class="{ 'animate-pulse': item.status === 'running' }"
+                :style="{ background: item.status === 'running' ? 'var(--work-accent)' : 'var(--fg-faint)' }"
+              />
+              <span class="font-medium text-fg">{{ item.title || "深度思考" }}</span>
+              <span class="ml-auto text-[11px] text-fg-faint">
+                {{ item.status === "running" ? "思考中…" : "已完成" }}
+              </span>
+            </summary>
+            <div class="px-3.5 pb-3 pt-0.5">
+              <p class="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-fg-muted">{{ item.text }}</p>
+            </div>
+          </details>
+
+          <!-- Pre-tool Commentary -->
+          <div
+            v-else-if="item.kind === 'commentary'"
+            class="rounded-2xl bg-canvas/65 px-3.5 py-2.5 text-[12px] leading-relaxed text-fg-muted"
+          >
+            <p class="whitespace-pre-wrap break-words">{{ item.text }}</p>
+          </div>
+
+          <!-- Tool Invocation Card -->
+          <details
+            v-else
+            class="disclosure-card rounded-2xl bg-canvas/85 text-[12px]"
+            :open="item.status === 'running' || item.status === 'failed'"
+          >
+            <summary class="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2 select-none">
+              <span
+                class="h-1.5 w-1.5 shrink-0 rounded-full"
+                :class="{ 'animate-pulse': item.status === 'running' }"
+                :style="{ background: stepDotColor(item.status) }"
+              />
+              <span class="shrink-0 font-medium text-fg">{{ toolDisplayLabel(item.tool) }}</span>
+              <span class="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-faint">
+                {{ extractItemFilePath(item) || toolSummary(item) }}
+              </span>
+              <button
+                v-if="extractItemFilePath(item)"
+                type="button"
+                class="shrink-0 rounded-lg bg-surface px-2 py-0.5 text-[10.5px] text-fg-muted transition-colors hover:text-fg"
+                @click.stop.prevent="previewStepFile(extractItemFilePath(item)!)"
+              >
+                预览
+              </button>
+              <span v-if="typeof item.duration === 'number'" class="shrink-0 text-[10.5px] tabular-nums text-fg-faint">
+                {{ item.duration.toFixed(1) }}s
+              </span>
+            </summary>
+            <div class="space-y-2 px-3.5 pb-3 pt-1">
+              <pre
+                v-if="item.args"
+                class="max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-code px-3 py-2 font-mono text-[11px] leading-relaxed text-[#c6c5be]"
+              >{{ formatPayloadValue(item.args) }}</pre>
+              <pre
+                v-if="item.result || item.error"
+                class="max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-code px-3 py-2 font-mono text-[11px] leading-relaxed"
+                :class="item.status === 'failed' ? 'text-[#f3a6a0]' : 'text-[#d6d5ce]'"
+              >{{ formatPayloadValue(item.error ?? item.result ?? "") }}</pre>
+            </div>
+          </details>
+        </template>
+      </template>
+    </div>
+
+    <!-- Tab 2: Workspace Files -->
+    <div v-else-if="work.inspectorTab === 'files'" class="flex min-h-0 flex-1 flex-col gap-2.5 p-3">
       <div v-if="!work.activeWorkspace" class="flex flex-1 flex-col items-center justify-center rounded-2xl bg-canvas/55 p-6 text-center">
         <p class="text-[13px] font-medium text-fg">尚未选定本地项目</p>
         <p class="mt-1.5 text-[12px] leading-relaxed text-fg-faint">
@@ -285,56 +592,6 @@ watch(
         @open-explorer="work.openInExplorer($event)"
         @insert-path="emit('insertPath', $event)"
       />
-    </div>
-
-    <!-- Tab 3: Plan & Subagents -->
-    <div v-else-if="work.inspectorTab === 'plan'" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto custom-scrollbar p-3">
-      <section class="rounded-2xl bg-canvas/85 p-3.5">
-        <div class="flex items-center justify-between">
-          <span class="text-[11px] font-medium uppercase tracking-[0.14em] text-fg-faint">任务计划</span>
-          <span class="text-[11px] text-fg-faint">{{ planItems.length }} 步</span>
-        </div>
-        <ol v-if="planItems.length" class="mt-2.5 space-y-2">
-          <li v-for="(item, index) in planItems" :key="String(item.id ?? index)" class="flex items-start gap-2">
-            <span
-              class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
-              :style="{
-                background:
-                  item.status === 'completed'
-                    ? 'var(--success)'
-                    : item.status === 'in_progress'
-                      ? 'var(--work-accent)'
-                      : 'var(--line-strong)',
-              }"
-            />
-            <span
-              class="text-[12px] leading-relaxed"
-              :class="item.status === 'completed' ? 'text-fg-faint line-through' : 'text-fg-muted'"
-            >
-              {{ String(item.content ?? "") }}
-            </span>
-          </li>
-        </ol>
-        <p v-else class="mt-2.5 text-[12px] leading-relaxed text-fg-faint">
-          复杂编码或研究任务会自动拆解步骤，进度会实时同步到这里。
-        </p>
-      </section>
-
-      <section v-if="work.subagents.length" class="rounded-2xl bg-canvas/85 p-3.5">
-        <div class="flex items-center justify-between">
-          <span class="text-[11px] font-medium uppercase tracking-[0.14em] text-fg-faint">子代理委派</span>
-          <span class="text-[11px] text-fg-faint">{{ work.subagents.length }}</span>
-        </div>
-        <div class="mt-2.5 space-y-2">
-          <div v-for="sub in work.subagents" :key="sub.id" class="rounded-xl bg-surface/65 px-3 py-2 text-[12px]">
-            <div class="flex items-center justify-between gap-2">
-              <span class="font-medium text-fg">{{ sub.goal }}</span>
-              <span class="text-[10.5px] text-fg-faint">{{ sub.status }}</span>
-            </div>
-            <p v-if="sub.summary" class="mt-1 text-[11.5px] text-fg-muted">{{ sub.summary }}</p>
-          </div>
-        </div>
-      </section>
     </div>
 
     <!-- Tab 4: Runtime + MCP + LSP + Context Compact -->

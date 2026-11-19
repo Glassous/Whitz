@@ -16,6 +16,10 @@ import { initUpdater } from "./updater";
 const logger = scoped("main");
 let tray: Tray | null = null;
 
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.whitz.desktop");
+}
+
 registerAppProtocol();
 
 if (!app.requestSingleInstanceLock()) {

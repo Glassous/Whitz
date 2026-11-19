@@ -12,8 +12,6 @@ import {
   addMessage,
   copyMessagesUpTo,
   createConversation,
-  deleteMessage,
-  findRunningTool,
   getActiveWorkspacePath,
   getConversation,
   getConversationMeta,
@@ -34,12 +32,19 @@ import type {
   WorkConversationDetail,
   WorkEvent,
   WorkPendingControl,
-  WorkRole,
   WorkSessionDiffItem,
+  WorkTimelineItem,
   WorkTokenUsage,
 } from "../../shared/work-types";
 
 const logger = scoped("work:runner");
+
+type PartKind = "text" | "reasoning";
+
+interface ThinkParseState {
+  inThink: boolean;
+  pending: string;
+}
 
 interface PendingQuestionState {
   requestId: string;
@@ -56,13 +61,17 @@ interface ActiveRun {
   assistantId: string | null;
   userMapped: boolean;
   latestOcAssistantId: string | null;
-  hasToolsSinceAssistant: boolean;
   content: string;
+  lastTextOutput: string;
+  timeline: WorkTimelineItem[];
   reasoning: Array<Record<string, unknown>>;
   plan: Record<string, unknown> | null;
   usage: WorkTokenUsage | null;
   userMessageIds: Set<string>;
   assistantMessageIds: Set<string>;
+  partTypes: Map<string, PartKind>;
+  pendingPartDeltas: Map<string, string>;
+  partThinkStates: Map<string, ThinkParseState>;
   partTexts: Map<string, string>;
   partReasons: Map<string, string>;
   segmentTextPartIds: Set<string>;
@@ -99,6 +108,7 @@ export function getActiveRunSnapshots(): WorkActiveRunSnapshot[] {
       status: run.pendingControls.length ? "waiting" : "streaming",
       content: run.content,
       reasoning: run.reasoning,
+      timeline: [...run.timeline],
       plan: run.plan,
       pending_control: run.pendingControls[0] ?? null,
       pending_controls: [...run.pendingControls],
@@ -120,6 +130,17 @@ async function ensureReady(): Promise<void> {
   await startRuntime();
 }
 
+function buildPersistedPayload(run: ActiveRun, existing?: Record<string, unknown> | null): Record<string, unknown> {
+  return {
+    ...(existing ?? {}),
+    reasoning: run.reasoning,
+    timeline: run.timeline,
+    plan: run.plan,
+    ...(run.latestOcAssistantId ? { opencode_message_id: run.latestOcAssistantId } : {}),
+    ...(run.usage ? { usage: run.usage } : {}),
+  };
+}
+
 function flush(run: ActiveRun, force = false): void {
   if (!run.assistantId) return;
   const now = Date.now();
@@ -128,24 +149,12 @@ function flush(run: ActiveRun, force = false): void {
   const existing = getMessageRow(run.assistantId)?.tool_payload ?? {};
   updateMessage(run.assistantId, {
     content: run.content,
-    tool_payload: {
-      ...existing,
-      reasoning: run.reasoning,
-      plan: run.plan,
-      ...(run.usage ? { usage: run.usage } : {}),
-    },
+    tool_payload: buildPersistedPayload(run, existing),
   });
 }
 
-function ensureSegmentForOutput(conversationId: string, run: ActiveRun): string {
-  if (run.assistantId && !run.hasToolsSinceAssistant) {
-    return run.assistantId;
-  }
-  if (run.assistantId && run.hasToolsSinceAssistant) {
-    flush(run, true);
-    updateMessage(run.assistantId, { status: "completed" });
-    emit(conversationId, { event: "segment.completed", data: { message_id: run.assistantId } });
-  }
+function ensureAssistantRow(conversationId: string, run: ActiveRun): string {
+  if (run.assistantId) return run.assistantId;
   const msg = addMessage({
     conversation_id: conversationId,
     role: "assistant",
@@ -155,33 +164,60 @@ function ensureSegmentForOutput(conversationId: string, run: ActiveRun): string 
     tool_payload: run.latestOcAssistantId ? { opencode_message_id: run.latestOcAssistantId } : null,
   });
   run.assistantId = msg.id;
-  run.hasToolsSinceAssistant = false;
-  run.content = "";
-  run.reasoning = [];
-  run.segmentTextPartIds.clear();
   emit(conversationId, {
     event: "message.created",
-    data: { assistant_message_id: msg.id, is_continuation: true },
+    data: { assistant_message_id: msg.id },
   });
   return msg.id;
 }
 
-function closeSegmentBeforeTool(conversationId: string, run: ActiveRun): void {
-  if (!run.assistantId) return;
-  if (!run.content.trim() && run.reasoning.length === 0) {
-    const emptyId = run.assistantId;
-    deleteMessage(emptyId);
-    run.assistantId = null;
-    run.hasToolsSinceAssistant = false;
-    emit(conversationId, { event: "message.removed", data: { message_id: emptyId } });
-    return;
+function completeOpenThinkingItems(run: ActiveRun): void {
+  for (const item of run.timeline) {
+    if (item.kind === "thinking" && item.status === "running") {
+      item.status = "completed";
+    }
   }
-  if (!run.hasToolsSinceAssistant) {
-    flush(run, true);
-    updateMessage(run.assistantId, { status: "completed" });
-    emit(conversationId, { event: "segment.completed", data: { message_id: run.assistantId } });
-    run.hasToolsSinceAssistant = true;
+}
+
+function upsertTimelineItem(conversationId: string, run: ActiveRun, item: WorkTimelineItem): void {
+  const targetId = ensureAssistantRow(conversationId, run);
+  const idx = run.timeline.findIndex((entry) => entry.id === item.id);
+  if (idx >= 0) {
+    run.timeline[idx] = item;
+  } else {
+    run.timeline.push(item);
   }
+  flush(run, true);
+  emit(conversationId, {
+    event: "timeline.item",
+    data: { item, message_id: targetId },
+  });
+}
+
+function promotePreToolContent(conversationId: string, run: ActiveRun): void {
+  completeOpenThinkingItems(run);
+  const trimmed = run.content.trim();
+  if (!trimmed) return;
+  const targetId = ensureAssistantRow(conversationId, run);
+  const commentaryItem: WorkTimelineItem = {
+    id: `comment:${crypto.randomUUID()}`,
+    kind: "commentary",
+    text: trimmed,
+    status: "completed",
+  };
+  run.timeline.push(commentaryItem);
+  run.lastTextOutput = run.content;
+  run.content = "";
+  run.segmentTextPartIds.clear();
+  flush(run, true);
+  emit(conversationId, {
+    event: "timeline.item",
+    data: { item: commentaryItem, message_id: targetId },
+  });
+  emit(conversationId, {
+    event: "content.reset",
+    data: { message_id: targetId },
+  });
 }
 
 function buildSystemInstructions(
@@ -397,13 +433,17 @@ async function startRunWithPump(
     assistantId: assistant.id,
     userMapped: false,
     latestOcAssistantId: null,
-    hasToolsSinceAssistant: false,
     content: "",
+    lastTextOutput: "",
+    timeline: [],
     reasoning: [],
     plan: null,
     usage: null,
     userMessageIds: new Set(),
     assistantMessageIds: new Set(),
+    partTypes: new Map(),
+    pendingPartDeltas: new Map(),
+    partThinkStates: new Map(),
     partTexts: new Map(),
     partReasons: new Map(),
     segmentTextPartIds: new Set(),
@@ -579,21 +619,41 @@ export async function runShellCommand(
   );
 }
 
+function finalizeRunStreams(conversationId: string, run: ActiveRun): void {
+  if (run.pendingPartDeltas.size) {
+    for (const [partId, pending] of run.pendingPartDeltas.entries()) {
+      if (!pending) continue;
+      const kind = run.partTypes.get(partId) ?? "text";
+      if (kind === "reasoning") {
+        run.partReasons.set(partId, (run.partReasons.get(partId) ?? "") + pending);
+        appendReasoningDelta(conversationId, run, partId, pending);
+      } else {
+        run.partTexts.set(partId, (run.partTexts.get(partId) ?? "") + pending);
+        appendTextWithThinkFilter(conversationId, run, partId, pending);
+      }
+    }
+    run.pendingPartDeltas.clear();
+  }
+  for (const partId of run.partThinkStates.keys()) {
+    appendTextWithThinkFilter(conversationId, run, partId, "", true);
+  }
+  completeOpenThinkingItems(run);
+}
+
 function finalizeCompletedRun(conversationId: string, run: ActiveRun): void {
   if (run.finished || run.stopped) return;
+  finalizeRunStreams(conversationId, run);
   run.finished = true;
   run.pendingControls = [];
+  if (!run.content.trim() && run.lastTextOutput.trim()) {
+    run.content = run.lastTextOutput;
+  }
   if (run.assistantId) {
     const existing = getMessageRow(run.assistantId)?.tool_payload ?? {};
     updateMessage(run.assistantId, {
       status: "completed",
       content: run.content,
-      tool_payload: {
-        ...existing,
-        reasoning: run.reasoning,
-        plan: run.plan,
-        ...(run.usage ? { usage: run.usage } : {}),
-      },
+      tool_payload: buildPersistedPayload(run, existing),
     });
   }
   emit(conversationId, {
@@ -603,6 +663,7 @@ function finalizeCompletedRun(conversationId: string, run: ActiveRun): void {
       message_id: run.assistantId,
       plan: run.plan,
       reasoning: run.reasoning,
+      timeline: run.timeline,
       usage: run.usage,
     },
   });
@@ -804,9 +865,11 @@ async function pump(
     if (!run.stopped && !run.finished) {
       const message = err instanceof Error ? err.message : "OpenCode 事件流中断";
       logger.warn("opencode event stream failed", message);
+      finalizeRunStreams(conversationId, run);
       run.finished = true;
       const targetId = run.assistantId ?? addMessage({ conversation_id: conversationId, role: "assistant", content: message, status: "failed", run_id: run.runId }).id;
-      updateMessage(targetId, { status: "failed", content: run.content || message });
+      const existing = getMessageRow(targetId)?.tool_payload ?? {};
+      updateMessage(targetId, { status: "failed", content: run.content || message, tool_payload: buildPersistedPayload(run, existing) });
       emit(conversationId, { event: "run.failed", data: { error: message, output: run.content, message_id: targetId } });
     }
   } finally {
@@ -841,20 +904,92 @@ function extractErrorText(errorObj: unknown): string {
 
 function appendReasoningDelta(conversationId: string, run: ActiveRun, partId: string, delta: string): void {
   if (!delta) return;
-  const targetId = ensureSegmentForOutput(conversationId, run);
+  const targetId = ensureAssistantRow(conversationId, run);
   let block = run.reasoning.find((r) => r.step === partId);
   if (!block) {
     block = { step: partId, title: "", text: "", tools: [] };
     run.reasoning.push(block);
   }
   block.text = String(block.text ?? "") + delta;
+
+  const timelineId = `think:${partId}`;
+  let item = run.timeline.find((entry) => entry.id === timelineId);
+  if (!item) {
+    item = { id: timelineId, kind: "thinking", title: "深度思考", text: delta, status: "running" };
+    run.timeline.push(item);
+  } else {
+    item.text = `${item.text ?? ""}${delta}`;
+    item.status = "running";
+  }
+
   flush(run);
   emit(conversationId, { event: "reasoning.delta", data: { step: partId, delta, message_id: targetId } });
+  emit(conversationId, { event: "timeline.delta", data: { id: timelineId, kind: "thinking", title: "深度思考", delta, message_id: targetId } });
+}
+
+function appendTextWithThinkFilter(
+  conversationId: string,
+  run: ActiveRun,
+  partId: string,
+  delta: string,
+  flushEnd = false,
+): void {
+  let state = run.partThinkStates.get(partId);
+  if (!state) {
+    state = { inThink: false, pending: "" };
+    run.partThinkStates.set(partId, state);
+  }
+  if (delta) state.pending += delta;
+
+  while (state.pending.length > 0) {
+    if (!state.inThink) {
+      const openMatch = /<think(?:ing)?>/i.exec(state.pending);
+      if (openMatch && openMatch.index !== undefined) {
+        const before = state.pending.slice(0, openMatch.index);
+        if (before) appendTextDelta(conversationId, run, partId, before);
+        state.pending = state.pending.slice(openMatch.index + openMatch[0].length).replace(/^\r?\n/, "");
+        state.inThink = true;
+        continue;
+      }
+      if (!flushEnd) {
+        const partial = /<(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?)?$/i.exec(state.pending);
+        const cut = partial ? partial.index : state.pending.length;
+        const safe = state.pending.slice(0, cut);
+        if (safe) appendTextDelta(conversationId, run, partId, safe);
+        state.pending = state.pending.slice(cut);
+        break;
+      }
+      appendTextDelta(conversationId, run, partId, state.pending);
+      state.pending = "";
+      break;
+    }
+
+    const closeMatch = /<\/think(?:ing)?>/i.exec(state.pending);
+    if (closeMatch && closeMatch.index !== undefined) {
+      const inside = state.pending.slice(0, closeMatch.index);
+      if (inside) appendReasoningDelta(conversationId, run, `${partId}:inline`, inside);
+      state.pending = state.pending.slice(closeMatch.index + closeMatch[0].length).replace(/^\r?\n+/, "");
+      state.inThink = false;
+      continue;
+    }
+    if (!flushEnd) {
+      const partialClose = /<\/(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?)?$/i.exec(state.pending);
+      const cut = partialClose ? partialClose.index : state.pending.length;
+      const safe = state.pending.slice(0, cut);
+      if (safe) appendReasoningDelta(conversationId, run, `${partId}:inline`, safe);
+      state.pending = state.pending.slice(cut);
+      break;
+    }
+    appendReasoningDelta(conversationId, run, `${partId}:inline`, state.pending);
+    state.pending = "";
+    break;
+  }
 }
 
 function appendTextDelta(conversationId: string, run: ActiveRun, partId: string, delta: string): void {
   if (!delta) return;
-  const targetId = ensureSegmentForOutput(conversationId, run);
+  const targetId = ensureAssistantRow(conversationId, run);
+  completeOpenThinkingItems(run);
   let appended = delta;
   if (!run.segmentTextPartIds.has(partId)) {
     run.segmentTextPartIds.add(partId);
@@ -863,6 +998,9 @@ function appendTextDelta(conversationId: string, run: ActiveRun, partId: string,
     }
   }
   run.content += appended;
+  if (run.content.trim()) {
+    run.lastTextOutput = run.content;
+  }
   updateMessage(targetId, { content: run.content });
   emit(conversationId, { event: "message.delta", data: { text: appended, message_id: targetId } });
 }
@@ -921,12 +1059,14 @@ function handleOpenCodeEvent(
         }
         if (info.error) {
           const errMsg = extractErrorText(info.error);
+          finalizeRunStreams(conversationId, run);
           run.finished = true;
           const targetId =
             run.assistantId ??
             addMessage({ conversation_id: conversationId, role: "assistant", content: errMsg, status: "failed", run_id: run.runId }).id;
-          updateMessage(targetId, { status: "failed", content: run.content || errMsg });
-          emit(conversationId, { event: "run.failed", data: { error: errMsg, output: run.content, message_id: targetId } });
+          const existing = getMessageRow(targetId)?.tool_payload ?? {};
+          updateMessage(targetId, { status: "failed", content: run.content || errMsg, tool_payload: buildPersistedPayload(run, existing) });
+          emit(conversationId, { event: "run.failed", data: { error: errMsg, output: run.content, timeline: run.timeline, message_id: targetId } });
           run.controller.abort();
         }
       }
@@ -940,14 +1080,25 @@ function handleOpenCodeEvent(
       const field = String(props.field ?? "text");
       const delta = String(props.delta ?? "");
       if (!delta) return;
-      if (field === "text") {
-        const prev = run.partTexts.get(partId) ?? "";
-        run.partTexts.set(partId, prev + delta);
-        appendTextDelta(conversationId, run, partId, delta);
-      } else if (field === "reasoning") {
+      if (field === "reasoning") {
+        run.partTypes.set(partId, "reasoning");
         const prev = run.partReasons.get(partId) ?? "";
         run.partReasons.set(partId, prev + delta);
         appendReasoningDelta(conversationId, run, partId, delta);
+      } else if (field === "text") {
+        const knownType = run.partTypes.get(partId);
+        if (knownType === "reasoning") {
+          const prev = run.partReasons.get(partId) ?? "";
+          run.partReasons.set(partId, prev + delta);
+          appendReasoningDelta(conversationId, run, partId, delta);
+        } else if (knownType === "text") {
+          const prev = run.partTexts.get(partId) ?? "";
+          run.partTexts.set(partId, prev + delta);
+          appendTextWithThinkFilter(conversationId, run, partId, delta);
+        } else {
+          const prevPending = run.pendingPartDeltas.get(partId) ?? "";
+          run.pendingPartDeltas.set(partId, prevPending + delta);
+        }
       }
       return;
     }
@@ -961,16 +1112,30 @@ function handleOpenCodeEvent(
       const partId = String(part.id ?? "");
       const partType = String(part.type ?? "");
       if (partType === "text" && !part.synthetic && !part.ignored) {
+        run.partTypes.set(partId, "text");
+        const buffered = run.pendingPartDeltas.get(partId) ?? "";
+        if (buffered) {
+          run.pendingPartDeltas.delete(partId);
+          run.partTexts.set(partId, (run.partTexts.get(partId) ?? "") + buffered);
+          appendTextWithThinkFilter(conversationId, run, partId, buffered);
+        }
         const full = String(part.text ?? "");
         const prev = run.partTexts.get(partId) ?? "";
         if (full.length > prev.length && full.startsWith(prev)) {
           const diff = full.slice(prev.length);
           run.partTexts.set(partId, full);
-          appendTextDelta(conversationId, run, partId, diff);
+          appendTextWithThinkFilter(conversationId, run, partId, diff);
         }
         return;
       }
       if (partType === "reasoning") {
+        run.partTypes.set(partId, "reasoning");
+        const buffered = run.pendingPartDeltas.get(partId) ?? "";
+        if (buffered) {
+          run.pendingPartDeltas.delete(partId);
+          run.partReasons.set(partId, (run.partReasons.get(partId) ?? "") + buffered);
+          appendReasoningDelta(conversationId, run, partId, buffered);
+        }
         const full = String(part.text ?? "");
         const prev = run.partReasons.get(partId) ?? "";
         if (full.length > prev.length && full.startsWith(prev)) {
@@ -980,38 +1145,40 @@ function handleOpenCodeEvent(
         }
         return;
       }
+      run.pendingPartDeltas.delete(partId);
       if (partType === "tool") {
         const toolName = String(part.tool ?? "tool");
         const callId = String(part.callID ?? partId);
         const stateObj = (part.state as Record<string, unknown> | undefined) ?? {};
         const status = String(stateObj.status ?? "pending");
         const prevStatus = run.toolStates.get(callId);
+        const targetId = ensureAssistantRow(conversationId, run);
         if (status === "running" && prevStatus !== "running") {
-          closeSegmentBeforeTool(conversationId, run);
+          promotePreToolContent(conversationId, run);
           run.toolStates.set(callId, "running");
-          const msg = addMessage({
-            conversation_id: conversationId,
-            role: "tool" as WorkRole,
-            tool_name: toolName,
+          const item: WorkTimelineItem = {
+            id: callId,
+            kind: "tool",
+            tool: toolName,
+            call_id: callId,
+            title: stateObj.title ? String(stateObj.title) : null,
+            args: stateObj.input ?? null,
             status: "running",
-            tool_payload: {
-              args: stateObj.input ?? null,
-              title: stateObj.title ?? null,
-              tool_call_id: callId,
-              status: "running",
-            },
-            run_id: run.runId,
-          });
+          };
+          upsertTimelineItem(conversationId, run, item);
           emit(conversationId, {
             event: "tool.started",
-            data: { tool: toolName, preview: stateObj.input ?? null, tool_call_id: callId, message_id: msg.id },
+            data: { tool: toolName, preview: stateObj.input ?? null, tool_call_id: callId, message_id: targetId },
           });
           return;
         }
         if ((status === "completed" || status === "error") && prevStatus !== status) {
-          closeSegmentBeforeTool(conversationId, run);
+          if (!prevStatus) {
+            promotePreToolContent(conversationId, run);
+          } else {
+            completeOpenThinkingItems(run);
+          }
           run.toolStates.set(callId, status);
-          let row = findRunningTool(conversationId, toolName, callId);
           const timeObj = stateObj.time as Record<string, number> | undefined;
           const duration =
             timeObj && typeof timeObj.end === "number" && typeof timeObj.start === "number"
@@ -1019,36 +1186,20 @@ function handleOpenCodeEvent(
               : null;
           const errorText = status === "error" ? String(stateObj.error ?? "工具执行失败") : null;
           const resultPreview = stateObj.output ?? stateObj.error ?? stateObj.title ?? null;
-
-          if (!row) {
-            row = addMessage({
-              conversation_id: conversationId,
-              role: "tool" as WorkRole,
-              tool_name: toolName,
-              status: errorText ? "failed" : "completed",
-              tool_payload: {
-                args: stateObj.input ?? null,
-                result: resultPreview,
-                duration,
-                error: errorText,
-                tool_call_id: callId,
-                status: errorText ? "failed" : "completed",
-              },
-              run_id: run.runId,
-            });
-          } else {
-            updateMessage(row.id, {
-              status: errorText ? "failed" : "completed",
-              tool_payload: {
-                ...(row.tool_payload ?? {}),
-                args: stateObj.input ?? row.tool_payload?.args ?? null,
-                result: resultPreview,
-                duration,
-                error: errorText,
-                status: errorText ? "failed" : "completed",
-              },
-            });
-          }
+          const prevItem = run.timeline.find((entry) => entry.id === callId);
+          const item: WorkTimelineItem = {
+            id: callId,
+            kind: "tool",
+            tool: toolName,
+            call_id: callId,
+            title: stateObj.title ? String(stateObj.title) : (prevItem?.title ?? null),
+            args: stateObj.input ?? prevItem?.args ?? null,
+            result: resultPreview,
+            duration,
+            error: errorText,
+            status: errorText ? "failed" : "completed",
+          };
+          upsertTimelineItem(conversationId, run, item);
           emit(conversationId, {
             event: "tool.completed",
             data: {
@@ -1057,7 +1208,7 @@ function handleOpenCodeEvent(
               preview: resultPreview,
               duration,
               error: errorText,
-              message_id: row.id,
+              message_id: targetId,
             },
           });
         }
@@ -1099,13 +1250,15 @@ function handleOpenCodeEvent(
 
     case "session.error": {
       const errMsg = extractErrorText(props.error);
+      finalizeRunStreams(conversationId, run);
       run.finished = true;
       run.pendingControls = [];
       const targetId =
         run.assistantId ??
         addMessage({ conversation_id: conversationId, role: "assistant", content: errMsg, status: "failed", run_id: run.runId }).id;
-      updateMessage(targetId, { status: "failed", content: run.content || errMsg });
-      emit(conversationId, { event: "run.failed", data: { error: errMsg, output: run.content, message_id: targetId } });
+      const existing = getMessageRow(targetId)?.tool_payload ?? {};
+      updateMessage(targetId, { status: "failed", content: run.content || errMsg, tool_payload: buildPersistedPayload(run, existing) });
+      emit(conversationId, { event: "run.failed", data: { error: errMsg, output: run.content, timeline: run.timeline, message_id: targetId } });
       run.controller.abort();
       return;
     }
@@ -1137,6 +1290,16 @@ export async function steerRun(conversationId: string, content: string): Promise
 export async function stopRun(conversationId: string): Promise<void> {
   const run = active.get(conversationId);
   if (!run) return;
+  finalizeRunStreams(conversationId, run);
+  for (const item of run.timeline) {
+    if (item.kind === "tool" && item.status === "running") {
+      item.status = "failed";
+      item.error = item.error ?? "已手动停止";
+    }
+  }
+  if (!run.content.trim() && run.lastTextOutput.trim()) {
+    run.content = run.lastTextOutput;
+  }
   run.stopped = true;
   run.finished = true;
   run.pendingControls = [];
@@ -1147,11 +1310,16 @@ export async function stopRun(conversationId: string): Promise<void> {
     logger.warn("abort opencode session failed", err instanceof Error ? err.message : String(err));
   }
   if (run.assistantId) {
-    updateMessage(run.assistantId, { status: "cancelled", content: run.content });
+    const existing = getMessageRow(run.assistantId)?.tool_payload ?? {};
+    updateMessage(run.assistantId, {
+      status: "cancelled",
+      content: run.content,
+      tool_payload: buildPersistedPayload(run, existing),
+    });
   }
   emit(conversationId, {
     event: "run.cancelled",
-    data: { output: run.assistantId ? run.content : undefined, message_id: run.assistantId },
+    data: { output: run.assistantId ? run.content : undefined, message_id: run.assistantId, timeline: run.timeline },
   });
   active.delete(conversationId);
 }

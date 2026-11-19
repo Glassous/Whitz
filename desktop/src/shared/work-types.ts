@@ -102,6 +102,22 @@ export interface WorkPendingControl {
   choices?: string[] | null;
 }
 
+export type WorkTimelineKind = "thinking" | "commentary" | "tool";
+
+export interface WorkTimelineItem {
+  id: string;
+  kind: WorkTimelineKind;
+  title?: string | null;
+  text?: string;
+  tool?: string | null;
+  call_id?: string | null;
+  args?: unknown;
+  result?: unknown;
+  error?: string | null;
+  duration?: number | null;
+  status?: "running" | "completed" | "failed";
+}
+
 export interface WorkActiveRunSnapshot {
   conversation_id: string;
   run_id: string;
@@ -109,6 +125,7 @@ export interface WorkActiveRunSnapshot {
   status: "streaming" | "waiting";
   content: string;
   reasoning: Array<Record<string, unknown>>;
+  timeline?: WorkTimelineItem[];
   plan: Record<string, unknown> | null;
   pending_control: WorkPendingControl | null;
   pending_controls?: WorkPendingControl[];

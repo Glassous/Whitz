@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import type { WorkMessage, WorkTokenUsage } from "@shared/work-types";
+import { useWorkStore } from "../../stores/work";
 import MarkdownRenderer from "@web/components/chat/MarkdownRenderer.vue";
 
+const NEAR_BOTTOM_PX = 120;
+
 const props = defineProps<{
+  conversationId: string | null;
   messages: WorkMessage[];
   activeAssistantId: string | null;
+  selectedTurnId: string | null;
   streaming: boolean;
   revertedCount?: number;
   projectName?: string | null;
@@ -16,16 +21,16 @@ const emit = defineEmits<{
   revert: [string];
   unrevert: [];
   fork: [string];
+  steps: [string];
 }>();
 
+const work = useWorkStore();
 const scroller = ref<HTMLElement | null>(null);
 const copiedId = ref<string | null>(null);
-const blocks = computed(() => props.messages);
+const autoFollow = ref(true);
+let programmaticUntil = 0;
 
-function reasoningOf(message: WorkMessage): Array<Record<string, unknown>> {
-  const value = message.tool_payload?.reasoning;
-  return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : [];
-}
+const visibleMessages = computed(() => props.messages.filter((m) => m.role !== "tool"));
 
 function attachmentsOf(message: WorkMessage): Array<{ name: string; kind: string }> {
   const value = message.tool_payload?.attachments;
@@ -44,72 +49,16 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-function toolDisplayLabel(name: string | null): string {
-  const map: Record<string, string> = {
-    read: "读取文件",
-    read_file: "读取文件",
-    write: "写入文件",
-    write_file: "写入文件",
-    edit: "编辑文件",
-    multiedit: "批量编辑",
-    apply_patch: "应用补丁",
-    patch: "修改补丁",
-    glob: "文件匹配",
-    grep: "全文搜索",
-    list: "目录浏览",
-    search_files: "搜索工作区",
-    bash: "终端命令",
-    terminal: "终端命令",
-    execute_code: "代码执行",
-    webfetch: "抓取网页",
-    websearch: "网页检索",
-    web_search: "网页检索",
-    web_extract: "网页提取",
-    todowrite: "任务计划",
-    todo_list: "任务计划",
-    task: "子任务委派",
-    skill: "读取技能",
-  };
-  return (name && map[name]) || name || "工具调用";
+function isLiveMessage(message: WorkMessage): boolean {
+  return message.status === "streaming" || message.status === "waiting";
 }
 
-function extractFilePath(message: WorkMessage): string | null {
-  const tool = message.tool_name ?? "";
-  if (!["read", "write", "edit", "read_file", "write_file", "patch"].includes(tool)) return null;
-  const rawArgs = message.tool_payload?.args;
-  if (!rawArgs) return null;
-  if (typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
-    const obj = rawArgs as Record<string, unknown>;
-    const p = obj.filePath ?? obj.path ?? obj.file_path ?? obj.target_file;
-    if (typeof p === "string" && p.trim()) return p.trim();
-  }
-  const raw = typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs);
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const p = parsed.filePath ?? parsed.path ?? parsed.file_path ?? parsed.target_file;
-    if (typeof p === "string" && p.trim()) return p.trim();
-  } catch {
-    const match = /["']?([a-zA-Z0-9_.\-\\/]+\.[a-zA-Z0-9]+)["']?/.exec(raw);
-    if (match) return match[1];
-  }
-  return null;
+function stepCountOf(message: WorkMessage): number {
+  return work.getTurnTimeline(message, props.messages).length;
 }
 
-function formatPayloadValue(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function toolSummary(message: WorkMessage): string {
-  const args = message.tool_payload?.args;
-  if (!args) return "";
-  const text = typeof args === "string" ? args : JSON.stringify(args);
-  return text.replace(/\s+/g, " ").slice(0, 90);
+function liveLabelOf(message: WorkMessage): string {
+  return work.getTurnLiveLabel(message);
 }
 
 async function copyText(id: string, content: string) {
@@ -125,26 +74,78 @@ async function copyText(id: string, content: string) {
   }
 }
 
-function scrollToBottom(smooth = false) {
+function isNearBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
+}
+
+function onScrollerScroll() {
+  const el = scroller.value;
+  if (!el) return;
+  if (performance.now() < programmaticUntil) return;
+  autoFollow.value = isNearBottom(el);
+}
+
+function onScrollerWheel(e: WheelEvent) {
+  if (e.deltaY < 0) {
+    autoFollow.value = false;
+  }
+}
+
+function scrollToBottom(force = false) {
+  if (force) autoFollow.value = true;
+  if (!autoFollow.value) return;
   void nextTick(() => {
-    const element = scroller.value;
-    if (!element) return;
-    element.scrollTo({ top: element.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    const el = scroller.value;
+    if (!el || (!force && !autoFollow.value)) return;
+    programmaticUntil = performance.now() + 45;
+    el.scrollTop = el.scrollHeight;
   });
 }
 
 watch(
-  () => [props.messages.length, props.messages.map((m) => m.content.length).join(","), props.streaming],
-  () => scrollToBottom(true),
+  () => props.conversationId,
+  () => {
+    autoFollow.value = true;
+    scrollToBottom(true);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => {
+    const lastVisible = visibleMessages.value[visibleMessages.value.length - 1];
+    const stepLen = lastVisible?.role === "assistant" ? stepCountOf(lastVisible) : 0;
+    return [
+      visibleMessages.value.length,
+      lastVisible?.id ?? "",
+      lastVisible?.content.length ?? 0,
+      lastVisible?.status ?? "",
+      stepLen,
+    ] as const;
+  },
+  ([len], prev) => {
+    const last = visibleMessages.value[len - 1];
+    if (prev && len > prev[0] && last?.role === "user") {
+      scrollToBottom(true);
+      return;
+    }
+    scrollToBottom(false);
+  },
+  { flush: "post" },
 );
 
 defineExpose({ scrollToBottom });
 </script>
 
 <template>
-  <div ref="scroller" class="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-4 pb-44 pt-3 sm:px-6">
+  <div
+    ref="scroller"
+    class="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-4 pb-44 pt-3 sm:px-6"
+    @scroll.passive="onScrollerScroll"
+    @wheel.passive="onScrollerWheel"
+  >
     <!-- Empty State Matching Web Chat Centerpiece -->
-    <div v-if="!blocks.length" class="flex min-h-full flex-col items-center justify-center py-20 text-center">
+    <div v-if="!visibleMessages.length" class="flex min-h-full flex-col items-center justify-center py-20 text-center">
       <div class="w-full max-w-2xl">
         <h2 class="text-[30px] font-semibold tracking-tight text-fg sm:text-[36px]">
           {{ projectName ? `在 ${projectName} 中协作` : "OpenCode 工作台" }}
@@ -159,7 +160,7 @@ defineExpose({ scrollToBottom });
 
     <template v-else>
       <article
-        v-for="message in blocks"
+        v-for="message in visibleMessages"
         :key="message.id"
         class="mx-auto mb-5 max-w-4xl"
         :class="message.role === 'user' ? 'group/user flex flex-col items-end' : 'group/assistant'"
@@ -204,82 +205,36 @@ defineExpose({ scrollToBottom });
           </div>
         </template>
 
-        <!-- Tool Call Pill (Borderless tonal card) -->
-        <template v-else-if="message.role === 'tool'">
-          <details
-            class="disclosure-card rounded-2xl bg-surface/60 text-[12.5px]"
-            :open="message.status === 'running' || message.status === 'failed'"
-          >
-            <summary class="flex cursor-pointer list-none items-center gap-2.5 px-3.5 py-2 select-none">
+        <!-- Assistant Final Result (Main Area: Steps Pill + Final Output Only) -->
+        <template v-else>
+          <div class="min-w-0 space-y-2.5">
+            <button
+              v-if="stepCountOf(message) > 0 || isLiveMessage(message)"
+              type="button"
+              class="focus-ring inline-flex max-w-full items-center gap-2 rounded-full bg-surface px-3 py-1 text-[12px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+              :class="{ 'ring-1 ring-white/12 text-fg': selectedTurnId === message.id }"
+              @click="emit('steps', message.id)"
+            >
               <span
                 class="h-1.5 w-1.5 shrink-0 rounded-full"
-                :class="{ 'animate-pulse': message.status === 'running' }"
-                :style="{
-                  background:
-                    message.status === 'running'
-                      ? 'var(--warning)'
-                      : message.status === 'failed'
-                        ? 'var(--danger)'
-                        : 'var(--success)',
-                }"
+                :class="{ 'animate-pulse': isLiveMessage(message) }"
+                :style="{ background: isLiveMessage(message) ? 'var(--work-accent)' : 'var(--success)' }"
               />
-              <span class="shrink-0 font-medium text-fg">{{ toolDisplayLabel(message.tool_name) }}</span>
-              <span class="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-faint">
-                {{ extractFilePath(message) || toolSummary(message) }}
+              <span class="truncate">{{ liveLabelOf(message) }}</span>
+              <span v-if="stepCountOf(message) > 0" class="shrink-0 tabular-nums text-fg-faint">
+                · {{ stepCountOf(message) }}
               </span>
-              <button
-                v-if="extractFilePath(message)"
-                type="button"
-                class="shrink-0 rounded-lg bg-canvas/85 px-2 py-0.5 text-[11px] text-fg-muted transition-colors hover:text-fg"
-                @click.stop.prevent="emit('openFile', extractFilePath(message)!)"
-              >
-                预览
-              </button>
-              <span v-if="message.tool_payload?.duration" class="shrink-0 text-[11px] tabular-nums text-fg-faint">
-                {{ Number(message.tool_payload.duration).toFixed(1) }}s
-              </span>
-            </summary>
-
-            <div class="space-y-2 px-3.5 pb-3 pt-1">
-              <pre
-                v-if="message.tool_payload?.args"
-                class="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-code px-3 py-2 font-mono text-[11.5px] leading-relaxed text-[#c6c5be]"
-              >{{ formatPayloadValue(message.tool_payload.args) }}</pre>
-              <pre
-                v-if="message.tool_payload?.result || message.tool_payload?.error"
-                class="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-code px-3 py-2 font-mono text-[11.5px] leading-relaxed"
-                :class="message.status === 'failed' ? 'text-[#f3a6a0]' : 'text-[#d6d5ce]'"
-              >{{ formatPayloadValue(message.tool_payload?.error ?? message.tool_payload?.result ?? "") }}</pre>
-            </div>
-          </details>
-        </template>
-
-        <!-- Assistant Prose (Clean full-width layout aligned with MessageBubble.vue) -->
-        <template v-else>
-          <div class="min-w-0 space-y-2">
-            <details v-if="reasoningOf(message).length" class="disclosure-card inline-block max-w-full rounded-2xl bg-surface/60">
-              <summary class="flex cursor-pointer list-none items-center gap-2 px-3.5 py-1.5 text-[12.5px] text-fg-muted select-none">
-                <span class="h-1.5 w-1.5 rounded-full" style="background: var(--work-accent)" />
-                <span>思考过程 · {{ reasoningOf(message).length }} 段</span>
-              </summary>
-              <div class="space-y-2 px-3.5 pb-3 pt-1">
-                <div v-for="(block, index) in reasoningOf(message)" :key="index" class="text-[12.5px] leading-relaxed text-fg-muted">
-                  <p v-if="block.title" class="mb-1 text-[11px] font-medium text-fg-faint">{{ block.title }}</p>
-                  <p v-if="block.text" class="whitespace-pre-wrap">{{ block.text }}</p>
-                  <p v-if="block.content" class="mt-1 whitespace-pre-wrap">{{ block.content }}</p>
-                </div>
-              </div>
-            </details>
+              <svg class="h-3.5 w-3.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="m9 6 6 6-6 6" />
+              </svg>
+            </button>
 
             <div v-if="message.content" class="markdown-body">
               <MarkdownRenderer :content="message.content" />
             </div>
-            <p v-else-if="message.status === 'streaming'" class="flex items-center gap-2 text-[13.5px] text-fg-faint">
-              <span class="inline-block h-1.5 w-1.5 animate-pulse rounded-full" style="background: var(--work-accent)" />
-              正在思考与调度工具…
-            </p>
-            <p v-if="message.status === 'waiting'" class="text-[12.5px] text-warning">等待你的确认后继续</p>
-            <p v-if="message.status === 'failed'" class="text-[12.5px] text-danger">本轮执行失败</p>
+            <p v-else-if="message.status === 'waiting'" class="text-[12.5px] text-warning">等待你的确认后继续</p>
+            <p v-else-if="message.status === 'failed'" class="text-[12.5px] text-danger">本轮执行失败</p>
+            <p v-else-if="message.status === 'cancelled'" class="text-[12.5px] text-fg-faint">任务已停止</p>
 
             <!-- Hover Action Bar & Telemetry -->
             <div

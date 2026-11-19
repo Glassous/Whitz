@@ -15,6 +15,7 @@ import type {
   WorkSessionDiffItem,
   WorkSessionPrefsPatch,
   WorkSkillItem,
+  WorkTimelineItem,
   WorkTokenUsage,
   WorkWorkspace,
   WorkspaceEntry,
@@ -71,7 +72,7 @@ export interface WorkProjectGroup {
   waitingCount: number;
 }
 
-export type WorkInspectorTab = "files" | "git" | "plan" | "runtime";
+export type WorkInspectorTab = "steps" | "files" | "git" | "runtime";
 
 function emptyRunState(): WorkRunState {
   return {
@@ -120,7 +121,8 @@ export const useWorkStore = defineStore("work", () => {
   const inspectorOpen = ref(
     typeof window !== "undefined" ? window.localStorage.getItem("whitz_work_inspector_open") !== "0" : true,
   );
-  const inspectorTab = ref<WorkInspectorTab>("files");
+  const inspectorTab = ref<WorkInspectorTab>("steps");
+  const selectedTurnId = ref<string | null>(null);
 
   let started = false;
 
@@ -279,6 +281,20 @@ export const useWorkStore = defineStore("work", () => {
       run.pendingControls = [toPendingControl(snap.pending_control)];
     } else {
       run.pendingControls = [];
+    }
+    const detail = getDetailTarget(snap.conversation_id);
+    const assistant = detail && snap.assistant_id
+      ? detail.messages.find((m) => m.id === snap.assistant_id)
+      : undefined;
+    if (assistant) {
+      if (typeof snap.content === "string") assistant.content = snap.content;
+      assistant.status = snap.status === "waiting" ? "waiting" : "streaming";
+      assistant.tool_payload = {
+        ...(assistant.tool_payload ?? {}),
+        ...(Array.isArray(snap.timeline) ? { timeline: [...snap.timeline] } : {}),
+        ...(Array.isArray(snap.reasoning) ? { reasoning: snap.reasoning } : {}),
+        plan: run.plan,
+      };
     }
   }
 
@@ -481,6 +497,7 @@ export const useWorkStore = defineStore("work", () => {
   async function select(id: string) {
     const nextUnread = new Set(unreadCompletedIds.value);
     if (nextUnread.delete(id)) unreadCompletedIds.value = nextUnread;
+    selectedTurnId.value = null;
 
     const cached = detailCache.value[id];
     if (cached) {
@@ -589,6 +606,116 @@ export const useWorkStore = defineStore("work", () => {
     message.tool_payload = { ...(message.tool_payload ?? {}), reasoning: blocks, plan: run.plan };
   }
 
+  function ensureMessageTimeline(message: WorkMessage): WorkTimelineItem[] {
+    const raw = message.tool_payload?.timeline;
+    if (Array.isArray(raw)) {
+      return raw.map((item) => ({ ...(item as WorkTimelineItem) }));
+    }
+    return [];
+  }
+
+  function saveMessageTimeline(message: WorkMessage, items: WorkTimelineItem[], planVal?: Record<string, unknown> | null) {
+    message.tool_payload = {
+      ...(message.tool_payload ?? {}),
+      timeline: items,
+      ...(planVal !== undefined ? { plan: planVal } : {}),
+    };
+  }
+
+  function getTurnTimeline(assistantMessage: WorkMessage, allMessages?: WorkMessage[]): WorkTimelineItem[] {
+    const explicit = assistantMessage.tool_payload?.timeline;
+    if (Array.isArray(explicit) && explicit.length > 0) {
+      return explicit as WorkTimelineItem[];
+    }
+    const items: WorkTimelineItem[] = [];
+    const blocks = assistantMessage.tool_payload?.reasoning;
+    if (Array.isArray(blocks)) {
+      blocks.forEach((b, i) => {
+        const rec = b as Record<string, unknown>;
+        const text = String(rec.text ?? "").trim();
+        if (text) {
+          items.push({
+            id: `legacy-think:${assistantMessage.id}:${i}`,
+            kind: "thinking",
+            title: String(rec.title ?? "") || "深度思考",
+            text,
+            status: assistantMessage.status === "streaming" ? "running" : "completed",
+          });
+        }
+        const commentary = String(rec.content ?? "").trim();
+        if (commentary) {
+          items.push({
+            id: `legacy-comment:${assistantMessage.id}:${i}`,
+            kind: "commentary",
+            text: commentary,
+            status: "completed",
+          });
+        }
+      });
+    }
+    const list = allMessages ?? messages.value;
+    if (assistantMessage.run_id) {
+      for (const m of list) {
+        if (m.role !== "tool") continue;
+        if (m.run_id !== assistantMessage.run_id) continue;
+        const p = (m.tool_payload ?? {}) as Record<string, unknown>;
+        items.push({
+          id: m.id,
+          kind: "tool",
+          tool: m.tool_name,
+          call_id: (p.tool_call_id as string | null) ?? m.id,
+          title: (p.title as string | null) ?? null,
+          args: p.args ?? null,
+          result: p.result ?? null,
+          error: (p.error as string | null) ?? null,
+          duration: typeof p.duration === "number" ? p.duration : null,
+          status: m.status === "failed" ? "failed" : m.status === "running" ? "running" : "completed",
+        });
+      }
+    }
+    return items;
+  }
+
+  function getTurnLiveLabel(assistantMessage: WorkMessage): string {
+    if (assistantMessage.status === "waiting") return "等待确认...";
+    if (assistantMessage.status !== "streaming") return "步骤查看";
+    const items = getTurnTimeline(assistantMessage);
+    const last = items[items.length - 1];
+    if (last?.kind === "tool" && last.status === "running") {
+      const names: Record<string, string> = {
+        bash: "终端命令",
+        terminal: "终端命令",
+        execute_code: "执行命令",
+        read: "读取文件",
+        read_file: "读取文件",
+        write: "写入文件",
+        write_file: "写入文件",
+        edit: "编辑文件",
+        patch: "编辑文件",
+        multiedit: "批量编辑",
+        apply_patch: "应用补丁",
+        glob: "查找文件",
+        grep: "全文搜索",
+        list: "目录列表",
+        webfetch: "网页抓取",
+        websearch: "网页搜索",
+        todowrite: "更新计划",
+        question: "等待确认",
+        task: "子任务",
+      };
+      const toolLabel = names[String(last.tool ?? "")] ?? String(last.tool ?? "工具");
+      return `正在执行 · ${toolLabel}`;
+    }
+    if (last?.kind === "thinking" && last.status === "running") return "正在深度思考...";
+    return "正在生成...";
+  }
+
+  function selectTurn(messageId: string) {
+    selectedTurnId.value = messageId;
+    inspectorTab.value = "steps";
+    setInspectorOpen(true);
+  }
+
   function prepareOptimisticMessages(
     conversationId: string,
     userText: string,
@@ -618,7 +745,7 @@ export const useWorkStore = defineStore("work", () => {
       content: "",
       status: "streaming",
       tool_name: null,
-      tool_payload: { reasoning: [] },
+      tool_payload: { reasoning: [], timeline: [] },
       run_id: null,
       created_at: new Date().toISOString(),
     };
@@ -629,6 +756,9 @@ export const useWorkStore = defineStore("work", () => {
     run.activeAssistantId = assistantMessage.id;
     run.streaming = true;
     run.sending = true;
+    if (conversationId === activeConversationId.value) {
+      selectedTurnId.value = assistantMessage.id;
+    }
     return { run, assistantMessage };
   }
 
@@ -811,10 +941,14 @@ export const useWorkStore = defineStore("work", () => {
         if (detail) {
           const tempUser = [...detail.messages].reverse().find((m) => m.role === "user" && m.id.startsWith("temp-"));
           if (tempUser && typeof data.user_message_id === "string") tempUser.id = data.user_message_id;
-          const assistant = detail.messages.find((m) => m.id === run.activeAssistantId);
+          const prevAssistantId = run.activeAssistantId;
+          const assistant = detail.messages.find((m) => m.id === prevAssistantId);
           if (assistant && typeof data.assistant_message_id === "string") {
             assistant.id = data.assistant_message_id;
             run.activeAssistantId = data.assistant_message_id;
+            if (selectedTurnId.value === prevAssistantId) {
+              selectedTurnId.value = data.assistant_message_id;
+            }
           }
         } else if (typeof data.assistant_message_id === "string") {
           run.activeAssistantId = data.assistant_message_id;
@@ -845,7 +979,78 @@ export const useWorkStore = defineStore("work", () => {
         const text = String(data.text ?? "");
         const targetId = typeof data.message_id === "string" ? data.message_id : run.activeAssistantId;
         const assistant = targetId ? detail?.messages.find((m) => m.id === targetId) : undefined;
-        if (assistant) assistant.content += text;
+        if (assistant) {
+          const list = ensureMessageTimeline(assistant);
+          let updated = false;
+          for (const entry of list) {
+            if (entry.kind === "thinking" && entry.status === "running") {
+              entry.status = "completed";
+              updated = true;
+            }
+          }
+          if (updated) saveMessageTimeline(assistant, list, run.plan);
+          assistant.content += text;
+        }
+        return;
+      }
+      case "content.reset": {
+        const targetId = typeof data.message_id === "string" ? data.message_id : run.activeAssistantId;
+        const assistant = targetId ? detail?.messages.find((m) => m.id === targetId) : undefined;
+        if (assistant) assistant.content = "";
+        return;
+      }
+      case "timeline.delta": {
+        const targetId = typeof data.message_id === "string" ? data.message_id : run.activeAssistantId;
+        if (targetId) run.activeAssistantId = targetId;
+        const assistant = targetId ? detail?.messages.find((m) => m.id === targetId) : undefined;
+        if (!assistant) return;
+        const list = ensureMessageTimeline(assistant);
+        const itemId = String(data.id ?? "think");
+        const delta = String(data.delta ?? "");
+        let item = list.find((entry) => entry.id === itemId);
+        if (!item) {
+          item = {
+            id: itemId,
+            kind: (data.kind as WorkTimelineItem["kind"]) || "thinking",
+            title: typeof data.title === "string" ? data.title : "深度思考",
+            text: delta,
+            status: "running",
+          };
+          list.push(item);
+        } else {
+          item.text = `${item.text ?? ""}${delta}`;
+          item.status = "running";
+        }
+        saveMessageTimeline(assistant, list, run.plan);
+        return;
+      }
+      case "timeline.item": {
+        const targetId = typeof data.message_id === "string" ? data.message_id : run.activeAssistantId;
+        if (targetId) run.activeAssistantId = targetId;
+        const assistant = targetId ? detail?.messages.find((m) => m.id === targetId) : undefined;
+        const incoming = data.item as WorkTimelineItem | undefined;
+        if (!assistant || !incoming) return;
+        const list = ensureMessageTimeline(assistant);
+        for (const entry of list) {
+          if (entry.kind === "thinking" && entry.status === "running") {
+            entry.status = "completed";
+          }
+        }
+        const idx = list.findIndex((entry) => entry.id === incoming.id);
+        if (idx >= 0) list[idx] = { ...incoming };
+        else list.push({ ...incoming });
+        saveMessageTimeline(assistant, list, run.plan);
+        if (
+          conversationId === activeConversationId.value &&
+          incoming.kind === "tool" &&
+          incoming.status &&
+          incoming.status !== "running" &&
+          ["write", "edit", "multiedit", "apply_patch", "bash", "write_file", "patch", "terminal", "execute_code"].includes(
+            String(incoming.tool ?? ""),
+          )
+        ) {
+          void refreshWorkspace();
+        }
         return;
       }
       case "reasoning.delta":
@@ -878,36 +1083,9 @@ export const useWorkStore = defineStore("work", () => {
         return;
       }
       case "tool.started": {
-        if (!detail) return;
-        detail.messages.push({
-          id: String(data.message_id ?? uid()),
-          conversation_id: conversationId,
-          role: "tool",
-          content: "",
-          status: "running",
-          tool_name: String(data.tool ?? "tool"),
-          tool_payload: {
-            args: data.preview,
-            tool_call_id: data.tool_call_id ?? null,
-            status: "running",
-          },
-          run_id: null,
-          created_at: new Date().toISOString(),
-        });
         return;
       }
       case "tool.completed": {
-        const message = detail?.messages.find((m) => m.id === data.message_id);
-        if (message) {
-          message.status = data.error ? "failed" : "completed";
-          message.tool_payload = {
-            ...(message.tool_payload ?? {}),
-            result: data.preview,
-            error: data.error,
-            duration: data.duration,
-            status: message.status,
-          };
-        }
         if (
           conversationId === activeConversationId.value &&
           ["write", "edit", "multiedit", "apply_patch", "bash", "write_file", "patch", "terminal", "execute_code"].includes(
@@ -1095,6 +1273,7 @@ export const useWorkStore = defineStore("work", () => {
     detailCache.value = {};
     runsByConversation.value = {};
     unreadCompletedIds.value = new Set();
+    selectedTurnId.value = null;
   }
 
   return {
@@ -1132,10 +1311,14 @@ export const useWorkStore = defineStore("work", () => {
     commands,
     inspectorOpen,
     inspectorTab,
+    selectedTurnId,
     isConversationRunning,
     isConversationWaiting,
     hasUnreadDone,
     setInspectorOpen,
+    selectTurn,
+    getTurnTimeline,
+    getTurnLiveLabel,
     bindEvents,
     syncActiveRuns,
     loadWorkspaceState,
