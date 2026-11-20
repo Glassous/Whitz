@@ -1,5 +1,7 @@
 package com.glassous.whitz.feature.chat
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,26 +11,28 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -44,19 +48,18 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -91,8 +94,11 @@ import com.glassous.whitz.core.model.ReasoningBlock
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.ui.theme.LocalWhitzColors
+import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
+import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
+import com.glassous.whitz.ui.theme.WhitzTextField
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun MessageBubble(
     message: Message,
@@ -113,36 +119,47 @@ fun MessageBubble(
             var editing by remember(message.id) { mutableStateOf(false) }
             var draft by remember(message.id, message.content) { mutableStateOf(message.content) }
 
+            BackHandler(enabled = editing) {
+                editing = false
+                draft = message.content
+            }
+
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.End,
             ) {
                 if (editing) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth(0.92f)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(colors.surface)
-                            .border(1.dp, colors.lineStrong, RoundedCornerShape(14.dp))
-                            .padding(12.dp),
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(0.92f),
+                        shape = RoundedCornerShape(18.dp),
+                        color = colors.surface,
+                        border = BorderStroke(1.dp, colors.lineStrong),
                     ) {
-                        OutlinedTextField(
-                            value = draft,
-                            onValueChange = { draft = it },
-                            modifier = Modifier.fillMaxWidth(),
-                            maxLines = 8,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                            TextButton(onClick = { editing = false; draft = message.content }) { Text("取消") }
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Button(
-                                onClick = {
-                                    editing = false
-                                    onEditSubmit(message.id, draft)
-                                },
-                                enabled = draft.isNotBlank() && !streaming,
-                            ) { Text("保存并重发") }
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            WhitzTextField(
+                                value = draft,
+                                onValueChange = { draft = it },
+                                singleLine = false,
+                                maxLines = 8,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                                TextButton(onClick = { editing = false; draft = message.content }) {
+                                    Text("取消", color = colors.fgMuted)
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Button(
+                                    onClick = {
+                                        editing = false
+                                        onEditSubmit(message.id, draft)
+                                    },
+                                    shapes = ButtonDefaults.shapesFor(36.dp),
+                                    enabled = draft.isNotBlank() && !streaming,
+                                    modifier = Modifier.height(36.dp),
+                                    contentPadding = PaddingValues(horizontal = 14.dp),
+                                ) { Text("保存并重发", fontSize = 13.sp) }
+                            }
                         }
                     }
                 } else {
@@ -152,7 +169,7 @@ fun MessageBubble(
                     Column(
                         modifier = Modifier
                             .widthIn(max = 320.dp)
-                            .clip(RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp))
+                            .clip(RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
                             .background(MaterialTheme.colorScheme.primary)
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                     ) {
@@ -263,14 +280,14 @@ fun MessageBubble(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(colors.surface)
-                    .border(1.dp, colors.line, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(colors.surface.copy(alpha = 0.72f))
+                    .border(1.dp, colors.line, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (isRunning) {
-                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                    WhitzLoadingIndicator(size = 16.dp)
                 } else {
                     Icon(
                         imageVector = if (isFailed) Icons.Default.ErrorOutline else Icons.Default.Terminal,
@@ -302,7 +319,6 @@ fun MessageBubble(
         }
 
         else -> {
-            // Assistant message
             val hasReasoning = !message.toolPayload?.reasoning.isNullOrEmpty() || !message.toolPayload?.plan?.items.isNullOrEmpty()
             val artifacts = message.toolPayload?.artifacts.orEmpty()
 
@@ -310,23 +326,24 @@ fun MessageBubble(
                 if (hasReasoning || (isActiveTurn && streaming)) {
                     Row(
                         modifier = Modifier
-                            .padding(bottom = 6.dp)
-                            .clip(RoundedCornerShape(16.dp))
+                            .padding(bottom = 8.dp)
+                            .clip(RoundedCornerShape(999.dp))
                             .background(colors.surface)
-                            .border(1.dp, colors.line, RoundedCornerShape(16.dp))
+                            .border(1.dp, colors.line, RoundedCornerShape(999.dp))
                             .clickable { onOpenTurnDetails(message.id) }
-                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                            .padding(horizontal = 11.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (isActiveTurn && streaming) {
-                            CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.8.dp)
+                            WhitzLoadingIndicator(size = 14.dp)
                         } else {
                             Icon(Icons.Default.Psychology, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(14.dp))
                         }
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (isActiveTurn && streaming) "思考与执行中 · 点击查看详情" else "查看推理步骤与计划",
+                            text = if (isActiveTurn && streaming) "思考与执行中 · 查看步骤" else "查看推理步骤与计划",
                             fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
                             color = colors.fgMuted,
                         )
                     }
@@ -339,18 +356,18 @@ fun MessageBubble(
                     )
                 } else if (message.status == "streaming") {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
-                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        WhitzLoadingIndicator(size = 16.dp)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("正在思考...", fontSize = 13.sp, color = colors.fgMuted)
+                        Text("正在思考...", fontSize = 13.5.sp, color = colors.fgMuted)
                     }
                 } else if (message.status == "waiting") {
-                    Text("等待你的确认...", fontSize = 13.sp, color = colors.warning)
+                    Text("等待你的确认...", fontSize = 13.5.sp, color = colors.warning)
                 } else if (message.status == "cancelled") {
-                    Text("已停止生成", fontSize = 13.sp, color = colors.fgFaint)
+                    Text("已停止生成", fontSize = 13.5.sp, color = colors.fgFaint)
                 }
 
                 if (artifacts.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -370,11 +387,11 @@ fun MessageBubble(
                             )
                             Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .clip(RoundedCornerShape(12.dp))
                                     .background(colors.surface)
-                                    .border(1.dp, colors.line, RoundedCornerShape(10.dp))
+                                    .border(1.dp, colors.line, RoundedCornerShape(12.dp))
                                     .clickable { onOpenFile(convFile) }
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    .padding(horizontal = 11.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(15.dp))
@@ -419,57 +436,67 @@ fun MessageBubble(
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun ApprovalCard(
     control: PendingControl,
     onApprove: (String) -> Unit,
 ) {
     val colors = LocalWhitzColors.current
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(colors.warningWeak)
-            .border(1.dp, colors.warning.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
-            .padding(14.dp),
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = colors.warningWeak,
+        border = BorderStroke(1.dp, colors.warning.copy(alpha = 0.35f)),
     ) {
-        Text(
-            text = "需要你的授权确认 · ${control.tool ?: "工具调用"}",
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 14.sp,
-            color = colors.fg,
-        )
-        if (!control.preview.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 160.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(colors.canvas)
-                    .verticalScroll(rememberScrollState())
-                    .padding(10.dp),
-            ) {
-                Text(
-                    text = control.preview,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    color = colors.fg,
-                )
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = "需要你的授权确认 · ${control.tool ?: "工具调用"}",
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                color = colors.fg,
+            )
+            if (!control.preview.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 160.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(colors.canvas)
+                        .verticalScroll(rememberScrollState())
+                        .padding(10.dp),
+                ) {
+                    Text(
+                        text = control.preview,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = colors.fg,
+                    )
+                }
             }
-        }
-        Spacer(modifier = Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(onClick = { onApprove("deny") }, modifier = Modifier.weight(1f)) {
-                Text("拒绝")
-            }
-            Button(onClick = { onApprove("once") }, modifier = Modifier.weight(1f)) {
-                Text("允许一次")
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = { onApprove("deny") },
+                    shapes = ButtonDefaults.shapesFor(40.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("拒绝")
+                }
+                Button(
+                    onClick = { onApprove("once") },
+                    shapes = ButtonDefaults.shapesFor(40.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("允许一次")
+                }
             }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun ClarifyCard(
     control: PendingControl,
@@ -477,38 +504,41 @@ fun ClarifyCard(
 ) {
     val colors = LocalWhitzColors.current
     var answer by remember(control.requestId) { mutableStateOf("") }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(colors.surface)
-            .border(1.dp, colors.lineStrong, RoundedCornerShape(14.dp))
-            .padding(14.dp),
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = colors.surface,
+        border = BorderStroke(1.dp, colors.lineStrong),
     ) {
-        Text("需要补充信息", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = colors.fg)
-        if (!control.preview.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(control.preview, fontSize = 13.sp, color = colors.fgMuted)
-        }
-        Spacer(modifier = Modifier.height(10.dp))
-        OutlinedTextField(
-            value = answer,
-            onValueChange = { answer = it },
-            placeholder = { Text("输入你的回答...") },
-            modifier = Modifier.fillMaxWidth(),
-            maxLines = 4,
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Button(
-            onClick = { onSubmit(answer) },
-            enabled = answer.isNotBlank(),
-            modifier = Modifier.align(Alignment.End),
-        ) {
-            Text("提交")
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text("需要补充信息", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = colors.fg)
+            if (!control.preview.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(control.preview, fontSize = 13.sp, color = colors.fgMuted)
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            WhitzTextField(
+                value = answer,
+                onValueChange = { answer = it },
+                placeholder = "输入你的回答...",
+                singleLine = false,
+                maxLines = 4,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Button(
+                onClick = { onSubmit(answer) },
+                shapes = ButtonDefaults.shapesFor(36.dp),
+                enabled = answer.isNotBlank(),
+                modifier = Modifier.align(Alignment.End),
+            ) {
+                Text("提交")
+            }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun MemoryPendingCard(
     item: MemoryPendingItem,
@@ -518,78 +548,242 @@ fun MemoryPendingCard(
     var editing by remember(item.id) { mutableStateOf(false) }
     var draft by remember(item.id, item.content) { mutableStateOf(item.content) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(colors.surface)
-            .border(1.dp, colors.lineStrong, RoundedCornerShape(12.dp))
-            .padding(12.dp),
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = colors.surface,
+        border = BorderStroke(1.dp, colors.lineStrong),
     ) {
-        Text(
-            text = "待确认记忆（${item.action}）",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = colors.fg,
-        )
-        if (!item.reason.isNullOrBlank()) {
-            Text(item.reason, fontSize = 12.sp, color = colors.fgMuted)
-        }
-        Spacer(modifier = Modifier.height(6.dp))
-        if (editing) {
-            OutlinedTextField(value = draft, onValueChange = { draft = it }, modifier = Modifier.fillMaxWidth())
-        } else {
-            Text(draft, fontSize = 13.sp, color = colors.fg)
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { editing = !editing }) { Text(if (editing) "完成编辑" else "编辑") }
-            Spacer(modifier = Modifier.weight(1f))
-            OutlinedButton(onClick = { onResolve(item.id, "reject", null) }) { Text("拒绝") }
-            Button(onClick = { onResolve(item.id, "approve", if (draft != item.content) draft else null) }) {
-                Text("保存")
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = "待确认记忆（${item.action}）",
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.fg,
+            )
+            if (!item.reason.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(item.reason, fontSize = 12.sp, color = colors.fgMuted)
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            if (editing) {
+                WhitzTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    singleLine = false,
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                Text(draft, fontSize = 13.sp, color = colors.fg)
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { editing = !editing }) { Text(if (editing) "完成编辑" else "编辑") }
+                Spacer(modifier = Modifier.weight(1f))
+                OutlinedButton(
+                    onClick = { onResolve(item.id, "reject", null) },
+                    shapes = ButtonDefaults.shapesFor(36.dp),
+                ) { Text("拒绝") }
+                Button(
+                    onClick = { onResolve(item.id, "approve", if (draft != item.content) draft else null) },
+                    shapes = ButtonDefaults.shapesFor(36.dp),
+                ) { Text("保存") }
             }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SkillPendingCard(
     item: SkillPendingItem,
     onResolve: (id: String, action: String, content: String?) -> Unit,
 ) {
     val colors = LocalWhitzColors.current
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(colors.surface)
-            .border(1.dp, colors.lineStrong, RoundedCornerShape(12.dp))
-            .padding(12.dp),
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = colors.surface,
+        border = BorderStroke(1.dp, colors.lineStrong),
     ) {
-        Text(
-            text = "待确认技能：${item.name}（${item.action}）",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = colors.fg,
-        )
-        if (!item.description.isNullOrBlank()) {
-            Text(item.description, fontSize = 12.sp, color = colors.fgMuted)
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = "待确认技能：${item.name}（${item.action}）",
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.fg,
+            )
+            if (!item.description.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(item.description, fontSize = 12.sp, color = colors.fgMuted)
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = item.content.take(240),
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                color = colors.fgMuted,
+                maxLines = 5,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Spacer(modifier = Modifier.weight(1f))
+                OutlinedButton(
+                    onClick = { onResolve(item.id, "reject", null) },
+                    shapes = ButtonDefaults.shapesFor(36.dp),
+                ) { Text("拒绝") }
+                Button(
+                    onClick = { onResolve(item.id, "approve", null) },
+                    shapes = ButtonDefaults.shapesFor(36.dp),
+                ) { Text("批准") }
+            }
         }
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = item.content.take(240),
-            fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace,
-            color = colors.fgMuted,
-            maxLines = 5,
-            overflow = TextOverflow.Ellipsis,
+    }
+}
+
+@Composable
+fun TaskDetailContent(
+    plan: Plan?,
+    reasoning: List<ReasoningBlock>,
+    files: List<ConversationFile>,
+    onOpenFile: (ConversationFile) -> Unit,
+    onDeleteFile: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalWhitzColors.current
+    var tab by remember { mutableIntStateOf(0) }
+
+    Column(modifier = modifier) {
+        WhitzConnectedRadioGroup(
+            options = listOf(0 to "执行步骤", 1 to "对话文件 (${files.size})"),
+            selected = tab,
+            onSelect = { tab = it },
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         )
-        Spacer(modifier = Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Spacer(modifier = Modifier.weight(1f))
-            OutlinedButton(onClick = { onResolve(item.id, "reject", null) }) { Text("拒绝") }
-            Button(onClick = { onResolve(item.id, "approve", null) }) { Text("批准") }
+
+        if (tab == 0) {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                val planItems = plan?.items.orEmpty()
+                if (planItems.isNotEmpty()) {
+                    item {
+                        Text("任务计划", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = colors.fg)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            planItems.forEach { p ->
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = if (p.status == "completed") Icons.Default.CheckCircle else Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = if (p.status == "completed") colors.success else colors.fgMuted,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(p.content, fontSize = 13.5.sp, color = colors.fg)
+                                }
+                            }
+                        }
+                        HorizontalDivider(modifier = Modifier.padding(top = 12.dp), color = colors.line)
+                    }
+                }
+
+                if (reasoning.isEmpty()) {
+                    item {
+                        Text("暂无详细推理步骤", fontSize = 13.sp, color = colors.fgFaint)
+                    }
+                } else {
+                    items(reasoning) { blk ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(colors.surface)
+                                .padding(12.dp),
+                        ) {
+                            if (blk.title.isNotBlank() || blk.step != null) {
+                                Text(
+                                    text = blk.title.ifBlank { "步骤 ${blk.step}" },
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    color = colors.fg,
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                            }
+                            if (blk.text.isNotBlank()) {
+                                Text(blk.text, fontSize = 12.sp, color = colors.fgMuted)
+                            }
+                            if (blk.content.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(blk.content, fontSize = 13.sp, color = colors.fg)
+                            }
+                            blk.tools.forEach { t ->
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(colors.canvas)
+                                        .padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(Icons.Default.Terminal, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(t.name, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.fg)
+                                        if (!t.args.isNullOrBlank()) {
+                                            Text(t.args, fontSize = 11.sp, color = colors.fgFaint, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    }
+                                    Text(
+                                        text = t.status ?: "",
+                                        fontSize = 11.sp,
+                                        color = if (t.status == "failed") colors.danger else colors.success,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            if (files.isEmpty()) {
+                Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                    Text("当前对话暂无文件", color = colors.fgFaint, fontSize = 13.sp)
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(files, key = { it.id }) { f ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(colors.surface)
+                                .clickable { onOpenFile(f) }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(f.filename, fontSize = 14.sp, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("${FileValidator.formatSize(f.sizeBytes)} · ${f.source}", fontSize = 11.sp, color = colors.fgFaint)
+                            }
+                            IconButton(onClick = { onDeleteFile(f.id) }, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.Delete, contentDescription = "删除文件", tint = colors.fgFaint, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -605,139 +799,25 @@ fun TaskDetailSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = LocalWhitzColors.current
-    var tab by remember { mutableIntStateOf(0) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheetState,
         containerColor = colors.canvas,
+        contentWindowInsets = { WindowInsets(0) },
     ) {
-        Column(modifier = Modifier.fillMaxWidth().heightIn(min = 320.dp, max = 560.dp)) {
-            TabRow(selectedTabIndex = tab, containerColor = colors.canvas) {
-                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("执行步骤") })
-                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("对话文件 (${files.size})") })
-            }
-
-            if (tab == 0) {
-                LazyColumn(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    val planItems = plan?.items.orEmpty()
-                    if (planItems.isNotEmpty()) {
-                        item {
-                            Text("任务计划", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = colors.fg)
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                planItems.forEach { p ->
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            imageVector = if (p.status == "completed") Icons.Default.CheckCircle else Icons.Default.AutoAwesome,
-                                            contentDescription = null,
-                                            tint = if (p.status == "completed") colors.success else colors.fgMuted,
-                                            modifier = Modifier.size(16.dp),
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(p.content, fontSize = 13.sp, color = colors.fg)
-                                    }
-                                }
-                            }
-                            HorizontalDivider(modifier = Modifier.padding(top = 12.dp), color = colors.line)
-                        }
-                    }
-
-                    if (reasoning.isEmpty()) {
-                        item {
-                            Text("暂无详细推理步骤", fontSize = 13.sp, color = colors.fgFaint)
-                        }
-                    } else {
-                        items(reasoning) { blk ->
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(colors.surface)
-                                    .padding(12.dp),
-                            ) {
-                                if (blk.title.isNotBlank() || blk.step != null) {
-                                    Text(
-                                        text = blk.title.ifBlank { "步骤 ${blk.step}" },
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 13.sp,
-                                        color = colors.fg,
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                }
-                                if (blk.text.isNotBlank()) {
-                                    Text(blk.text, fontSize = 12.sp, color = colors.fgMuted)
-                                }
-                                if (blk.content.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(blk.content, fontSize = 13.sp, color = colors.fg)
-                                }
-                                blk.tools.forEach { t ->
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(colors.canvas)
-                                            .padding(8.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Icon(Icons.Default.Terminal, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(14.dp))
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(t.name, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.fg)
-                                            if (!t.args.isNullOrBlank()) {
-                                                Text(t.args, fontSize = 11.sp, color = colors.fgFaint, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                            }
-                                        }
-                                        Text(
-                                            text = t.status ?: "",
-                                            fontSize = 11.sp,
-                                            color = if (t.status == "failed") colors.danger else colors.success,
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                if (files.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                        Text("当前对话暂无文件", color = colors.fgFaint, fontSize = 13.sp)
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        items(files, key = { it.id }) { f ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(colors.surface)
-                                    .clickable { onOpenFile(f) }
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(f.filename, fontSize = 14.sp, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text("${FileValidator.formatSize(f.sizeBytes)} · ${f.source}", fontSize = 11.sp, color = colors.fgFaint)
-                                }
-                                IconButton(onClick = { onDeleteFile(f.id) }, modifier = Modifier.size(32.dp)) {
-                                    Icon(Icons.Default.Delete, contentDescription = "删除文件", tint = colors.fgFaint, modifier = Modifier.size(16.dp))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        TaskDetailContent(
+            plan = plan,
+            reasoning = reasoning,
+            files = files,
+            onOpenFile = onOpenFile,
+            onDeleteFile = onDeleteFile,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 320.dp, max = 580.dp)
+                .navigationBarsPadding(),
+        )
     }
 }
 
@@ -754,24 +834,24 @@ fun SearchDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("搜索对话") },
+        containerColor = colors.canvas,
+        title = { Text("搜索对话", fontWeight = FontWeight.SemiBold, color = colors.fg) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                OutlinedTextField(
+                WhitzTextField(
                     value = query,
                     onValueChange = {
                         query = it
                         onQueryChange(it)
                     },
-                    placeholder = { Text("输入标题或消息关键词...") },
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                    singleLine = true,
+                    placeholder = "输入标题或消息关键词...",
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = colors.fgMuted) },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 if (searching) {
-                    Box(modifier = Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(modifier = Modifier.size(22.dp))
+                    Box(modifier = Modifier.fillMaxWidth().padding(18.dp), contentAlignment = Alignment.Center) {
+                        WhitzLoadingIndicator(size = 24.dp)
                     }
                 } else if (query.isNotBlank() && results.isEmpty()) {
                     Text("没有找到匹配的对话", fontSize = 13.sp, color = colors.fgFaint, modifier = Modifier.padding(8.dp))
@@ -781,7 +861,7 @@ fun SearchDialog(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(10.dp))
                                     .clickable {
                                         onSelectConversation(hit.conversationId)
                                         onDismiss()
@@ -804,6 +884,7 @@ fun SearchDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SkillPickerDialog(
     skills: List<SkillItem>,
@@ -814,7 +895,8 @@ fun SkillPickerDialog(
     val colors = LocalWhitzColors.current
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("选择本轮附加技能") },
+        containerColor = colors.canvas,
+        title = { Text("选择本轮附加技能", fontWeight = FontWeight.SemiBold, color = colors.fg) },
         text = {
             if (skills.isEmpty()) {
                 Text("暂无可用技能，请在设置 -> 技能管理中启用或创建技能。", fontSize = 13.sp, color = colors.fgMuted)
@@ -825,8 +907,9 @@ fun SkillPickerDialog(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
                                 .clickable { onToggle(sk.name) }
-                                .padding(vertical = 6.dp),
+                                .padding(vertical = 6.dp, horizontal = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Checkbox(checked = checked, onCheckedChange = { onToggle(sk.name) })
@@ -842,11 +925,12 @@ fun SkillPickerDialog(
             }
         },
         confirmButton = {
-            Button(onClick = onDismiss) { Text("完成") }
+            Button(onClick = onDismiss, shapes = ButtonDefaults.shapesFor(36.dp)) { Text("完成") }
         },
     )
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun LibraryAttachDialog(
     fetchLibrary: suspend (String) -> List<ConversationFile>,
@@ -867,20 +951,20 @@ fun LibraryAttachDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("从文件库选择") },
+        containerColor = colors.canvas,
+        title = { Text("从文件库选择", fontWeight = FontWeight.SemiBold, color = colors.fg) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                OutlinedTextField(
+                WhitzTextField(
                     value = query,
                     onValueChange = { query = it },
-                    placeholder = { Text("搜索文件名...") },
-                    singleLine = true,
+                    placeholder = "搜索文件名...",
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 if (loading) {
                     Box(modifier = Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(modifier = Modifier.size(22.dp))
+                        WhitzLoadingIndicator(size = 24.dp)
                     }
                 } else if (items.isEmpty()) {
                     Text("文件库暂无匹配文件", fontSize = 13.sp, color = colors.fgFaint, modifier = Modifier.padding(8.dp))
@@ -891,10 +975,11 @@ fun LibraryAttachDialog(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
                                     .clickable {
                                         if (checked) selectedIds.remove(f.id) else selectedIds.add(f.id)
                                     }
-                                    .padding(vertical = 6.dp),
+                                    .padding(vertical = 6.dp, horizontal = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Checkbox(
@@ -920,6 +1005,7 @@ fun LibraryAttachDialog(
                     onAttach(selectedIds.toList())
                     onDismiss()
                 },
+                shapes = ButtonDefaults.shapesFor(36.dp),
                 enabled = selectedIds.isNotEmpty(),
             ) {
                 Text("附加 (${selectedIds.size})")
@@ -928,6 +1014,7 @@ fun LibraryAttachDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun FilePreviewDialog(
     target: PreviewTarget,
@@ -938,12 +1025,14 @@ fun FilePreviewDialog(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .background(colors.canvas)
+                .statusBarsPadding()
+                .navigationBarsPadding()
                 .padding(16.dp),
         ) {
             Row(
@@ -979,7 +1068,7 @@ fun FilePreviewDialog(
             when {
                 target.loading -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator()
+                        WhitzLoadingIndicator()
                     }
                 }
                 !target.error.isNullOrBlank() -> {
@@ -1024,12 +1113,15 @@ fun FilePreviewDialog(
                     ) {
                         Text("该文件类型暂不支持内嵌预览", color = colors.fgMuted, fontSize = 14.sp)
                         Spacer(modifier = Modifier.height(12.dp))
-                        Button(onClick = {
-                            try {
-                                uriHandler.openUri(target.previewUrl)
-                            } catch (_: Exception) {
-                            }
-                        }) {
+                        Button(
+                            onClick = {
+                                try {
+                                    uriHandler.openUri(target.previewUrl)
+                                } catch (_: Exception) {
+                                }
+                            },
+                            shapes = ButtonDefaults.shapesFor(40.dp),
+                        ) {
                             Icon(Icons.Default.Download, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("在浏览器中下载 / 打开")

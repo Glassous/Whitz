@@ -1,44 +1,64 @@
 package com.glassous.whitz.feature.chat
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -46,31 +66,29 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -78,19 +96,54 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import com.glassous.whitz.R
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.UploadTaskStatus
+import com.glassous.whitz.core.model.User
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
+import com.glassous.whitz.ui.theme.WhitzBrandMark
+import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
+import com.glassous.whitz.ui.theme.WhitzLogoMark
+import com.glassous.whitz.ui.theme.WhitzProgressiveBlurBottom
+import com.glassous.whitz.ui.theme.WhitzProgressiveBlurTop
+import com.glassous.whitz.ui.theme.WhitzTextField
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.launch
+import java.util.Calendar
+import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+private fun currentGreeting(): String {
+    val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+    return when {
+        h < 5 -> "夜深了"
+        h < 12 -> "早上好"
+        h < 14 -> "中午好"
+        h < 18 -> "下午好"
+        else -> "晚上好"
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(
     vm: ChatViewModel,
@@ -103,16 +156,38 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val hazeState = rememberHazeState()
+    val density = LocalDensity.current
 
     var inputText by remember { mutableStateOf("") }
+    var composerExpanded by remember { mutableStateOf(false) }
+    var plusMenuExpanded by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }
     var showSkillPicker by remember { mutableStateOf(false) }
     var showLibraryPicker by remember { mutableStateOf(false) }
     var showTaskSheet by remember { mutableStateOf(false) }
+    var showDesktopTaskPanel by remember { mutableStateOf(false) }
+    var desktopSidebarCollapsed by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
 
     var renameTarget by remember { mutableStateOf<Conversation?>(null) }
     var deleteTarget by remember { mutableStateOf<Conversation?>(null) }
+    var bottomOverlayHeightPx by remember { mutableIntStateOf(0) }
+    var stageCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var plusButtonCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var plusAnchorBounds by remember { mutableStateOf<Rect?>(null) }
+
+    val refreshPlusAnchor = {
+        val stage = stageCoords
+        val btn = plusButtonCoords
+        if (stage != null && btn != null && stage.isAttached && btn.isAttached) {
+            plusAnchorBounds = stage.localBoundingBoxOf(btn, clipBounds = false)
+        }
+    }
+    val dismissPlusMenu = {
+        showAttachMenu = false
+        plusMenuExpanded = false
+    }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
@@ -133,123 +208,150 @@ fun ChatScreen(
         }
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(
-                drawerContainerColor = colors.sidebar,
-                modifier = Modifier.width(300.dp),
+    // Back key handling: overlays & drawer close before exiting
+    BackHandler(enabled = ui.previewTarget != null) { vm.closeFilePreview() }
+    BackHandler(enabled = showSearch) { showSearch = false }
+    BackHandler(enabled = showTaskSheet) { showTaskSheet = false }
+    BackHandler(enabled = showSkillPicker) { showSkillPicker = false }
+    BackHandler(enabled = showLibraryPicker) { showLibraryPicker = false }
+    BackHandler(enabled = plusMenuExpanded) { dismissPlusMenu() }
+    BackHandler(enabled = composerExpanded) { composerExpanded = false }
+    BackHandler(enabled = drawerState.isOpen) {
+        scope.launch { drawerState.close() }
+    }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize().background(colors.canvas)) {
+        val isExpandedScreen = maxWidth >= 840.dp
+
+        val mainStage: @Composable () -> Unit = {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onGloballyPositioned { coords ->
+                        stageCoords = coords
+                        refreshPlusAnchor()
+                    },
             ) {
-                Column(modifier = Modifier.fillMaxHeight().padding(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
+                Row(modifier = Modifier.fillMaxSize()) {
+                // Expanded screen: persistent collapsible sidebar
+                if (isExpandedScreen) {
+                    val railWidth by animateDpAsState(
+                        targetValue = if (desktopSidebarCollapsed) 68.dp else 276.dp,
+                        animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+                        label = "sidebarWidth",
+                    )
+                    Surface(
+                        color = colors.sidebar,
+                        border = BorderStroke(0.5.dp, colors.line),
+                        modifier = Modifier
+                            .width(railWidth)
+                            .fillMaxHeight(),
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(32.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(MaterialTheme.colorScheme.primary),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text("W", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
-                        }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text("Whitz", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = colors.fg, modifier = Modifier.weight(1f))
-                        IconButton(onClick = { showSearch = true }) {
-                            Icon(Icons.Default.Search, contentDescription = "搜索", tint = colors.fgMuted)
-                        }
-                        IconButton(onClick = {
-                            vm.startNewConversation()
-                            scope.launch { drawerState.close() }
-                        }) {
-                            Icon(Icons.Default.Add, contentDescription = "新对话", tint = colors.fg)
-                        }
+                        SidebarContent(
+                            ui = ui,
+                            user = user,
+                            collapsed = desktopSidebarCollapsed,
+                            showCloseButton = false,
+                            onCloseDrawer = {},
+                            onNewChat = { vm.startNewConversation() },
+                            onOpenSearch = { showSearch = true },
+                            onSelectConv = { vm.openConversation(it) },
+                            onTogglePin = { id, pin -> vm.togglePin(id, pin) },
+                            onRename = { renameTarget = it },
+                            onDelete = { deleteTarget = it },
+                            onOpenSettings = onOpenSettings,
+                        )
                     }
+                }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = colors.line)
-                    Spacer(modifier = Modifier.height(8.dp))
+                // Center Chat Area (100% edge-to-edge)
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+                    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                    val composerOverlayDp = with(density) { bottomOverlayHeightPx.toDp() }
+                    val listTopPadding = statusTop + 68.dp
+                    val listBottomPadding = (if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottom) + 16.dp
 
-                    if (ui.conversationsLoading && ui.conversations.isEmpty()) {
-                        Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(modifier = Modifier.size(22.dp))
-                        }
-                    } else if (ui.conversations.isEmpty()) {
-                        Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            Text("暂无历史对话", color = colors.fgFaint, fontSize = 13.sp)
-                        }
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            items(ui.conversations, key = { it.id }) { conv ->
-                                val selected = conv.id == ui.currentConvId
-                                var menuOpen by remember(conv.id) { mutableStateOf(false) }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(if (selected) colors.hover else colors.sidebar)
-                                        .clickable {
-                                            vm.openConversation(conv.id)
-                                            scope.launch { drawerState.close() }
-                                        }
-                                        .padding(horizontal = 10.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    if (conv.isPinned) {
-                                        Icon(
-                                            Icons.Default.PushPin,
-                                            contentDescription = "已置顶",
-                                            tint = colors.fgMuted,
-                                            modifier = Modifier.size(14.dp).padding(end = 2.dp),
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                    }
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = conv.title.ifBlank { "新对话" },
-                                            fontSize = 14.sp,
-                                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                            color = colors.fg,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        val time = DateTimeUtils.formatShort(conv.lastMessageAt ?: conv.updatedAt)
-                                        if (time.isNotBlank()) {
-                                            Text(time, fontSize = 11.sp, color = colors.fgFaint)
-                                        }
-                                    }
-                                    Box {
-                                        IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(28.dp)) {
-                                            Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = colors.fgFaint, modifier = Modifier.size(16.dp))
-                                        }
-                                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                                            DropdownMenuItem(
-                                                text = { Text(if (conv.isPinned) "取消置顶" else "置顶对话") },
-                                                leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null) },
-                                                onClick = {
-                                                    menuOpen = false
-                                                    vm.togglePin(conv.id, !conv.isPinned)
+                    // 1. Messages or Empty State (hazeSource for progressive blur)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .hazeSource(state = hazeState),
+                    ) {
+                        if (ui.messages.isEmpty()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(
+                                        start = 24.dp,
+                                        end = 24.dp,
+                                        top = listTopPadding,
+                                        bottom = listBottomPadding,
+                                    ),
+                                verticalArrangement = Arrangement.Center,
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                val greeting = remember { currentGreeting() }
+                                val name = user?.displayName?.trim().orEmpty()
+                                Text(
+                                    text = if (name.isNotEmpty()) "$greeting，$name" else greeting,
+                                    fontSize = if (isExpandedScreen) 36.sp else 30.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    letterSpacing = (-0.6).sp,
+                                    color = colors.fg,
+                                    textAlign = TextAlign.Center,
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    text = "我可以帮你规划任务、联网检索、整理信息。今天想做点什么？",
+                                    fontSize = 15.sp,
+                                    lineHeight = 22.sp,
+                                    color = colors.fgMuted,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.widthIn(max = 460.dp),
+                                )
+                                if (ui.agentStatus != null && ui.agentStatus?.ready == false) {
+                                    Spacer(modifier = Modifier.height(16.dp))
+                                    Text(
+                                        text = "助理正在初始化，稍后即可开始对话…",
+                                        fontSize = 13.sp,
+                                        color = colors.fgFaint,
+                                    )
+                                }
+                            }
+                        } else {
+                            LazyColumn(
+                                state = listState,
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(
+                                    start = if (isExpandedScreen) 32.dp else 16.dp,
+                                    end = if (isExpandedScreen) 32.dp else 16.dp,
+                                    top = listTopPadding,
+                                    bottom = listBottomPadding,
+                                ),
+                                verticalArrangement = Arrangement.spacedBy(16.dp),
+                            ) {
+                                items(ui.messages, key = { it.id }) { msg ->
+                                    Box(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Box(modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth()) {
+                                            MessageBubble(
+                                                message = msg,
+                                                streaming = ui.streaming,
+                                                isActiveTurn = msg.id == ui.activeAssistantId,
+                                                convFiles = ui.files,
+                                                onCopy = {
+                                                    scope.launch { snackbarHostState.showSnackbar("已复制到剪贴板") }
                                                 },
-                                            )
-                                            DropdownMenuItem(
-                                                text = { Text("重命名") },
-                                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
-                                                onClick = {
-                                                    menuOpen = false
-                                                    renameTarget = conv
+                                                onRegenerate = { vm.regenerate(it) },
+                                                onEditSubmit = { id, content -> vm.editAndResend(id, content) },
+                                                onOpenTurnDetails = { id ->
+                                                    vm.selectTurn(id)
+                                                    if (isExpandedScreen) showDesktopTaskPanel = true else showTaskSheet = true
                                                 },
-                                            )
-                                            DropdownMenuItem(
-                                                text = { Text("删除", color = colors.danger) },
-                                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = colors.danger) },
-                                                onClick = {
-                                                    menuOpen = false
-                                                    deleteTarget = conv
-                                                },
+                                                onOpenFile = { f -> vm.openFilePreview(f) },
                                             )
                                         }
                                     }
@@ -258,85 +360,49 @@ fun ChatScreen(
                         }
                     }
 
-                    HorizontalDivider(color = colors.line)
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Sidebar Footer: User & Credits & Settings
+                    // 2. Top Progressive Blur Overlay + Floating Header
+                    WhitzProgressiveBlurTop(
+                        hazeState = hazeState,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .height(statusTop + 76.dp),
+                    )
                     Row(
                         modifier = Modifier
+                            .align(Alignment.TopCenter)
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable {
-                                scope.launch { drawerState.close() }
-                                onOpenSettings()
-                            }
-                            .padding(8.dp),
+                            .statusBarsPadding()
+                            .padding(horizontal = 10.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (!user?.avatarUrl.isNullOrBlank()) {
-                            AsyncImage(
-                                model = user?.avatarUrl,
-                                contentDescription = "头像",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.size(36.dp).clip(CircleShape),
-                            )
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primary),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(
-                                    text = (user?.displayName?.firstOrNull() ?: 'U').uppercase(),
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            }
-                        }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = user?.displayName ?: "未登录",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = colors.fg,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            val creditsLabel = ui.credits?.let { "${it.tierLabel} · 剩余 ${it.remaining} 积分" }
-                                ?: (user?.email ?: "")
-                            Text(
-                                text = creditsLabel,
-                                fontSize = 11.sp,
-                                color = colors.fgFaint,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                        IconButton(
+                            onClick = {
+                                if (isExpandedScreen) {
+                                    desktopSidebarCollapsed = !desktopSidebarCollapsed
+                                } else {
+                                    scope.launch { drawerState.open() }
+                                }
+                            },
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_sidebar_toggle),
+                                contentDescription = "切换侧栏",
+                                tint = colors.fgMuted,
+                                modifier = Modifier.size(21.dp),
                             )
                         }
-                        Icon(Icons.Default.Settings, contentDescription = "设置", tint = colors.fgMuted, modifier = Modifier.size(20.dp))
-                    }
-                }
-            }
-        },
-    ) {
-        Scaffold(
-            containerColor = colors.canvas,
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            topBar = {
-                TopAppBar(
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.canvas),
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "菜单", tint = colors.fg)
-                        }
-                    },
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             Text(
                                 text = ui.currentConvTitle,
-                                fontSize = 16.sp,
+                                fontSize = 15.5.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = colors.fg,
                                 maxLines = 1,
@@ -347,293 +413,491 @@ fun ChatScreen(
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Box(
                                     modifier = Modifier
-                                        .size(8.dp)
+                                        .size(7.dp)
                                         .clip(CircleShape)
                                         .background(if (ui.agentStatus?.ready == true) colors.success else colors.warning),
                                 )
                             }
                         }
-                    },
-                    actions = {
-                        IconButton(onClick = { showTaskSheet = true }) {
-                            Icon(Icons.Default.Layers, contentDescription = "步骤与文件", tint = colors.fgMuted)
-                        }
-                        IconButton(onClick = { vm.startNewConversation() }) {
-                            Icon(Icons.Default.Add, contentDescription = "新对话", tint = colors.fg)
-                        }
-                    },
-                )
-            },
-        ) { innerPadding ->
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .imePadding(),
-            ) {
-                // Messages Area
-                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    if (ui.messages.isEmpty()) {
-                        Column(
-                            modifier = Modifier.fillMaxSize().padding(24.dp),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(56.dp)
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(MaterialTheme.colorScheme.primary),
-                                contentAlignment = Alignment.Center,
+
+                        Box {
+                            IconButton(
+                                onClick = {
+                                    if (isExpandedScreen) {
+                                        showDesktopTaskPanel = !showDesktopTaskPanel
+                                    } else {
+                                        showTaskSheet = true
+                                    }
+                                },
+                                modifier = Modifier.size(40.dp),
                             ) {
-                                Text("W", color = MaterialTheme.colorScheme.onPrimary, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_task_panel),
+                                    contentDescription = "步骤与文件",
+                                    tint = colors.fgMuted,
+                                    modifier = Modifier.size(20.dp),
+                                )
                             }
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text("有什么我可以帮你的？", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = colors.fg)
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                "支持文档分析、代码编写、深度推理与多轮工具调用",
-                                fontSize = 13.sp,
-                                color = colors.fgMuted,
+                            if (ui.files.isNotEmpty() && !showDesktopTaskPanel) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(top = 8.dp, end = 8.dp)
+                                        .size(7.dp)
+                                        .clip(CircleShape)
+                                        .background(colors.fg),
+                                )
+                            }
+                        }
+
+                        IconButton(
+                            onClick = { vm.startNewConversation() },
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Add,
+                                contentDescription = "新对话",
+                                tint = colors.fg,
+                                modifier = Modifier.size(22.dp),
                             )
                         }
-                    } else {
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                    }
+
+                    // 3. Bottom Progressive Blur Overlay + Floating Composer & Pending Cards
+                    WhitzProgressiveBlurBottom(
+                        hazeState = hazeState,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height((if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottom) + 32.dp),
+                    )
+
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .onSizeChanged { bottomOverlayHeightPx = it.height }
+                            .navigationBarsPadding()
+                            .imePadding()
+                            .padding(horizontal = if (isExpandedScreen) 24.dp else 12.dp, vertical = 10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Column(
+                            modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            items(ui.messages, key = { it.id }) { msg ->
-                                MessageBubble(
-                                    message = msg,
-                                    streaming = ui.streaming,
-                                    isActiveTurn = msg.id == ui.activeAssistantId,
-                                    convFiles = ui.files,
-                                    onCopy = {
-                                        scope.launch { snackbarHostState.showSnackbar("已复制到剪贴板") }
-                                    },
-                                    onRegenerate = { vm.regenerate(it) },
-                                    onEditSubmit = { id, content -> vm.editAndResend(id, content) },
-                                    onOpenTurnDetails = { id ->
-                                        vm.selectTurn(id)
-                                        showTaskSheet = true
-                                    },
-                                    onOpenFile = { f -> vm.openFilePreview(f) },
+                            ui.pendingControl?.let { ctrl ->
+                                if (ctrl.kind == "approval") {
+                                    ApprovalCard(control = ctrl, onApprove = { vm.approveControl(it) })
+                                } else {
+                                    ClarifyCard(control = ctrl, onSubmit = { vm.clarifyControl(it) })
+                                }
+                            }
+
+                            ui.pendingMemory.forEach { mem ->
+                                MemoryPendingCard(
+                                    item = mem,
+                                    onResolve = { id, act, c -> vm.resolvePendingMemory(id, act, c) },
                                 )
                             }
 
-                            ui.pendingControl?.let { ctrl ->
-                                item(key = "ctrl-${ctrl.requestId ?: ctrl.kind}") {
-                                    if (ctrl.kind == "approval") {
-                                        ApprovalCard(control = ctrl, onApprove = { vm.approveControl(it) })
-                                    } else {
-                                        ClarifyCard(control = ctrl, onSubmit = { vm.clarifyControl(it) })
+                            ui.pendingSkills.forEach { sk ->
+                                SkillPendingCard(
+                                    item = sk,
+                                    onResolve = { id, act, c -> vm.resolvePendingSkill(id, act, c) },
+                                )
+                            }
+
+                            val bannerError = ui.error ?: ui.fileError
+                            if (!bannerError.isNullOrBlank()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(colors.dangerWeak)
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(bannerError, color = colors.danger, fontSize = 12.5.sp, modifier = Modifier.weight(1f))
+                                    IconButton(onClick = { vm.clearError() }, modifier = Modifier.size(24.dp)) {
+                                        Icon(Icons.Default.Close, contentDescription = "关闭", tint = colors.danger, modifier = Modifier.size(14.dp))
                                     }
                                 }
                             }
 
-                            items(ui.pendingMemory, key = { "mem-${it.id}" }) { mem ->
-                                MemoryPendingCard(item = mem, onResolve = { id, act, c -> vm.resolvePendingMemory(id, act, c) })
-                            }
-
-                            items(ui.pendingSkills, key = { "skill-${it.id}" }) { sk ->
-                                SkillPendingCard(item = sk, onResolve = { id, act, c -> vm.resolvePendingSkill(id, act, c) })
-                            }
-                        }
-                    }
-                }
-
-                // Error Banner
-                val bannerError = ui.error ?: ui.fileError
-                if (!bannerError.isNullOrBlank()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(colors.dangerWeak)
-                            .padding(horizontal = 14.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(bannerError, color = colors.danger, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                        IconButton(onClick = { vm.clearError() }, modifier = Modifier.size(24.dp)) {
-                            Icon(Icons.Default.Close, contentDescription = "关闭", tint = colors.danger, modifier = Modifier.size(14.dp))
-                        }
-                    }
-                }
-
-                // Composer Area
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(colors.canvas)
-                        .border(0.5.dp, colors.line)
-                        .navigationBarsPadding()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                ) {
-                    // Uploading tasks + Attached files + Selected skills
-                    val attachedFiles = ui.files.filter { it.id in ui.attachedIds }
-                    if (ui.uploads.isNotEmpty() || attachedFiles.isNotEmpty() || ui.selectedSkillNames.isNotEmpty()) {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.padding(bottom = 8.dp),
-                        ) {
-                            ui.uploads.forEach { task ->
-                                Row(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(colors.surface)
-                                        .border(1.dp, colors.line, RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 8.dp, vertical = 5.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
+                            // Standalone circular '+' button + borderless, shadowless input capsule
+                            // (plus menu overlay lives in a separate layer above mainStage so it never shifts layout)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.Bottom,
+                            ) {
+                                // Independent circular '+' button on the left
+                                Box(
+                                    modifier = Modifier.onGloballyPositioned { coords ->
+                                        plusButtonCoords = coords
+                                        refreshPlusAnchor()
+                                    },
                                 ) {
-                                    Column(modifier = Modifier.width(120.dp)) {
-                                        Text(task.filename, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.fg)
-                                        if (task.status == UploadTaskStatus.ERROR) {
-                                            Text(task.error ?: "失败", fontSize = 10.sp, color = colors.danger, maxLines = 1)
-                                        } else {
-                                            LinearProgressIndicator(
-                                                progress = { task.progress / 100f },
-                                                modifier = Modifier.fillMaxWidth().height(3.dp),
+                                    Surface(
+                                        onClick = {
+                                            if (plusMenuExpanded) {
+                                                dismissPlusMenu()
+                                            } else {
+                                                plusMenuExpanded = true
+                                            }
+                                        },
+                                        shape = CircleShape,
+                                        color = if (plusMenuExpanded) colors.hover else colors.surface,
+                                        modifier = Modifier.size(48.dp),
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                Icons.Default.Add,
+                                                contentDescription = "展开工具",
+                                                tint = colors.fg,
+                                                modifier = Modifier.size(21.dp),
                                             )
                                         }
                                     }
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Icon(
-                                        Icons.Default.Close,
-                                        contentDescription = "取消",
-                                        tint = colors.fgFaint,
-                                        modifier = Modifier.size(14.dp).clickable { vm.cancelOrDismissUpload(task.localId) },
-                                    )
+                                    if (ui.selectedSkillNames.isNotEmpty()) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .padding(3.dp)
+                                                .size(8.dp)
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primary),
+                                        )
+                                    }
                                 }
-                            }
 
-                            attachedFiles.forEach { f ->
-                                Row(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(colors.surface)
-                                        .border(1.dp, colors.line, RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(13.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(f.filename, fontSize = 12.sp, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Icon(
-                                        Icons.Default.Close,
-                                        contentDescription = "移除",
-                                        tint = colors.fgFaint,
-                                        modifier = Modifier.size(14.dp).clickable { vm.detachFile(f.id) },
-                                    )
-                                }
-                            }
+                                Spacer(modifier = Modifier.width(8.dp))
 
-                            ui.selectedSkillNames.forEach { sk ->
-                                Row(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(colors.surface)
-                                        .border(1.dp, colors.lineStrong, RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
+                                // Borderless, shadowless input capsule
+                                Surface(
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(26.dp),
+                                    color = colors.surface,
                                 ) {
-                                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = colors.fg, modifier = Modifier.size(13.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(sk, fontSize = 12.sp, color = colors.fg)
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Icon(
-                                        Icons.Default.Close,
-                                        contentDescription = "移除技能",
-                                        tint = colors.fgFaint,
-                                        modifier = Modifier.size(14.dp).clickable { vm.toggleSkillSelection(sk) },
-                                    )
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                                        ) {
+                                            val attachedFiles = ui.files.filter { it.id in ui.attachedIds }
+                                            if (ui.uploads.isNotEmpty() || attachedFiles.isNotEmpty() || ui.selectedSkillNames.isNotEmpty()) {
+                                                FlowRow(
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                                    modifier = Modifier.padding(bottom = 8.dp, start = 4.dp, end = 4.dp),
+                                                ) {
+                                                    ui.uploads.forEach { task ->
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .clip(RoundedCornerShape(10.dp))
+                                                                .background(colors.canvas)
+                                                                .padding(horizontal = 8.dp, vertical = 5.dp),
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                        ) {
+                                                            Column(modifier = Modifier.width(120.dp)) {
+                                                                Text(task.filename, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.fg)
+                                                                if (task.status == UploadTaskStatus.ERROR) {
+                                                                    Text(task.error ?: "失败", fontSize = 10.sp, color = colors.danger, maxLines = 1)
+                                                                } else {
+                                                                    Spacer(modifier = Modifier.height(2.dp))
+                                                                    LinearWavyProgressIndicator(
+                                                                        progress = { task.progress / 100f },
+                                                                        modifier = Modifier.fillMaxWidth().height(4.dp),
+                                                                    )
+                                                                }
+                                                            }
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Icon(
+                                                                Icons.Default.Close,
+                                                                contentDescription = "取消",
+                                                                tint = colors.fgFaint,
+                                                                modifier = Modifier.size(14.dp).clickable { vm.cancelOrDismissUpload(task.localId) },
+                                                            )
+                                                        }
+                                                    }
+
+                                                    attachedFiles.forEach { f ->
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .clip(RoundedCornerShape(10.dp))
+                                                                .background(colors.canvas)
+                                                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                        ) {
+                                                            Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(13.dp))
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text(f.filename, fontSize = 12.sp, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Icon(
+                                                                Icons.Default.Close,
+                                                                contentDescription = "移除",
+                                                                tint = colors.fgFaint,
+                                                                modifier = Modifier.size(14.dp).clickable { vm.detachFile(f.id) },
+                                                            )
+                                                        }
+                                                    }
+
+                                                    ui.selectedSkillNames.forEach { sk ->
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .clip(RoundedCornerShape(10.dp))
+                                                                .background(colors.canvas)
+                                                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                        ) {
+                                                            Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = colors.fg, modifier = Modifier.size(13.dp))
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text(sk, fontSize = 12.sp, color = colors.fg)
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Icon(
+                                                                Icons.Default.Close,
+                                                                contentDescription = "移除技能",
+                                                                tint = colors.fgFaint,
+                                                                modifier = Modifier.size(14.dp).clickable { vm.toggleSkillSelection(sk) },
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            val canExpandInput = inputText.length > 60 || inputText.contains('\n') || composerExpanded
+                                            val canSend = inputText.isNotBlank() || ui.attachedIds.isNotEmpty()
+
+                                            val inputFieldContent: @Composable (Modifier) -> Unit = { fieldMod ->
+                                                Box(
+                                                    modifier = fieldMod.padding(horizontal = 4.dp, vertical = 6.dp),
+                                                ) {
+                                                    if (inputText.isEmpty()) {
+                                                        Text(
+                                                            text = if (ui.agentStatus?.ready == false) "助理初始化中..." else "给 Whitz 发消息...",
+                                                            color = colors.fgFaint,
+                                                            fontSize = 15.sp,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                        )
+                                                    }
+                                                    BasicTextField(
+                                                        value = inputText,
+                                                        onValueChange = {
+                                                            inputText = it
+                                                            if (plusMenuExpanded) dismissPlusMenu()
+                                                        },
+                                                        textStyle = TextStyle(
+                                                            color = colors.fg,
+                                                            fontSize = 15.sp,
+                                                            lineHeight = 22.sp,
+                                                        ),
+                                                        cursorBrush = SolidColor(colors.fg),
+                                                        maxLines = if (composerExpanded) 12 else 5,
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .heightIn(min = 24.dp, max = if (composerExpanded) 240.dp else 110.dp),
+                                                    )
+                                                }
+                                            }
+
+                                            val sendOrStopContent: @Composable () -> Unit = {
+                                                ComposerSendOrStopButton(
+                                                    streaming = ui.streaming,
+                                                    canSend = canSend,
+                                                    onStop = { vm.stopRun() },
+                                                    onSend = {
+                                                        val text = inputText
+                                                        inputText = ""
+                                                        composerExpanded = false
+                                                        dismissPlusMenu()
+                                                        vm.sendMessage(text)
+                                                    },
+                                                )
+                                            }
+
+                                            if (isExpandedScreen) {
+                                                inputFieldContent(Modifier.fillMaxWidth())
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.End,
+                                                ) {
+                                                    if (canExpandInput) {
+                                                        IconButton(
+                                                            onClick = { composerExpanded = !composerExpanded },
+                                                            modifier = Modifier.size(36.dp),
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = if (composerExpanded) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
+                                                                contentDescription = if (composerExpanded) "收起输入框" else "展开输入框",
+                                                                tint = colors.fgMuted,
+                                                                modifier = Modifier.size(16.dp),
+                                                            )
+                                                        }
+                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                    }
+                                                    sendOrStopContent()
+                                                }
+                                            } else {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    verticalAlignment = Alignment.Bottom,
+                                                ) {
+                                                    inputFieldContent(
+                                                        Modifier
+                                                            .weight(1f)
+                                                            .align(Alignment.CenterVertically),
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Column(
+                                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                                                    ) {
+                                                        if (canExpandInput) {
+                                                            IconButton(
+                                                                onClick = { composerExpanded = !composerExpanded },
+                                                                modifier = Modifier.size(36.dp),
+                                                            ) {
+                                                                Icon(
+                                                                    imageVector = if (composerExpanded) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
+                                                                    contentDescription = if (composerExpanded) "收起输入框" else "展开输入框",
+                                                                    tint = colors.fgMuted,
+                                                                    modifier = Modifier.size(16.dp),
+                                                                )
+                                                            }
+                                                        }
+                                                        sendOrStopContent()
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.Bottom,
+                    SnackbarHost(
+                        hostState = snackbarHostState,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .navigationBarsPadding()
+                            .padding(bottom = 90.dp),
+                    )
+                }
+
+                // Expanded screen: right-side Task & Files panel
+                AnimatedVisibility(
+                    visible = isExpandedScreen && showDesktopTaskPanel,
+                    enter = fadeIn() + slideInHorizontally { it / 3 },
+                    exit = fadeOut() + slideOutHorizontally { it / 3 },
+                ) {
+                    val selectedMsg = ui.messages.firstOrNull { it.id == ui.selectedTurnId }
+                        ?: ui.messages.lastOrNull { it.role == "assistant" }
+                    val activeTurn = selectedMsg?.id == ui.activeAssistantId
+                    val sheetPlan = if (activeTurn) ui.plan ?: selectedMsg?.toolPayload?.plan else selectedMsg?.toolPayload?.plan
+                    val sheetReasoning = if (activeTurn) ui.reasoning else selectedMsg?.toolPayload?.reasoning.orEmpty()
+
+                    Surface(
+                        color = colors.canvas,
+                        border = BorderStroke(0.5.dp, colors.line),
+                        modifier = Modifier
+                            .width(340.dp)
+                            .fillMaxHeight(),
                     ) {
-                        Box {
-                            IconButton(onClick = { showAttachMenu = true }) {
-                                Icon(Icons.Default.Add, contentDescription = "更多选项", tint = colors.fgMuted)
-                            }
-                            DropdownMenu(expanded = showAttachMenu, onDismissRequest = { showAttachMenu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("上传本地文件") },
-                                    leadingIcon = { Icon(Icons.Default.UploadFile, contentDescription = null) },
-                                    onClick = {
-                                        showAttachMenu = false
-                                        filePickerLauncher.launch(arrayOf("*/*"))
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("从文件库选择") },
-                                    leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
-                                    onClick = {
-                                        showAttachMenu = false
-                                        showLibraryPicker = true
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("附加技能 (${ui.selectedSkillNames.size})") },
-                                    leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
-                                    onClick = {
-                                        showAttachMenu = false
-                                        showSkillPicker = true
-                                    },
-                                )
-                            }
-                        }
-
-                        OutlinedTextField(
-                            value = inputText,
-                            onValueChange = { inputText = it },
-                            placeholder = { Text("输入消息...") },
-                            maxLines = 5,
-                            shape = RoundedCornerShape(20.dp),
-                            modifier = Modifier.weight(1f),
-                        )
-
-                        Spacer(modifier = Modifier.width(6.dp))
-
-                        if (ui.streaming) {
-                            IconButton(
-                                onClick = { vm.stopRun() },
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .statusBarsPadding()
+                                .navigationBarsPadding(),
+                        ) {
+                            Row(
                                 modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .background(colors.danger),
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Icon(Icons.Default.Stop, contentDescription = "停止生成", tint = MaterialTheme.colorScheme.onError)
+                                Text("任务与文件", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = colors.fg, modifier = Modifier.weight(1f))
+                                IconButton(onClick = { showDesktopTaskPanel = false }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.Close, contentDescription = "关闭面板", tint = colors.fgMuted, modifier = Modifier.size(18.dp))
+                                }
                             }
-                        } else {
-                            val canSend = inputText.isNotBlank() || ui.attachedIds.isNotEmpty()
-                            IconButton(
-                                onClick = {
-                                    val text = inputText
-                                    inputText = ""
-                                    vm.sendMessage(text)
-                                },
-                                enabled = canSend,
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .background(if (canSend) MaterialTheme.colorScheme.primary else colors.surface),
-                            ) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.Send,
-                                    contentDescription = "发送",
-                                    tint = if (canSend) MaterialTheme.colorScheme.onPrimary else colors.fgFaint,
-                                )
-                            }
+                            TaskDetailContent(
+                                plan = sheetPlan,
+                                reasoning = sheetReasoning,
+                                files = ui.files,
+                                onOpenFile = { vm.openFilePreview(it) },
+                                onDeleteFile = { vm.deleteFile(it) },
+                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                            )
                         }
                     }
                 }
+            }
+
+                ComposerPlusMenuOverlay(
+                    visible = plusMenuExpanded,
+                    anchorBounds = { plusAnchorBounds },
+                    selectedSkillCount = ui.selectedSkillNames.size,
+                    showAttachMenu = showAttachMenu,
+                    onDismiss = dismissPlusMenu,
+                    onOpenAttachMenu = { showAttachMenu = true },
+                    onDismissAttachMenu = { showAttachMenu = false },
+                    onUploadLocalFile = {
+                        dismissPlusMenu()
+                        filePickerLauncher.launch(arrayOf("*/*"))
+                    },
+                    onPickFromLibrary = {
+                        dismissPlusMenu()
+                        showLibraryPicker = true
+                    },
+                    onOpenSkillPicker = {
+                        dismissPlusMenu()
+                        showSkillPicker = true
+                    },
+                )
+            }
+        }
+
+        if (isExpandedScreen) {
+            mainStage()
+        } else {
+            ModalNavigationDrawer(
+                drawerState = drawerState,
+                drawerContent = {
+                    ModalDrawerSheet(
+                        drawerContainerColor = colors.sidebar,
+                        windowInsets = WindowInsets(0),
+                        modifier = Modifier.width(292.dp),
+                    ) {
+                        SidebarContent(
+                            ui = ui,
+                            user = user,
+                            collapsed = false,
+                            showCloseButton = true,
+                            onCloseDrawer = { scope.launch { drawerState.close() } },
+                            onNewChat = {
+                                vm.startNewConversation()
+                                scope.launch { drawerState.close() }
+                            },
+                            onOpenSearch = { showSearch = true },
+                            onSelectConv = {
+                                vm.openConversation(it)
+                                scope.launch { drawerState.close() }
+                            },
+                            onTogglePin = { id, pin -> vm.togglePin(id, pin) },
+                            onRename = { renameTarget = it },
+                            onDelete = { deleteTarget = it },
+                            onOpenSettings = {
+                                scope.launch { drawerState.close() }
+                                onOpenSettings()
+                            },
+                        )
+                    }
+                },
+            ) {
+                mainStage()
             }
         }
     }
@@ -694,21 +958,24 @@ fun ChatScreen(
         var newTitle by remember(conv.id) { mutableStateOf(conv.title) }
         AlertDialog(
             onDismissRequest = { renameTarget = null },
-            title = { Text("重命名对话") },
+            containerColor = colors.canvas,
+            title = { Text("重命名对话", fontWeight = FontWeight.SemiBold, color = colors.fg) },
             text = {
-                OutlinedTextField(
+                WhitzTextField(
                     value = newTitle,
                     onValueChange = { newTitle = it },
-                    singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
             },
             dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("取消") } },
             confirmButton = {
-                Button(onClick = {
-                    vm.renameConversation(conv.id, newTitle)
-                    renameTarget = null
-                }) { Text("保存") }
+                Button(
+                    onClick = {
+                        vm.renameConversation(conv.id, newTitle)
+                        renameTarget = null
+                    },
+                    shapes = ButtonDefaults.shapesFor(36.dp),
+                ) { Text("保存") }
             },
         )
     }
@@ -716,15 +983,520 @@ fun ChatScreen(
     deleteTarget?.let { conv ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
-            title = { Text("删除对话") },
-            text = { Text("确定要删除「${conv.title}」吗？删除后无法恢复。") },
+            containerColor = colors.canvas,
+            title = { Text("删除对话", fontWeight = FontWeight.SemiBold, color = colors.fg) },
+            text = { Text("确定要删除「${conv.title}」吗？删除后无法恢复。", color = colors.fgMuted) },
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } },
             confirmButton = {
-                Button(onClick = {
-                    vm.deleteConversation(conv.id)
-                    deleteTarget = null
-                }) { Text("删除") }
+                Button(
+                    onClick = {
+                        vm.deleteConversation(conv.id)
+                        deleteTarget = null
+                    },
+                    shapes = ButtonDefaults.shapesFor(36.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.danger),
+                ) { Text("删除") }
             },
         )
     }
 }
+
+@Composable
+private fun SidebarContent(
+    ui: ChatUiState,
+    user: User?,
+    collapsed: Boolean,
+    showCloseButton: Boolean,
+    onCloseDrawer: () -> Unit,
+    onNewChat: () -> Unit,
+    onOpenSearch: () -> Unit,
+    onSelectConv: (String) -> Unit,
+    onTogglePin: (String, Boolean) -> Unit,
+    onRename: (Conversation) -> Unit,
+    onDelete: (Conversation) -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .padding(horizontal = 10.dp),
+    ) {
+        // Brand Header
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (collapsed) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(onClick = onNewChat),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    WhitzLogoMark(modifier = Modifier.size(26.dp))
+                }
+            } else {
+                WhitzBrandMark(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable(onClick = onNewChat)
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                if (showCloseButton) {
+                    IconButton(onClick = onCloseDrawer, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭侧栏", tint = colors.fgFaint, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+
+        // Action Buttons: New Chat & Search
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onNewChat)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "新建对话", tint = colors.fg, modifier = Modifier.size(20.dp))
+                if (!collapsed) {
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("新建对话", fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, color = colors.fg)
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onOpenSearch)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Search, contentDescription = "搜索对话", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
+                if (!collapsed) {
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("搜索对话", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Conversation List
+        if (collapsed) {
+            Spacer(modifier = Modifier.weight(1f))
+        } else {
+            val pinned = remember(ui.conversations) { ui.conversations.filter { it.isPinned } }
+            val recent = remember(ui.conversations) { ui.conversations.filterNot { it.isPinned } }
+
+            if (ui.conversationsLoading && ui.conversations.isEmpty()) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    WhitzLoadingIndicator(size = 24.dp)
+                }
+            } else if (ui.conversations.isEmpty()) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text("暂无历史对话", color = colors.fgFaint, fontSize = 13.sp)
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    if (pinned.isNotEmpty()) {
+                        item(key = "hdr-pinned") {
+                            Text(
+                                text = "置顶对话",
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = colors.fgFaint,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            )
+                        }
+                        items(pinned, key = { it.id }) { conv ->
+                            ConversationRow(
+                                conv = conv,
+                                selected = conv.id == ui.currentConvId,
+                                onSelect = { onSelectConv(conv.id) },
+                                onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
+                                onRename = { onRename(conv) },
+                                onDelete = { onDelete(conv) },
+                            )
+                        }
+                    }
+
+                    if (recent.isNotEmpty()) {
+                        if (pinned.isNotEmpty()) {
+                            item(key = "hdr-recent") {
+                                Text(
+                                    text = "最近对话",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = colors.fgFaint,
+                                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 4.dp),
+                                )
+                            }
+                        }
+                        items(recent, key = { it.id }) { conv ->
+                            ConversationRow(
+                                conv = conv,
+                                selected = conv.id == ui.currentConvId,
+                                onSelect = { onSelectConv(conv.id) },
+                                onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
+                                onRename = { onRename(conv) },
+                                onDelete = { onDelete(conv) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalDivider(color = colors.line)
+
+        // Footer: User & Settings (with navigationBarsPadding for gesture bar penetration)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp, bottom = navBottom + 10.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .clickable(onClick = onOpenSettings)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (!user?.avatarUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = user?.avatarUrl,
+                    contentDescription = "头像",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(34.dp).clip(CircleShape),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = (user?.displayName?.firstOrNull() ?: 'U').uppercase(),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                    )
+                }
+            }
+            if (!collapsed) {
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = user?.displayName ?: "未登录",
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.fg,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    val creditsLabel = ui.credits?.let { "${it.tierLabel} · 剩余 ${it.remaining} 积分" }
+                        ?: (user?.email ?: "")
+                    Text(
+                        text = creditsLabel,
+                        fontSize = 11.sp,
+                        color = colors.fgFaint,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Icon(Icons.Default.Settings, contentDescription = "设置", tint = colors.fgMuted, modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConversationRow(
+    conv: Conversation,
+    selected: Boolean,
+    onSelect: () -> Unit,
+    onTogglePin: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    var menuOpen by remember(conv.id) { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) colors.hover else colors.sidebar)
+            .clickable(onClick = onSelect)
+            .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (conv.isPinned) {
+            Icon(
+                Icons.Default.PushPin,
+                contentDescription = "已置顶",
+                tint = colors.fgFaint,
+                modifier = Modifier.size(13.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = conv.title.ifBlank { "新对话" },
+                fontSize = 13.5.sp,
+                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                color = if (selected) colors.fg else colors.fgMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            val time = DateTimeUtils.formatShort(conv.lastMessageAt ?: conv.updatedAt)
+            if (time.isNotBlank()) {
+                Text(time, fontSize = 10.5.sp, color = colors.fgFaint)
+            }
+        }
+        Box {
+            IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.MoreHoriz, contentDescription = "更多", tint = colors.fgFaint, modifier = Modifier.size(16.dp))
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text(if (conv.isPinned) "取消置顶" else "置顶对话") },
+                    leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null) },
+                    onClick = {
+                        menuOpen = false
+                        onTogglePin()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("重命名") },
+                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                    onClick = {
+                        menuOpen = false
+                        onRename()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("删除", color = colors.danger) },
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = colors.danger) },
+                    onClick = {
+                        menuOpen = false
+                        onDelete()
+                    },
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun ComposerPlusMenuOverlay(
+    visible: Boolean,
+    anchorBounds: () -> Rect?,
+    selectedSkillCount: Int,
+    showAttachMenu: Boolean,
+    onDismiss: () -> Unit,
+    onOpenAttachMenu: () -> Unit,
+    onDismissAttachMenu: () -> Unit,
+    onUploadLocalFile: () -> Unit,
+    onPickFromLibrary: () -> Unit,
+    onOpenSkillPicker: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val spatialFloatSpec = MaterialTheme.motionScheme.fastSpatialSpec<Float>()
+    val effectsSpec = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+
+    // Scrim outside the card: tapping any other area dismisses the card
+    if (visible) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                ),
+        )
+    }
+
+    // Separated full-stage overlay pass so opening the card never shifts the composer or message list
+    Layout(
+        modifier = Modifier.fillMaxSize(),
+        content = {
+            AnimatedVisibility(
+                visible = visible && anchorBounds() != null,
+                enter = scaleIn(
+                    initialScale = 0.55f,
+                    transformOrigin = TransformOrigin(0f, 1f),
+                    animationSpec = spatialFloatSpec,
+                ) + fadeIn(animationSpec = effectsSpec),
+                exit = scaleOut(
+                    targetScale = 0.55f,
+                    transformOrigin = TransformOrigin(0f, 1f),
+                    animationSpec = spatialFloatSpec,
+                ) + fadeOut(animationSpec = effectsSpec),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = colors.hover,
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    ),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .width(172.dp)
+                            .padding(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Box {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(42.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable(onClick = onOpenAttachMenu)
+                                    .padding(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    Icons.Default.AttachFile,
+                                    contentDescription = "文件上传",
+                                    tint = colors.fg,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "文件上传",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = colors.fg,
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showAttachMenu,
+                                onDismissRequest = onDismissAttachMenu,
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("上传本地文件") },
+                                    leadingIcon = { Icon(Icons.Default.UploadFile, contentDescription = null) },
+                                    onClick = onUploadLocalFile,
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("从文件库选择") },
+                                    leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
+                                    onClick = onPickFromLibrary,
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(42.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (selectedSkillCount > 0) colors.active else Color.Transparent)
+                                .clickable(onClick = onOpenSkillPicker)
+                                .padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Default.AutoAwesome,
+                                contentDescription = "技能",
+                                tint = colors.fg,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = if (selectedSkillCount > 0) "技能 ($selectedSkillCount)" else "技能",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = colors.fg,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+    ) { measurables, constraints ->
+        val placeables = measurables.map { it.measure(constraints.copy(minWidth = 0, minHeight = 0)) }
+        layout(constraints.maxWidth, constraints.maxHeight) {
+            val bounds = anchorBounds()
+            if (bounds != null) {
+                placeables.forEach { placeable ->
+                    val x = bounds.left.roundToInt().coerceIn(
+                        0,
+                        (constraints.maxWidth - placeable.width).coerceAtLeast(0),
+                    )
+                    // Align bottom-left of card with bottom-left of '+' button so it expands upward in place
+                    val y = (bounds.bottom.roundToInt() - placeable.height).coerceAtLeast(0)
+                    placeable.place(x, y)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComposerSendOrStopButton(
+    streaming: Boolean,
+    canSend: Boolean,
+    onStop: () -> Unit,
+    onSend: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    if (streaming) {
+        IconButton(
+            onClick = onStop,
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(colors.canvas),
+        ) {
+            Icon(
+                Icons.Default.Stop,
+                contentDescription = "停止生成",
+                tint = colors.fg,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    } else {
+        IconButton(
+            onClick = onSend,
+            enabled = canSend,
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(if (canSend) MaterialTheme.colorScheme.primary else colors.hover),
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowForward,
+                contentDescription = "发送",
+                tint = if (canSend) MaterialTheme.colorScheme.onPrimary else colors.fgFaint,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+

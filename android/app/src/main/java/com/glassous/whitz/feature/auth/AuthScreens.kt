@@ -1,20 +1,25 @@
 package com.glassous.whitz.feature.auth
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -25,15 +30,12 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -45,6 +47,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -53,65 +58,134 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.glassous.whitz.core.network.LogoutReason
 import com.glassous.whitz.ui.theme.LocalWhitzColors
+import com.glassous.whitz.ui.theme.WhitzBrandMark
+import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
+import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
+import com.glassous.whitz.ui.theme.WhitzTextField
+import kotlin.math.hypot
 
 @Composable
 private fun AuthScaffold(
     title: String,
     subtitle: String,
     onBack: (() -> Unit)? = null,
+    footer: (@Composable () -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     val colors = LocalWhitzColors.current
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(colors.canvas)
-            .systemBarsPadding()
-            .imePadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .background(colors.canvas),
     ) {
-        if (onBack != null) {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = colors.fg)
+        // Web-aligned ambient radial aura + masked dot-grid backdrop (edge-to-edge)
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val auraCenter = Offset(size.width * 0.5f, size.height * 0.08f)
+            val auraRadius = size.width.coerceAtLeast(size.height) * 0.58f
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        colors.surface.copy(alpha = if (colors.isDark) 0.45f else 0.9f),
+                        Color.Transparent,
+                    ),
+                    center = auraCenter,
+                    radius = auraRadius,
+                ),
+                radius = auraRadius,
+                center = auraCenter,
+            )
+
+            val step = 28.dp.toPx()
+            val maxDist = hypot(size.width * 0.45f, size.height * 0.35f)
+            val origin = Offset(size.width * 0.5f, size.height * 0.28f)
+            val dotAlphaBase = if (colors.isDark) 0.22f else 0.42f
+            var x = step * 0.5f
+            while (x < size.width) {
+                var y = step * 0.5f
+                while (y < size.height * 0.72f) {
+                    val d = hypot(x - origin.x, y - origin.y)
+                    val mask = (1f - (d / maxDist)).coerceIn(0f, 1f)
+                    if (mask > 0.04f) {
+                        drawCircle(
+                            color = colors.lineStrong.copy(alpha = dotAlphaBase * mask),
+                            radius = 1.dp.toPx(),
+                            center = Offset(x, y),
+                        )
+                    }
+                    y += step
                 }
+                x += step
             }
-        } else {
-            Spacer(modifier = Modifier.height(24.dp))
         }
 
-        Box(
+        Column(
             modifier = Modifier
-                .size(52.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(MaterialTheme.colorScheme.primary),
-            contentAlignment = Alignment.Center,
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text(
-                text = "W",
-                color = MaterialTheme.colorScheme.onPrimary,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            text = title,
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            color = colors.fg,
-        )
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = subtitle,
-            fontSize = 14.sp,
-            color = colors.fgMuted,
-        )
-        Spacer(modifier = Modifier.height(24.dp))
-        Column(modifier = Modifier.fillMaxWidth()) {
-            content()
+            // Top bar matching AuthLayout.vue
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (onBack != null) {
+                    IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "返回",
+                            tint = colors.fg,
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
+                WhitzBrandMark(modifier = Modifier.padding(vertical = 4.dp))
+            }
+
+            Spacer(modifier = Modifier.weight(1f, fill = true))
+
+            // Centered elevated card (max 416dp)
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 416.dp),
+                shape = RoundedCornerShape(24.dp),
+                color = colors.canvas.copy(alpha = 0.96f),
+                border = BorderStroke(1.dp, colors.line),
+                shadowElevation = if (colors.isDark) 10.dp else 6.dp,
+            ) {
+                Column(modifier = Modifier.padding(24.dp)) {
+                    Text(
+                        text = title,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = (-0.4).sp,
+                        color = colors.fg,
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = subtitle,
+                        fontSize = 13.5.sp,
+                        lineHeight = 19.sp,
+                        color = colors.fgMuted,
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    content()
+                }
+            }
+
+            if (footer != null) {
+                Spacer(modifier = Modifier.height(18.dp))
+                footer()
+            }
+
+            Spacer(modifier = Modifier.weight(1f, fill = true))
         }
     }
 }
@@ -124,12 +198,12 @@ private fun ErrorBanner(message: String?) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = 12.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(colors.dangerWeak)
-            .border(1.dp, colors.danger.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+            .border(1.dp, colors.danger.copy(alpha = 0.28f), RoundedCornerShape(12.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
-        Text(text = message, color = colors.danger, fontSize = 13.sp)
+        Text(text = message, color = colors.danger, fontSize = 13.sp, lineHeight = 18.sp)
     }
 }
 
@@ -143,11 +217,41 @@ private fun InfoBanner(message: String?, isWarning: Boolean = false) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = 12.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(bg)
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
-        Text(text = message, color = fg, fontSize = 13.sp)
+        Text(text = message, color = fg, fontSize = 13.sp, lineHeight = 18.sp)
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun AuthPrimaryButton(
+    text: String,
+    loading: Boolean,
+    onClick: () -> Unit,
+) {
+    Button(
+        onClick = onClick,
+        shapes = ButtonDefaults.shapesFor(48.dp),
+        enabled = !loading,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+        ),
+    ) {
+        if (loading) {
+            WhitzLoadingIndicator(
+                size = 22.dp,
+                color = MaterialTheme.colorScheme.onPrimary,
+            )
+        } else {
+            Text(text, fontWeight = FontWeight.Medium, fontSize = 15.sp)
+        }
     }
 }
 
@@ -160,6 +264,7 @@ fun LoginScreen(
 ) {
     val ui by vm.ui.collectAsState()
     val logoutNotice by vm.logoutNotice.collectAsState()
+    val colors = LocalWhitzColors.current
     var isCodeMode by remember { mutableStateOf(false) }
     var account by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -169,6 +274,17 @@ fun LoginScreen(
     AuthScaffold(
         title = "欢迎回来",
         subtitle = "登录你的 Whitz 账号，继续上次的对话",
+        footer = {
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("还没有账号？", fontSize = 13.sp, color = colors.fgMuted)
+                TextButton(onClick = onNavigateRegister) {
+                    Text("立即注册", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = colors.fg)
+                }
+            }
+        },
     ) {
         logoutNotice?.let { notice ->
             InfoBanner(
@@ -177,73 +293,64 @@ fun LoginScreen(
             )
         }
 
-        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-            SegmentedButton(
-                selected = !isCodeMode,
-                onClick = {
-                    isCodeMode = false
-                    vm.clearError()
-                    vm.clearNotice()
-                },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-            ) { Text("密码登录") }
-            SegmentedButton(
-                selected = isCodeMode,
-                onClick = {
-                    isCodeMode = true
-                    vm.clearError()
-                    vm.clearNotice()
-                },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-            ) { Text("验证码登录") }
-        }
+        WhitzConnectedRadioGroup(
+            options = listOf(false to "密码登录", true to "验证码登录"),
+            selected = isCodeMode,
+            onSelect = {
+                isCodeMode = it
+                vm.clearError()
+                vm.clearNotice()
+            },
+        )
 
         Spacer(modifier = Modifier.height(16.dp))
         ErrorBanner(ui.error)
         InfoBanner(ui.codeNotice)
 
-        OutlinedTextField(
+        WhitzTextField(
             value = account,
             onValueChange = { account = it; vm.clearError() },
-            label = { Text(if (isCodeMode) "邮箱地址" else "邮箱或用户名") },
-            singleLine = true,
+            label = if (isCodeMode) "邮箱地址" else "邮箱或用户名",
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(12.dp))
 
         if (!isCodeMode) {
-            OutlinedTextField(
+            WhitzTextField(
                 value = password,
                 onValueChange = { password = it; vm.clearError() },
-                label = { Text("登录密码") },
-                singleLine = true,
+                label = "登录密码",
                 visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
                     IconButton(onClick = { showPassword = !showPassword }) {
                         Icon(
                             if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
                             contentDescription = "切换密码可见",
+                            tint = colors.fgMuted,
                         )
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
             )
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onNavigateForgot) {
-                    Text("忘记密码？")
+                TextButton(
+                    onClick = onNavigateForgot,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Text("忘记密码？", fontSize = 12.5.sp, color = colors.fgMuted)
                 }
             }
+            Spacer(modifier = Modifier.height(4.dp))
         } else {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                OutlinedTextField(
+                WhitzTextField(
                     value = code,
                     onValueChange = { code = it; vm.clearError() },
-                    label = { Text("邮箱验证码") },
-                    singleLine = true,
+                    label = "邮箱验证码",
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f),
                 )
@@ -251,6 +358,8 @@ fun LoginScreen(
                 OutlinedButton(
                     onClick = { vm.sendEmailCode(account, "login") },
                     enabled = !ui.sendingCode && ui.cooldown == 0,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, colors.lineStrong),
                     modifier = Modifier.height(54.dp),
                 ) {
                     Text(
@@ -258,14 +367,18 @@ fun LoginScreen(
                             ui.sendingCode -> "发送中"
                             ui.cooldown > 0 -> "${ui.cooldown}s"
                             else -> "获取验证码"
-                        }
+                        },
+                        fontSize = 13.sp,
+                        color = colors.fg,
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(18.dp))
         }
 
-        Button(
+        AuthPrimaryButton(
+            text = "登录",
+            loading = ui.loading,
             onClick = {
                 vm.dismissLogoutNotice()
                 if (isCodeMode) {
@@ -274,37 +387,7 @@ fun LoginScreen(
                     vm.loginWithPassword(account, password, onLoginSuccess)
                 }
             },
-            enabled = !ui.loading,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-            ),
-        ) {
-            if (ui.loading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.onPrimary,
-                )
-            } else {
-                Text("登录", fontWeight = FontWeight.Medium)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("还没有账号？", fontSize = 14.sp, color = LocalWhitzColors.current.fgMuted)
-            TextButton(onClick = onNavigateRegister) {
-                Text("立即注册", fontWeight = FontWeight.SemiBold)
-            }
-        }
+        )
     }
 }
 
@@ -315,6 +398,7 @@ fun RegisterScreen(
     onBack: () -> Unit,
 ) {
     val ui by vm.ui.collectAsState()
+    val colors = LocalWhitzColors.current
     var email by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
     var displayName by remember { mutableStateOf("") }
@@ -323,28 +407,26 @@ fun RegisterScreen(
 
     AuthScaffold(
         title = "创建账号",
-        subtitle = "注册 Whitz 账号开始使用 AI 助理",
+        subtitle = "注册 Whitz 账号，开启智能对话体验",
         onBack = onBack,
     ) {
         ErrorBanner(ui.error)
         InfoBanner(ui.codeNotice)
 
-        OutlinedTextField(
+        WhitzTextField(
             value = email,
             onValueChange = { email = it; vm.clearError() },
-            label = { Text("邮箱地址") },
-            singleLine = true,
+            label = "邮箱地址",
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(12.dp))
 
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
+            WhitzTextField(
                 value = code,
                 onValueChange = { code = it; vm.clearError() },
-                label = { Text("邮箱验证码") },
-                singleLine = true,
+                label = "邮箱验证码",
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.weight(1f),
             )
@@ -352,6 +434,8 @@ fun RegisterScreen(
             OutlinedButton(
                 onClick = { vm.sendEmailCode(email, "register") },
                 enabled = !ui.sendingCode && ui.cooldown == 0,
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, colors.lineStrong),
                 modifier = Modifier.height(54.dp),
             ) {
                 Text(
@@ -359,32 +443,33 @@ fun RegisterScreen(
                         ui.sendingCode -> "发送中"
                         ui.cooldown > 0 -> "${ui.cooldown}s"
                         else -> "获取验证码"
-                    }
+                    },
+                    fontSize = 13.sp,
+                    color = colors.fg,
                 )
             }
         }
         Spacer(modifier = Modifier.height(12.dp))
 
-        OutlinedTextField(
+        WhitzTextField(
             value = displayName,
             onValueChange = { displayName = it; vm.clearError() },
-            label = { Text("昵称") },
-            singleLine = true,
+            label = "昵称",
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(12.dp))
 
-        OutlinedTextField(
+        WhitzTextField(
             value = password,
             onValueChange = { password = it; vm.clearError() },
-            label = { Text("设置密码（至少 6 位）") },
-            singleLine = true,
+            label = "设置密码（至少 6 位）",
             visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = {
                 IconButton(onClick = { showPassword = !showPassword }) {
                     Icon(
                         if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
                         contentDescription = "切换密码可见",
+                        tint = colors.fgMuted,
                     )
                 }
             },
@@ -392,23 +477,11 @@ fun RegisterScreen(
         )
         Spacer(modifier = Modifier.height(20.dp))
 
-        Button(
+        AuthPrimaryButton(
+            text = "注册并登录",
+            loading = ui.loading,
             onClick = { vm.register(email, code, displayName, password, onRegisterSuccess) },
-            enabled = !ui.loading,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp),
-        ) {
-            if (ui.loading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.onPrimary,
-                )
-            } else {
-                Text("注册并登录", fontWeight = FontWeight.Medium)
-            }
-        }
+        )
     }
 }
 
@@ -419,6 +492,7 @@ fun ForgotPasswordScreen(
     onBack: () -> Unit,
 ) {
     val ui by vm.ui.collectAsState()
+    val colors = LocalWhitzColors.current
     var email by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
     var newPassword by remember { mutableStateOf("") }
@@ -432,22 +506,20 @@ fun ForgotPasswordScreen(
         ErrorBanner(ui.error)
         InfoBanner(ui.codeNotice)
 
-        OutlinedTextField(
+        WhitzTextField(
             value = email,
             onValueChange = { email = it; vm.clearError() },
-            label = { Text("注册邮箱") },
-            singleLine = true,
+            label = "注册邮箱",
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(12.dp))
 
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
+            WhitzTextField(
                 value = code,
                 onValueChange = { code = it; vm.clearError() },
-                label = { Text("邮箱验证码") },
-                singleLine = true,
+                label = "邮箱验证码",
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.weight(1f),
             )
@@ -455,6 +527,8 @@ fun ForgotPasswordScreen(
             OutlinedButton(
                 onClick = { vm.sendEmailCode(email, "reset_password") },
                 enabled = !ui.sendingCode && ui.cooldown == 0,
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, colors.lineStrong),
                 modifier = Modifier.height(54.dp),
             ) {
                 Text(
@@ -462,23 +536,25 @@ fun ForgotPasswordScreen(
                         ui.sendingCode -> "发送中"
                         ui.cooldown > 0 -> "${ui.cooldown}s"
                         else -> "获取验证码"
-                    }
+                    },
+                    fontSize = 13.sp,
+                    color = colors.fg,
                 )
             }
         }
         Spacer(modifier = Modifier.height(12.dp))
 
-        OutlinedTextField(
+        WhitzTextField(
             value = newPassword,
             onValueChange = { newPassword = it; vm.clearError() },
-            label = { Text("新密码（至少 6 位）") },
-            singleLine = true,
+            label = "新密码（至少 6 位）",
             visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = {
                 IconButton(onClick = { showPassword = !showPassword }) {
                     Icon(
                         if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
                         contentDescription = "切换密码可见",
+                        tint = colors.fgMuted,
                     )
                 }
             },
@@ -486,22 +562,10 @@ fun ForgotPasswordScreen(
         )
         Spacer(modifier = Modifier.height(20.dp))
 
-        Button(
+        AuthPrimaryButton(
+            text = "确认重置",
+            loading = ui.loading,
             onClick = { vm.resetPassword(email, code, newPassword, onResetSuccess) },
-            enabled = !ui.loading,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp),
-        ) {
-            if (ui.loading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.onPrimary,
-                )
-            } else {
-                Text("确认重置", fontWeight = FontWeight.Medium)
-            }
-        }
+        )
     }
 }

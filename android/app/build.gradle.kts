@@ -6,11 +6,7 @@ plugins {
 
 android {
     namespace = "com.glassous.whitz"
-    compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
-    }
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.glassous.whitz"
@@ -25,9 +21,13 @@ android {
 
     buildTypes {
         debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            resValue("string", "app_name", "Whitz Debug")
             buildConfigField("String", "API_BASE_URL", "\"https://whitzapi.kamisato.top/api\"")
         }
         release {
+            resValue("string", "app_name", "Whitz")
             optimization {
                 enable = false
             }
@@ -38,6 +38,7 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        resValues = true
     }
 
     compileOptions {
@@ -56,7 +57,10 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material3.window.size)
+    implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.androidx.compose.material.icons)
+    implementation(libs.haze)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
