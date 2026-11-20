@@ -34,8 +34,22 @@ pnpm-debug.log*
 
 # --- Local scratch / logs ---
 .scratch/
+.scratch-*
 logs/
 *.log
+
+# --- Android / Gradle ---
+.kotlin/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.jks
+*.keystore
+*.hprof
+android/.gradle/
+android/**/build/
+android/local.properties
 
 # --- Editor / OS ---
 .DS_Store
