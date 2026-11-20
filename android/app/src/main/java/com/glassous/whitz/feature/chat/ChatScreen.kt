@@ -97,6 +97,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -181,7 +182,7 @@ fun ChatScreen(
     var showSearch by remember { mutableStateOf(false) }
     var showSkillPicker by remember { mutableStateOf(false) }
     var showLibraryPicker by remember { mutableStateOf(false) }
-    var desktopSidebarCollapsed by remember { mutableStateOf(false) }
+    var desktopSidebarCollapsed by rememberSaveable { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
 
     var renameTarget by remember { mutableStateOf<Conversation?>(null) }
@@ -270,18 +271,36 @@ fun ChatScreen(
         (WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 68.dp).roundToPx()
     }
     val conversationScrollKey = ui.currentConvId ?: "local-new"
-    var revealedConversationKey by remember { mutableStateOf<String?>(null) }
+    var revealedConversationKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var lastScrolledMsgCount by rememberSaveable { mutableIntStateOf(0) }
+    var lastScrolledLastLen by rememberSaveable { mutableIntStateOf(0) }
+    var isInitialEffect by remember { mutableStateOf(true) }
 
     val lastMsgContentLen = visibleMessages.lastOrNull()?.content?.length ?: 0
     LaunchedEffect(conversationScrollKey, visibleMessages.size, lastMsgContentLen) {
-        if (visibleMessages.isEmpty()) return@LaunchedEffect
+        if (visibleMessages.isEmpty()) {
+            revealedConversationKey = null
+            lastScrolledMsgCount = 0
+            lastScrolledLastLen = 0
+            isInitialEffect = false
+            return@LaunchedEffect
+        }
         val lastIndex = visibleMessages.lastIndex
-        // Entering a conversation (or returning from another page) jumps straight to the top of the
-        // newest message, aligned with the web client. Streaming updates animate from there.
+        // Entering a new conversation jumps straight to the top of the newest message.
+        // Returning from another page (steps or settings) preserves the reader's current scroll position.
         if (revealedConversationKey != conversationScrollKey) {
             revealedConversationKey = conversationScrollKey
+            lastScrolledMsgCount = visibleMessages.size
+            lastScrolledLastLen = lastMsgContentLen
+            isInitialEffect = false
             listState.scrollToItem(lastIndex, scrollOffset = -revealTopOffsetPx)
-        } else {
+        } else if (isInitialEffect) {
+            lastScrolledMsgCount = visibleMessages.size
+            lastScrolledLastLen = lastMsgContentLen
+            isInitialEffect = false
+        } else if (visibleMessages.size != lastScrolledMsgCount || lastMsgContentLen != lastScrolledLastLen) {
+            lastScrolledMsgCount = visibleMessages.size
+            lastScrolledLastLen = lastMsgContentLen
             listState.animateScrollToItem(lastIndex, scrollOffset = -revealTopOffsetPx)
         }
     }
@@ -986,10 +1005,7 @@ fun ChatScreen(
                             onTogglePin = { id, pin -> vm.togglePin(id, pin) },
                             onRename = { renameTarget = it },
                             onDelete = { deleteTarget = it },
-                            onOpenSettings = {
-                                scope.launch { drawerState.close() }
-                                onOpenSettings()
-                            },
+                            onOpenSettings = onOpenSettings,
                         )
                     }
                 },

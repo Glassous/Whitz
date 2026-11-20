@@ -268,14 +268,21 @@ class SettingsViewModel(
         }
     }
 
-    fun addMemoryEntry(content: String, target: String = "memory") {
+    fun addMemoryEntry(
+        content: String,
+        target: String = "memory",
+        onSuccess: () -> Unit = {},
+    ) {
         if (content.isBlank()) return
         viewModelScope.launch {
+            _ui.update { it.copy(loading = true, message = null, error = null) }
             try {
                 container.network.api.createMemoryEntry(MemoryEntryRequest(content.trim(), target = target))
+                _ui.update { it.copy(loading = false, message = "已添加记忆") }
                 loadMemory()
+                onSuccess()
             } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "添加记忆失败")) }
+                _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "添加记忆失败")) }
             }
         }
     }
@@ -351,15 +358,22 @@ class SettingsViewModel(
         }
     }
 
-    fun createSkill(name: String, description: String, content: String) {
+    fun createSkill(
+        name: String,
+        description: String,
+        content: String,
+        onSuccess: () -> Unit = {},
+    ) {
         if (name.isBlank() || content.isBlank()) return
         viewModelScope.launch {
+            _ui.update { it.copy(loading = true, message = null, error = null) }
             try {
                 container.network.api.createSkill(CreateSkillRequest(name.trim(), description.trim(), content = content))
+                _ui.update { it.copy(loading = false, message = "技能已创建") }
                 loadSkills()
-                _ui.update { it.copy(message = "技能已创建") }
+                onSuccess()
             } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "创建技能失败")) }
+                _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "创建技能失败")) }
             }
         }
     }
@@ -415,6 +429,7 @@ class SettingsViewModel(
         name: String? = null,
         ref: String? = null,
         path: String? = null,
+        onSuccess: () -> Unit = {},
     ) {
         val url = repoUrl.trim()
         if (url.isBlank()) return
@@ -432,6 +447,7 @@ class SettingsViewModel(
                 )
                 _ui.update { it.copy(loading = false, githubPreview = null, message = "GitHub 技能安装成功") }
                 loadSkills()
+                onSuccess()
             } catch (t: Throwable) {
                 _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "安装技能失败")) }
             }

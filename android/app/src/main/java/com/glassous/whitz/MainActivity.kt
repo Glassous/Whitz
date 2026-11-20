@@ -20,9 +20,12 @@ import androidx.compose.runtime.remember
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavBackStackEntry
+import androidx.navigation.NavController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.navigation
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.glassous.whitz.feature.auth.AuthViewModel
@@ -32,8 +35,20 @@ import com.glassous.whitz.feature.auth.RegisterScreen
 import com.glassous.whitz.feature.chat.ChatScreen
 import com.glassous.whitz.feature.chat.ChatViewModel
 import com.glassous.whitz.feature.chat.TaskDetailScreen
-import com.glassous.whitz.feature.settings.SettingsRootScreen
+import com.glassous.whitz.feature.settings.AddMemoryScreen
+import com.glassous.whitz.feature.settings.CreateSkillScreen
+import com.glassous.whitz.feature.settings.DevicesSettingsScreen
+import com.glassous.whitz.feature.settings.GithubSkillInstallScreen
+import com.glassous.whitz.feature.settings.LibrarySettingsScreen
+import com.glassous.whitz.feature.settings.MembershipSettingsScreen
+import com.glassous.whitz.feature.settings.MemorySettingsScreen
+import com.glassous.whitz.feature.settings.PasswordSettingsScreen
+import com.glassous.whitz.feature.settings.PersonaSettingsScreen
+import com.glassous.whitz.feature.settings.ProfileSettingsScreen
+import com.glassous.whitz.feature.settings.SettingsHomeScreen
+import com.glassous.whitz.feature.settings.SettingsRoutes
 import com.glassous.whitz.feature.settings.SettingsViewModel
+import com.glassous.whitz.feature.settings.SkillsSettingsScreen
 import com.glassous.whitz.ui.theme.WhitzTheme
 import com.glassous.whitz.ui.theme.isWhitzDarkTheme
 
@@ -152,7 +167,7 @@ private fun WhitzRoot(container: AppContainer) {
             val chatVm: ChatViewModel = viewModel(factory = factory)
             ChatScreen(
                 vm = chatVm,
-                onOpenSettings = { navController.navigate("settings") },
+                onOpenSettings = { navController.navigate(SettingsRoutes.GRAPH) },
                 onOpenTaskDetails = { tab -> navController.navigate("task_details?tab=$tab") },
             )
         }
@@ -178,17 +193,128 @@ private fun WhitzRoot(container: AppContainer) {
                 )
             }
         }
-        composable("settings") {
-            val settingsVm: SettingsViewModel = viewModel(factory = factory)
-            SettingsRootScreen(
-                vm = settingsVm,
-                onBackToChat = { navController.popBackStack() },
-                onLoggedOut = {
-                    navController.navigate("login") {
-                        popUpTo(0) { inclusive = true }
-                    }
-                },
-            )
+        navigation(
+            route = SettingsRoutes.GRAPH,
+            startDestination = SettingsRoutes.HOME,
+        ) {
+            composable(SettingsRoutes.HOME) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    SettingsHomeScreen(
+                        vm = vm,
+                        onNavigateRoute = { route -> navController.navigate(route) },
+                        onBackToChat = { navController.popBackStack() },
+                        onLoggedOut = {
+                            navController.navigate("login") {
+                                popUpTo(0) { inclusive = true }
+                            }
+                        },
+                    )
+                }
+            }
+            composable(SettingsRoutes.PROFILE) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    ProfileSettingsScreen(
+                        vm = vm,
+                        onOpenPassword = { navController.navigate(SettingsRoutes.PASSWORD) },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.PASSWORD) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    PasswordSettingsScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.LIBRARY) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    LibrarySettingsScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.MEMORY) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    MemorySettingsScreen(
+                        vm = vm,
+                        onOpenAddMemory = { navController.navigate(SettingsRoutes.MEMORY_ADD) },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.MEMORY_ADD) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    AddMemoryScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.SKILLS) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    SkillsSettingsScreen(
+                        vm = vm,
+                        onOpenCreateSkill = { navController.navigate(SettingsRoutes.SKILLS_CREATE) },
+                        onOpenGithubInstall = { navController.navigate(SettingsRoutes.SKILLS_GITHUB) },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.SKILLS_CREATE) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    CreateSkillScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.SKILLS_GITHUB) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    GithubSkillInstallScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.MEMBERSHIP) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    MembershipSettingsScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.PERSONA) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    PersonaSettingsScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.DEVICES) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    DevicesSettingsScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun rememberSharedSettingsVm(
+    navController: NavController,
+    entry: NavBackStackEntry,
+    factory: ViewModelProvider.Factory,
+): SettingsViewModel? {
+    val parentEntry = remember(entry) {
+        runCatching { navController.getBackStackEntry(SettingsRoutes.GRAPH) }.getOrNull()
+    } ?: return null
+    return viewModel(parentEntry, factory = factory)
 }
