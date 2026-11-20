@@ -154,8 +154,8 @@ class AuthViewModel(
             _ui.value = _ui.value.copy(error = "请输入昵称")
             return
         }
-        if (password.length < 6) {
-            _ui.value = _ui.value.copy(error = "密码长度至少 6 位")
+        if (password.length < 8) {
+            _ui.value = _ui.value.copy(error = "密码长度至少 8 位")
             return
         }
         viewModelScope.launch {
@@ -184,8 +184,8 @@ class AuthViewModel(
             _ui.value = _ui.value.copy(error = "请输入邮箱验证码")
             return
         }
-        if (newPassword.length < 6) {
-            _ui.value = _ui.value.copy(error = "新密码长度至少 6 位")
+        if (newPassword.length < 8) {
+            _ui.value = _ui.value.copy(error = "新密码长度至少 8 位")
             return
         }
         viewModelScope.launch {

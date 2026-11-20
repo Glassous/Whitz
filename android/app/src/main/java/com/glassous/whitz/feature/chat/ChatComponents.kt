@@ -1,6 +1,8 @@
 package com.glassous.whitz.feature.chat
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -28,19 +30,21 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Terminal
@@ -53,6 +57,7 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -65,12 +70,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
@@ -91,6 +98,7 @@ import com.glassous.whitz.core.model.Message
 import com.glassous.whitz.core.model.PendingControl
 import com.glassous.whitz.core.model.Plan
 import com.glassous.whitz.core.model.ReasoningBlock
+import com.glassous.whitz.core.model.ReasoningTool
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.ui.theme.LocalWhitzColors
@@ -104,6 +112,10 @@ fun MessageBubble(
     message: Message,
     streaming: Boolean,
     isActiveTurn: Boolean,
+    isSelectedTurn: Boolean = false,
+    liveLabel: String? = null,
+    turnPlan: Plan? = null,
+    turnReasoning: List<ReasoningBlock>? = null,
     convFiles: List<ConversationFile>,
     onCopy: (String) -> Unit,
     onRegenerate: (String) -> Unit,
@@ -274,77 +286,56 @@ fun MessageBubble(
             }
         }
 
-        "tool" -> {
-            val isRunning = message.status == "running"
-            val isFailed = message.status == "failed"
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(colors.surface.copy(alpha = 0.72f))
-                    .border(1.dp, colors.line, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 9.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (isRunning) {
-                    WhitzLoadingIndicator(size = 16.dp)
-                } else {
-                    Icon(
-                        imageVector = if (isFailed) Icons.Default.ErrorOutline else Icons.Default.Terminal,
-                        contentDescription = null,
-                        tint = if (isFailed) colors.danger else colors.success,
-                        modifier = Modifier.size(15.dp),
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = message.toolName ?: "tool",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = colors.fg,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = when (message.status) {
-                        "running" -> "执行中"
-                        "failed" -> "失败"
-                        else -> "完成"
-                    },
-                    fontSize = 11.sp,
-                    color = if (isFailed) colors.danger else colors.fgFaint,
-                )
-            }
-        }
+        "tool" -> Unit
 
         else -> {
-            val hasReasoning = !message.toolPayload?.reasoning.isNullOrEmpty() || !message.toolPayload?.plan?.items.isNullOrEmpty()
+            val effectiveReasoning = turnReasoning ?: message.toolPayload?.reasoning.orEmpty()
+            val effectivePlan = turnPlan ?: message.toolPayload?.plan ?: derivePlanFromReasoning(effectiveReasoning)
+            val isLive = isActiveTurn && streaming
+            val isFailureOrCancelled = !isLive && (message.status == "failed" || message.status == "cancelled")
+            val stepsCount = computeStepsCount(effectivePlan, effectiveReasoning)
+            val hasStepsOrReasoning = effectiveReasoning.isNotEmpty() || !effectivePlan?.items.isNullOrEmpty()
             val artifacts = message.toolPayload?.artifacts.orEmpty()
 
             Column(modifier = Modifier.fillMaxWidth()) {
-                if (hasReasoning || (isActiveTurn && streaming)) {
+                if (hasStepsOrReasoning || isLive) {
+                    val primaryColor = MaterialTheme.colorScheme.primary
                     Row(
                         modifier = Modifier
-                            .padding(bottom = 8.dp)
+                            .padding(bottom = 10.dp)
                             .clip(RoundedCornerShape(999.dp))
-                            .background(colors.surface)
-                            .border(1.dp, colors.line, RoundedCornerShape(999.dp))
+                            .background(if (isSelectedTurn) primaryColor.copy(alpha = 0.14f) else colors.surface)
                             .clickable { onOpenTurnDetails(message.id) }
-                            .padding(horizontal = 11.dp, vertical = 6.dp),
+                            .padding(horizontal = 13.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (isActiveTurn && streaming) {
+                        if (isLive) {
                             WhitzLoadingIndicator(size = 14.dp)
-                        } else {
-                            Icon(Icons.Default.Psychology, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
                         }
-                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (isActiveTurn && streaming) "思考与执行中 · 查看步骤" else "查看推理步骤与计划",
-                            fontSize = 12.sp,
+                            text = if (isLive) (liveLabel ?: "正在思考…") else "步骤查看",
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.Medium,
-                            color = colors.fgMuted,
+                            color = if (isSelectedTurn) primaryColor else colors.fgMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        if (!isLive && stepsCount > 0) {
+                            Text(
+                                text = " · $stepsCount",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (isSelectedTurn) primaryColor.copy(alpha = 0.8f) else colors.fgFaint,
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = if (isSelectedTurn) primaryColor.copy(alpha = 0.8f) else colors.fgFaint,
+                            modifier = Modifier.size(14.dp),
                         )
                     }
                 }
@@ -358,12 +349,10 @@ fun MessageBubble(
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
                         WhitzLoadingIndicator(size = 16.dp)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("正在思考...", fontSize = 13.5.sp, color = colors.fgMuted)
+                        Text(liveLabel ?: "正在思考...", fontSize = 13.5.sp, color = colors.fgMuted)
                     }
                 } else if (message.status == "waiting") {
                     Text("等待你的确认...", fontSize = 13.5.sp, color = colors.warning)
-                } else if (message.status == "cancelled") {
-                    Text("已停止生成", fontSize = 13.5.sp, color = colors.fgFaint)
                 }
 
                 if (artifacts.isNotEmpty()) {
@@ -405,9 +394,34 @@ fun MessageBubble(
                     }
                 }
 
-                if (!streaming || !isActiveTurn) {
+                if (isFailureOrCancelled) {
+                    Spacer(modifier = Modifier.height(10.dp))
                     Row(
-                        modifier = Modifier.padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(
+                            text = if (message.status == "failed") "回复失败，请重试。" else "已停止生成",
+                            fontSize = 12.5.sp,
+                            color = if (message.status == "failed") colors.danger else colors.fgFaint,
+                        )
+                        Button(
+                            onClick = { onRegenerate(message.id) },
+                            enabled = !streaming,
+                            shapes = ButtonDefaults.shapesFor(28.dp),
+                            modifier = Modifier.height(28.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(13.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("重试", fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                if (!isLive && (message.content.isNotBlank() || isFailureOrCancelled)) {
+                    Row(
+                        modifier = Modifier.padding(top = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (message.content.isNotBlank()) {
@@ -651,9 +665,18 @@ fun TaskDetailContent(
     onOpenFile: (ConversationFile) -> Unit,
     onDeleteFile: (String) -> Unit,
     modifier: Modifier = Modifier,
+    streaming: Boolean = false,
+    runningTool: String? = null,
+    turnKey: String = "",
 ) {
     val colors = LocalWhitzColors.current
     var tab by remember { mutableIntStateOf(0) }
+    val sections = remember(plan, reasoning) { partitionPlanSteps(plan, reasoning) }
+    val toggledSteps = remember(turnKey) { mutableStateMapOf<String, Boolean>() }
+
+    LaunchedEffect(streaming) {
+        if (streaming) toggledSteps.clear()
+    }
 
     Column(modifier = modifier) {
         WhitzConnectedRadioGroup(
@@ -669,83 +692,114 @@ fun TaskDetailContent(
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                val planItems = plan?.items.orEmpty()
-                if (planItems.isNotEmpty()) {
-                    item {
-                        Text("任务计划", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = colors.fg)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            planItems.forEach { p ->
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = if (p.status == "completed") Icons.Default.CheckCircle else Icons.Default.AutoAwesome,
-                                        contentDescription = null,
-                                        tint = if (p.status == "completed") colors.success else colors.fgMuted,
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(p.content, fontSize = 13.5.sp, color = colors.fg)
-                                }
-                            }
-                        }
-                        HorizontalDivider(modifier = Modifier.padding(top = 12.dp), color = colors.line)
+                if (sections.items.isNotEmpty() && sections.planningBlocks.isNotEmpty()) {
+                    item(key = "sec-planning-header") {
+                        Text("规划", fontWeight = FontWeight.Medium, fontSize = 13.5.sp, color = colors.fgMuted)
+                    }
+                    items(sections.planningBlocks.size, key = { "planning-$it" }) { idx ->
+                        ReasoningBlockView(block = sections.planningBlocks[idx])
                     }
                 }
 
-                if (reasoning.isEmpty()) {
-                    item {
-                        Text("暂无详细推理步骤", fontSize = 13.sp, color = colors.fgFaint)
+                if (sections.steps.isNotEmpty()) {
+                    item(key = "sec-steps-header") {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("执行步骤", fontWeight = FontWeight.Medium, fontSize = 13.5.sp, color = colors.fgMuted)
+                                Text(
+                                    "${sections.doneCount} / ${sections.items.size}",
+                                    fontSize = 12.5.sp,
+                                    color = colors.fgFaint,
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            LinearProgressIndicator(
+                                progress = { sections.progressPct.coerceIn(0f, 1f) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(999.dp)),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = colors.surface,
+                            )
+                        }
                     }
-                } else {
-                    items(reasoning) { blk ->
-                        Column(
+                    items(sections.steps, key = { "step-${it.key}-${it.index}" }) { step ->
+                        val expanded = (toggledSteps[step.key] ?: (step.item.status == "in_progress")) && step.blocks.isNotEmpty()
+                        PlanStepCard(
+                            step = step,
+                            expanded = expanded,
+                            onToggle = {
+                                if (step.blocks.isNotEmpty()) {
+                                    toggledSteps[step.key] = !expanded
+                                }
+                            },
+                        )
+                    }
+                }
+
+                if (sections.items.isNotEmpty() && sections.summaryBlocks.isNotEmpty()) {
+                    item(key = "sec-summary-header") {
+                        Text("总结", fontWeight = FontWeight.Medium, fontSize = 13.5.sp, color = colors.fgMuted)
+                    }
+                    items(sections.summaryBlocks.size, key = { "summary-$it" }) { idx ->
+                        ReasoningBlockView(block = sections.summaryBlocks[idx])
+                    }
+                }
+
+                if (sections.looseBlocks.isNotEmpty()) {
+                    item(key = "sec-loose-header") {
+                        Text(
+                            text = if (sections.items.isNotEmpty()) "其他记录" else "思考与执行",
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 13.5.sp,
+                            color = colors.fgMuted,
+                        )
+                    }
+                    items(sections.looseBlocks.size, key = { "loose-$it" }) { idx ->
+                        ReasoningBlockView(block = sections.looseBlocks[idx])
+                    }
+                }
+
+                if (streaming && !runningTool.isNullOrBlank()) {
+                    item(key = "sec-running-tool") {
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
+                                .clip(RoundedCornerShape(10.dp))
                                 .background(colors.surface)
-                                .padding(12.dp),
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            if (blk.title.isNotBlank() || blk.step != null) {
-                                Text(
-                                    text = blk.title.ifBlank { "步骤 ${blk.step}" },
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 13.sp,
-                                    color = colors.fg,
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                            }
-                            if (blk.text.isNotBlank()) {
-                                Text(blk.text, fontSize = 12.sp, color = colors.fgMuted)
-                            }
-                            if (blk.content.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(blk.content, fontSize = 13.sp, color = colors.fg)
-                            }
-                            blk.tools.forEach { t ->
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(colors.canvas)
-                                        .padding(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Icon(Icons.Default.Terminal, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(t.name, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.fg)
-                                        if (!t.args.isNullOrBlank()) {
-                                            Text(t.args, fontSize = 11.sp, color = colors.fgFaint, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                        }
-                                    }
-                                    Text(
-                                        text = t.status ?: "",
-                                        fontSize = 11.sp,
-                                        color = if (t.status == "failed") colors.danger else colors.success,
-                                    )
-                                }
-                            }
+                            WhitzLoadingIndicator(size = 14.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "正在调用 ${toolDisplayName(runningTool)}",
+                                fontSize = 12.5.sp,
+                                color = colors.fgMuted,
+                            )
+                        }
+                    }
+                }
+
+                if (sections.items.isEmpty() && reasoning.isEmpty() && !streaming) {
+                    item(key = "sec-empty") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 28.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "暂无运行详情。\n助理处理多步骤任务或读取文件时，这里会按步骤显示思考与工具调用。",
+                                fontSize = 13.sp,
+                                lineHeight = 20.sp,
+                                color = colors.fgFaint,
+                            )
                         }
                     }
                 }
@@ -797,6 +851,9 @@ fun TaskDetailSheet(
     onOpenFile: (ConversationFile) -> Unit,
     onDeleteFile: (String) -> Unit,
     onDismiss: () -> Unit,
+    streaming: Boolean = false,
+    runningTool: String? = null,
+    turnKey: String = "",
 ) {
     val colors = LocalWhitzColors.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -813,11 +870,404 @@ fun TaskDetailSheet(
             files = files,
             onOpenFile = onOpenFile,
             onDeleteFile = onDeleteFile,
+            streaming = streaming,
+            runningTool = runningTool,
+            turnKey = turnKey,
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 320.dp, max = 580.dp)
                 .navigationBarsPadding(),
         )
+    }
+}
+
+@Composable
+private fun PlanStepCard(
+    step: ResolvedStepItem,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val hasBlocks = step.blocks.isNotEmpty()
+    val rotation by animateFloatAsState(
+        targetValue = if (expanded) 90f else 0f,
+        label = "stepChevronRotation",
+    )
+    val calls = step.blocks.size
+    val toolCount = step.blocks.sumOf { it.tools.size }
+    val meta = listOfNotNull(
+        if (calls > 0) "$calls 段思考" else null,
+        if (toolCount > 0) "$toolCount 个操作" else null,
+    ).joinToString(" · ")
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(colors.surface.copy(alpha = 0.78f))
+            .border(1.dp, colors.line, RoundedCornerShape(14.dp)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .let { if (hasBlocks) it.clickable(onClick = onToggle) else it }
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Box(
+                modifier = Modifier.padding(top = 2.dp).size(16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                when (step.item.status) {
+                    "in_progress" -> WhitzLoadingIndicator(size = 14.dp)
+                    "completed" -> Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(colors.success.copy(alpha = 0.16f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Default.Check,
+                            contentDescription = null,
+                            tint = colors.success,
+                            modifier = Modifier.size(11.dp),
+                        )
+                    }
+                    else -> Box(
+                        modifier = Modifier
+                            .size(12.dp)
+                            .clip(CircleShape)
+                            .border(1.5.dp, colors.lineStrong, CircleShape),
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "步骤 ${step.index}",
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.fgFaint,
+                    )
+                    Text(
+                        text = step.item.content,
+                        fontSize = 13.5.sp,
+                        fontWeight = if (step.item.status == "in_progress") FontWeight.Medium else FontWeight.Normal,
+                        color = when (step.item.status) {
+                            "completed" -> colors.fgFaint
+                            "in_progress" -> colors.fg
+                            else -> colors.fgMuted
+                        },
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = buildString {
+                        append(planStatusLabel(step.item.status))
+                        if (!expanded && meta.isNotEmpty()) append(" · $meta")
+                    },
+                    fontSize = 11.5.sp,
+                    color = colors.fgFaint,
+                )
+            }
+            if (hasBlocks) {
+                Icon(
+                    Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = colors.fgFaint,
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .size(16.dp)
+                        .rotate(rotation),
+                )
+            }
+        }
+
+        AnimatedVisibility(visible = expanded && hasBlocks) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                step.blocks.forEach { block ->
+                    ReasoningBlockView(block = block)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReasoningBlockView(block: ReasoningBlock) {
+    val colors = LocalWhitzColors.current
+    var contentExpanded by remember(block) { mutableStateOf(false) }
+    var textExpanded by remember(block) { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (block.content.isNotBlank()) {
+            val isLong = block.content.length > 180 || block.content.lines().count { it.isNotBlank() } > 3
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(colors.surface)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+            ) {
+                Text("过程回复", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = colors.fgFaint)
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = block.content,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    color = colors.fgMuted,
+                    maxLines = if (isLong && !contentExpanded) 3 else Int.MAX_VALUE,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (isLong) {
+                    Text(
+                        text = if (contentExpanded) "收起" else "展开全文",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .padding(top = 4.dp)
+                            .clickable { contentExpanded = !contentExpanded },
+                    )
+                }
+            }
+        }
+
+        if (block.text.isNotBlank()) {
+            val isLong = block.text.length > 180 || block.text.lines().count { it.isNotBlank() } > 3
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = block.text,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    color = colors.fgMuted,
+                    maxLines = if (isLong && !textExpanded) 3 else Int.MAX_VALUE,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (isLong) {
+                    Text(
+                        text = if (textExpanded) "收起" else "展开全文",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .padding(top = 4.dp)
+                            .clickable { textExpanded = !textExpanded },
+                    )
+                }
+            }
+        }
+
+        block.tools.forEach { tool ->
+            ToolCallRow(tool = tool)
+        }
+    }
+}
+
+@Composable
+private fun ToolCallRow(tool: ReasoningTool) {
+    val colors = LocalWhitzColors.current
+    val uriHandler = LocalUriHandler.current
+    var open by remember(tool) { mutableStateOf(false) }
+    val rotation by animateFloatAsState(
+        targetValue = if (open) 90f else 0f,
+        label = "toolChevronRotation",
+    )
+    val summary = remember(tool) { formatToolSummary(tool) }
+    val collapsedTitles = remember(tool) {
+        if (isWebTool(tool)) parseWebSearchItems(tool).mapNotNull { it.title.ifBlank { null } }.take(3) else emptyList()
+    }
+    val isFailed = tool.status == "failed" || !tool.error.isNullOrBlank()
+    val durationText = tool.durationMs?.let { ms ->
+        if (ms >= 1000.0) String.format("%.1fs", ms / 1000.0) else "${ms.toInt()}ms"
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(colors.canvas.copy(alpha = 0.85f))
+            .border(1.dp, colors.line, RoundedCornerShape(10.dp)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { open = !open }
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (tool.status == "running") {
+                WhitzLoadingIndicator(size = 13.dp)
+            } else {
+                Icon(
+                    imageVector = if (isFailed) Icons.Default.ErrorOutline else Icons.Default.Build,
+                    contentDescription = null,
+                    tint = if (isFailed) colors.danger else colors.fgFaint,
+                    modifier = Modifier.size(13.dp),
+                )
+            }
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = toolDisplayName(tool.name),
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (isFailed) colors.danger else colors.fgMuted,
+            )
+            if (summary.isNotBlank()) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = summary,
+                    fontSize = 12.sp,
+                    color = colors.fgFaint,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
+            }
+            if (!durationText.isNullOrBlank()) {
+                Text(
+                    text = durationText,
+                    fontSize = 11.sp,
+                    color = colors.fgFaint,
+                    modifier = Modifier.padding(end = 4.dp),
+                )
+            }
+            Icon(
+                Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = colors.fgFaint,
+                modifier = Modifier.size(14.dp).rotate(rotation),
+            )
+        }
+
+        if (!open && collapsedTitles.isNotEmpty()) {
+            Column(
+                modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                collapsedTitles.forEach { title ->
+                    Text(
+                        text = "· $title",
+                        fontSize = 12.sp,
+                        color = colors.fgFaint,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+
+        AnimatedVisibility(visible = open) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (!tool.error.isNullOrBlank()) {
+                    Text(
+                        text = "错误：${tool.error}",
+                        fontSize = 12.sp,
+                        color = colors.danger,
+                    )
+                }
+                when {
+                    isWebTool(tool) -> {
+                        val query = parseWebSearchQuery(tool)
+                        val webItems = parseWebSearchItems(tool)
+                        if (query.isNotBlank()) {
+                            Text("搜索：$query", fontSize = 12.sp, color = colors.fgFaint)
+                        }
+                        if (webItems.isEmpty()) {
+                            Text("暂无结果详情", fontSize = 12.sp, color = colors.fgFaint)
+                        } else {
+                            webItems.forEach { item ->
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        text = item.title.ifBlank { item.url },
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = colors.fgMuted,
+                                    )
+                                    if (item.url.isNotBlank()) {
+                                        Text(
+                                            text = item.url,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.clickable { uriHandler.openUri(item.url) },
+                                        )
+                                    }
+                                    if (item.snippet.isNotBlank()) {
+                                        Text(
+                                            text = item.snippet,
+                                            fontSize = 12.sp,
+                                            color = colors.fgFaint,
+                                            maxLines = 4,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tool.name == "todo_list" -> {
+                        val changes = parseTodoChanges(tool)
+                        changes.forEach { line ->
+                            Text("· $line", fontSize = 12.sp, color = colors.fgFaint)
+                        }
+                    }
+                    else -> {
+                        val prettyArgs = prettyToolPayload(tool.args)
+                        val prettyRes = prettyToolPayload(tool.result)
+                        if (prettyArgs.isNotBlank()) {
+                            Text("参数", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = colors.fgFaint)
+                            Text(
+                                text = prettyArgs,
+                                fontSize = 11.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = colors.fgFaint,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(colors.surface)
+                                    .padding(8.dp),
+                            )
+                        }
+                        if (prettyRes.isNotBlank()) {
+                            Text("结果", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = colors.fgFaint)
+                            Text(
+                                text = prettyRes,
+                                fontSize = 11.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = colors.fgFaint,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(colors.surface)
+                                    .padding(8.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

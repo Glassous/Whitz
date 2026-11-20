@@ -2,8 +2,23 @@ package com.glassous.whitz
 
 import com.glassous.whitz.core.files.FileValidator
 import com.glassous.whitz.core.model.Conversation
+import com.glassous.whitz.core.model.ConversationDetail
+import com.glassous.whitz.core.model.CreditStatus
+import com.glassous.whitz.core.model.Message
+import com.glassous.whitz.core.model.Plan
+import com.glassous.whitz.core.model.PlanItem
+import com.glassous.whitz.core.model.ReasoningBlock
+import com.glassous.whitz.core.model.ReasoningTool
+import com.glassous.whitz.core.model.ToolPayload
+import com.glassous.whitz.core.model.formatCredits
 import com.glassous.whitz.core.network.SseParser
+import com.glassous.whitz.core.network.WhitzJson
 import com.glassous.whitz.core.util.ConversationSorter
+import com.glassous.whitz.feature.chat.computeLiveStepLabel
+import com.glassous.whitz.feature.chat.computeStepsCount
+import com.glassous.whitz.feature.chat.filterVisibleMessages
+import com.glassous.whitz.feature.chat.partitionPlanSteps
+import com.glassous.whitz.feature.chat.resolveTurnDetails
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import org.junit.Assert.assertEquals
@@ -53,5 +68,114 @@ class WhitzCoreTests {
         )
         val sorted = ConversationSorter.sort(listOf(c1, c2, c3))
         assertEquals(listOf("3", "2", "1"), sorted.map { it.id })
+    }
+
+    @Test
+    fun creditStatus_decodesFractionalUsedAndRemaining() {
+        val raw = """
+            {
+              "tier": "pro",
+              "tier_label": "Pro",
+              "remaining": 679.7,
+              "weekly": {"limit": 1250, "used": 570.3, "remaining": 679.7, "reset_at": "2026-11-27T00:00:00Z"},
+              "five_hour": {"limit": null, "used": 12.5, "remaining": null, "reset_at": "2026-11-20T21:00:00Z"}
+            }
+        """.trimIndent()
+        val parsed = WhitzJson.decodeFromString(CreditStatus.serializer(), raw)
+        assertEquals(679.7, parsed.remaining, 0.001)
+        assertEquals(570.3, parsed.weekly.used, 0.001)
+        assertEquals("570.3", formatCredits(parsed.weekly.used))
+        assertEquals("1250", formatCredits(1250.0))
+    }
+
+    @Test
+    fun conversationDetail_decodesFractionalDurationMs() {
+        val raw = """
+            {
+              "id": "conv-1",
+              "title": "Test",
+              "messages": [
+                {
+                  "id": "msg-1",
+                  "role": "assistant",
+                  "content": "done",
+                  "tool_payload": {
+                    "reasoning": [
+                      {
+                        "step": 1,
+                        "title": "Search",
+                        "tools": [
+                          {"name": "web_search", "call_id": "O8e1KcE4oe9064", "duration_ms": 2712.1}
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+        """.trimIndent()
+        val parsed = WhitzJson.decodeFromString(ConversationDetail.serializer(), raw)
+        val durationMs = parsed.messages.first().toolPayload?.reasoning?.first()?.tools?.first()?.durationMs
+        assertNotNull(durationMs)
+        assertEquals(2712.1, durationMs!!, 0.001)
+    }
+
+    @Test
+    fun messageList_filtersOutToolRoleMessages() {
+        val msgs = listOf(
+            Message(id = "u1", role = "user", content = "hi"),
+            Message(id = "t1", role = "tool", toolName = "web_search", status = "completed"),
+            Message(id = "a1", role = "assistant", content = "final answer"),
+        )
+        val visible = filterVisibleMessages(msgs)
+        assertEquals(listOf("u1", "a1"), visible.map { it.id })
+    }
+
+    @Test
+    fun turnDetails_resolvesPlanReasoningAndLiveRunningTool() {
+        val blocks = listOf(
+            ReasoningBlock(step = null, title = "思路", text = "planning"),
+            ReasoningBlock(
+                step = 1,
+                stepId = "s1",
+                title = "搜索资料",
+                text = "searching",
+                tools = listOf(ReasoningTool(name = "web_search", status = "completed")),
+            ),
+            ReasoningBlock(step = null, title = "总结", content = "all set"),
+        )
+        val msgs = listOf(
+            Message(id = "u1", role = "user", content = "go"),
+            Message(id = "t1", role = "tool", toolName = "web_search", status = "running"),
+            Message(
+                id = "a1",
+                role = "assistant",
+                content = "",
+                status = "streaming",
+                toolPayload = ToolPayload(reasoning = blocks),
+            ),
+        )
+        val details = resolveTurnDetails(
+            messages = msgs,
+            selectedTurnId = "a1",
+            activeAssistantId = "a1",
+            streaming = true,
+            livePlan = null,
+            liveReasoning = blocks,
+        )
+        assertEquals("a1", details.turnId)
+        assertEquals("web_search", details.runningTool)
+        assertEquals(1, computeStepsCount(details.plan, details.reasoning))
+        assertEquals("正在使用 web_search", computeLiveStepLabel(null, details.runningTool, details.plan))
+
+        val sections = partitionPlanSteps(
+            plan = Plan(items = listOf(PlanItem(id = JsonPrimitive("s1"), content = "搜索资料", status = "in_progress"))),
+            reasoning = blocks,
+        )
+        assertEquals(1, sections.planningBlocks.size)
+        assertEquals(1, sections.steps.size)
+        assertEquals(1, sections.steps.first().blocks.size)
+        assertEquals(1, sections.summaryBlocks.size)
+        assertEquals(0, sections.looseBlocks.size)
     }
 }

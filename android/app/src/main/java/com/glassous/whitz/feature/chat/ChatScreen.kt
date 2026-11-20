@@ -127,6 +127,7 @@ import com.glassous.whitz.R
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.UploadTaskStatus
 import com.glassous.whitz.core.model.User
+import com.glassous.whitz.core.model.formatCredits
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzBrandMark
@@ -232,10 +233,38 @@ fun ChatScreen(
         wasImeVisible = imeVisible
     }
 
-    val lastMsgContentLen = ui.messages.lastOrNull()?.content?.length ?: 0
-    LaunchedEffect(ui.messages.size, lastMsgContentLen) {
-        if (ui.messages.isNotEmpty()) {
-            listState.animateScrollToItem(ui.messages.lastIndex)
+    val visibleMessages = remember(ui.messages) { filterVisibleMessages(ui.messages) }
+    val runningToolName = remember(ui.messages, ui.streaming) {
+        if (ui.streaming) computeRunningTool(ui.messages) else null
+    }
+    val currentStepInfo = remember(ui.plan, ui.streaming) {
+        if (ui.streaming) computeCurrentStep(ui.plan) else null
+    }
+    val liveStepLabel = remember(currentStepInfo, runningToolName, ui.plan, ui.streaming) {
+        if (ui.streaming) computeLiveStepLabel(currentStepInfo, runningToolName, ui.plan) else null
+    }
+    val resolvedTurn = remember(
+        ui.messages,
+        ui.selectedTurnId,
+        ui.activeAssistantId,
+        ui.streaming,
+        ui.plan,
+        ui.reasoning,
+    ) {
+        resolveTurnDetails(
+            messages = ui.messages,
+            selectedTurnId = ui.selectedTurnId,
+            activeAssistantId = ui.activeAssistantId,
+            streaming = ui.streaming,
+            livePlan = ui.plan,
+            liveReasoning = ui.reasoning,
+        )
+    }
+
+    val lastMsgContentLen = visibleMessages.lastOrNull()?.content?.length ?: 0
+    LaunchedEffect(visibleMessages.size, lastMsgContentLen) {
+        if (visibleMessages.isNotEmpty()) {
+            listState.animateScrollToItem(visibleMessages.lastIndex)
         }
     }
 
@@ -317,7 +346,7 @@ fun ChatScreen(
                     Box(
                         modifier = Modifier.fillMaxSize(),
                     ) {
-                        if (ui.messages.isEmpty()) {
+                        if (visibleMessages.isEmpty()) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -359,16 +388,21 @@ fun ChatScreen(
                                 ),
                                 verticalArrangement = Arrangement.spacedBy(16.dp),
                             ) {
-                                items(ui.messages, key = { it.id }) { msg ->
+                                items(visibleMessages, key = { it.id }) { msg ->
                                     Box(
                                         modifier = Modifier.fillMaxWidth(),
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         Box(modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth()) {
+                                            val isSelected = msg.id == resolvedTurn.turnId
                                             MessageBubble(
                                                 message = msg,
                                                 streaming = ui.streaming,
                                                 isActiveTurn = msg.id == ui.activeAssistantId,
+                                                isSelectedTurn = isSelected,
+                                                liveLabel = if (msg.id == ui.activeAssistantId && ui.streaming) liveStepLabel else null,
+                                                turnPlan = if (isSelected) resolvedTurn.plan else null,
+                                                turnReasoning = if (isSelected) resolvedTurn.reasoning else null,
                                                 convFiles = ui.files,
                                                 onCopy = {
                                                     scope.launch { snackbarHostState.showSnackbar("已复制到剪贴板") }
@@ -721,7 +755,8 @@ fun ChatScreen(
                                             }
 
                                             val canExpandInput = inputText.length > 60 || inputText.contains('\n') || composerExpanded
-                                            val canSend = inputText.isNotBlank() || ui.attachedIds.isNotEmpty()
+                                            val hasActiveUploads = ui.uploads.any { it.status != UploadTaskStatus.ERROR }
+                                            val canSend = inputText.isNotBlank() && !hasActiveUploads
 
                                             val inputMinHeight by animateDpAsState(
                                                 targetValue = if (composerExpanded) 200.dp else 24.dp,
@@ -884,12 +919,6 @@ fun ChatScreen(
                     enter = fadeIn() + slideInHorizontally { it / 3 },
                     exit = fadeOut() + slideOutHorizontally { it / 3 },
                 ) {
-                    val selectedMsg = ui.messages.firstOrNull { it.id == ui.selectedTurnId }
-                        ?: ui.messages.lastOrNull { it.role == "assistant" }
-                    val activeTurn = selectedMsg?.id == ui.activeAssistantId
-                    val sheetPlan = if (activeTurn) ui.plan ?: selectedMsg?.toolPayload?.plan else selectedMsg?.toolPayload?.plan
-                    val sheetReasoning = if (activeTurn) ui.reasoning else selectedMsg?.toolPayload?.reasoning.orEmpty()
-
                     Surface(
                         color = colors.canvas,
                         border = BorderStroke(0.5.dp, colors.line),
@@ -915,11 +944,14 @@ fun ChatScreen(
                                 }
                             }
                             TaskDetailContent(
-                                plan = sheetPlan,
-                                reasoning = sheetReasoning,
+                                plan = resolvedTurn.plan,
+                                reasoning = resolvedTurn.reasoning,
                                 files = ui.files,
                                 onOpenFile = { vm.openFilePreview(it) },
                                 onDeleteFile = { vm.deleteFile(it) },
+                                streaming = resolvedTurn.isLive,
+                                runningTool = resolvedTurn.runningTool,
+                                turnKey = resolvedTurn.turnId ?: "",
                                 modifier = Modifier.weight(1f).fillMaxWidth(),
                             )
                         }
@@ -1027,19 +1059,16 @@ fun ChatScreen(
     }
 
     if (showTaskSheet) {
-        val selectedMsg = ui.messages.firstOrNull { it.id == ui.selectedTurnId }
-            ?: ui.messages.lastOrNull { it.role == "assistant" }
-        val activeTurn = selectedMsg?.id == ui.activeAssistantId
-        val sheetPlan = if (activeTurn) ui.plan ?: selectedMsg?.toolPayload?.plan else selectedMsg?.toolPayload?.plan
-        val sheetReasoning = if (activeTurn) ui.reasoning else selectedMsg?.toolPayload?.reasoning.orEmpty()
-
         TaskDetailSheet(
-            plan = sheetPlan,
-            reasoning = sheetReasoning,
+            plan = resolvedTurn.plan,
+            reasoning = resolvedTurn.reasoning,
             files = ui.files,
             onOpenFile = { f -> vm.openFilePreview(f) },
             onDeleteFile = { id -> vm.deleteFile(id) },
             onDismiss = { showTaskSheet = false },
+            streaming = resolvedTurn.isLive,
+            runningTool = resolvedTurn.runningTool,
+            turnKey = resolvedTurn.turnId ?: "",
         )
     }
 
@@ -1329,7 +1358,7 @@ private fun SidebarContent(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    val creditsLabel = ui.credits?.let { "${it.tierLabel} · 剩余 ${it.remaining} 积分" }
+                    val creditsLabel = ui.credits?.let { "${it.tierLabel} · 剩余 ${formatCredits(it.remaining)} 积分" }
                         ?: (user?.email ?: "")
                     Text(
                         text = creditsLabel,

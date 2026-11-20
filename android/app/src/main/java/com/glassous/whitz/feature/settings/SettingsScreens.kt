@@ -86,6 +86,7 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.glassous.whitz.core.files.FileValidator
 import com.glassous.whitz.core.model.ThemePreference
+import com.glassous.whitz.core.model.formatCredits
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
@@ -359,7 +360,7 @@ private fun SettingsHomeContent(
                 SettingsMenuRow(
                     Icons.Default.CreditCard,
                     "会员与积分",
-                    ui.credits?.let { "${it.tierLabel} · ${it.remaining} 积分" },
+                    ui.credits?.let { "${it.tierLabel} · ${formatCredits(it.remaining)} 积分" },
                     selectedSection == SettingsSection.MEMBERSHIP,
                 ) { onSelect(SettingsSection.MEMBERSHIP) }
                 HorizontalDivider(color = colors.line)
@@ -560,7 +561,7 @@ private fun PasswordSettingsContent(vm: SettingsViewModel) {
         WhitzTextField(
             value = next,
             onValueChange = { next = it },
-            label = "新密码（至少 6 位）",
+            label = "新密码（至少 8 位）",
             visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth(),
         )
@@ -577,7 +578,7 @@ private fun PasswordSettingsContent(vm: SettingsViewModel) {
                 vm.updatePassword(current, next)
             },
             shapes = ButtonDefaults.shapesFor(48.dp),
-            enabled = !ui.loading && current.isNotBlank() && next.length >= 6 && next == confirm,
+            enabled = !ui.loading && current.isNotBlank() && next.length >= 8 && next == confirm,
             modifier = Modifier.fillMaxWidth().height(48.dp),
         ) {
             Text("更新密码")
@@ -875,9 +876,14 @@ private fun SkillsSettingsContent(vm: SettingsViewModel) {
 
     if (showGithub) {
         var repoUrl by remember { mutableStateOf("") }
-        val selectedPaths = remember { mutableStateListOf<String>() }
+        var refInput by remember { mutableStateOf("") }
+        var pathInput by remember { mutableStateOf("") }
+        var installName by remember(ui.githubPreview?.name) { mutableStateOf(ui.githubPreview?.name ?: "") }
         AlertDialog(
-            onDismissRequest = { showGithub = false },
+            onDismissRequest = {
+                vm.clearGithubPreview()
+                showGithub = false
+            },
             containerColor = colors.canvas,
             title = { Text("从 GitHub 安装技能", fontWeight = FontWeight.SemiBold, color = colors.fg) },
             text = {
@@ -885,41 +891,75 @@ private fun SkillsSettingsContent(vm: SettingsViewModel) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         WhitzTextField(
                             value = repoUrl,
-                            onValueChange = { repoUrl = it },
+                            onValueChange = {
+                                repoUrl = it
+                                if (ui.githubPreview != null) vm.clearGithubPreview()
+                            },
                             label = "GitHub 仓库 URL",
                             modifier = Modifier.weight(1f),
                         )
                         OutlinedButton(
-                            onClick = { vm.previewGithubSkill(repoUrl) },
+                            onClick = { vm.previewGithubSkill(repoUrl, refInput, pathInput) },
                             shapes = ButtonDefaults.shapesFor(40.dp),
+                            enabled = repoUrl.isNotBlank() && !ui.loading,
                         ) { Text("解析") }
                     }
-                    if (ui.githubPreviewItems.isNotEmpty()) {
-                        LazyColumn(modifier = Modifier.height(180.dp)) {
-                            items(ui.githubPreviewItems) { item ->
-                                val checked = item.path in selectedPaths
-                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable {
-                                    if (checked) selectedPaths.remove(item.path) else selectedPaths.add(item.path)
-                                }) {
-                                    Checkbox(checked = checked, onCheckedChange = {
-                                        if (checked) selectedPaths.remove(item.path) else selectedPaths.add(item.path)
-                                    })
-                                    Text(item.name, fontSize = 13.sp, color = colors.fg)
-                                }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        WhitzTextField(
+                            value = refInput,
+                            onValueChange = { refInput = it },
+                            label = "分支/Tag（可选）",
+                            modifier = Modifier.weight(1f),
+                        )
+                        WhitzTextField(
+                            value = pathInput,
+                            onValueChange = { pathInput = it },
+                            label = "子路径（可选）",
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    ui.githubPreview?.let { preview ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(colors.surface)
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            WhitzTextField(
+                                value = installName,
+                                onValueChange = { installName = it },
+                                label = "技能名称",
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            if (preview.description.isNotBlank()) {
+                                Text(preview.description, fontSize = 12.sp, color = colors.fgMuted, maxLines = 3, overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }
                 }
             },
-            dismissButton = { TextButton(onClick = { showGithub = false }) { Text("取消") } },
+            dismissButton = {
+                TextButton(onClick = {
+                    vm.clearGithubPreview()
+                    showGithub = false
+                }) { Text("取消") }
+            },
             confirmButton = {
                 Button(
                     onClick = {
-                        vm.installGithubSkill(repoUrl, selectedPaths.toList())
+                        val preview = ui.githubPreview
+                        vm.installGithubSkill(
+                            repoUrl = repoUrl,
+                            name = installName.ifBlank { preview?.name },
+                            ref = preview?.ref ?: refInput,
+                            path = preview?.path ?: pathInput,
+                        )
                         showGithub = false
                     },
                     shapes = ButtonDefaults.shapesFor(36.dp),
-                    enabled = repoUrl.isNotBlank(),
+                    enabled = repoUrl.isNotBlank() && ui.githubPreview != null && !ui.loading,
                 ) { Text("安装") }
             },
         )
@@ -956,19 +996,19 @@ private fun MembershipSettingsContent(vm: SettingsViewModel) {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text("当前套餐：${c.tierLabel}", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = colors.fg)
-                    Text("剩余可用积分：${c.remaining}", fontSize = 14.sp, color = colors.fgMuted)
+                    Text("剩余可用积分：${formatCredits(c.remaining)}", fontSize = 14.sp, color = colors.fgMuted)
                     if (!c.expiresAt.isNullOrBlank()) {
                         Text("到期时间：${DateTimeUtils.formatShort(c.expiresAt)}", fontSize = 12.sp, color = colors.fgFaint)
                     }
 
                     c.fiveHour.limit?.let { limit ->
-                        val pct = if (limit > 0) ((limit - c.fiveHour.used).coerceAtLeast(0).toFloat() / limit).coerceIn(0f, 1f) else 0f
-                        Text("5 小时额度：已用 ${c.fiveHour.used} / $limit", fontSize = 12.sp, color = colors.fgMuted)
+                        val pct = if (limit > 0) ((limit - c.fiveHour.used).coerceAtLeast(0.0) / limit).toFloat().coerceIn(0f, 1f) else 0f
+                        Text("5 小时额度：已用 ${formatCredits(c.fiveHour.used)} / $limit", fontSize = 12.sp, color = colors.fgMuted)
                         LinearWavyProgressIndicator(progress = { pct }, modifier = Modifier.fillMaxWidth())
                     }
                     c.weekly.limit?.let { limit ->
-                        val pct = if (limit > 0) ((limit - c.weekly.used).coerceAtLeast(0).toFloat() / limit).coerceIn(0f, 1f) else 0f
-                        Text("每周额度：已用 ${c.weekly.used} / $limit", fontSize = 12.sp, color = colors.fgMuted)
+                        val pct = if (limit > 0) ((limit - c.weekly.used).coerceAtLeast(0.0) / limit).toFloat().coerceIn(0f, 1f) else 0f
+                        Text("每周额度：已用 ${formatCredits(c.weekly.used)} / $limit", fontSize = 12.sp, color = colors.fgMuted)
                         LinearWavyProgressIndicator(progress = { pct }, modifier = Modifier.fillMaxWidth())
                     }
                 }

@@ -410,7 +410,7 @@ class ChatViewModel(
         val attachedIds = state.attachedIds
         val attachedFiles = state.files.filter { it.id in attachedIds }
         val skillNames = state.selectedSkillNames
-        if (trimmed.isEmpty() && attachedFiles.isEmpty()) return
+        if (trimmed.isEmpty()) return
 
         viewModelScope.launch {
             val convId = try {
@@ -878,7 +878,7 @@ class ChatViewModel(
                 val callId = d.str("call_id")
                 val err = d.str("error")
                 val duration = d.double("duration")
-                val durationMs = d.long("duration_ms")
+                val durationMs = d.double("duration_ms")
                 val rawResult = d["result"]?.let { jsonToPlainString(it) } ?: d.str("preview") ?: ""
                 val nextStatus = if (!err.isNullOrBlank()) "failed" else "completed"
 

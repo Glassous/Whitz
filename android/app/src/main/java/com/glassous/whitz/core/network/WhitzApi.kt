@@ -20,18 +20,15 @@ import com.glassous.whitz.core.model.UserSessionItem
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
-import okhttp3.MultipartBody
 import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.HeaderMap
-import retrofit2.http.Multipart
 import retrofit2.http.PATCH
 import retrofit2.http.POST
 import retrofit2.http.PUT
-import retrofit2.http.Part
 import retrofit2.http.Path
 import retrofit2.http.Query
 
@@ -119,21 +116,28 @@ data class UpdateProfileRequest(
 )
 
 @Serializable
-data class ProfileContextRequest(val enabled: Boolean)
+data class ProfileContextRequest(
+    val enabled: Boolean,
+    val consent: Boolean = false,
+)
 
 @Serializable
 data class UpdatePasswordRequest(
-    @SerialName("current_password") val currentPassword: String,
+    @SerialName("old_password") val oldPassword: String,
     @SerialName("new_password") val newPassword: String,
 )
+
+@Serializable
+data class AvatarUploadRequest(@SerialName("data_url") val dataUrl: String)
 
 @Serializable
 data class UpdatePersonaRequest(val persona: String)
 
 @Serializable
 data class MemorySettingsRequest(
-    @SerialName("memory_enabled") val memoryEnabled: Boolean? = null,
-    @SerialName("memory_require_confirm") val memoryRequireConfirm: Boolean? = null,
+    val enabled: Boolean? = null,
+    @SerialName("require_confirm") val requireConfirm: Boolean? = null,
+    val consent: Boolean = false,
 )
 
 @Serializable
@@ -162,12 +166,19 @@ data class CreateSkillRequest(
 )
 
 @Serializable
-data class GithubPreviewRequest(@SerialName("repo_url") val repoUrl: String)
+data class GithubPreviewRequest(
+    val url: String,
+    val ref: String? = null,
+    val path: String? = null,
+)
 
 @Serializable
 data class GithubInstallRequest(
-    @SerialName("repo_url") val repoUrl: String,
-    val paths: List<String>? = null,
+    val url: String,
+    val name: String? = null,
+    val ref: String? = null,
+    val path: String? = null,
+    val enabled: Boolean = true,
 )
 
 @Serializable
@@ -210,14 +221,13 @@ interface WhitzApi {
     suspend fun updatePassword(@Body body: UpdatePasswordRequest): Response<Unit>
 
     @PUT("users/me/persona")
-    suspend fun updatePersona(@Body body: UpdatePersonaRequest): Response<Unit>
+    suspend fun updatePersona(@Body body: UpdatePersonaRequest): User
 
-    @Multipart
     @PUT("users/me/avatar")
-    suspend fun uploadAvatar(@Part file: MultipartBody.Part): User
+    suspend fun uploadAvatar(@Body body: AvatarUploadRequest): User
 
     @DELETE("users/me/avatar")
-    suspend fun deleteAvatar(): Response<Unit>
+    suspend fun deleteAvatar(): User
 
     @GET("users/me/credits")
     suspend fun getCredits(): CreditStatus
@@ -276,11 +286,11 @@ interface WhitzApi {
     @POST("skills/pending/{id}")
     suspend fun resolveSkillPending(@Path("id") id: String, @Body body: PendingActionRequest): Response<Unit>
 
-    @POST("skills/github/preview")
+    @POST("skills/preview-github")
     suspend fun previewGithubSkill(@Body body: GithubPreviewRequest): GithubSkillPreviewResponse
 
     @POST("skills/install-github")
-    suspend fun installGithubSkill(@Body body: GithubInstallRequest): JsonElement
+    suspend fun installGithubSkill(@Body body: GithubInstallRequest): SkillItem
 
     // --- Agent ---
     @GET("agent/status")

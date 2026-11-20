@@ -3,17 +3,19 @@ package com.glassous.whitz.feature.settings
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Base64
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.glassous.whitz.AppContainer
 import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.CreditStatus
-import com.glassous.whitz.core.model.GithubSkillPreviewItem
+import com.glassous.whitz.core.model.GithubSkillPreviewResponse
 import com.glassous.whitz.core.model.MemoryOverview
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.model.ThemePreference
 import com.glassous.whitz.core.model.UserSessionItem
+import com.glassous.whitz.core.network.AvatarUploadRequest
 import com.glassous.whitz.core.network.CreateSkillRequest
 import com.glassous.whitz.core.network.GithubInstallRequest
 import com.glassous.whitz.core.network.GithubPreviewRequest
@@ -38,9 +40,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
-import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayOutputStream
 
 data class SettingsUiState(
@@ -54,8 +53,7 @@ data class SettingsUiState(
     // Skills
     val skills: List<SkillItem> = emptyList(),
     val pendingSkills: List<SkillPendingItem> = emptyList(),
-    val githubPreviewRepo: String = "",
-    val githubPreviewItems: List<GithubSkillPreviewItem> = emptyList(),
+    val githubPreview: GithubSkillPreviewResponse? = null,
     // Library
     val libraryFiles: List<ConversationFile> = emptyList(),
     // Sessions
@@ -130,7 +128,9 @@ class SettingsViewModel(
     fun toggleProfileContext(enabled: Boolean) {
         viewModelScope.launch {
             try {
-                val updated = container.network.api.updateProfileContext(ProfileContextRequest(enabled))
+                val updated = container.network.api.updateProfileContext(
+                    ProfileContextRequest(enabled = enabled, consent = enabled)
+                )
                 container.authManager.updateUser(updated)
             } catch (t: Throwable) {
                 _ui.update { it.copy(error = extractErrorMessage(t, "更新设置失败")) }
@@ -142,7 +142,7 @@ class SettingsViewModel(
         viewModelScope.launch {
             _ui.update { it.copy(loading = true, message = null, error = null) }
             try {
-                val bytes = withContext(Dispatchers.IO) {
+                val dataUrl = withContext(Dispatchers.IO) {
                     val stream = container.appContext.contentResolver.openInputStream(uri)
                         ?: throw IllegalStateException("无法读取图片")
                     val orig = stream.use { BitmapFactory.decodeStream(it) }
@@ -156,14 +156,9 @@ class SettingsViewModel(
                     } else orig
                     val out = ByteArrayOutputStream()
                     scaled.compress(Bitmap.CompressFormat.JPEG, 88, out)
-                    out.toByteArray()
+                    "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
                 }
-                val part = MultipartBody.Part.createFormData(
-                    "file",
-                    "avatar.jpg",
-                    bytes.toRequestBody("image/jpeg".toMediaType()),
-                )
-                val updated = container.network.api.uploadAvatar(part)
+                val updated = container.network.api.uploadAvatar(AvatarUploadRequest(dataUrl))
                 container.authManager.updateUser(updated)
                 _ui.update { it.copy(loading = false, message = "头像已更新") }
             } catch (t: Throwable) {
@@ -176,9 +171,8 @@ class SettingsViewModel(
         viewModelScope.launch {
             _ui.update { it.copy(loading = true, message = null, error = null) }
             try {
-                container.network.api.deleteAvatar()
-                val me = container.network.api.getMe()
-                container.authManager.updateUser(me)
+                val updated = container.network.api.deleteAvatar()
+                container.authManager.updateUser(updated)
                 _ui.update { it.copy(loading = false, message = "已移除头像") }
             } catch (t: Throwable) {
                 _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "移除头像失败")) }
@@ -187,8 +181,8 @@ class SettingsViewModel(
     }
 
     fun updatePassword(current: String, next: String) {
-        if (current.isBlank() || next.length < 6) {
-            _ui.update { it.copy(error = "请输入当前密码，且新密码至少 6 位") }
+        if (current.isBlank() || next.length < 8) {
+            _ui.update { it.copy(error = "请输入当前密码，且新密码至少 8 位") }
             return
         }
         viewModelScope.launch {
@@ -209,9 +203,8 @@ class SettingsViewModel(
         viewModelScope.launch {
             _ui.update { it.copy(loading = true, message = null, error = null) }
             try {
-                container.network.api.updatePersona(UpdatePersonaRequest(persona))
-                val me = container.network.api.getMe()
-                container.authManager.updateUser(me)
+                val updated = container.network.api.updatePersona(UpdatePersonaRequest(persona))
+                container.authManager.updateUser(updated)
                 _ui.update { it.copy(loading = false, message = "人格设定已保存") }
             } catch (t: Throwable) {
                 _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "保存人格设定失败")) }
@@ -261,7 +254,13 @@ class SettingsViewModel(
     fun updateMemorySettings(enabled: Boolean? = null, requireConfirm: Boolean? = null) {
         viewModelScope.launch {
             try {
-                val m = container.network.api.updateMemorySettings(MemorySettingsRequest(enabled, requireConfirm))
+                val m = container.network.api.updateMemorySettings(
+                    MemorySettingsRequest(
+                        enabled = enabled,
+                        requireConfirm = requireConfirm,
+                        consent = enabled == true,
+                    )
+                )
                 _ui.update { it.copy(memory = m) }
             } catch (t: Throwable) {
                 _ui.update { it.copy(error = extractErrorMessage(t, "更新记忆设置失败")) }
@@ -387,31 +386,51 @@ class SettingsViewModel(
         }
     }
 
-    fun previewGithubSkill(repoUrl: String) {
-        if (repoUrl.isBlank()) return
+    fun clearGithubPreview() {
+        _ui.update { it.copy(githubPreview = null) }
+    }
+
+    fun previewGithubSkill(repoUrl: String, ref: String? = null, path: String? = null) {
+        val url = repoUrl.trim()
+        if (url.isBlank()) return
         viewModelScope.launch {
-            _ui.update { it.copy(loading = true, error = null) }
+            _ui.update { it.copy(loading = true, error = null, githubPreview = null) }
             try {
-                val res = container.network.api.previewGithubSkill(GithubPreviewRequest(repoUrl.trim()))
-                _ui.update {
-                    it.copy(
-                        loading = false,
-                        githubPreviewRepo = repoUrl.trim(),
-                        githubPreviewItems = res.skills,
+                val res = container.network.api.previewGithubSkill(
+                    GithubPreviewRequest(
+                        url = url,
+                        ref = ref?.trim()?.ifBlank { null },
+                        path = path?.trim()?.ifBlank { null },
                     )
-                }
+                )
+                _ui.update { it.copy(loading = false, githubPreview = res) }
             } catch (t: Throwable) {
                 _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "解析 GitHub 仓库失败")) }
             }
         }
     }
 
-    fun installGithubSkill(repoUrl: String, paths: List<String>) {
+    fun installGithubSkill(
+        repoUrl: String,
+        name: String? = null,
+        ref: String? = null,
+        path: String? = null,
+    ) {
+        val url = repoUrl.trim()
+        if (url.isBlank()) return
         viewModelScope.launch {
             _ui.update { it.copy(loading = true, error = null) }
             try {
-                container.network.api.installGithubSkill(GithubInstallRequest(repoUrl, paths.ifEmpty { null }))
-                _ui.update { it.copy(loading = false, githubPreviewItems = emptyList(), message = "GitHub 技能安装成功") }
+                container.network.api.installGithubSkill(
+                    GithubInstallRequest(
+                        url = url,
+                        name = name?.trim()?.ifBlank { null },
+                        ref = ref?.trim()?.ifBlank { null },
+                        path = path?.trim()?.ifBlank { null },
+                        enabled = true,
+                    )
+                )
+                _ui.update { it.copy(loading = false, githubPreview = null, message = "GitHub 技能安装成功") }
                 loadSkills()
             } catch (t: Throwable) {
                 _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "安装技能失败")) }

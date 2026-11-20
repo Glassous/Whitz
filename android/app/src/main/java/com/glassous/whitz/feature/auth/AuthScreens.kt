@@ -462,7 +462,7 @@ fun RegisterScreen(
         WhitzTextField(
             value = password,
             onValueChange = { password = it; vm.clearError() },
-            label = "设置密码（至少 6 位）",
+            label = "设置密码（至少 8 位）",
             visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = {
                 IconButton(onClick = { showPassword = !showPassword }) {
@@ -547,7 +547,7 @@ fun ForgotPasswordScreen(
         WhitzTextField(
             value = newPassword,
             onValueChange = { newPassword = it; vm.clearError() },
-            label = "新密码（至少 6 位）",
+            label = "新密码（至少 8 位）",
             visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = {
                 IconButton(onClick = { showPassword = !showPassword }) {

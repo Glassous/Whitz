@@ -36,8 +36,8 @@ data class User(
 @Serializable
 data class CreditWindow(
     val limit: Long? = null,
-    val used: Long = 0,
-    val remaining: Long? = null,
+    val used: Double = 0.0,
+    val remaining: Double? = null,
     @SerialName("reset_at") val resetAt: String = "",
 )
 
@@ -62,7 +62,7 @@ data class CreditStatus(
     @SerialName("tokens_per_credit") val tokensPerCredit: Long = 5000,
     val weekly: CreditWindow = CreditWindow(),
     @SerialName("five_hour") val fiveHour: CreditWindow = CreditWindow(),
-    val remaining: Long = 0,
+    val remaining: Double = 0.0,
     val overdrawn: Boolean = false,
     val plan: MembershipPlan = MembershipPlan(tier = "free", label = "Free"),
     val plans: List<MembershipPlan> = emptyList(),
@@ -145,7 +145,7 @@ data class ReasoningTool(
     val args: String? = null,
     val result: String? = null,
     val status: String? = null,
-    @SerialName("duration_ms") val durationMs: Long? = null,
+    @SerialName("duration_ms") val durationMs: Double? = null,
     val error: String? = null,
 )
 
@@ -367,18 +367,23 @@ data class DownloadUrlResponse(
 )
 
 @Serializable
-data class GithubSkillPreviewItem(
-    val name: String,
+data class GithubSkillPreviewResponse(
+    val name: String = "",
     val description: String = "",
-    val path: String = "",
-    val selected: Boolean = true,
+    val content: String = "",
+    @SerialName("repo_url") val repoUrl: String = "",
+    val ref: String? = null,
+    val path: String? = null,
 )
 
-@Serializable
-data class GithubSkillPreviewResponse(
-    val repo: String = "",
-    val skills: List<GithubSkillPreviewItem> = emptyList(),
-)
+fun formatCredits(value: Double): String {
+    if (!value.isFinite()) return "0"
+    val rounded = kotlin.math.round(value * 100.0) / 100.0
+    if (rounded % 1.0 == 0.0) return rounded.toLong().toString()
+    return String.format(java.util.Locale.US, "%.2f", rounded)
+        .trimEnd('0')
+        .trimEnd('.')
+}
 
 enum class ThemePreference {
     SYSTEM, LIGHT, DARK
