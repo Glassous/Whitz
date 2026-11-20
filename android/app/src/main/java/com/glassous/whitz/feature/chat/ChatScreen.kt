@@ -159,6 +159,7 @@ private fun currentGreeting(): String {
 fun ChatScreen(
     vm: ChatViewModel,
     onOpenSettings: () -> Unit,
+    onOpenTaskDetails: (Int) -> Unit,
 ) {
     val ui by vm.ui.collectAsState()
     val user by vm.user.collectAsState()
@@ -180,8 +181,6 @@ fun ChatScreen(
     var showSearch by remember { mutableStateOf(false) }
     var showSkillPicker by remember { mutableStateOf(false) }
     var showLibraryPicker by remember { mutableStateOf(false) }
-    var showTaskSheet by remember { mutableStateOf(false) }
-    var showDesktopTaskPanel by remember { mutableStateOf(false) }
     var desktopSidebarCollapsed by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
 
@@ -290,7 +289,6 @@ fun ChatScreen(
     // Back key handling: overlays & drawer close before exiting
     BackHandler(enabled = ui.previewTarget != null) { vm.closeFilePreview() }
     BackHandler(enabled = showSearch) { showSearch = false }
-    BackHandler(enabled = showTaskSheet) { showTaskSheet = false }
     BackHandler(enabled = showSkillPicker) { showSkillPicker = false }
     BackHandler(enabled = showLibraryPicker) { showLibraryPicker = false }
     BackHandler(enabled = plusMenuExpanded) { dismissPlusMenu() }
@@ -432,7 +430,7 @@ fun ChatScreen(
                                                 onEditSubmit = { id, content -> vm.editAndResend(id, content) },
                                                 onOpenTurnDetails = { id ->
                                                     vm.selectTurn(id)
-                                                    if (isExpandedScreen) showDesktopTaskPanel = true else showTaskSheet = true
+                                                    onOpenTaskDetails(0)
                                                 },
                                                 onOpenFile = { f -> vm.openFilePreview(f) },
                                             )
@@ -489,13 +487,7 @@ fun ChatScreen(
                             WhitzGlassCircleButton(
                                 hazeState = headerHazeState,
                                 showBorder = visibleMessages.isNotEmpty(),
-                                onClick = {
-                                    if (isExpandedScreen) {
-                                        showDesktopTaskPanel = !showDesktopTaskPanel
-                                    } else {
-                                        showTaskSheet = true
-                                    }
-                                },
+                                onClick = { onOpenTaskDetails(0) },
                             ) {
                                 Icon(
                                     painter = painterResource(R.drawable.ic_task_panel),
@@ -504,7 +496,7 @@ fun ChatScreen(
                                     modifier = Modifier.size(22.dp),
                                 )
                             }
-                            if (ui.files.isNotEmpty() && !showDesktopTaskPanel) {
+                            if (ui.files.isNotEmpty()) {
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.TopEnd)
@@ -931,51 +923,6 @@ fun ChatScreen(
                             .padding(bottom = 90.dp),
                     )
                 }
-
-                // Expanded screen: right-side Task & Files panel
-                AnimatedVisibility(
-                    visible = isExpandedScreen && showDesktopTaskPanel,
-                    enter = fadeIn() + slideInHorizontally { it / 3 },
-                    exit = fadeOut() + slideOutHorizontally { it / 3 },
-                ) {
-                    Surface(
-                        color = colors.canvas,
-                        border = BorderStroke(0.5.dp, colors.line),
-                        modifier = Modifier
-                            .width(340.dp)
-                            .fillMaxHeight(),
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .statusBarsPadding()
-                                .navigationBarsPadding(),
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text("任务与文件", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = colors.fg, modifier = Modifier.weight(1f))
-                                IconButton(onClick = { showDesktopTaskPanel = false }, modifier = Modifier.size(32.dp)) {
-                                    Icon(Icons.Default.Close, contentDescription = "关闭面板", tint = colors.fgMuted, modifier = Modifier.size(18.dp))
-                                }
-                            }
-                            TaskDetailContent(
-                                plan = resolvedTurn.plan,
-                                reasoning = resolvedTurn.reasoning,
-                                files = ui.files,
-                                onOpenFile = { vm.openFilePreview(it) },
-                                onDeleteFile = { vm.deleteFile(it) },
-                                streaming = resolvedTurn.isLive,
-                                runningTool = resolvedTurn.runningTool,
-                                turnKey = resolvedTurn.turnId ?: "",
-                                modifier = Modifier.weight(1f).fillMaxWidth(),
-                            )
-                        }
-                    }
-                }
             }
 
                 ComposerPlusMenuOverlay(
@@ -1074,20 +1021,6 @@ fun ChatScreen(
             fetchLibrary = { q -> vm.fetchLibraryFiles(q) },
             onAttach = { ids -> vm.attachFromLibrary(ids) },
             onDismiss = { showLibraryPicker = false },
-        )
-    }
-
-    if (showTaskSheet) {
-        TaskDetailSheet(
-            plan = resolvedTurn.plan,
-            reasoning = resolvedTurn.reasoning,
-            files = ui.files,
-            onOpenFile = { f -> vm.openFilePreview(f) },
-            onDeleteFile = { id -> vm.deleteFile(id) },
-            onDismiss = { showTaskSheet = false },
-            streaming = resolvedTurn.isLive,
-            runningTool = resolvedTurn.runningTool,
-            turnKey = resolvedTurn.turnId ?: "",
         )
     }
 

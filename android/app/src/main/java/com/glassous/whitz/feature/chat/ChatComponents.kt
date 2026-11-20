@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -52,23 +51,19 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -85,6 +80,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -102,7 +98,6 @@ import com.glassous.whitz.core.model.ReasoningTool
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.ui.theme.LocalWhitzColors
-import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
 import com.glassous.whitz.ui.theme.WhitzTextField
 
@@ -658,19 +653,16 @@ fun SkillPendingCard(
 }
 
 @Composable
-fun TaskDetailContent(
+fun TaskStepsPane(
     plan: Plan?,
     reasoning: List<ReasoningBlock>,
-    files: List<ConversationFile>,
-    onOpenFile: (ConversationFile) -> Unit,
-    onDeleteFile: (String) -> Unit,
     modifier: Modifier = Modifier,
     streaming: Boolean = false,
     runningTool: String? = null,
     turnKey: String = "",
+    bottomPadding: Dp = 24.dp,
 ) {
     val colors = LocalWhitzColors.current
-    var tab by remember { mutableIntStateOf(0) }
     val sections = remember(plan, reasoning) { partitionPlanSteps(plan, reasoning) }
     val toggledSteps = remember(turnKey) { mutableStateMapOf<String, Boolean>() }
 
@@ -678,206 +670,172 @@ fun TaskDetailContent(
         if (streaming) toggledSteps.clear()
     }
 
-    Column(modifier = modifier) {
-        WhitzConnectedRadioGroup(
-            options = listOf(0 to "执行步骤", 1 to "对话文件 (${files.size})"),
-            selected = tab,
-            onSelect = { tab = it },
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-        )
+    LazyColumn(
+        modifier = modifier,
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = bottomPadding),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (sections.items.isNotEmpty() && sections.planningBlocks.isNotEmpty()) {
+            item(key = "sec-planning-header") {
+                Text("规划", fontWeight = FontWeight.Medium, fontSize = 13.5.sp, color = colors.fgMuted)
+            }
+            items(sections.planningBlocks.size, key = { "planning-$it" }) { idx ->
+                ReasoningBlockView(block = sections.planningBlocks[idx])
+            }
+        }
 
-        if (tab == 0) {
-            LazyColumn(
-                modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                if (sections.items.isNotEmpty() && sections.planningBlocks.isNotEmpty()) {
-                    item(key = "sec-planning-header") {
-                        Text("规划", fontWeight = FontWeight.Medium, fontSize = 13.5.sp, color = colors.fgMuted)
-                    }
-                    items(sections.planningBlocks.size, key = { "planning-$it" }) { idx ->
-                        ReasoningBlockView(block = sections.planningBlocks[idx])
-                    }
-                }
-
-                if (sections.steps.isNotEmpty()) {
-                    item(key = "sec-steps-header") {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text("执行步骤", fontWeight = FontWeight.Medium, fontSize = 13.5.sp, color = colors.fgMuted)
-                                Text(
-                                    "${sections.doneCount} / ${sections.items.size}",
-                                    fontSize = 12.5.sp,
-                                    color = colors.fgFaint,
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            LinearProgressIndicator(
-                                progress = { sections.progressPct.coerceIn(0f, 1f) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(4.dp)
-                                    .clip(RoundedCornerShape(999.dp)),
-                                color = MaterialTheme.colorScheme.primary,
-                                trackColor = colors.surface,
-                            )
-                        }
-                    }
-                    items(sections.steps, key = { "step-${it.key}-${it.index}" }) { step ->
-                        val expanded = (toggledSteps[step.key] ?: (step.item.status == "in_progress")) && step.blocks.isNotEmpty()
-                        PlanStepCard(
-                            step = step,
-                            expanded = expanded,
-                            onToggle = {
-                                if (step.blocks.isNotEmpty()) {
-                                    toggledSteps[step.key] = !expanded
-                                }
-                            },
-                        )
-                    }
-                }
-
-                if (sections.items.isNotEmpty() && sections.summaryBlocks.isNotEmpty()) {
-                    item(key = "sec-summary-header") {
-                        Text("总结", fontWeight = FontWeight.Medium, fontSize = 13.5.sp, color = colors.fgMuted)
-                    }
-                    items(sections.summaryBlocks.size, key = { "summary-$it" }) { idx ->
-                        ReasoningBlockView(block = sections.summaryBlocks[idx])
-                    }
-                }
-
-                if (sections.looseBlocks.isNotEmpty()) {
-                    item(key = "sec-loose-header") {
+        if (sections.steps.isNotEmpty()) {
+            item(key = "sec-steps-header") {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("执行步骤", fontWeight = FontWeight.Medium, fontSize = 13.5.sp, color = colors.fgMuted)
                         Text(
-                            text = if (sections.items.isNotEmpty()) "其他记录" else "思考与执行",
-                            fontWeight = FontWeight.Medium,
-                            fontSize = 13.5.sp,
-                            color = colors.fgMuted,
+                            "${sections.doneCount} / ${sections.items.size}",
+                            fontSize = 12.5.sp,
+                            color = colors.fgFaint,
                         )
                     }
-                    items(sections.looseBlocks.size, key = { "loose-$it" }) { idx ->
-                        ReasoningBlockView(block = sections.looseBlocks[idx])
-                    }
-                }
-
-                if (streaming && !runningTool.isNullOrBlank()) {
-                    item(key = "sec-running-tool") {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(colors.surface)
-                                .padding(horizontal = 12.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            WhitzLoadingIndicator(size = 14.dp)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "正在调用 ${toolDisplayName(runningTool)}",
-                                fontSize = 12.5.sp,
-                                color = colors.fgMuted,
-                            )
-                        }
-                    }
-                }
-
-                if (sections.items.isEmpty() && reasoning.isEmpty() && !streaming) {
-                    item(key = "sec-empty") {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 28.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = "暂无运行详情。\n助理处理多步骤任务或读取文件时，这里会按步骤显示思考与工具调用。",
-                                fontSize = 13.sp,
-                                lineHeight = 20.sp,
-                                color = colors.fgFaint,
-                            )
-                        }
-                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { sections.progressPct.coerceIn(0f, 1f) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(999.dp)),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = colors.surface,
+                    )
                 }
             }
-        } else {
-            if (files.isEmpty()) {
-                Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                    Text("当前对话暂无文件", color = colors.fgFaint, fontSize = 13.sp)
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(files, key = { it.id }) { f ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(colors.surface)
-                                .clickable { onOpenFile(f) }
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(f.filename, fontSize = 14.sp, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("${FileValidator.formatSize(f.sizeBytes)} · ${f.source}", fontSize = 11.sp, color = colors.fgFaint)
-                            }
-                            IconButton(onClick = { onDeleteFile(f.id) }, modifier = Modifier.size(32.dp)) {
-                                Icon(Icons.Default.Delete, contentDescription = "删除文件", tint = colors.fgFaint, modifier = Modifier.size(16.dp))
-                            }
+            items(sections.steps, key = { "step-${it.key}-${it.index}" }) { step ->
+                val expanded = (toggledSteps[step.key] ?: (step.item.status == "in_progress")) && step.blocks.isNotEmpty()
+                PlanStepCard(
+                    step = step,
+                    expanded = expanded,
+                    onToggle = {
+                        if (step.blocks.isNotEmpty()) {
+                            toggledSteps[step.key] = !expanded
                         }
-                    }
+                    },
+                )
+            }
+        }
+
+        if (sections.items.isNotEmpty() && sections.summaryBlocks.isNotEmpty()) {
+            item(key = "sec-summary-header") {
+                Text("总结", fontWeight = FontWeight.Medium, fontSize = 13.5.sp, color = colors.fgMuted)
+            }
+            items(sections.summaryBlocks.size, key = { "summary-$it" }) { idx ->
+                ReasoningBlockView(block = sections.summaryBlocks[idx])
+            }
+        }
+
+        if (sections.looseBlocks.isNotEmpty()) {
+            item(key = "sec-loose-header") {
+                Text(
+                    text = if (sections.items.isNotEmpty()) "其他记录" else "思考与执行",
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 13.5.sp,
+                    color = colors.fgMuted,
+                )
+            }
+            items(sections.looseBlocks.size, key = { "loose-$it" }) { idx ->
+                ReasoningBlockView(block = sections.looseBlocks[idx])
+            }
+        }
+
+        if (streaming && !runningTool.isNullOrBlank()) {
+            item(key = "sec-running-tool") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(colors.surface)
+                        .border(0.5.dp, colors.line, RoundedCornerShape(14.dp))
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    WhitzLoadingIndicator(size = 14.dp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "正在调用 ${toolDisplayName(runningTool)}",
+                        fontSize = 13.sp,
+                        color = colors.fgMuted,
+                    )
+                }
+            }
+        }
+
+        if (sections.items.isEmpty() && reasoning.isEmpty() && !streaming) {
+            item(key = "sec-empty") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 48.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "暂无运行详情。\n助理处理多步骤任务或读取文件时，这里会按步骤显示思考与工具调用。",
+                        fontSize = 13.sp,
+                        lineHeight = 20.sp,
+                        color = colors.fgFaint,
+                    )
                 }
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TaskDetailSheet(
-    plan: Plan?,
-    reasoning: List<ReasoningBlock>,
+fun TaskFilesPane(
     files: List<ConversationFile>,
     onOpenFile: (ConversationFile) -> Unit,
     onDeleteFile: (String) -> Unit,
-    onDismiss: () -> Unit,
-    streaming: Boolean = false,
-    runningTool: String? = null,
-    turnKey: String = "",
+    modifier: Modifier = Modifier,
+    bottomPadding: Dp = 24.dp,
 ) {
     val colors = LocalWhitzColors.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = colors.canvas,
-        contentWindowInsets = { WindowInsets(0) },
-    ) {
-        TaskDetailContent(
-            plan = plan,
-            reasoning = reasoning,
-            files = files,
-            onOpenFile = onOpenFile,
-            onDeleteFile = onDeleteFile,
-            streaming = streaming,
-            runningTool = runningTool,
-            turnKey = turnKey,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 320.dp, max = 580.dp)
-                .navigationBarsPadding(),
-        )
+    if (files.isEmpty()) {
+        Box(modifier = modifier.padding(32.dp), contentAlignment = Alignment.Center) {
+            Text("当前对话暂无文件", color = colors.fgFaint, fontSize = 13.5.sp)
+        }
+    } else {
+        LazyColumn(
+            modifier = modifier,
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = bottomPadding),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(files, key = { it.id }) { f ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable { onOpenFile(f) },
+                    shape = RoundedCornerShape(16.dp),
+                    color = colors.surface,
+                    border = BorderStroke(0.5.dp, colors.line),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(f.filename, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${FileValidator.formatSize(f.sizeBytes)} · ${f.source}", fontSize = 12.sp, color = colors.fgFaint)
+                        }
+                        IconButton(onClick = { onDeleteFile(f.id) }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Delete, contentDescription = "删除文件", tint = colors.danger, modifier = Modifier.size(17.dp))
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

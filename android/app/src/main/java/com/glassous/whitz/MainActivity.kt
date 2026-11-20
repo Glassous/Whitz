@@ -20,15 +20,18 @@ import androidx.compose.runtime.remember
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.glassous.whitz.feature.auth.AuthViewModel
 import com.glassous.whitz.feature.auth.ForgotPasswordScreen
 import com.glassous.whitz.feature.auth.LoginScreen
 import com.glassous.whitz.feature.auth.RegisterScreen
 import com.glassous.whitz.feature.chat.ChatScreen
 import com.glassous.whitz.feature.chat.ChatViewModel
+import com.glassous.whitz.feature.chat.TaskDetailScreen
 import com.glassous.whitz.feature.settings.SettingsRootScreen
 import com.glassous.whitz.feature.settings.SettingsViewModel
 import com.glassous.whitz.ui.theme.WhitzTheme
@@ -93,7 +96,7 @@ private fun WhitzRoot(container: AppContainer) {
 
     LaunchedEffect(user) {
         val currentRoute = navController.currentBackStackEntry?.destination?.route
-        if (user == null && currentRoute in setOf("chat", "settings")) {
+        if (user == null && currentRoute != null && currentRoute !in setOf("login", "register", "forgot")) {
             navController.navigate("login") {
                 popUpTo(0) { inclusive = true }
             }
@@ -150,7 +153,30 @@ private fun WhitzRoot(container: AppContainer) {
             ChatScreen(
                 vm = chatVm,
                 onOpenSettings = { navController.navigate("settings") },
+                onOpenTaskDetails = { tab -> navController.navigate("task_details?tab=$tab") },
             )
+        }
+        composable(
+            route = "task_details?tab={tab}",
+            arguments = listOf(
+                navArgument("tab") {
+                    type = NavType.IntType
+                    defaultValue = 0
+                },
+            ),
+        ) { backStackEntry ->
+            val initialTab = backStackEntry.arguments?.getInt("tab") ?: 0
+            val chatEntry = remember(backStackEntry) {
+                runCatching { navController.getBackStackEntry("chat") }.getOrNull()
+            }
+            if (chatEntry != null) {
+                val chatVm: ChatViewModel = viewModel(chatEntry, factory = factory)
+                TaskDetailScreen(
+                    vm = chatVm,
+                    initialTab = initialTab,
+                    onBack = { navController.popBackStack() },
+                )
+            }
         }
         composable("settings") {
             val settingsVm: SettingsViewModel = viewModel(factory = factory)
