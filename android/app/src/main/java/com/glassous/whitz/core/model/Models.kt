@@ -385,6 +385,49 @@ fun formatCredits(value: Double): String {
         .trimEnd('.')
 }
 
+/**
+ * Remaining quota of one window as a percentage (0–100), mirroring the web client.
+ * Returns null when the window has no limit (unlimited).
+ */
+fun CreditWindow.remainingPercent(): Int? {
+    val cap = limit ?: return null
+    if (cap <= 0L) return null
+    val pct = ((cap - used) / cap.toDouble()) * 100.0
+    return kotlin.math.round(pct).toInt().coerceIn(0, 100)
+}
+
+fun CreditStatus.weeklyPercent(): Int? = weekly.remainingPercent()
+
+fun CreditStatus.fiveHourPercent(): Int? = fiveHour.remainingPercent()
+
+/**
+ * Headline percentage: Pro only relies on the weekly window, other tiers are capped by both windows.
+ */
+fun CreditStatus.availablePercent(): Int? {
+    val weeklyPct = weeklyPercent()
+    if (tier == "pro") return weeklyPct
+    val fiveHourPct = fiveHourPercent()
+    return when {
+        weeklyPct == null -> fiveHourPct
+        fiveHourPct == null -> weeklyPct
+        else -> minOf(weeklyPct, fiveHourPct)
+    }
+}
+
+/**
+ * Compact quota summary using percentages instead of raw credit amounts, e.g. 「本周 62% · 5 小时 80%」.
+ * Matches the wording used on the web sidebar quick card.
+ */
+fun CreditStatus.quotaPercentLabel(): String {
+    val parts = buildList {
+        add(weeklyPercent()?.let { "本周 $it%" } ?: "本周不限")
+        if (tier != "pro") {
+            fiveHourPercent()?.let { add("5 小时 $it%") }
+        }
+    }
+    return parts.joinToString(" · ")
+}
+
 enum class ThemePreference {
     SYSTEM, LIGHT, DARK
 }

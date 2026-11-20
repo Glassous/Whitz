@@ -442,36 +442,65 @@ fun MarkdownText(
                     }
                 }
                 is MdBlock.Table -> {
+                    // 1–2 columns: stretch to the full available width, no horizontal scrolling.
+                    // 3+ columns: keep the fixed-width scrollable layout.
+                    val columnCount = maxOf(
+                        block.headers.size,
+                        block.rows.maxOfOrNull { it.size } ?: 0,
+                    ).coerceAtLeast(1)
+                    val stretchToWidth = columnCount <= 2
+                    val cellModifier = Modifier.width(120.dp).padding(horizontal = 4.dp)
+
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
+                            .then(
+                                if (stretchToWidth) {
+                                    Modifier
+                                } else {
+                                    Modifier.horizontalScroll(rememberScrollState())
+                                },
+                            )
                             .clip(RoundedCornerShape(8.dp))
                             .border(1.dp, colors.line, RoundedCornerShape(8.dp)),
                     ) {
-                        Row(modifier = Modifier.background(colors.surface).padding(8.dp)) {
-                            block.headers.forEach { h ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(colors.surface)
+                                .padding(8.dp),
+                        ) {
+                            repeat(columnCount) { index ->
                                 Text(
-                                    text = h,
+                                    text = block.headers.getOrNull(index).orEmpty(),
                                     fontWeight = FontWeight.SemiBold,
                                     fontSize = 13.sp,
                                     color = colors.fg,
-                                    modifier = Modifier.width(120.dp).padding(horizontal = 4.dp),
+                                    modifier = if (stretchToWidth) {
+                                        Modifier.weight(1f).padding(horizontal = 4.dp)
+                                    } else {
+                                        cellModifier
+                                    },
                                 )
                             }
                         }
                         block.rows.forEach { row ->
                             Row(
                                 modifier = Modifier
+                                    .fillMaxWidth()
                                     .border(0.5.dp, colors.line)
                                     .padding(8.dp),
                             ) {
-                                row.forEach { cell ->
+                                repeat(columnCount) { index ->
                                     Text(
-                                        text = cell,
+                                        text = row.getOrNull(index).orEmpty(),
                                         fontSize = 13.sp,
                                         color = colors.fg,
-                                        modifier = Modifier.width(120.dp).padding(horizontal = 4.dp),
+                                        modifier = if (stretchToWidth) {
+                                            Modifier.weight(1f).padding(horizontal = 4.dp)
+                                        } else {
+                                            cellModifier
+                                        },
                                     )
                                 }
                             }

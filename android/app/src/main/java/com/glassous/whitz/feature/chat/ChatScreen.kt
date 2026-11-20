@@ -127,15 +127,18 @@ import com.glassous.whitz.R
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.UploadTaskStatus
 import com.glassous.whitz.core.model.User
-import com.glassous.whitz.core.model.formatCredits
+import com.glassous.whitz.core.model.quotaPercentLabel
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzBrandMark
+import com.glassous.whitz.ui.theme.WhitzGlassCircleButton
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
 import com.glassous.whitz.ui.theme.WhitzLogoMark
 import com.glassous.whitz.ui.theme.WhitzProgressiveBlurBottom
 import com.glassous.whitz.ui.theme.WhitzProgressiveBlurTop
 import com.glassous.whitz.ui.theme.WhitzTextField
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.launch
 import java.util.Calendar
 import kotlin.math.roundToInt
@@ -168,6 +171,7 @@ fun ChatScreen(
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
     val inputFocusRequester = remember { FocusRequester() }
+    val headerHazeState = rememberHazeState()
 
     var inputText by remember { mutableStateOf("") }
     var isInputFocused by remember { mutableStateOf(false) }
@@ -261,10 +265,25 @@ fun ChatScreen(
         )
     }
 
+    // Top of the newest message must clear the floating header (status bar + 66dp button row),
+    // otherwise the first line of that message is hidden behind the frosted buttons.
+    val revealTopOffsetPx = with(density) {
+        (WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 68.dp).roundToPx()
+    }
+    val conversationScrollKey = ui.currentConvId ?: "local-new"
+    var revealedConversationKey by remember { mutableStateOf<String?>(null) }
+
     val lastMsgContentLen = visibleMessages.lastOrNull()?.content?.length ?: 0
-    LaunchedEffect(visibleMessages.size, lastMsgContentLen) {
-        if (visibleMessages.isNotEmpty()) {
-            listState.animateScrollToItem(visibleMessages.lastIndex)
+    LaunchedEffect(conversationScrollKey, visibleMessages.size, lastMsgContentLen) {
+        if (visibleMessages.isEmpty()) return@LaunchedEffect
+        val lastIndex = visibleMessages.lastIndex
+        // Entering a conversation (or returning from another page) jumps straight to the top of the
+        // newest message, aligned with the web client. Streaming updates animate from there.
+        if (revealedConversationKey != conversationScrollKey) {
+            revealedConversationKey = conversationScrollKey
+            listState.scrollToItem(lastIndex, scrollOffset = -revealTopOffsetPx)
+        } else {
+            listState.animateScrollToItem(lastIndex, scrollOffset = -revealTopOffsetPx)
         }
     }
 
@@ -342,9 +361,11 @@ fun ChatScreen(
                     val listTopPadding = statusTop + 68.dp
                     val listBottomPadding = (if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottom) + 16.dp
 
-                    // 1. Messages or Empty State
+                    // 1. Messages or Empty State (also the blur source for the floating header)
                     Box(
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .hazeSource(headerHazeState),
                     ) {
                         if (visibleMessages.isEmpty()) {
                             Column(
@@ -422,13 +443,19 @@ fun ChatScreen(
                         }
                     }
 
-                    // 2. Top Gradient Scrim + Floating Header
-                    WhitzProgressiveBlurTop(
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .fillMaxWidth()
-                            .height(statusTop + 56.dp),
-                    )
+                    // 2a. Status bar scrim only (same look as the bottom scrim); the header row itself
+                    //     stays fully transparent.
+                    if (statusTop > 0.dp) {
+                        WhitzProgressiveBlurTop(
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .fillMaxWidth()
+                                .height(statusTop + 12.dp),
+                            maxAlpha = 0.85f,
+                        )
+                    }
+
+                    // 2b. Floating Header: no title, frosted circular buttons only
                     Row(
                         modifier = Modifier
                             .align(Alignment.TopCenter)
@@ -437,7 +464,9 @@ fun ChatScreen(
                             .padding(horizontal = 10.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        IconButton(
+                        WhitzGlassCircleButton(
+                            hazeState = headerHazeState,
+                            showBorder = visibleMessages.isNotEmpty(),
                             onClick = {
                                 if (isExpandedScreen) {
                                     desktopSidebarCollapsed = !desktopSidebarCollapsed
@@ -445,30 +474,21 @@ fun ChatScreen(
                                     scope.launch { drawerState.open() }
                                 }
                             },
-                            modifier = Modifier.size(40.dp),
                         ) {
                             Icon(
                                 painter = painterResource(R.drawable.ic_sidebar_toggle),
                                 contentDescription = "切换侧栏",
                                 tint = colors.fgMuted,
-                                modifier = Modifier.size(21.dp),
+                                modifier = Modifier.size(23.dp),
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(6.dp))
-
-                        Text(
-                            text = ui.currentConvTitle,
-                            fontSize = 15.5.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = colors.fg,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
+                        Spacer(modifier = Modifier.weight(1f))
 
                         Box {
-                            IconButton(
+                            WhitzGlassCircleButton(
+                                hazeState = headerHazeState,
+                                showBorder = visibleMessages.isNotEmpty(),
                                 onClick = {
                                     if (isExpandedScreen) {
                                         showDesktopTaskPanel = !showDesktopTaskPanel
@@ -476,20 +496,19 @@ fun ChatScreen(
                                         showTaskSheet = true
                                     }
                                 },
-                                modifier = Modifier.size(40.dp),
                             ) {
                                 Icon(
                                     painter = painterResource(R.drawable.ic_task_panel),
                                     contentDescription = "步骤与文件",
                                     tint = colors.fgMuted,
-                                    modifier = Modifier.size(20.dp),
+                                    modifier = Modifier.size(22.dp),
                                 )
                             }
                             if (ui.files.isNotEmpty() && !showDesktopTaskPanel) {
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.TopEnd)
-                                        .padding(top = 8.dp, end = 8.dp)
+                                        .padding(top = 6.dp, end = 6.dp)
                                         .size(7.dp)
                                         .clip(CircleShape)
                                         .background(colors.fg),
@@ -1358,7 +1377,7 @@ private fun SidebarContent(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    val creditsLabel = ui.credits?.let { "${it.tierLabel} · 剩余 ${formatCredits(it.remaining)} 积分" }
+                    val creditsLabel = ui.credits?.let { "${it.tierLabel} · ${it.quotaPercentLabel()}" }
                         ?: (user?.email ?: "")
                     Text(
                         text = creditsLabel,

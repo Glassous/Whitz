@@ -3,6 +3,15 @@ package com.glassous.whitz.feature.settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -86,7 +95,10 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.glassous.whitz.core.files.FileValidator
 import com.glassous.whitz.core.model.ThemePreference
-import com.glassous.whitz.core.model.formatCredits
+import com.glassous.whitz.core.model.availablePercent
+import com.glassous.whitz.core.model.fiveHourPercent
+import com.glassous.whitz.core.model.quotaPercentLabel
+import com.glassous.whitz.core.model.weeklyPercent
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
@@ -211,27 +223,58 @@ fun SettingsRootScreen(
                                 .background(colors.line),
                         )
                         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                            SettingsSectionBody(section = activeSection, vm = vm)
+                            AnimatedContent(
+                                targetState = activeSection,
+                                transitionSpec = { settingsSectionTransition() },
+                                label = "settingsSectionExpanded",
+                            ) { target ->
+                                SettingsSectionBody(section = target, vm = vm)
+                            }
                         }
                     }
                 } else {
-                    if (section == SettingsSection.HOME) {
-                        SettingsHomeContent(
-                            vm = vm,
-                            selectedSection = null,
-                            onSelect = {
-                                vm.clearFeedback()
-                                section = it
-                            },
-                            onLogout = { vm.logout(onLoggedOut) },
-                        )
-                    } else {
-                        SettingsSectionBody(section = section, vm = vm)
+                    AnimatedContent(
+                        targetState = section,
+                        transitionSpec = { settingsSectionTransition() },
+                        label = "settingsSection",
+                        modifier = Modifier.weight(1f),
+                    ) { target ->
+                        if (target == SettingsSection.HOME) {
+                            SettingsHomeContent(
+                                vm = vm,
+                                selectedSection = null,
+                                onSelect = {
+                                    vm.clearFeedback()
+                                    section = it
+                                },
+                                onLogout = { vm.logout(onLoggedOut) },
+                            )
+                        } else {
+                            SettingsSectionBody(section = target, vm = vm)
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/** Nesting depth, used to decide the direction of the section transition. */
+private fun settingsSectionDepth(section: SettingsSection): Int = when (section) {
+    SettingsSection.HOME -> 0
+    SettingsSection.PASSWORD -> 2
+    else -> 1
+}
+
+private fun AnimatedContentTransitionScope<SettingsSection>.settingsSectionTransition(): ContentTransform {
+    val forward = settingsSectionDepth(targetState) >= settingsSectionDepth(initialState)
+    val enter = slideInHorizontally(animationSpec = tween(260)) { width ->
+        if (forward) width / 6 else -(width / 6)
+    } + fadeIn(animationSpec = tween(200))
+    val exit = slideOutHorizontally(animationSpec = tween(220)) { width ->
+        if (forward) -(width / 10) else width / 10
+    } + fadeOut(animationSpec = tween(160))
+    return enter togetherWith exit
 }
 
 @Composable
@@ -360,7 +403,7 @@ private fun SettingsHomeContent(
                 SettingsMenuRow(
                     Icons.Default.CreditCard,
                     "会员与积分",
-                    ui.credits?.let { "${it.tierLabel} · ${formatCredits(it.remaining)} 积分" },
+                    ui.credits?.let { "${it.tierLabel} · ${it.quotaPercentLabel()}" },
                     selectedSection == SettingsSection.MEMBERSHIP,
                 ) { onSelect(SettingsSection.MEMBERSHIP) }
                 HorizontalDivider(color = colors.line)
@@ -996,20 +1039,56 @@ private fun MembershipSettingsContent(vm: SettingsViewModel) {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text("当前套餐：${c.tierLabel}", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = colors.fg)
-                    Text("剩余可用积分：${formatCredits(c.remaining)}", fontSize = 14.sp, color = colors.fgMuted)
+                    val availablePct = c.availablePercent()
+                    Text(
+                        text = when {
+                            c.overdrawn -> "当前可用：额度已用尽"
+                            availablePct == null -> "当前可用：不限"
+                            else -> "当前可用：$availablePct%"
+                        },
+                        fontSize = 14.sp,
+                        color = if (c.overdrawn) colors.danger else colors.fgMuted,
+                    )
                     if (!c.expiresAt.isNullOrBlank()) {
                         Text("到期时间：${DateTimeUtils.formatShort(c.expiresAt)}", fontSize = 12.sp, color = colors.fgFaint)
                     }
 
-                    c.fiveHour.limit?.let { limit ->
-                        val pct = if (limit > 0) ((limit - c.fiveHour.used).coerceAtLeast(0.0) / limit).toFloat().coerceIn(0f, 1f) else 0f
-                        Text("5 小时额度：已用 ${formatCredits(c.fiveHour.used)} / $limit", fontSize = 12.sp, color = colors.fgMuted)
-                        LinearWavyProgressIndicator(progress = { pct }, modifier = Modifier.fillMaxWidth())
+                    val weeklyPct = c.weeklyPercent()
+                    Text(
+                        text = weeklyPct?.let { "本周剩余：$it%" } ?: "本周剩余：不限",
+                        fontSize = 12.sp,
+                        color = colors.fgMuted,
+                    )
+                    LinearWavyProgressIndicator(
+                        progress = { (weeklyPct ?: 100) / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (weeklyPct != null && c.weekly.resetAt.isNotBlank()) {
+                        Text(
+                            "${DateTimeUtils.formatShort(c.weekly.resetAt)} 重置",
+                            fontSize = 11.sp,
+                            color = colors.fgFaint,
+                        )
                     }
-                    c.weekly.limit?.let { limit ->
-                        val pct = if (limit > 0) ((limit - c.weekly.used).coerceAtLeast(0.0) / limit).toFloat().coerceIn(0f, 1f) else 0f
-                        Text("每周额度：已用 ${formatCredits(c.weekly.used)} / $limit", fontSize = 12.sp, color = colors.fgMuted)
-                        LinearWavyProgressIndicator(progress = { pct }, modifier = Modifier.fillMaxWidth())
+
+                    if (c.tier != "pro") {
+                        val fiveHourPct = c.fiveHourPercent()
+                        Text(
+                            text = fiveHourPct?.let { "5 小时剩余：$it%" } ?: "5 小时剩余：不限",
+                            fontSize = 12.sp,
+                            color = colors.fgMuted,
+                        )
+                        LinearWavyProgressIndicator(
+                            progress = { (fiveHourPct ?: 100) / 100f },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (fiveHourPct != null && c.fiveHour.resetAt.isNotBlank()) {
+                            Text(
+                                "${DateTimeUtils.formatShort(c.fiveHour.resetAt)} 重置",
+                                fontSize = 11.sp,
+                                color = colors.fgFaint,
+                            )
+                        }
                     }
                 }
             }
