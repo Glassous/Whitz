@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.ToggleButton
 import androidx.compose.material3.ToggleButtonDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -37,11 +38,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.chrisbanes.haze.HazeProgressive
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
+import kotlin.math.PI
+import kotlin.math.cos
 
 /**
  * M3E connected radio group replacing the retired SegmentedButtonRow.
@@ -164,76 +162,59 @@ fun WhitzTextField(
     )
 }
 
-/**
- * Top progressive blur + canvas fade matching Web's `.progressive-blur-top`.
- */
-@Composable
-fun WhitzProgressiveBlurTop(
-    hazeState: HazeState,
-    modifier: Modifier = Modifier,
-) {
-    val canvas = LocalWhitzColors.current.canvas
-    Box(
-        modifier = modifier
-            .hazeEffect(
-                state = hazeState,
-                style = HazeStyle(
-                    backgroundColor = canvas,
-                    tint = HazeTint(canvas.copy(alpha = 0.35f)),
-                    blurRadius = 18.dp,
-                ),
-            ) {
-                progressive = HazeProgressive.verticalGradient(
-                    startIntensity = 1f,
-                    endIntensity = 0f,
-                )
-            }
-            .background(
-                Brush.verticalGradient(
-                    colorStops = arrayOf(
-                        0.0f to canvas.copy(alpha = 0.96f),
-                        0.44f to canvas.copy(alpha = 0.78f),
-                        0.76f to canvas.copy(alpha = 0.28f),
-                        1.0f to Color.Transparent,
-                    ),
-                ),
-            ),
-    )
+private fun buildEasedScrimStops(
+    color: Color,
+    topToBottom: Boolean,
+    solidHoldFraction: Float,
+    steps: Int = 24,
+): Array<Pair<Float, Color>> = Array(steps + 1) { index ->
+    val position = index / steps.toFloat()
+    val t = if (topToBottom) position else 1f - position
+    val alpha = if (t <= solidHoldFraction) {
+        1f
+    } else {
+        val u = ((t - solidHoldFraction) / (1f - solidHoldFraction)).coerceIn(0f, 1f)
+        0.5f * (1f + cos(PI * u).toFloat())
+    }
+    position to color.copy(alpha = alpha)
 }
 
 /**
- * Bottom progressive blur + canvas fade matching Web's `.progressive-blur-bottom`.
+ * Top gradient scrim mask matching the canvas color with dense cosine-eased stops.
  */
 @Composable
-fun WhitzProgressiveBlurBottom(
-    hazeState: HazeState,
+fun WhitzProgressiveBlurTop(
     modifier: Modifier = Modifier,
 ) {
     val canvas = LocalWhitzColors.current.canvas
-    Box(
-        modifier = modifier
-            .hazeEffect(
-                state = hazeState,
-                style = HazeStyle(
-                    backgroundColor = canvas,
-                    tint = HazeTint(canvas.copy(alpha = 0.28f)),
-                    blurRadius = 14.dp,
-                ),
-            ) {
-                progressive = HazeProgressive.verticalGradient(
-                    startIntensity = 0f,
-                    endIntensity = 1f,
-                )
-            }
-            .background(
-                Brush.verticalGradient(
-                    colorStops = arrayOf(
-                        0.0f to Color.Transparent,
-                        0.26f to canvas.copy(alpha = 0.16f),
-                        0.58f to canvas.copy(alpha = 0.52f),
-                        1.0f to canvas.copy(alpha = 0.88f),
-                    ),
-                ),
+    val brush = remember(canvas) {
+        Brush.verticalGradient(
+            colorStops = buildEasedScrimStops(
+                color = canvas,
+                topToBottom = true,
+                solidHoldFraction = 0.28f,
             ),
-    )
+        )
+    }
+    Box(modifier = modifier.background(brush))
+}
+
+/**
+ * Bottom gradient scrim mask matching the canvas color with dense cosine-eased stops.
+ */
+@Composable
+fun WhitzProgressiveBlurBottom(
+    modifier: Modifier = Modifier,
+) {
+    val canvas = LocalWhitzColors.current.canvas
+    val brush = remember(canvas) {
+        Brush.verticalGradient(
+            colorStops = buildEasedScrimStops(
+                color = canvas,
+                topToBottom = false,
+                solidHoldFraction = 0.24f,
+            ),
+        )
+    }
+    Box(modifier = modifier.background(brush))
 }

@@ -131,8 +131,6 @@ import com.glassous.whitz.ui.theme.WhitzLogoMark
 import com.glassous.whitz.ui.theme.WhitzProgressiveBlurBottom
 import com.glassous.whitz.ui.theme.WhitzProgressiveBlurTop
 import com.glassous.whitz.ui.theme.WhitzTextField
-import dev.chrisbanes.haze.hazeSource
-import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.launch
 import java.util.Calendar
 import kotlin.math.roundToInt
@@ -161,7 +159,6 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
-    val hazeState = rememberHazeState()
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
     val inputFocusRequester = remember { FocusRequester() }
@@ -181,7 +178,10 @@ fun ChatScreen(
     var renameTarget by remember { mutableStateOf<Conversation?>(null) }
     var deleteTarget by remember { mutableStateOf<Conversation?>(null) }
     var bottomOverlayHeightPx by remember { mutableIntStateOf(0) }
+    var bottomBlurHeightPx by remember { mutableIntStateOf(0) }
     var stageCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var chatAreaCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var composerRowCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var plusButtonCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var plusAnchorBounds by remember { mutableStateOf<Rect?>(null) }
 
@@ -190,6 +190,15 @@ fun ChatScreen(
         val btn = plusButtonCoords
         if (stage != null && btn != null && stage.isAttached && btn.isAttached) {
             plusAnchorBounds = stage.localBoundingBoxOf(btn, clipBounds = false)
+        }
+    }
+    val refreshBottomBlurHeight = {
+        val chat = chatAreaCoords
+        val row = composerRowCoords
+        if (chat != null && row != null && chat.isAttached && row.isAttached) {
+            val rowRect = chat.localBoundingBoxOf(row, clipBounds = false)
+            val rowMidY = (rowRect.top + rowRect.bottom) / 2f
+            bottomBlurHeightPx = (chat.size.height - rowMidY).roundToInt().coerceAtLeast(0)
         }
     }
     val dismissPlusMenu = {
@@ -282,18 +291,24 @@ fun ChatScreen(
                 }
 
                 // Center Chat Area (100% edge-to-edge)
-                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .onGloballyPositioned { coords ->
+                            chatAreaCoords = coords
+                            refreshBottomBlurHeight()
+                        },
+                ) {
                     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
                     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
                     val composerOverlayDp = with(density) { bottomOverlayHeightPx.toDp() }
                     val listTopPadding = statusTop + 68.dp
                     val listBottomPadding = (if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottom) + 16.dp
 
-                    // 1. Messages or Empty State (hazeSource for progressive blur)
+                    // 1. Messages or Empty State
                     Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .hazeSource(state = hazeState),
+                        modifier = Modifier.fillMaxSize(),
                     ) {
                         if (ui.messages.isEmpty()) {
                             Column(
@@ -383,13 +398,12 @@ fun ChatScreen(
                         }
                     }
 
-                    // 2. Top Progressive Blur Overlay + Floating Header
+                    // 2. Top Gradient Scrim + Floating Header
                     WhitzProgressiveBlurTop(
-                        hazeState = hazeState,
                         modifier = Modifier
                             .align(Alignment.TopCenter)
                             .fillMaxWidth()
-                            .height(statusTop + 76.dp),
+                            .height(statusTop + 56.dp),
                     )
                     Row(
                         modifier = Modifier
@@ -419,29 +433,15 @@ fun ChatScreen(
 
                         Spacer(modifier = Modifier.width(6.dp))
 
-                        Row(
+                        Text(
+                            text = ui.currentConvTitle,
+                            fontSize = 15.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.fg,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = ui.currentConvTitle,
-                                fontSize = 15.5.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = colors.fg,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false),
-                            )
-                            if (ui.agentStatus != null) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(if (ui.agentStatus?.ready == true) colors.success else colors.warning),
-                                )
-                            }
-                        }
+                        )
 
                         Box {
                             IconButton(
@@ -472,27 +472,19 @@ fun ChatScreen(
                                 )
                             }
                         }
-
-                        IconButton(
-                            onClick = { vm.startNewConversation() },
-                            modifier = Modifier.size(40.dp),
-                        ) {
-                            Icon(
-                                Icons.Default.Add,
-                                contentDescription = "新对话",
-                                tint = colors.fg,
-                                modifier = Modifier.size(22.dp),
-                            )
-                        }
                     }
 
-                    // 3. Bottom Progressive Blur Overlay + Floating Composer & Pending Cards
+                    // 3. Bottom Gradient Scrim + Floating Composer & Pending Cards
+                    val bottomBlurHeightDp = if (bottomBlurHeightPx > 0) {
+                        with(density) { bottomBlurHeightPx.toDp() }
+                    } else {
+                        56.dp + navBottom
+                    }
                     WhitzProgressiveBlurBottom(
-                        hazeState = hazeState,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .height((if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottom) + 32.dp),
+                            .height(bottomBlurHeightDp),
                     )
 
                     val hasAttachmentsOrSkills = ui.uploads.isNotEmpty() ||
@@ -589,6 +581,10 @@ fun ChatScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .onGloballyPositioned { coords ->
+                                        composerRowCoords = coords
+                                        refreshBottomBlurHeight()
+                                    }
                                     .padding(horizontal = composerHorizontalInset.coerceAtLeast(0.dp)),
                                 verticalAlignment = Alignment.Bottom,
                             ) {
