@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -96,6 +97,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -106,6 +110,7 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -158,8 +163,11 @@ fun ChatScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val hazeState = rememberHazeState()
     val density = LocalDensity.current
+    val focusManager = LocalFocusManager.current
+    val inputFocusRequester = remember { FocusRequester() }
 
     var inputText by remember { mutableStateOf("") }
+    var isInputFocused by remember { mutableStateOf(false) }
     var composerExpanded by remember { mutableStateOf(false) }
     var plusMenuExpanded by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }
@@ -199,6 +207,15 @@ fun ChatScreen(
 
     LaunchedEffect(Unit) {
         vm.loadInitialData()
+    }
+
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    var wasImeVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(imeVisible) {
+        if (wasImeVisible && !imeVisible && isInputFocused) {
+            focusManager.clearFocus()
+        }
+        wasImeVisible = imeVisible
     }
 
     val lastMsgContentLen = ui.messages.lastOrNull()?.content?.length ?: 0
@@ -282,6 +299,12 @@ fun ChatScreen(
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
+                                    ) {
+                                        if (isInputFocused) focusManager.clearFocus()
+                                    }
                                     .padding(
                                         start = 24.dp,
                                         end = 24.dp,
@@ -472,6 +495,37 @@ fun ChatScreen(
                             .height((if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottom) + 32.dp),
                     )
 
+                    val hasAttachmentsOrSkills = ui.uploads.isNotEmpty() ||
+                        ui.attachedIds.isNotEmpty() ||
+                        ui.selectedSkillNames.isNotEmpty()
+                    val isComposerActive = isInputFocused || inputText.isNotEmpty() || hasAttachmentsOrSkills
+
+                    val composerBottomPadding by animateDpAsState(
+                        targetValue = if (isComposerActive) 10.dp else 24.dp,
+                        animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+                        label = "composerBottomPadding",
+                    )
+                    val composerHorizontalInset by animateDpAsState(
+                        targetValue = if (isComposerActive) 0.dp else if (isExpandedScreen) 64.dp else 18.dp,
+                        animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
+                        label = "composerHorizontalInset",
+                    )
+                    val composerCapsuleMinHeight by animateDpAsState(
+                        targetValue = if (isComposerActive) 48.dp else if (isExpandedScreen) 104.dp else 62.dp,
+                        animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+                        label = "composerCapsuleMinHeight",
+                    )
+                    val composerCapsuleCorner by animateDpAsState(
+                        targetValue = if (isComposerActive) 26.dp else 30.dp,
+                        animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+                        label = "composerCapsuleCorner",
+                    )
+                    val plusButtonSize by animateDpAsState(
+                        targetValue = if (isComposerActive) 48.dp else 60.dp,
+                        animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+                        label = "plusButtonSize",
+                    )
+
                     Column(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -479,7 +533,12 @@ fun ChatScreen(
                             .onSizeChanged { bottomOverlayHeightPx = it.height }
                             .navigationBarsPadding()
                             .imePadding()
-                            .padding(horizontal = if (isExpandedScreen) 24.dp else 12.dp, vertical = 10.dp),
+                            .padding(
+                                start = if (isExpandedScreen) 24.dp else 12.dp,
+                                end = if (isExpandedScreen) 24.dp else 12.dp,
+                                top = 10.dp,
+                                bottom = composerBottomPadding.coerceAtLeast(0.dp),
+                            ),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
                         Column(
@@ -528,7 +587,9 @@ fun ChatScreen(
                             // Standalone circular '+' button + borderless, shadowless input capsule
                             // (plus menu overlay lives in a separate layer above mainStage so it never shifts layout)
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = composerHorizontalInset.coerceAtLeast(0.dp)),
                                 verticalAlignment = Alignment.Bottom,
                             ) {
                                 // Independent circular '+' button on the left
@@ -548,7 +609,7 @@ fun ChatScreen(
                                         },
                                         shape = CircleShape,
                                         color = if (plusMenuExpanded) colors.hover else colors.surface,
-                                        modifier = Modifier.size(48.dp),
+                                        modifier = Modifier.size(plusButtonSize.coerceAtLeast(0.dp)),
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(
@@ -575,14 +636,22 @@ fun ChatScreen(
 
                                 // Borderless, shadowless input capsule
                                 Surface(
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(26.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = composerCapsuleMinHeight.coerceAtLeast(0.dp)),
+                                    shape = RoundedCornerShape(composerCapsuleCorner.coerceAtLeast(0.dp)),
                                     color = colors.surface,
                                 ) {
                                         Column(
                                             modifier = Modifier
                                                 .fillMaxWidth()
+                                                .clickable(
+                                                    interactionSource = remember { MutableInteractionSource() },
+                                                    indication = null,
+                                                    onClick = { inputFocusRequester.requestFocus() },
+                                                )
                                                 .padding(horizontal = 12.dp, vertical = 6.dp),
+                                            verticalArrangement = Arrangement.Center,
                                         ) {
                                             val attachedFiles = ui.files.filter { it.id in ui.attachedIds }
                                             if (ui.uploads.isNotEmpty() || attachedFiles.isNotEmpty() || ui.selectedSkillNames.isNotEmpty()) {
@@ -668,6 +737,19 @@ fun ChatScreen(
                                             val canExpandInput = inputText.length > 60 || inputText.contains('\n') || composerExpanded
                                             val canSend = inputText.isNotBlank() || ui.attachedIds.isNotEmpty()
 
+                                            val inputMinHeight by animateDpAsState(
+                                                targetValue = if (composerExpanded) 200.dp else 24.dp,
+                                                animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+                                                label = "inputMinHeight",
+                                            )
+                                            val inputMaxHeight by animateDpAsState(
+                                                targetValue = if (composerExpanded) 240.dp else 110.dp,
+                                                animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+                                                label = "inputMaxHeight",
+                                            )
+                                            val safeInputMinHeight = inputMinHeight.coerceAtLeast(24.dp)
+                                            val safeInputMaxHeight = inputMaxHeight.coerceAtLeast(safeInputMinHeight)
+
                                             val inputFieldContent: @Composable (Modifier) -> Unit = { fieldMod ->
                                                 Box(
                                                     modifier = fieldMod.padding(horizontal = 4.dp, vertical = 6.dp),
@@ -693,10 +775,12 @@ fun ChatScreen(
                                                             lineHeight = 22.sp,
                                                         ),
                                                         cursorBrush = SolidColor(colors.fg),
-                                                        maxLines = if (composerExpanded) 12 else 5,
+                                                        maxLines = Int.MAX_VALUE,
                                                         modifier = Modifier
                                                             .fillMaxWidth()
-                                                            .heightIn(min = 24.dp, max = if (composerExpanded) 240.dp else 110.dp),
+                                                            .heightIn(min = safeInputMinHeight, max = safeInputMaxHeight)
+                                                            .focusRequester(inputFocusRequester)
+                                                            .onFocusChanged { isInputFocused = it.isFocused },
                                                     )
                                                 }
                                             }
@@ -716,58 +800,79 @@ fun ChatScreen(
                                                 )
                                             }
 
+                                            val expandToggleButton: @Composable () -> Unit = {
+                                                IconButton(
+                                                    onClick = { composerExpanded = !composerExpanded },
+                                                    modifier = Modifier.size(36.dp),
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (composerExpanded) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
+                                                        contentDescription = if (composerExpanded) "收起输入框" else "展开输入框",
+                                                        tint = colors.fgMuted,
+                                                        modifier = Modifier.size(16.dp),
+                                                    )
+                                                }
+                                            }
+
                                             if (isExpandedScreen) {
-                                                inputFieldContent(Modifier.fillMaxWidth())
+                                                val expandedReservedEnd by animateDpAsState(
+                                                    targetValue = if (canExpandInput) 40.dp else 0.dp,
+                                                    animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
+                                                    label = "expandedReservedEnd",
+                                                )
+                                                Box(modifier = Modifier.fillMaxWidth()) {
+                                                    inputFieldContent(
+                                                        Modifier
+                                                            .fillMaxWidth()
+                                                            .padding(end = expandedReservedEnd.coerceAtLeast(0.dp)),
+                                                    )
+                                                    androidx.compose.animation.AnimatedVisibility(
+                                                        visible = canExpandInput,
+                                                        enter = fadeIn(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()) +
+                                                            scaleIn(initialScale = 0.8f, animationSpec = MaterialTheme.motionScheme.fastSpatialSpec()),
+                                                        exit = fadeOut(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()) +
+                                                            scaleOut(targetScale = 0.8f, animationSpec = MaterialTheme.motionScheme.fastSpatialSpec()),
+                                                        modifier = Modifier.align(Alignment.TopEnd),
+                                                    ) {
+                                                        expandToggleButton()
+                                                    }
+                                                }
                                                 Spacer(modifier = Modifier.height(4.dp))
                                                 Row(
                                                     modifier = Modifier.fillMaxWidth(),
                                                     verticalAlignment = Alignment.CenterVertically,
                                                     horizontalArrangement = Arrangement.End,
                                                 ) {
-                                                    if (canExpandInput) {
-                                                        IconButton(
-                                                            onClick = { composerExpanded = !composerExpanded },
-                                                            modifier = Modifier.size(36.dp),
-                                                        ) {
-                                                            Icon(
-                                                                imageVector = if (composerExpanded) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
-                                                                contentDescription = if (composerExpanded) "收起输入框" else "展开输入框",
-                                                                tint = colors.fgMuted,
-                                                                modifier = Modifier.size(16.dp),
-                                                            )
-                                                        }
-                                                        Spacer(modifier = Modifier.width(4.dp))
-                                                    }
                                                     sendOrStopContent()
                                                 }
                                             } else {
-                                                Row(
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    verticalAlignment = Alignment.Bottom,
+                                                val mobileComposerMinHeight by animateDpAsState(
+                                                    targetValue = if (canExpandInput) 88.dp else 0.dp,
+                                                    animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
+                                                    label = "mobileComposerMinHeight",
+                                                )
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .heightIn(min = mobileComposerMinHeight.coerceAtLeast(0.dp)),
                                                 ) {
                                                     inputFieldContent(
                                                         Modifier
-                                                            .weight(1f)
-                                                            .align(Alignment.CenterVertically),
+                                                            .fillMaxWidth()
+                                                            .align(if (canExpandInput || composerExpanded) Alignment.TopStart else Alignment.CenterStart)
+                                                            .padding(end = 44.dp),
                                                     )
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Column(
-                                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                                                    androidx.compose.animation.AnimatedVisibility(
+                                                        visible = canExpandInput,
+                                                        enter = fadeIn(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()) +
+                                                            scaleIn(initialScale = 0.8f, animationSpec = MaterialTheme.motionScheme.fastSpatialSpec()),
+                                                        exit = fadeOut(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()) +
+                                                            scaleOut(targetScale = 0.8f, animationSpec = MaterialTheme.motionScheme.fastSpatialSpec()),
+                                                        modifier = Modifier.align(Alignment.TopEnd),
                                                     ) {
-                                                        if (canExpandInput) {
-                                                            IconButton(
-                                                                onClick = { composerExpanded = !composerExpanded },
-                                                                modifier = Modifier.size(36.dp),
-                                                            ) {
-                                                                Icon(
-                                                                    imageVector = if (composerExpanded) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
-                                                                    contentDescription = if (composerExpanded) "收起输入框" else "展开输入框",
-                                                                    tint = colors.fgMuted,
-                                                                    modifier = Modifier.size(16.dp),
-                                                                )
-                                                            }
-                                                        }
+                                                        expandToggleButton()
+                                                    }
+                                                    Box(modifier = Modifier.align(Alignment.BottomEnd)) {
                                                         sendOrStopContent()
                                                     }
                                                 }
