@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, app, protocol, shell } from "electron";
+import { BrowserWindow, Menu, app, nativeTheme, protocol, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -80,13 +80,13 @@ export function createMainWindow(): BrowserWindow {
     minWidth: 1024,
     minHeight: 680,
     show: false,
-    backgroundColor: "#FAF9F7",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#000000" : "#FFFFFF",
     title: "Whitz",
     icon: appIconPath(),
     titleBarStyle: "hidden",
     titleBarOverlay: {
       color: "#00000000",
-      symbolColor: "#5D5C58",
+      symbolColor: nativeTheme.shouldUseDarkColors ? "#A1A1AA" : "#52525B",
       height: 40,
     },
     webPreferences: {
