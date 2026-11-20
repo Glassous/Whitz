@@ -483,28 +483,34 @@ fun ChatScreen(
 
                         Spacer(modifier = Modifier.weight(1f))
 
-                        Box {
-                            WhitzGlassCircleButton(
-                                hazeState = headerHazeState,
-                                showBorder = visibleMessages.isNotEmpty(),
-                                onClick = { onOpenTaskDetails(0) },
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_task_panel),
-                                    contentDescription = "步骤与文件",
-                                    tint = colors.fgMuted,
-                                    modifier = Modifier.size(22.dp),
-                                )
-                            }
-                            if (ui.files.isNotEmpty()) {
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(top = 6.dp, end = 6.dp)
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(colors.fg),
-                                )
+                        AnimatedVisibility(
+                            visible = visibleMessages.isNotEmpty(),
+                            enter = fadeIn(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()),
+                            exit = fadeOut(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()),
+                        ) {
+                            Box {
+                                WhitzGlassCircleButton(
+                                    hazeState = headerHazeState,
+                                    showBorder = visibleMessages.isNotEmpty(),
+                                    onClick = { onOpenTaskDetails(0) },
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_task_panel),
+                                        contentDescription = "步骤与文件",
+                                        tint = colors.fgMuted,
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                }
+                                if (ui.files.isNotEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(top = 6.dp, end = 6.dp)
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(colors.fg),
+                                    )
+                                }
                             }
                         }
                     }
