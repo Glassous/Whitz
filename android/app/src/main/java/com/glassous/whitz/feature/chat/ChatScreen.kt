@@ -45,9 +45,11 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
@@ -62,7 +64,6 @@ import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
@@ -71,8 +72,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearWavyProgressIndicator
@@ -84,6 +85,9 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -154,6 +158,7 @@ fun ChatScreen(
 ) {
     val ui by vm.ui.collectAsState()
     val user by vm.user.collectAsState()
+    val authReady by vm.authReady.collectAsState()
     val colors = LocalWhitzColors.current
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -262,7 +267,7 @@ fun ChatScreen(
                 // Expanded screen: persistent collapsible sidebar
                 if (isExpandedScreen) {
                     val railWidth by animateDpAsState(
-                        targetValue = if (desktopSidebarCollapsed) 68.dp else 276.dp,
+                        targetValue = if (desktopSidebarCollapsed) 68.dp else 320.dp,
                         animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
                         label = "sidebarWidth",
                     )
@@ -276,11 +281,13 @@ fun ChatScreen(
                         SidebarContent(
                             ui = ui,
                             user = user,
+                            authReady = authReady,
                             collapsed = desktopSidebarCollapsed,
                             showCloseButton = false,
                             onCloseDrawer = {},
                             onNewChat = { vm.startNewConversation() },
                             onOpenSearch = { showSearch = true },
+                            onRefreshConversations = { vm.refreshConversations() },
                             onSelectConv = { vm.openConversation(it) },
                             onTogglePin = { id, pin -> vm.togglePin(id, pin) },
                             onRename = { renameTarget = it },
@@ -339,23 +346,6 @@ fun ChatScreen(
                                     color = colors.fg,
                                     textAlign = TextAlign.Center,
                                 )
-                                Spacer(modifier = Modifier.height(10.dp))
-                                Text(
-                                    text = "我可以帮你规划任务、联网检索、整理信息。今天想做点什么？",
-                                    fontSize = 15.sp,
-                                    lineHeight = 22.sp,
-                                    color = colors.fgMuted,
-                                    textAlign = TextAlign.Center,
-                                    modifier = Modifier.widthIn(max = 460.dp),
-                                )
-                                if (ui.agentStatus != null && ui.agentStatus?.ready == false) {
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                    Text(
-                                        text = "助理正在初始化，稍后即可开始对话…",
-                                        fontSize = 13.sp,
-                                        color = colors.fgFaint,
-                                    )
-                                }
                             }
                         } else {
                             LazyColumn(
@@ -970,11 +960,12 @@ fun ChatScreen(
                     ModalDrawerSheet(
                         drawerContainerColor = colors.sidebar,
                         windowInsets = WindowInsets(0),
-                        modifier = Modifier.width(292.dp),
+                        modifier = Modifier.width(332.dp),
                     ) {
                         SidebarContent(
                             ui = ui,
                             user = user,
+                            authReady = authReady,
                             collapsed = false,
                             showCloseButton = true,
                             onCloseDrawer = { scope.launch { drawerState.close() } },
@@ -983,6 +974,7 @@ fun ChatScreen(
                                 scope.launch { drawerState.close() }
                             },
                             onOpenSearch = { showSearch = true },
+                            onRefreshConversations = { vm.refreshConversations() },
                             onSelectConv = {
                                 vm.openConversation(it)
                                 scope.launch { drawerState.close() }
@@ -1102,15 +1094,18 @@ fun ChatScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SidebarContent(
     ui: ChatUiState,
     user: User?,
+    authReady: Boolean,
     collapsed: Boolean,
     showCloseButton: Boolean,
     onCloseDrawer: () -> Unit,
     onNewChat: () -> Unit,
     onOpenSearch: () -> Unit,
+    onRefreshConversations: () -> Unit,
     onSelectConv: (String) -> Unit,
     onTogglePin: (String, Boolean) -> Unit,
     onRename: (Conversation) -> Unit,
@@ -1202,73 +1197,95 @@ private fun SidebarContent(
         } else {
             val pinned = remember(ui.conversations) { ui.conversations.filter { it.isPinned } }
             val recent = remember(ui.conversations) { ui.conversations.filterNot { it.isPinned } }
+            val showColdStartLoading = (!authReady || ui.conversationsLoading) && ui.conversations.isEmpty()
 
-            if (ui.conversationsLoading && ui.conversations.isEmpty()) {
+            if (showColdStartLoading) {
+                // Cold-start loading indicator: large, centered, and independent from pull-to-refresh
                 Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    WhitzLoadingIndicator(size = 24.dp)
-                }
-            } else if (ui.conversations.isEmpty()) {
-                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Text("暂无历史对话", color = colors.fgFaint, fontSize = 13.sp)
+                    WhitzLoadingIndicator(size = 56.dp)
                 }
             } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(vertical = 6.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                val pullRefreshState = rememberPullToRefreshState()
+                PullToRefreshBox(
+                    isRefreshing = ui.conversationsRefreshing,
+                    onRefresh = onRefreshConversations,
+                    state = pullRefreshState,
+                    indicator = {
+                        PullToRefreshDefaults.LoadingIndicator(
+                            state = pullRefreshState,
+                            isRefreshing = ui.conversationsRefreshing,
+                            modifier = Modifier.align(Alignment.TopCenter),
+                        )
+                    },
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
-                    if (pinned.isNotEmpty()) {
-                        item(key = "hdr-pinned") {
-                            Text(
-                                text = "置顶对话",
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = colors.fgFaint,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            )
+                    if (ui.conversations.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState()),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("暂无历史对话", color = colors.fgFaint, fontSize = 13.sp)
                         }
-                        items(pinned, key = { it.id }) { conv ->
-                            ConversationRow(
-                                conv = conv,
-                                selected = conv.id == ui.currentConvId,
-                                onSelect = { onSelectConv(conv.id) },
-                                onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
-                                onRename = { onRename(conv) },
-                                onDelete = { onDelete(conv) },
-                            )
-                        }
-                    }
-
-                    if (recent.isNotEmpty()) {
-                        if (pinned.isNotEmpty()) {
-                            item(key = "hdr-recent") {
-                                Text(
-                                    text = "最近对话",
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = colors.fgFaint,
-                                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 4.dp),
-                                )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(vertical = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            if (pinned.isNotEmpty()) {
+                                item(key = "hdr-pinned") {
+                                    Text(
+                                        text = "置顶对话",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = colors.fgFaint,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    )
+                                }
+                                items(pinned, key = { it.id }) { conv ->
+                                    ConversationRow(
+                                        conv = conv,
+                                        selected = conv.id == ui.currentConvId,
+                                        onSelect = { onSelectConv(conv.id) },
+                                        onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
+                                        onRename = { onRename(conv) },
+                                        onDelete = { onDelete(conv) },
+                                    )
+                                }
                             }
-                        }
-                        items(recent, key = { it.id }) { conv ->
-                            ConversationRow(
-                                conv = conv,
-                                selected = conv.id == ui.currentConvId,
-                                onSelect = { onSelectConv(conv.id) },
-                                onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
-                                onRename = { onRename(conv) },
-                                onDelete = { onDelete(conv) },
-                            )
+
+                            if (recent.isNotEmpty()) {
+                                if (pinned.isNotEmpty()) {
+                                    item(key = "hdr-recent") {
+                                        Text(
+                                            text = "最近对话",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = colors.fgFaint,
+                                            modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 4.dp),
+                                        )
+                                    }
+                                }
+                                items(recent, key = { it.id }) { conv ->
+                                    ConversationRow(
+                                        conv = conv,
+                                        selected = conv.id == ui.currentConvId,
+                                        onSelect = { onSelectConv(conv.id) },
+                                        onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
+                                        onRename = { onRename(conv) },
+                                        onDelete = { onDelete(conv) },
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        HorizontalDivider(color = colors.line)
-
-        // Footer: User & Settings (with navigationBarsPadding for gesture bar penetration)
+        // Footer: User profile (pure without divider or settings icon)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1322,7 +1339,6 @@ private fun SidebarContent(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Icon(Icons.Default.Settings, contentDescription = "设置", tint = colors.fgMuted, modifier = Modifier.size(18.dp))
             }
         }
     }

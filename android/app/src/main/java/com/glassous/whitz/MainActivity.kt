@@ -11,22 +11,12 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.remember
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -41,9 +31,6 @@ import com.glassous.whitz.feature.chat.ChatScreen
 import com.glassous.whitz.feature.chat.ChatViewModel
 import com.glassous.whitz.feature.settings.SettingsRootScreen
 import com.glassous.whitz.feature.settings.SettingsViewModel
-import com.glassous.whitz.ui.theme.LocalWhitzColors
-import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
-import com.glassous.whitz.ui.theme.WhitzLogoMark
 import com.glassous.whitz.ui.theme.WhitzTheme
 import com.glassous.whitz.ui.theme.isWhitzDarkTheme
 
@@ -94,35 +81,15 @@ private class ContainerVmFactory(
 
 @Composable
 private fun WhitzRoot(container: AppContainer) {
-    val ready by container.authManager.ready.collectAsState()
     val user by container.authManager.user.collectAsState()
 
     LaunchedEffect(Unit) {
         container.authManager.init { container.network.api.getMe() }
     }
 
-    if (!ready) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(LocalWhitzColors.current.canvas),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                WhitzLogoMark(modifier = Modifier.size(48.dp))
-                Spacer(modifier = Modifier.height(20.dp))
-                WhitzLoadingIndicator(size = 28.dp)
-            }
-        }
-        return
-    }
-
     val navController = rememberNavController()
     val factory = ContainerVmFactory(container)
-    val startDestination = if (user != null) "chat" else "login"
+    val startDestination = remember { if (user != null) "chat" else "login" }
 
     LaunchedEffect(user) {
         val currentRoute = navController.currentBackStackEntry?.destination?.route

@@ -108,7 +108,10 @@ class AuthManager(
         _ready.value = true
     }
 
-    suspend fun refreshOnce(): RefreshResult = refreshMutex.withLock {
+    suspend fun refreshOnce(force: Boolean = false): RefreshResult = refreshMutex.withLock {
+        if (!force && !storage.isAccessTokenExpiringSoon()) {
+            return@withLock RefreshResult.OK
+        }
         withContext(Dispatchers.IO) {
             val refreshToken = storage.getRefreshToken()
             if (refreshToken.isNullOrBlank()) {

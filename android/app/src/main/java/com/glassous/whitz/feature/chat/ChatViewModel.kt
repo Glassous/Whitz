@@ -78,6 +78,7 @@ data class PreviewTarget(
 data class ChatUiState(
     val conversations: List<Conversation> = emptyList(),
     val conversationsLoading: Boolean = false,
+    val conversationsRefreshing: Boolean = false,
     val currentConvId: String? = null,
     val currentConvTitle: String = "新对话",
     val messages: List<Message> = emptyList(),
@@ -116,6 +117,7 @@ class ChatViewModel(
     val ui: StateFlow<ChatUiState> = _ui.asStateFlow()
 
     val user = container.authManager.user
+    val authReady = container.authManager.ready
 
     private var streamJob: Job? = null
     private val uploadJobs = mutableMapOf<String, Job>()
@@ -138,6 +140,36 @@ class ChatViewModel(
             _ui.update { it.copy(conversations = ConversationSorter.sort(list), conversationsLoading = false) }
         } catch (_: Throwable) {
             _ui.update { it.copy(conversationsLoading = false) }
+        }
+    }
+
+    fun refreshConversations() {
+        if (_ui.value.conversationsRefreshing) return
+        viewModelScope.launch {
+            _ui.update { it.copy(conversationsRefreshing = true) }
+            try {
+                val list = container.network.api.getConversations()
+                _ui.update {
+                    it.copy(
+                        conversations = ConversationSorter.sort(list),
+                        conversationsRefreshing = false,
+                        conversationsLoading = false,
+                    )
+                }
+            } catch (_: Throwable) {
+                _ui.update { it.copy(conversationsRefreshing = false) }
+            }
+        }
+    }
+
+    private fun syncConversationsFromServer() {
+        viewModelScope.launch {
+            try {
+                val list = container.network.api.getConversations()
+                _ui.update { it.copy(conversations = ConversationSorter.sort(list)) }
+            } catch (_: Throwable) {
+                /* ignore */
+            }
         }
     }
 
@@ -360,7 +392,6 @@ class ChatViewModel(
             state.copy(
                 currentConvId = conv.id,
                 currentConvTitle = conv.title,
-                conversations = ConversationSorter.sort(listOf(conv) + state.conversations),
             )
         }
         return conv.id
@@ -1095,6 +1126,7 @@ class ChatViewModel(
                 error = errMsg ?: state.error,
             )
         }
+        syncConversationsFromServer()
     }
 
     private fun updateReasoningBlock(

@@ -33,7 +33,7 @@ class NetworkModule(
 
         if (response.code == 401 && !isAuthPath) {
             response.close()
-            val result = runBlocking { authManager.refreshOnce() }
+            val result = runBlocking { authManager.refreshOnce(force = true) }
             if (result == RefreshResult.OK) {
                 val retryReq = original.withBearer(storage.accessToken)
                 response = chain.proceed(retryReq)
