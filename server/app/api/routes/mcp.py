@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import User
 from app.db.session import get_db
-from app.services import mcp_files, mcp_skills
+from app.services import mcp_files, mcp_schedules, mcp_skills
 
 router = APIRouter(prefix="/api/internal/mcp", tags=["internal-mcp"])
 
@@ -165,4 +165,34 @@ async def mcp_skills_get():
 
 @router.delete("/skills")
 async def mcp_skills_delete():
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/schedules")
+async def mcp_schedules_post(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_whitz_profile: str | None = Header(default=None),
+    x_whitz_namespace: str | None = Header(default=None),
+    mcp_session_id: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _handle_mcp_post(
+        request=request,
+        authorization=authorization,
+        namespace_header=x_whitz_namespace or x_whitz_profile,
+        mcp_session_id=mcp_session_id,
+        db=db,
+        server_name="whitz-schedules",
+        service_mod=mcp_schedules,
+    )
+
+
+@router.get("/schedules")
+async def mcp_schedules_get():
+    return Response(status_code=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+@router.delete("/schedules")
+async def mcp_schedules_delete():
     return Response(status_code=status.HTTP_204_NO_CONTENT)

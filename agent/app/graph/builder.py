@@ -112,6 +112,7 @@ def _base_agent_prompt(assistant_name: str = "Whitz", *, is_main_chat: bool = Fa
         "   - 复杂多步骤任务使用 `todo_list` 维护进度计划，或通过 `delegate_subtask` 委派给 `researcher` / `coder` 子智能体；\n"
         "   - 需要精确计算或验证代码时调用 `execute_code`（系统会自动暂停等待用户审批）；遇到关键歧义时调用 `clarify` 向用户追问；\n"
         "   - 若技能摘要与当前任务相关，调用 `skill_view` 按需加载完整技能指南后再执行；\n"
+        "   - 当用户希望设置周期提醒或自动定时执行某项任务时，可调用 `list_scheduled_tasks`、`create_scheduled_task`、`update_scheduled_task`、`delete_scheduled_task` 管理定时任务（变更会生成待确认卡片由用户确认生效）；\n"
         "   - 当用户提出精彩见解、高质量背景描述或友好致谢且工具可用时，可适度调用 `react_to_user_message` 给出正向点赞（`like`/`love`/`sparkle`/`insightful`，严禁负面回应，勿每轮刷屏）。\n"
         "3. 思考模式自主升档：若当前处于常规非思考模式，但你在分析或工具返回中发现逻辑复杂、信息矛盾或需要深度推演，可调用 `request_deep_thinking` 立即开启深度思考模式再继续作答。\n"
         "4. 回复质量规范：复杂调研、对比或技术方案采用「核心结论前置 + 清晰分点 + 来源引用」结构；简单问题直击要点、简明自然。"
@@ -314,6 +315,13 @@ def _build_system_prompt(state: AgentState, cfg: dict[str, Any], current_time_st
     if extra_instructions:
         sections.append(f"## 本轮附加说明\n{extra_instructions}")
 
+    if not bool(state.get("allow_hitl", cfg.get("allow_hitl", True))):
+        sections.append(
+            "## 后台定时任务无人值守模式\n"
+            "当前运行由定时任务自动触发，用户不在线。请自主使用可用工具直接完成任务并输出完整清晰的最终结果，"
+            "切勿调用需要人工审批或追问的工具，也不要向用户发起需要即时回复的提问。"
+        )
+
     return "\n\n".join(sections)
 
 
@@ -405,13 +413,14 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         router: ModelRouter = cfg.get("model_router") or ModelRouter()
         mcp_tools: list[BaseTool] = list(cfg.get("mcp_tools") or [])
         is_main = str(state.get("conversation_kind") or cfg.get("conversation_kind") or "side") == "main"
+        allow_hitl = bool(state.get("allow_hitl", cfg.get("allow_hitl", True)))
         settings = get_settings()
         include_thinking_tool = not bool(state.get("thinking_enabled")) and settings.llm_thinking_mode != "disabled"
         builtin = get_builtin_tools(
             include_delegation=True,
-            include_hitl=True,
+            include_hitl=allow_hitl,
             include_cross_chat=is_main,
-            include_user_reaction=bool(cfg.get("ai_reactions_enabled", True)),
+            include_user_reaction=bool(cfg.get("ai_reactions_enabled", True)) and allow_hitl,
         )
         if not include_thinking_tool:
             builtin = [t for t in builtin if t.name != "request_deep_thinking"]
@@ -508,6 +517,9 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             "read_workspace_file",
             "search_workspace_files",
             "write_workspace_file",
+            "create_scheduled_task",
+            "update_scheduled_task",
+            "delete_scheduled_task",
         ):
             args.setdefault("conversation_id", conv_id)
 
@@ -613,10 +625,31 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
     async def hitl_gate(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         _emit_node_running("hitl_gate")
         cfg = dict(config.get("configurable") or {})
+        allow_hitl = bool(state.get("allow_hitl", cfg.get("allow_hitl", True)))
         pending = _pending_tool_calls(list(state.get("messages") or []))
         # Process strictly ONE pending HITL call per node invocation so multi-tool interrupts
         # checkpoint cleanly and never replay an already-executed tool on subsequent resumes.
         hitl_calls = [tc for tc in pending if tc.get("name") in HITL_TOOL_NAMES][:1]
+        if not allow_hitl and hitl_calls:
+            blocked_msgs = [
+                ToolMessage(
+                    tool_call_id=str(tc.get("id") or tc.get("name") or "hitl"),
+                    name=str(tc.get("name") or "hitl"),
+                    content=json.dumps(
+                        {
+                            "status": "blocked",
+                            "message": "后台定时任务处于无人值守模式，不支持人工审批或追问工具，请直接基于现有能力完成答复。",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    status="error",
+                )
+                for tc in hitl_calls
+            ]
+            return {
+                "messages": blocked_msgs,
+                "tool_call_count": int(state.get("tool_call_count") or 0) + len(blocked_msgs),
+            }
         out_msgs: list[ToolMessage] = []
         executor = cfg.get("sandbox_executor") or DisabledSandboxExecutor()
         timeout_sec = int(get_settings().sandbox_timeout_seconds)

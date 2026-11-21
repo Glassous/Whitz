@@ -42,6 +42,11 @@ _ACTION_BASE_RISK: dict[str, int] = {
     "quant.eval.run": 20,
     "chat.rate_limited": 30,
     "chat.credits_exhausted": 25,
+    "schedule.create": 20,
+    "schedule.update": 20,
+    "schedule.delete": 25,
+    "schedule.run_now": 15,
+    "schedule.proposal.resolve": 20,
 }
 
 

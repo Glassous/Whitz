@@ -4,6 +4,7 @@ import { streamSSEGet } from "../api/sse";
 import { useChatStore } from "./chat";
 import { sortConversations, useConversationsStore } from "./conversations";
 import { useFilesStore } from "./files";
+import { useSchedulesStore } from "./schedules";
 
 /**
  * Per-user multi-device real-time sync stream (`GET /api/events/stream`).
@@ -135,6 +136,41 @@ export const useRealtimeStore = defineStore("realtime", () => {
           typeof d.index_status === "string" ? d.index_status : "ready",
           typeof d.indexed_chunks === "number" ? d.indexed_chunks : undefined,
         );
+      }
+      return;
+    }
+
+    if (event === "schedule.updated") {
+      const schedules = useSchedulesStore();
+      const action = typeof d.action === "string" ? d.action : "";
+      if (action === "deleted" && typeof d.task_id === "string") {
+        schedules.removeLocalTask(d.task_id);
+      } else if (d.task && typeof d.task === "object") {
+        schedules.upsertLocalTask(d.task);
+      }
+      return;
+    }
+
+    if (event === "schedule.run_updated") {
+      const schedules = useSchedulesStore();
+      if (d.task && typeof d.task === "object") {
+        schedules.upsertLocalTask(d.task);
+      }
+      if (typeof d.task_id === "string" && d.run && typeof d.run === "object") {
+        schedules.upsertLocalRun(d.task_id, d.run);
+      }
+      return;
+    }
+
+    if (event === "schedule.pending_updated") {
+      const schedules = useSchedulesStore();
+      const action = typeof d.action === "string" ? d.action : "";
+      if (action === "created" && d.proposal && typeof d.proposal === "object") {
+        const exists = schedules.pending.some((p) => p.id === d.proposal.id);
+        if (!exists) schedules.pending = [...schedules.pending, d.proposal];
+      } else if ((action === "approved" || action === "rejected") && typeof d.proposal_id === "string") {
+        schedules.pending = schedules.pending.filter((p) => p.id !== d.proposal_id);
+        chat.pendingSchedules = chat.pendingSchedules.filter((p) => p.id !== d.proposal_id);
       }
     }
   }

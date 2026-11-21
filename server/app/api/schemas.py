@@ -1,7 +1,7 @@
 import re
 import uuid
 from datetime import date, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
@@ -772,3 +772,125 @@ class AdminAnalyticsOut(BaseModel):
     file_stats: dict[str, int] = Field(default_factory=dict)
     summary: dict[str, int | float] = Field(default_factory=dict)
     generated_at: datetime
+
+
+ScheduleTypeLiteral = Literal["once", "interval", "daily", "weekly", "monthly", "cron"]
+ScheduleTargetModeLiteral = Literal["dedicated", "main", "conversation"]
+ScheduleModelRouteLiteral = Literal["auto", "default", "fast", "reasoning"]
+
+
+class ScheduledTaskCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    prompt: str = Field(min_length=1, max_length=16000)
+    schedule_type: ScheduleTypeLiteral
+    schedule_config: dict[str, Any] = Field(default_factory=dict)
+    timezone: str | None = Field(default=None, max_length=64)
+    target_mode: ScheduleTargetModeLiteral = "dedicated"
+    conversation_id: uuid.UUID | None = None
+    model_route: ScheduleModelRouteLiteral = "auto"
+    skill_names: list[str] = Field(default_factory=list, max_length=10)
+    enabled: bool = True
+    max_runs: int | None = Field(default=None, ge=1, le=10000)
+
+
+class ScheduledTaskUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    prompt: str | None = Field(default=None, min_length=1, max_length=16000)
+    schedule_type: ScheduleTypeLiteral | None = None
+    schedule_config: dict[str, Any] | None = None
+    timezone: str | None = Field(default=None, max_length=64)
+    target_mode: ScheduleTargetModeLiteral | None = None
+    conversation_id: uuid.UUID | None = None
+    model_route: ScheduleModelRouteLiteral | None = None
+    skill_names: list[str] | None = Field(default=None, max_length=10)
+    enabled: bool | None = None
+    max_runs: int | None = Field(default=None, ge=1, le=10000)
+
+
+class SchedulePreviewRequest(BaseModel):
+    schedule_type: ScheduleTypeLiteral
+    schedule_config: dict[str, Any] = Field(default_factory=dict)
+    timezone: str | None = Field(default=None, max_length=64)
+    count: int = Field(default=5, ge=1, le=10)
+
+
+class SchedulePreviewOut(BaseModel):
+    valid: bool
+    schedule_description: str = ""
+    next_runs: list[datetime] = Field(default_factory=list)
+    error: str | None = None
+
+
+class ScheduledTaskRunOut(BaseModel):
+    id: uuid.UUID
+    task_id: uuid.UUID
+    conversation_id: uuid.UUID | None = None
+    assistant_message_id: uuid.UUID | None = None
+    run_id: str | None = None
+    trigger_type: str = "scheduled"
+    status: str
+    scheduled_for: datetime | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    summary: str | None = None
+    error: str | None = None
+    tokens_used: int = 0
+
+
+class ScheduledTaskOut(BaseModel):
+    id: uuid.UUID
+    conversation_id: uuid.UUID | None = None
+    target_mode: str = "dedicated"
+    name: str
+    prompt: str
+    schedule_type: str
+    schedule_config: dict[str, Any] = Field(default_factory=dict)
+    schedule_description: str = ""
+    timezone: str = "Asia/Shanghai"
+    model_route: str = "auto"
+    skill_names: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    status: str = "active"
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    last_run_status: str | None = None
+    last_error: str | None = None
+    run_count: int = 0
+    consecutive_failures: int = 0
+    max_runs: int | None = None
+    source: str = "manual"
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScheduledTaskDetailOut(ScheduledTaskOut):
+    runs: list[ScheduledTaskRunOut] = Field(default_factory=list)
+
+
+class ScheduledTaskPendingOut(BaseModel):
+    id: str
+    target_task_id: str | None = None
+    conversation_id: uuid.UUID | None = None
+    action: str = "create"
+    payload: dict[str, Any] = Field(default_factory=dict)
+    schedule_description: str = ""
+    reason: str | None = None
+    status: str = "pending"
+    created_at: datetime | None = None
+
+
+class ScheduledTaskPendingResolveRequest(BaseModel):
+    action: Literal["approve", "reject"]
+
+
+class ScheduleQuotaOut(BaseModel):
+    tier: str
+    max_active_tasks: int
+    active_count: int
+    min_interval_minutes: int
+
+
+class ScheduleOverviewOut(BaseModel):
+    tasks: list[ScheduledTaskOut] = Field(default_factory=list)
+    pending: list[ScheduledTaskPendingOut] = Field(default_factory=list)
+    quota: ScheduleQuotaOut

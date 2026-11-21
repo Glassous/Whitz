@@ -379,3 +379,82 @@ export interface UserSessionItem {
   expires_at: string;
   is_current: boolean;
 }
+
+export type ScheduleType = "once" | "interval" | "daily" | "weekly" | "monthly" | "cron";
+export type ScheduleTargetMode = "dedicated" | "main" | "conversation";
+export type ScheduleModelRoute = "auto" | "default" | "fast" | "reasoning";
+
+export interface ScheduledTaskRun {
+  id: string;
+  task_id: string;
+  conversation_id: string | null;
+  assistant_message_id: string | null;
+  run_id: string | null;
+  trigger_type: "scheduled" | "manual" | string;
+  status: "queued" | "running" | "completed" | "failed" | "skipped" | "cancelled" | string;
+  scheduled_for: string | null;
+  started_at: string;
+  finished_at: string | null;
+  summary: string | null;
+  error: string | null;
+  tokens_used: number;
+}
+
+export interface ScheduledTask {
+  id: string;
+  conversation_id: string | null;
+  target_mode: ScheduleTargetMode;
+  name: string;
+  prompt: string;
+  schedule_type: ScheduleType;
+  schedule_config: Record<string, any>;
+  schedule_description: string;
+  timezone: string;
+  model_route: ScheduleModelRoute;
+  skill_names: string[];
+  enabled: boolean;
+  status: "active" | "paused" | "completed" | "error" | string;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_run_status: string | null;
+  last_error: string | null;
+  run_count: number;
+  consecutive_failures: number;
+  max_runs: number | null;
+  source: string;
+  created_at: string;
+  updated_at: string;
+  runs?: ScheduledTaskRun[];
+}
+
+export interface ScheduledTaskPendingItem {
+  id: string;
+  target_task_id?: string | null;
+  conversation_id?: string | null;
+  action: "create" | "update" | "pause" | "resume" | "delete" | string;
+  payload: Record<string, any>;
+  schedule_description?: string;
+  reason?: string | null;
+  status?: string;
+  created_at?: string | null;
+}
+
+export interface ScheduleQuota {
+  tier: MembershipTier | string;
+  max_active_tasks: number;
+  active_count: number;
+  min_interval_minutes: number;
+}
+
+export interface ScheduleOverview {
+  tasks: ScheduledTask[];
+  pending: ScheduledTaskPendingItem[];
+  quota: ScheduleQuota;
+}
+
+export interface SchedulePreviewResult {
+  valid: boolean;
+  schedule_description: string;
+  next_runs: string[];
+  error?: string | null;
+}

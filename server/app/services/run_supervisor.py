@@ -99,6 +99,8 @@ class SupervisedRun:
         run_slot: str | None,
         initial_mem_ids: set[str],
         initial_skill_ids: set[str],
+        initial_schedule_ids: set[str] | None = None,
+        scheduled_run_id: uuid.UUID | None = None,
         seed_events: list[dict[str, Any]] | None = None,
     ) -> None:
         self.run_id = run_id
@@ -114,6 +116,8 @@ class SupervisedRun:
         self.run_slot = run_slot
         self.initial_mem_ids = initial_mem_ids
         self.initial_skill_ids = initial_skill_ids
+        self.initial_schedule_ids = set(initial_schedule_ids or ())
+        self.scheduled_run_id = scheduled_run_id
 
         self.subscribers: set[asyncio.Queue[dict[str, Any] | None]] = set()
         self.done = False
@@ -340,9 +344,29 @@ class SupervisedRun:
                             )
 
                     for ev in await chat_stream._pending_events_since(
-                        db, self.user_id, self.initial_mem_ids, self.initial_skill_ids
+                        db,
+                        self.user_id,
+                        self.initial_mem_ids,
+                        self.initial_skill_ids,
+                        initial_schedule_ids=self.initial_schedule_ids,
                     ):
                         self.broadcast(ev)
+
+                    if self.scheduled_run_id is not None:
+                        from app.services import scheduler_service
+
+                        tokens_used = usage.tokens_from_usage((assistant.tool_payload or {}).get("usage"))
+                        err_msg = None
+                        if assistant.status == "failed":
+                            err_msg = str((assistant.tool_payload or {}).get("error") or "任务执行失败")
+                        await scheduler_service.finalize_scheduled_run(
+                            db,
+                            scheduled_run_id=self.scheduled_run_id,
+                            status=assistant.status or "completed",
+                            output=assistant.content or "",
+                            error=err_msg,
+                            tokens_used=tokens_used,
+                        )
 
                     async for ev in chat_stream._auto_title_events(db, conv, assistant):
                         self.broadcast(ev)
@@ -403,6 +427,17 @@ class SupervisedRun:
                     conv.active_run_status = None
                     conv.pending_control = None
                 await db.commit()
+                if self.scheduled_run_id is not None:
+                    from app.services import scheduler_service
+
+                    await scheduler_service.finalize_scheduled_run(
+                        db,
+                        scheduled_run_id=self.scheduled_run_id,
+                        status="failed",
+                        output=assistant.content if assistant is not None else "",
+                        error="定时任务执行异常终止",
+                        tokens_used=0,
+                    )
             await realtime_bus.publish_user_event(
                 self.user_id,
                 "conversation.run_updated",
@@ -440,6 +475,8 @@ def start_supervised_run(
     run_slot: str | None = None,
     initial_mem_ids: set[str] | None = None,
     initial_skill_ids: set[str] | None = None,
+    initial_schedule_ids: set[str] | None = None,
+    scheduled_run_id: uuid.UUID | None = None,
     seed_events: list[dict[str, Any]] | None = None,
 ) -> tuple[SupervisedRun, asyncio.Queue[dict[str, Any] | None]]:
     existing = get_supervisor(run_id)
@@ -460,6 +497,8 @@ def start_supervised_run(
         run_slot=run_slot,
         initial_mem_ids=initial_mem_ids or set(),
         initial_skill_ids=initial_skill_ids or set(),
+        initial_schedule_ids=initial_schedule_ids,
+        scheduled_run_id=scheduled_run_id,
         seed_events=seed_events,
     )
     q = sup.add_subscriber(replay_seed=True)

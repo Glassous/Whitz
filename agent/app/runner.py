@@ -307,6 +307,7 @@ async def _build_runtime_config(
             "memory_enabled": bool(payload.get("memory_enabled")),
             "memory_require_confirm": bool(payload.get("memory_require_confirm", True)),
             "ai_reactions_enabled": bool(payload.get("ai_reactions_enabled", True)),
+            "allow_hitl": bool(payload.get("allow_hitl", True)),
             "requested_route": str(payload.get("model_route") or "auto"),
             "timezone": str(payload.get("timezone") or "Asia/Shanghai"),
             "skills_catalog": skills_catalog,
@@ -934,6 +935,7 @@ async def execute_run(
             "memory_enabled": bool(payload.get("memory_enabled")),
             "memory_require_confirm": bool(payload.get("memory_require_confirm", True)),
             "ai_reactions_enabled": bool(payload.get("ai_reactions_enabled", True)),
+            "allow_hitl": bool(payload.get("allow_hitl", True)),
             "requested_route": str(payload.get("model_route") or "auto"),
         }
         await _stream_graph(

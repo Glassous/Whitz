@@ -48,6 +48,11 @@ async def load_whitz_mcp_tools(
             "url": f"{base}/api/internal/mcp/skills",
             "headers": headers,
         },
+        "whitz_schedules": {
+            "transport": "streamable_http",
+            "url": f"{base}/api/internal/mcp/schedules",
+            "headers": headers,
+        },
     }
 
     try:

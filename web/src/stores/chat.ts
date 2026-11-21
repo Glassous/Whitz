@@ -14,6 +14,7 @@ import type {
   Plan,
   PlanItem,
   ReasoningBlock,
+  ScheduledTaskPendingItem,
   SkillPendingItem,
   ToolPayload,
   UserReactionType,
@@ -48,6 +49,7 @@ export const useChatStore = defineStore("chat", () => {
   const pendingControl = ref<PendingControl | null>(null);
   const pendingMemory = ref<MemoryPendingItem[]>([]);
   const pendingSkills = ref<SkillPendingItem[]>([]);
+  const pendingSchedules = ref<ScheduledTaskPendingItem[]>([]);
   const error = ref<string | null>(null);
   const selectedTurnId = ref<string | null>(null);
   let controller: AbortController | null = null;
@@ -157,9 +159,10 @@ export const useChatStore = defineStore("chat", () => {
 
   async function loadConversationPending(targetConvId: string) {
     try {
-      const [memRes, skillRes] = await Promise.allSettled([
+      const [memRes, skillRes, schedRes] = await Promise.allSettled([
         api.get<MemoryOverview>("/users/me/memory"),
         api.get<SkillPendingItem[]>("/skills/pending"),
+        api.get<ScheduledTaskPendingItem[]>("/schedules/pending"),
       ]);
       if (convId.value !== targetConvId) return;
       if (memRes.status === "fulfilled" && Array.isArray(memRes.value?.pending)) {
@@ -169,6 +172,11 @@ export const useChatStore = defineStore("chat", () => {
       }
       if (skillRes.status === "fulfilled" && Array.isArray(skillRes.value)) {
         pendingSkills.value = skillRes.value.filter(
+          (item) => (!item.conversation_id || item.conversation_id === targetConvId) && (item.status ?? "pending") === "pending",
+        );
+      }
+      if (schedRes.status === "fulfilled" && Array.isArray(schedRes.value)) {
+        pendingSchedules.value = schedRes.value.filter(
           (item) => (!item.conversation_id || item.conversation_id === targetConvId) && (item.status ?? "pending") === "pending",
         );
       }
@@ -248,6 +256,7 @@ export const useChatStore = defineStore("chat", () => {
     hydratePendingControl(detail.pending_control);
     pendingMemory.value = [];
     pendingSkills.value = [];
+    pendingSchedules.value = [];
     pendingUserTargetId = null;
     error.value = null;
     streaming.value = false;
@@ -288,6 +297,7 @@ export const useChatStore = defineStore("chat", () => {
     pendingControl.value = null;
     pendingMemory.value = [];
     pendingSkills.value = [];
+    pendingSchedules.value = [];
     pendingUserTargetId = null;
     error.value = null;
   }
@@ -651,6 +661,12 @@ export const useChatStore = defineStore("chat", () => {
       case "skill.pending": {
         const items = extractPendingItems<SkillPendingItem>(d, "skills");
         pendingSkills.value = mergePending(pendingSkills.value, items);
+        break;
+      }
+      case "schedules.pending":
+      case "schedule.pending": {
+        const items = extractPendingItems<ScheduledTaskPendingItem>(d, "schedules");
+        pendingSchedules.value = mergePending(pendingSchedules.value, items);
         break;
       }
       case "run.completed": {
@@ -1039,6 +1055,11 @@ export const useChatStore = defineStore("chat", () => {
     pendingSkills.value = pendingSkills.value.filter((item) => item.id !== id);
   }
 
+  async function resolvePendingSchedule(id: string, action: "approve" | "reject") {
+    await api.post(`/schedules/pending/${id}`, { action });
+    pendingSchedules.value = pendingSchedules.value.filter((item) => item.id !== id);
+  }
+
   async function reconnect(runId: string) {
     const targetConvId = convId.value;
     if (!targetConvId || !runId || runId === "pending") return;
@@ -1218,10 +1239,10 @@ export const useChatStore = defineStore("chat", () => {
     activeAssistantId, activeRunId, plan, reasoning, currentStep, runningTool,
     selectedTurnId, selectedTurn, assistantTurns, viewPlan, viewReasoning, viewStreaming, viewCurrentStep,
     viewRunningTool, selectTurn,
-    pendingControl, pendingMemory, pendingSkills, error,
+    pendingControl, pendingMemory, pendingSkills, pendingSchedules, error,
     loadFromConversation, reset, send, regenerate, editAndResend, reconnect, recoverIfNeeded,
     stop, approve, clarify, abort, clearPendingControlFromSync,
-    resolvePendingMemory, resolvePendingSkill,
+    resolvePendingMemory, resolvePendingSkill, resolvePendingSchedule,
     applyMessageReactions, reactToMessage, removeReaction,
   };
 });

@@ -27,6 +27,7 @@ class AgentState(TypedDict, total=False):
     requested_skills: list[str]
     memory_enabled: bool
     memory_require_confirm: bool
+    allow_hitl: bool
     requested_route: str
     selected_route: str
     selected_model: str

@@ -42,6 +42,11 @@ TOOL_CALLS_TOTAL = Counter(
     "Total tool invocations by tool name and outcome",
     ["tool", "outcome"],
 )
+SCHEDULED_TASK_RUNS_TOTAL = Counter(
+    "whitz_scheduled_task_runs_total",
+    "Total scheduled task dispatches by trigger and outcome",
+    ["trigger", "status"],
+)
 
 
 def _route_label(request: Request) -> str:

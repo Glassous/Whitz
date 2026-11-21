@@ -17,7 +17,7 @@ const props = defineProps<{
   mainConversation: Conversation | null;
   sideConversations: Conversation[];
   currentId: string | null;
-  activeView: "chat" | "library";
+  activeView: "chat" | "library" | "schedules";
   loading?: boolean;
   open?: boolean;
   collapsed?: boolean;
@@ -29,7 +29,7 @@ const emit = defineEmits<{
   select: [string];
   "select-main": [];
   "create-side": [];
-  "switch-view": ["chat" | "library"];
+  "switch-view": ["chat" | "library" | "schedules"];
   "toggle-collapse": [];
   rename: [string, string];
   pin: [string, boolean];
@@ -234,6 +234,13 @@ function onClickLibraryRail() {
   hideTooltip();
   quickCardOpen.value = false;
   emit("switch-view", "library");
+  emit("close");
+}
+
+function onClickSchedulesRail() {
+  hideTooltip();
+  quickCardOpen.value = false;
+  emit("switch-view", "schedules");
   emit("close");
 }
 
@@ -595,6 +602,29 @@ const isMainActive = computed(
             <path stroke-linecap="round" stroke-linejoin="round" d="M4 19.5A2.5 2.5 0 016.5 17H20" />
             <path stroke-linecap="round" stroke-linejoin="round" d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
             <path stroke-linecap="round" d="M9 7h7M9 11h5" />
+          </svg>
+        </button>
+
+        <!-- 定时任务 -->
+        <button
+          type="button"
+          class="focus-ring flex h-10 w-10 items-center justify-center rounded-full transition-colors"
+          :class="
+            activeView === 'schedules'
+              ? 'bg-hover text-fg shadow-xs dark:bg-active'
+              : 'text-fg-muted hover:bg-hover/70 hover:text-fg'
+          "
+          :aria-current="activeView === 'schedules' ? 'page' : undefined"
+          aria-label="定时任务"
+          @mouseenter="showTooltip($event, '定时任务', '自动化定时指令与运行历史')"
+          @mouseleave="hideTooltip"
+          @focus="showTooltip($event, '定时任务', '自动化定时指令与运行历史')"
+          @blur="hideTooltip"
+          @click="onClickSchedulesRail"
+        >
+          <svg class="h-[20px] w-[20px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+            <circle cx="12" cy="12" r="9" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3.2 2" />
           </svg>
         </button>
       </nav>

@@ -741,3 +741,93 @@ class ModelPricing(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class ScheduledTask(Base):
+    """User-defined scheduled AI prompt / recurring task."""
+
+    __tablename__ = "scheduled_tasks"
+    __table_args__ = (
+        Index("ix_scheduled_tasks_user_created", "user_id", "created_at"),
+        Index("ix_scheduled_tasks_due", "enabled", "status", "next_run_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    target_mode: Mapped[str] = mapped_column(String(16), default="dedicated", server_default="dedicated")
+    name: Mapped[str] = mapped_column(String(120))
+    prompt: Mapped[str] = mapped_column(Text)
+    schedule_type: Mapped[str] = mapped_column(String(16))
+    schedule_config: Mapped[dict] = mapped_column(JSONB, default=dict)
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai", server_default="Asia/Shanghai")
+    model_route: Mapped[str] = mapped_column(String(16), default="auto", server_default="auto")
+    skill_names: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
+    status: Mapped[str] = mapped_column(String(24), default="active", server_default="active", index=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    run_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    max_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(24), default="manual", server_default="manual")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    runs: Mapped[list["ScheduledTaskRun"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan", order_by="ScheduledTaskRun.started_at.desc()"
+    )
+
+
+class ScheduledTaskRun(Base):
+    """Execution history record for a scheduled task."""
+
+    __tablename__ = "scheduled_task_runs"
+    __table_args__ = (
+        Index("ix_scheduled_task_runs_task_started", "task_id", "started_at"),
+        Index("ix_scheduled_task_runs_user_started", "user_id", "started_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("scheduled_tasks.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    assistant_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    trigger_type: Mapped[str] = mapped_column(String(16), default="scheduled", server_default="scheduled")
+    status: Mapped[str] = mapped_column(String(24), default="queued", server_default="queued", index=True)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    tokens_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+    task: Mapped[ScheduledTask] = relationship(back_populates="runs")
+
+
+class ScheduledTaskPendingProposal(Base):
+    """Agent-proposed scheduled task change waiting for explicit user confirmation."""
+
+    __tablename__ = "scheduled_task_pending_proposals"
+    __table_args__ = (Index("ix_schedule_pending_user_status", "user_id", "status", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    target_task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    action: Mapped[str] = mapped_column(String(24), default="create", server_default="create")
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

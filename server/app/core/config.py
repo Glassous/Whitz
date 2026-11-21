@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     allowed_hosts: str = "*"
     audit_enabled: bool = True
 
+    scheduler_enabled: bool = True
+    scheduler_poll_interval_seconds: float = 10.0
+    scheduler_batch_size: int = 20
+    scheduler_max_consecutive_failures: int = 5
+
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""

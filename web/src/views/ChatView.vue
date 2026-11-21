@@ -17,8 +17,10 @@ import ApprovalCard from "../components/chat/ApprovalCard.vue";
 import ClarifyCard from "../components/chat/ClarifyCard.vue";
 import MemoryPendingCard from "../components/chat/MemoryPendingCard.vue";
 import SkillPendingCard from "../components/chat/SkillPendingCard.vue";
+import SchedulePendingCard from "../components/chat/SchedulePendingCard.vue";
 import SearchModal from "../components/chat/SearchModal.vue";
 import LibraryPanel from "../components/settings/LibraryPanel.vue";
+import ScheduledTasksPanel from "../components/schedules/ScheduledTasksPanel.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -37,13 +39,14 @@ let openSeq = 0;
 const routeConversationId = computed(() => (typeof route.params.id === "string" && route.params.id ? route.params.id : null));
 const isNewSideDraft = computed(() => route.query.new === "1");
 
-const activeView = ref<"chat" | "library">("chat");
+const activeView = ref<"chat" | "library" | "schedules">("chat");
 
 const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
 const assistantAvatarUrl = computed(() => auth.user?.assistant_avatar_url ?? null);
 const isMainChat = computed(() => conversations.current?.kind === "main");
 const headerTitle = computed(() => {
   if (activeView.value === "library") return "资料库";
+  if (activeView.value === "schedules") return "定时任务";
   if (isMainChat.value) return "主要聊天";
   return conversations.current?.title ?? "新旁聊";
 });
@@ -287,9 +290,9 @@ function createSideConversation() {
   void router.push({ name: "chat", query: { new: "1" } });
 }
 
-function onSwitchView(view: "chat" | "library") {
+function onSwitchView(view: "chat" | "library" | "schedules") {
   activeView.value = view;
-  if (view === "library") {
+  if (view === "library" || view === "schedules") {
     previewTarget.value = null;
     mobileStepsOpen.value = false;
   } else if (!conversations.current && !isNewSideDraft.value) {
@@ -563,6 +566,26 @@ async function onResolveSkill(id: string, action: "approve" | "reject") {
   }
 }
 
+async function onResolveSchedule(id: string, action: "approve" | "reject") {
+  const nextBusy = new Set(pendingBusyIds.value);
+  nextBusy.add(id);
+  pendingBusyIds.value = nextBusy;
+  const { [id]: _, ...restErrors } = pendingErrors.value;
+  pendingErrors.value = restErrors;
+  try {
+    await chat.resolvePendingSchedule(id, action);
+  } catch (e: any) {
+    pendingErrors.value = {
+      ...pendingErrors.value,
+      [id]: e?.detail?.detail ?? e?.message ?? "操作失败，请重试",
+    };
+  } finally {
+    const afterBusy = new Set(pendingBusyIds.value);
+    afterBusy.delete(id);
+    pendingBusyIds.value = afterBusy;
+  }
+}
+
 function onViewSteps(id: string) {
   chat.selectTurn(id);
   previewTarget.value = null;
@@ -747,6 +770,31 @@ onBeforeUnmount(() => {
         </div>
       </template>
 
+      <!-- Embedded Scheduled Tasks View inside Homepage Main Area -->
+      <template v-else-if="activeView === 'schedules'">
+        <div class="relative flex min-w-0 flex-1 flex-col">
+          <div class="flex shrink-0 items-center gap-2.5 border-b border-line/60 px-3.5 py-3">
+            <button
+              type="button"
+              class="focus-ring flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
+              :aria-label="sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
+              :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
+              @click="onSidebarToggleClick"
+            >
+              <svg class="h-[22px] w-[22px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3">
+                <path stroke-linecap="round" d="M4 8.5h16M4 15.5h10" />
+              </svg>
+            </button>
+            <h1 class="min-w-0 truncate text-[16px] font-semibold text-fg">定时任务</h1>
+          </div>
+          <div v-scrollbar class="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+            <div class="mx-auto w-full max-w-5xl">
+              <ScheduledTasksPanel @open-conversation="onSelect" />
+            </div>
+          </div>
+        </div>
+      </template>
+
       <!-- Chat Workspace View (Main Chat & Side Chats) -->
       <template v-else>
       <!-- Fixed task panel toggle (top-right inside panel when expanded, same position when collapsed) -->
@@ -875,6 +923,15 @@ onBeforeUnmount(() => {
               :busy="pendingBusyIds.has(item.id)"
               :error="pendingErrors[item.id] ?? null"
               @resolve="onResolveSkill"
+            />
+
+            <SchedulePendingCard
+              v-for="item in chat.pendingSchedules"
+              :key="`sched-${item.id}`"
+              :item="item"
+              :busy="pendingBusyIds.has(item.id)"
+              :error="pendingErrors[item.id] ?? null"
+              @resolve="onResolveSchedule"
             />
 
             <Transition

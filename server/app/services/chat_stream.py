@@ -23,6 +23,7 @@ from app.services import (
     memory_service,
     profile_context,
     run_supervisor,
+    scheduler_service,
     skills_service,
     telemetry,
     titles,
@@ -1034,6 +1035,7 @@ async def _pending_events_since(
     user_id: uuid.UUID,
     initial_mem_ids: set[str] | None = None,
     initial_skill_ids: set[str] | None = None,
+    initial_schedule_ids: set[str] | None = None,
     since_dt: datetime | None = None,
 ) -> list[dict]:
     events: list[dict] = []
@@ -1077,6 +1079,28 @@ async def _pending_events_since(
                 {
                     "items": [_serialize_pending_item(i) for i in new_skills],
                     "count": len(new_skills),
+                },
+            )
+        )
+
+    schedule_items = await scheduler_service.list_pending(db, user_id)
+    if initial_schedule_ids is not None:
+        new_schedules = [item for item in schedule_items if item["id"] not in initial_schedule_ids]
+    elif since_dt is not None:
+        new_schedules = [
+            item
+            for item in schedule_items
+            if item.get("created_at") is None or item["created_at"] >= since_dt
+        ]
+    else:
+        new_schedules = schedule_items
+    if new_schedules:
+        events.append(
+            sse(
+                "schedules.pending",
+                {
+                    "items": [_serialize_pending_item(i) for i in new_schedules],
+                    "count": len(new_schedules),
                 },
             )
         )
@@ -1283,9 +1307,12 @@ async def _launch_supervised_turn(
     max_seconds: int | None = None,
     run_slot: str | None = None,
     idempotency_key: str | None = None,
+    allow_hitl: bool = True,
+    scheduled_run_id: uuid.UUID | None = None,
 ) -> tuple[run_supervisor.SupervisedRun, asyncio.Queue[dict[str, Any] | None], str]:
     initial_mem_ids = {item["id"] for item in await memory_service.list_pending(db, user.id)}
     initial_skill_ids = {item["id"] for item in await skills_service.list_pending(db, user.id)}
+    initial_schedule_ids = {item["id"] for item in await scheduler_service.list_pending(db, user.id)}
 
     run_started = time.time()
     run = await client.create_run(
@@ -1311,6 +1338,7 @@ async def _launch_supervised_turn(
         memory_enabled=bool(turn_ctx.get("memory_enabled")),
         memory_require_confirm=bool(turn_ctx.get("memory_require_confirm", True)),
         ai_reactions_enabled=bool(turn_ctx.get("ai_reactions_enabled", True)),
+        allow_hitl=allow_hitl,
         idempotency_key=idempotency_key or uuid.uuid4().hex,
     )
     run_id = str(run.get("run_id") or run.get("id"))
@@ -1335,6 +1363,8 @@ async def _launch_supervised_turn(
         run_slot=run_slot,
         initial_mem_ids=initial_mem_ids,
         initial_skill_ids=initial_skill_ids,
+        initial_schedule_ids=initial_schedule_ids,
+        scheduled_run_id=scheduled_run_id,
     )
     return sup, q, run_id
 
