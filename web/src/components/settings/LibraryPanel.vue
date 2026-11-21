@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
 import { api } from "../../api/client";
-import { categoryLabel, formatFileSize } from "../../lib/fileTypes";
-import { useConversationsStore } from "../../stores/conversations";
+import { ACCEPT_ATTR, categoryLabel, formatFileSize } from "../../lib/fileTypes";
+import { useFilesStore } from "../../stores/files";
 import type { LibraryFileItem } from "../../types";
 import MarkdownRenderer from "../chat/MarkdownRenderer.vue";
 import BaseBadge from "../ui/BaseBadge.vue";
@@ -12,14 +11,16 @@ import BaseModal from "../ui/BaseModal.vue";
 import FormError from "../ui/FormError.vue";
 import Spinner from "../ui/Spinner.vue";
 
+const props = defineProps<{
+  embedded?: boolean;
+}>();
+
 type CategoryFilter = "all" | "document" | "spreadsheet" | "code" | "image";
 type SourceFilter = "all" | "user" | "assistant";
-type GlobalFilter = "all" | "global";
 
 const PAGE_SIZE = 24;
 
-const router = useRouter();
-const conversations = useConversationsStore();
+const filesStore = useFilesStore();
 
 const files = ref<LibraryFileItem[]>([]);
 const totalCount = ref<number | null>(null);
@@ -33,12 +34,11 @@ const searchInput = ref("");
 const searchQuery = ref("");
 const categoryFilter = ref<CategoryFilter>("all");
 const sourceFilter = ref<SourceFilter>("all");
-const globalFilter = ref<GlobalFilter>("all");
 
 const brokenThumbs = ref<Record<string, boolean>>({});
-const togglingGlobalId = ref<string | null>(null);
-const attachingId = ref<string | null>(null);
 const downloadingId = ref<string | null>(null);
+const uploading = ref(false);
+const uploadInputRef = ref<HTMLInputElement | null>(null);
 
 // Preview modal state
 const previewFile = ref<LibraryFileItem | null>(null);
@@ -54,9 +54,6 @@ const deleting = ref(false);
 const deleteError = ref<string | null>(null);
 
 let searchTimer: number | null = null;
-
-const currentConvId = computed(() => conversations.current?.id ?? null);
-const currentConvTitle = computed(() => conversations.current?.title ?? "当前对话");
 
 function extractError(e: any, fallback: string): string {
   const detail = e?.detail;
@@ -132,7 +129,6 @@ async function loadFiles() {
     if (searchQuery.value.trim()) params.set("q", searchQuery.value.trim());
     if (categoryFilter.value !== "all") params.set("category", categoryFilter.value);
     if (sourceFilter.value !== "all") params.set("source", sourceFilter.value);
-    if (globalFilter.value === "global") params.set("is_global", "true");
     params.set("page", String(page.value));
     params.set("page_size", String(PAGE_SIZE));
 
@@ -197,58 +193,37 @@ function setSource(next: SourceFilter) {
   void loadFiles();
 }
 
-function setGlobal(next: GlobalFilter) {
-  if (globalFilter.value === next) return;
-  globalFilter.value = next;
-  page.value = 1;
-  void loadFiles();
-}
-
 function goToPage(nextPage: number) {
   if (nextPage < 1 || nextPage === page.value) return;
   page.value = nextPage;
   void loadFiles();
 }
 
-async function toggleGlobal(file: LibraryFileItem) {
-  if (togglingGlobalId.value) return;
-  togglingGlobalId.value = file.id;
-  error.value = null;
-  feedback.value = null;
-  const nextVal = !file.is_global;
-  try {
-    const updated = await api.patch<LibraryFileItem>(`/library/files/${encodeURIComponent(file.id)}`, {
-      is_global: nextVal,
-    });
-    file.is_global = updated?.is_global ?? nextVal;
-    feedback.value = file.is_global
-      ? `「${file.filename}」已设为全局共享，所有对话均可引用`
-      : `已取消「${file.filename}」的全局共享`;
-    if (globalFilter.value === "global" && !file.is_global) {
-      files.value = files.value.filter((f) => f.id !== file.id);
-    }
-  } catch (e: any) {
-    error.value = extractError(e, "更新全局共享状态失败");
-  } finally {
-    togglingGlobalId.value = null;
-  }
+function openUploadPicker() {
+  if (uploading.value) return;
+  uploadInputRef.value?.click();
 }
 
-async function attachToCurrentConv(file: LibraryFileItem) {
-  const convId = currentConvId.value;
-  if (!convId || attachingId.value) return;
-  attachingId.value = file.id;
+async function onUploadInputChange(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const selected = input.files;
+  if (!selected || !selected.length) return;
+  uploading.value = true;
   error.value = null;
   feedback.value = null;
   try {
-    await api.post(`/conversations/${encodeURIComponent(convId)}/files/attach`, {
-      file_ids: [file.id],
-    });
-    feedback.value = `已将「${file.filename}」引用到对话「${currentConvTitle.value}」`;
-  } catch (e: any) {
-    error.value = extractError(e, "引用到当前对话失败");
+    const { uploaded, errors } = await filesStore.uploadToLibrary(selected);
+    if (errors.length) {
+      error.value = errors.slice(0, 3).join("；");
+    }
+    if (uploaded.length) {
+      feedback.value = `已上传 ${uploaded.length} 个文件到资料库，主聊天与旁聊均可直接参考`;
+      page.value = 1;
+      await loadFiles();
+    }
   } finally {
-    attachingId.value = null;
+    uploading.value = false;
+    input.value = "";
   }
 }
 
@@ -363,17 +338,11 @@ async function confirmDeleteFile() {
       totalCount.value -= 1;
     }
     deleteTarget.value = null;
-    feedback.value = `已删除文件「${target.filename}」`;
+    feedback.value = `已永久删除文件「${target.filename}」，所有聊天将不再参考该文件`;
   } catch (e: any) {
     deleteError.value = extractError(e, "删除文件失败");
   } finally {
     deleting.value = false;
-  }
-}
-
-function goBackToCurrentConv() {
-  if (currentConvId.value) {
-    void router.push({ name: "chat-conversation", params: { id: currentConvId.value } });
   }
 }
 
@@ -388,24 +357,43 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="space-y-5">
+    <input
+      ref="uploadInputRef"
+      type="file"
+      multiple
+      :accept="ACCEPT_ATTR"
+      class="sr-only"
+      @change="onUploadInputChange"
+    />
+
     <!-- Filter & Search Bar Card -->
     <section class="space-y-4 rounded-[24px] bg-sidebar p-5 sm:p-6 dark:bg-surface">
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-2">
-            <h2 class="text-[15.5px] font-semibold text-fg">文件与资料资产</h2>
+            <h2 class="text-[15.5px] font-semibold text-fg">
+              {{ props.embedded ? "全部资料" : "文件与资料资产" }}
+            </h2>
             <BaseBadge tone="gray">
               {{ totalCount !== null ? `共 ${totalCount} 项` : `本页 ${files.length} 项` }}
             </BaseBadge>
           </div>
           <p class="mt-1 text-[13px] text-fg-muted">
-            统一管理你在各对话中上传的文件及 AI 生成的文档与图表；开启「全局共享」后，所有对话均可检索与读取该文件。
+            统一管理主聊天与旁聊中的所有上传文件及 AI 产出；所有文件默认全局可参考，删除后所有聊天将无法再访问。
           </p>
         </div>
 
-        <BaseButton variant="soft" size="sm" rounded="full" :disabled="loading" class="shrink-0" @click="loadFiles">
-          刷新列表
-        </BaseButton>
+        <div class="flex shrink-0 items-center gap-2">
+          <BaseButton size="sm" rounded="full" :loading="uploading" @click="openUploadPicker">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+            </svg>
+            <span>上传文件</span>
+          </BaseButton>
+          <BaseButton variant="soft" size="sm" rounded="full" :disabled="loading" @click="loadFiles">
+            刷新
+          </BaseButton>
+        </div>
       </div>
 
       <!-- Search Bar -->
@@ -479,28 +467,6 @@ onBeforeUnmount(() => {
             {{ opt.label }}
           </button>
         </div>
-
-        <!-- Global -->
-        <div class="flex flex-wrap items-center gap-1.5" role="group" aria-label="按共享范围筛选">
-          <span class="mr-0.5 text-fg-faint">共享</span>
-          <button
-            v-for="opt in [
-              { value: 'all', label: '全部' },
-              { value: 'global', label: '仅全局共享' },
-            ] as const"
-            :key="opt.value"
-            type="button"
-            class="focus-ring rounded-full px-2.5 py-1 font-medium transition-colors"
-            :class="
-              globalFilter === opt.value
-                ? 'bg-primary text-primary-fg'
-                : 'bg-canvas text-fg-muted hover:bg-hover hover:text-fg'
-            "
-            @click="setGlobal(opt.value)"
-          >
-            {{ opt.label }}
-          </button>
-        </div>
       </div>
     </section>
 
@@ -512,14 +478,6 @@ onBeforeUnmount(() => {
       class="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-success-weak px-4 py-2.5 text-[13px] text-success"
     >
       <span>{{ feedback }}</span>
-      <button
-        v-if="currentConvId && feedback.includes('引用到对话')"
-        type="button"
-        class="focus-ring rounded-full bg-canvas px-2.5 py-0.5 text-[12px] font-medium text-fg hover:bg-hover"
-        @click="goBackToCurrentConv"
-      >
-        返回当前对话
-      </button>
     </div>
 
     <!-- Loading -->
@@ -589,70 +547,34 @@ onBeforeUnmount(() => {
             </div>
 
             <p class="mt-1 truncate text-[12px] text-fg-muted" :title="file.conversation_title || undefined">
-              来源对话：{{ file.conversation_title || (file.conversation_id ? "原对话" : "原对话已删除") }}
+              来源：{{ file.conversation_title || (file.conversation_id ? "原聊天" : "资料库直传") }}
             </p>
           </div>
         </div>
 
-        <!-- Global Share Toggle -->
-        <div class="flex items-center justify-between gap-3 rounded-2xl bg-canvas/85 px-3.5 py-2.5 dark:bg-canvas/70">
-          <div class="min-w-0">
-            <p class="text-[12.5px] font-medium text-fg">全局共享（所有对话可用）</p>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            :aria-checked="file.is_global"
-            :aria-label="`切换 ${file.filename} 全局共享`"
-            :disabled="togglingGlobalId === file.id"
-            class="focus-ring relative inline-flex h-6 w-10.5 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-            :class="file.is_global ? 'bg-primary' : 'bg-line-strong'"
-            @click="toggleGlobal(file)"
-          >
-            <span
-              class="h-5 w-5 rounded-full bg-canvas shadow-xs transition-transform"
-              :class="file.is_global ? 'translate-x-4.5' : 'translate-x-0'"
-            />
-          </button>
-        </div>
-
         <!-- Actions Footer -->
-        <div class="flex flex-wrap items-center justify-between gap-1.5 border-t border-line/60 pt-2.5">
+        <div class="flex flex-wrap items-center justify-end gap-1 border-t border-line/60 pt-2.5">
+          <BaseButton variant="ghost" size="sm" rounded="full" @click="openPreview(file)">
+            预览
+          </BaseButton>
           <BaseButton
-            v-if="currentConvId"
-            variant="secondary"
+            variant="ghost"
             size="sm"
             rounded="full"
-            :loading="attachingId === file.id"
-            @click="attachToCurrentConv(file)"
+            :loading="downloadingId === file.id"
+            @click="downloadFile(file)"
           >
-            引用到当前对话
+            下载
           </BaseButton>
-          <span v-else class="text-[11.5px] text-fg-faint">进入对话后可直接引用</span>
-
-          <div class="ml-auto flex items-center gap-1">
-            <BaseButton variant="ghost" size="sm" rounded="full" @click="openPreview(file)">
-              预览
-            </BaseButton>
-            <BaseButton
-              variant="ghost"
-              size="sm"
-              rounded="full"
-              :loading="downloadingId === file.id"
-              @click="downloadFile(file)"
-            >
-              下载
-            </BaseButton>
-            <BaseButton
-              variant="ghost"
-              size="sm"
-              rounded="full"
-              class="text-danger hover:bg-danger-weak hover:text-danger"
-              @click="requestDeleteFile(file)"
-            >
-              删除
-            </BaseButton>
-          </div>
+          <BaseButton
+            variant="ghost"
+            size="sm"
+            rounded="full"
+            class="text-danger hover:bg-danger-weak hover:text-danger"
+            @click="requestDeleteFile(file)"
+          >
+            删除
+          </BaseButton>
         </div>
       </article>
     </div>
@@ -785,12 +707,9 @@ onBeforeUnmount(() => {
     >
       <div v-if="deleteTarget" class="space-y-3">
         <p class="text-[14px] leading-relaxed text-fg-muted">
-          确定要从个人资料库永久删除
+          确定要从资料库永久删除
           <strong class="font-medium text-fg">{{ deleteTarget.filename }}</strong>
-          吗？
-          <template v-if="deleteTarget.is_global">
-            该文件当前已设为「全局共享」，删除后所有对话将无法再访问它。
-          </template>
+          吗？删除后，主聊天和所有旁聊都将无法再参考该文件。
         </p>
         <FormError :message="deleteError" />
       </div>

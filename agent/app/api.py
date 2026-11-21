@@ -43,6 +43,10 @@ class CreateRunRequest(BaseModel):
     run_id: str | None = None
     thread_id: str | None = None
     conversation_id: str
+    conversation_kind: str = "side"
+    assistant_name: str = "Whitz"
+    rolling_summary: str = ""
+    cross_chat_context: str = ""
     user_id: str
     agent_namespace: str = ""
     agent_api_key: str = ""

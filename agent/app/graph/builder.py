@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -69,28 +71,61 @@ def format_current_time(tz_name: str | None = None) -> str:
     return f"{now.strftime('%Y-%m-%d %H:%M:%S')}（{weekday}，{cleaned}）"
 
 
-_BASE_AGENT_PROMPT = """你是 Whitz 智能助理，一个自主决策的多智能体工作台助手。
-你可以根据任务复杂度自主决定下一步行动，并严格遵守以下原则：
-1. 事实与时效性约束：始终以「当前时间」为基准理解“今天/今年/最近/当前”等时间概念；涉及具体日期、外部动态、文件正文、检索结果或代码运行结论时，必须先调用对应工具查证，严禁编造未验证的数据、链接、文件名或行号。
-2. 工具与 RAG 自主选择：
-   - 简单问答直接简洁、准确作答，避免过度铺垫；
-   - 用户提及已上传文件、文档或全局资料库时，优先使用 `rag_search_workspace` 混合检索定位片段，需要完整原文或查看图片时再调用 `read_workspace_file`；若 `rag_search_workspace` 未命中，可主动改用 `list_workspace_files` / `search_workspace_files` 自愈排查；
-   - 需要个性化背景时调用 `memory_search`，当用户表达长期偏好或重要项目背景且开启记忆功能时调用 `memory_propose`；
-   - 需要实时外部资料时使用 `web_search`，摘要不足时再调用 `web_extract` 精读关键页面；
-   - 复杂多步骤任务使用 `todo_list` 维护进度计划，或通过 `delegate_subtask` 委派给 `researcher` / `coder` 子智能体；
-   - 需要精确计算或验证代码时调用 `execute_code`（系统会自动暂停等待用户审批）；遇到关键歧义时调用 `clarify` 向用户追问；
-   - 若技能摘要与当前任务相关，调用 `skill_view` 按需加载完整技能指南后再执行。
-3. 思考模式自主升档：若当前处于常规非思考模式，但你在分析或工具返回中发现逻辑复杂、信息矛盾或需要深度推演，可调用 `request_deep_thinking` 立即开启深度思考模式再继续作答。
-4. 回复质量规范：复杂调研、对比或技术方案采用「核心结论前置 + 清晰分点 + 来源引用」结构；简单问题直击要点、简明自然。"""
+_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+
+def _estimate_message_tokens(msg: BaseMessage) -> int:
+    content = getattr(msg, "content", "")
+    if isinstance(content, list):
+        text = " ".join(
+            str(b.get("text") or b.get("thinking") or "") if isinstance(b, dict) else str(b)
+            for b in content
+        )
+    else:
+        text = str(content or "")
+    cjk = len(_CJK_RE.findall(text))
+    other = len(text) - cjk
+    tc_overhead = 0
+    if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+        tc_overhead = len(json.dumps(msg.tool_calls, ensure_ascii=False, default=str)) // 3
+    return max(4, int(math.ceil(cjk * 0.72 + other * 0.28)) + tc_overhead + 6)
+
+
+def _base_agent_prompt(assistant_name: str = "Whitz", *, is_main_chat: bool = False) -> str:
+    name = (assistant_name or "").strip() or "Whitz"
+    extra_main = (
+        "\n   - 你当前处于用户的「主聊天」模式，是用户的专属长期助手，天然记得主聊天历史与全部旁聊的关键进展；"
+        "当用户提及过去某次旁聊或早期对话的精确细节、参数、代码或决定，而当前摘要不足时，主动调用 `search_chat_history` 与 `read_conversation_history` 按需查阅原文。"
+        if is_main_chat
+        else ""
+    )
+    return (
+        f"你是 {name} 智能助理，一个自主决策的多智能体工作台助手。\n"
+        "你可以根据任务复杂度自主决定下一步行动，并严格遵守以下原则：\n"
+        "1. 事实与时效性约束：始终以「当前时间」为基准理解“今天/今年/最近/当前”等时间概念；涉及具体日期、外部动态、文件正文、检索结果或代码运行结论时，必须先调用对应工具查证，严禁编造未验证的数据、链接、文件名或行号。\n"
+        "2. 工具与 RAG 自主选择：\n"
+        "   - 简单问答直接简洁、准确作答，避免过度铺垫；\n"
+        "   - 用户提及已上传文件、文档或资料库文件时，优先使用 `rag_search_workspace` 混合检索定位片段，需要完整原文或查看图片时再调用 `read_workspace_file`；若 `rag_search_workspace` 未命中，可主动改用 `list_workspace_files` / `search_workspace_files` 自愈排查；\n"
+        "   - 需要个性化背景时调用 `memory_search`，当用户表达长期偏好或重要项目背景且开启记忆功能时调用 `memory_propose`；"
+        f"{extra_main}\n"
+        "   - 需要实时外部资料时使用 `web_search`，摘要不足时再调用 `web_extract` 精读关键页面；\n"
+        "   - 复杂多步骤任务使用 `todo_list` 维护进度计划，或通过 `delegate_subtask` 委派给 `researcher` / `coder` 子智能体；\n"
+        "   - 需要精确计算或验证代码时调用 `execute_code`（系统会自动暂停等待用户审批）；遇到关键歧义时调用 `clarify` 向用户追问；\n"
+        "   - 若技能摘要与当前任务相关，调用 `skill_view` 按需加载完整技能指南后再执行。\n"
+        "3. 思考模式自主升档：若当前处于常规非思考模式，但你在分析或工具返回中发现逻辑复杂、信息矛盾或需要深度推演，可调用 `request_deep_thinking` 立即开启深度思考模式再继续作答。\n"
+        "4. 回复质量规范：复杂调研、对比或技术方案采用「核心结论前置 + 清晰分点 + 来源引用」结构；简单问题直击要点、简明自然。"
+    )
 
 
 def _prepare_llm_messages(
     messages: list[Any],
     *,
     recent_keep: int = 8,
-    old_tool_char_limit: int = 1200,
+    old_tool_char_limit: int = 600,
+    max_prompt_tokens: int | None = None,
+    max_verbatim_messages: int | None = None,
 ) -> list[BaseMessage]:
-    """Ensure the fresh system context stays at index 0 and fold stale oversized tool outputs."""
+    """Keep fresh system context at index 0, fold stale tool outputs, and enforce a safe token budget."""
     sys_msg: SystemMessage | None = None
     non_sys: list[BaseMessage] = []
     for m in messages:
@@ -100,15 +135,13 @@ def _prepare_llm_messages(
         else:
             non_sys.append(m)
 
+    # Fold oversized ToolMessages older than the most recent few messages
     cutoff = max(0, len(non_sys) - recent_keep)
-    prepared: list[BaseMessage] = []
-    if sys_msg is not None:
-        prepared.append(sys_msg)
-
+    folded_non_sys: list[BaseMessage] = []
     for idx, m in enumerate(non_sys):
         if idx < cutoff and isinstance(m, ToolMessage) and isinstance(m.content, str) and len(m.content) > old_tool_char_limit:
-            folded = m.content[:900] + f"\n... [历史工具输出已折叠，原长 {len(m.content)} 字符]"
-            prepared.append(
+            folded = m.content[:old_tool_char_limit] + f"\n... [历史工具输出已折叠，原长 {len(m.content)} 字符]"
+            folded_non_sys.append(
                 ToolMessage(
                     content=folded,
                     tool_call_id=m.tool_call_id,
@@ -118,7 +151,49 @@ def _prepare_llm_messages(
                 )
             )
         else:
-            prepared.append(m)
+            folded_non_sys.append(m)
+
+    # Group into turn-aligned blocks starting at HumanMessage so trimming never splits tool_call/ToolMessage pairs
+    turns: list[list[BaseMessage]] = []
+    for m in folded_non_sys:
+        if isinstance(m, HumanMessage) or not turns:
+            turns.append([m])
+        else:
+            turns[-1].append(m)
+
+    # Keep turns from newest backwards under max_verbatim_messages and max_prompt_tokens
+    sys_tokens = _estimate_message_tokens(sys_msg) if sys_msg is not None else 0
+    budget = max(2000, int(max_prompt_tokens) - sys_tokens) if max_prompt_tokens else None
+    msg_cap = max(2, int(max_verbatim_messages)) if max_verbatim_messages else None
+
+    kept_turns: list[list[BaseMessage]] = []
+    used_tokens = 0
+    used_msgs = 0
+
+    for idx in range(len(turns) - 1, -1, -1):
+        turn = turns[idx]
+        turn_tokens = sum(_estimate_message_tokens(m) for m in turn)
+        is_latest_turn = idx == len(turns) - 1
+        if not is_latest_turn:
+            if msg_cap is not None and used_msgs + len(turn) > msg_cap:
+                break
+            if budget is not None and used_tokens + turn_tokens > budget:
+                break
+        kept_turns.append(turn)
+        used_tokens += turn_tokens
+        used_msgs += len(turn)
+
+    kept_turns.reverse()
+    windowed: list[BaseMessage] = [m for turn in kept_turns for m in turn]
+
+    # Guard against leading orphaned ToolMessages if input history didn't begin with HumanMessage
+    while windowed and isinstance(windowed[0], ToolMessage):
+        windowed.pop(0)
+
+    prepared: list[BaseMessage] = []
+    if sys_msg is not None:
+        prepared.append(sys_msg)
+    prepared.extend(windowed)
     return prepared
 
 
@@ -140,11 +215,12 @@ def _merge_usage(acc: dict[str, int] | None, msg: AIMessage) -> dict[str, int]:
 
 
 def _build_system_prompt(state: AgentState, cfg: dict[str, Any], current_time_str: str | None = None) -> str:
-    sections: list[str] = [_BASE_AGENT_PROMPT]
+    """Assemble system prompt in prefix-cache-friendly order: static/stable prefix first, dynamic turn suffix last."""
+    is_main = str(state.get("conversation_kind") or cfg.get("conversation_kind") or "side") == "main"
+    assistant_name = str(state.get("assistant_name") or cfg.get("assistant_name") or "").strip() or "Whitz"
 
-    tz_name = str(state.get("timezone") or cfg.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
-    now_str = current_time_str or str(cfg.get("current_time_str") or "").strip() or format_current_time(tz_name)
-    sections.append(f"## 当前时间\n{now_str}")
+    # --- Stable Prefix (maximizes LLM KV prefix-cache hit rate) ---
+    sections: list[str] = [_base_agent_prompt(assistant_name, is_main_chat=is_main)]
 
     persona = str(state.get("persona") or "").strip()
     if persona:
@@ -154,26 +230,9 @@ def _build_system_prompt(state: AgentState, cfg: dict[str, Any], current_time_st
     if profile_ctx:
         sections.append(f"## 用户授权档案上下文\n{profile_ctx}")
 
-    extra_instructions = str(state.get("instructions") or "").strip()
-    if extra_instructions:
-        sections.append(f"## 本轮附加说明\n{extra_instructions}")
-
-    conv_id = str(state.get("conversation_id") or cfg.get("conversation_id") or "").strip()
-    if conv_id:
-        sections.append(f"## 当前工作区\nconversation_id: `{conv_id}`")
-
-    attachments = list(state.get("attachments") or [])
-    if attachments:
-        lines = [
-            "以下为当前对话及全局资料库中可用的文件元数据（未预灌全文；请按需调用 `rag_search_workspace` 或 `read_workspace_file`）："
-        ]
-        for att in attachments:
-            lines.append(
-                f"- `{att.get('filename', 'file')}` (file_id=`{att.get('file_id')}`, "
-                f"category={att.get('category', 'unknown')}, mime={att.get('mime_type', '')}, "
-                f"size={att.get('size_bytes', 0)}B, scope={att.get('scope', 'conversation')})"
-            )
-        sections.append("## 附件与文件清单\n" + "\n".join(lines))
+    rolling_summary = str(state.get("rolling_summary") or "").strip()
+    if rolling_summary:
+        sections.append(f"## 主聊天历史滚动摘要（更早细节可调用 search_chat_history 查阅原文）\n{rolling_summary}")
 
     skills = list(state.get("skills") or [])
     requested_skills = set(str(s) for s in (state.get("requested_skills") or []))
@@ -196,7 +255,37 @@ def _build_system_prompt(state: AgentState, cfg: dict[str, Any], current_time_st
         mode_note = "写入需用户界面确认（propose）" if require_confirm else "可直接写入"
         sections.append(f"## 长期记忆策略\n记忆功能已开启（{mode_note}）。")
     else:
-        sections.append("## 长期记忆策略\n记忆功能未开启，请勿调用记忆写入。")
+        sections.append("## 长期记忆策略\n显式长期记忆条目写入未开启，请勿调用 `memory_propose`。")
+
+    # --- Dynamic Per-Turn Suffix ---
+    tz_name = str(state.get("timezone") or cfg.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+    now_str = current_time_str or str(cfg.get("current_time_str") or "").strip() or format_current_time(tz_name)
+    sections.append(f"## 当前时间\n{now_str}")
+
+    cross_chat_ctx = str(state.get("cross_chat_context") or "").strip()
+    if is_main and cross_chat_ctx:
+        sections.append(f"## 跨旁聊全局记忆\n{cross_chat_ctx}")
+
+    conv_id = str(state.get("conversation_id") or cfg.get("conversation_id") or "").strip()
+    if conv_id:
+        sections.append(f"## 当前工作区\nconversation_id: `{conv_id}` (kind=`{'main' if is_main else 'side'}`)")
+
+    attachments = list(state.get("attachments") or [])
+    if attachments:
+        lines = [
+            "以下为当前工作区及资料库中可用的文件元数据（全资料库共享；未预灌全文，请按需调用 `rag_search_workspace` 或 `read_workspace_file`）："
+        ]
+        for att in attachments:
+            lines.append(
+                f"- `{att.get('filename', 'file')}` (file_id=`{att.get('file_id')}`, "
+                f"category={att.get('category', 'unknown')}, mime={att.get('mime_type', '')}, "
+                f"size={att.get('size_bytes', 0)}B, scope={att.get('scope', 'library')})"
+            )
+        sections.append("## 资料库与附件文件清单\n" + "\n".join(lines))
+
+    extra_instructions = str(state.get("instructions") or "").strip()
+    if extra_instructions:
+        sections.append(f"## 本轮附加说明\n{extra_instructions}")
 
     return "\n\n".join(sections)
 
@@ -287,8 +376,14 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         cfg = dict(config.get("configurable") or {})
         router: ModelRouter = cfg.get("model_router") or ModelRouter()
         mcp_tools: list[BaseTool] = list(cfg.get("mcp_tools") or [])
-        include_thinking_tool = not bool(state.get("thinking_enabled")) and get_settings().llm_thinking_mode != "disabled"
-        builtin = get_builtin_tools(include_delegation=True, include_hitl=True)
+        is_main = str(state.get("conversation_kind") or cfg.get("conversation_kind") or "side") == "main"
+        settings = get_settings()
+        include_thinking_tool = not bool(state.get("thinking_enabled")) and settings.llm_thinking_mode != "disabled"
+        builtin = get_builtin_tools(
+            include_delegation=True,
+            include_hitl=True,
+            include_cross_chat=is_main,
+        )
         if not include_thinking_tool:
             builtin = [t for t in builtin if t.name != "request_deep_thinking"]
 
@@ -299,7 +394,12 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                 seen_names.add(t.name)
                 all_tools.append(t)
 
-        messages = _prepare_llm_messages(list(state.get("messages") or []))
+        max_tokens_budget = settings.main_max_prompt_tokens if is_main else settings.side_max_prompt_tokens
+        messages = _prepare_llm_messages(
+            list(state.get("messages") or []),
+            max_prompt_tokens=max_tokens_budget,
+            max_verbatim_messages=settings.recent_verbatim_messages,
+        )
         requested_route = str(state.get("selected_route") or state.get("requested_route") or cfg.get("requested_route") or "auto")
         thinking_enabled = bool(state.get("thinking_enabled"))
         candidates = await router.select_candidates(requested_route, messages)
@@ -427,7 +527,12 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         _emit_node_running("tools")
         cfg = dict(config.get("configurable") or {})
         mcp_tools: list[BaseTool] = list(cfg.get("mcp_tools") or [])
-        builtin = get_builtin_tools(include_delegation=False, include_hitl=False)
+        is_main = str(state.get("conversation_kind") or cfg.get("conversation_kind") or "side") == "main"
+        builtin = get_builtin_tools(
+            include_delegation=False,
+            include_hitl=False,
+            include_cross_chat=is_main,
+        )
         tool_map = {t.name: t for t in [*builtin, *mcp_tools]}
 
         pending = _pending_tool_calls(list(state.get("messages") or []))

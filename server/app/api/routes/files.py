@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_owned_conversation
@@ -19,7 +19,7 @@ from app.api.schemas import (
     LibraryFileOut,
 )
 from app.core.config import Settings, get_settings
-from app.db.models import Conversation, ConversationFile, User
+from app.db.models import Conversation, ConversationFile, FileChunk, User
 from app.db.session import get_db
 from app.services import audit, cos, file_chunks, file_parser
 from app.services.file_types import FileValidationError, validate_upload_request
@@ -33,9 +33,13 @@ async def _get_owned_file(
     file_id: uuid.UUID,
     conv: Conversation,
     db: AsyncSession,
+    *,
+    require_same_conversation: bool = True,
 ) -> ConversationFile:
     row = await db.get(ConversationFile, file_id)
-    if row is None or row.conversation_id != conv.id or row.user_id != conv.user_id:
+    if row is None or row.user_id != conv.user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
+    if require_same_conversation and row.conversation_id != conv.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
     return row
 
@@ -281,7 +285,7 @@ async def presign_upload(
         storage_key=storage_key,
         status="pending",
         source="user",
-        is_global=False,
+        is_global=True,
         expires_cleanup_at=datetime.now(timezone.utc) + timedelta(seconds=ttl),
     )
     db.add(record)
@@ -368,7 +372,7 @@ async def get_download_url(
     conv: Conversation = Depends(get_owned_conversation),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    record = await _get_owned_file(file_id, conv, db)
+    record = await _get_owned_file(file_id, conv, db, require_same_conversation=False)
     if record.status != "ready":
         raise HTTPException(status.HTTP_409_CONFLICT, "文件尚未就绪")
     settings = get_settings()
@@ -391,7 +395,7 @@ async def get_preview_content(
     conv: Conversation = Depends(get_owned_conversation),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    record = await _get_owned_file(file_id, conv, db)
+    record = await _get_owned_file(file_id, conv, db, require_same_conversation=False)
     return await read_preview_content_payload(record, sheet_name=sheet_name)
 
 
@@ -404,14 +408,19 @@ async def delete_file(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    """Detach a file from the side chat workspace while keeping it in the global Library."""
     record = await _get_owned_file(file_id, conv, db)
-    storage_key = record.storage_key
     filename = record.filename
-    await db.delete(record)
+    record.conversation_id = None
+    record.is_global = True
+    await db.execute(
+        update(FileChunk)
+        .where(FileChunk.file_id == record.id)
+        .values(conversation_id=None, is_global=True)
+    )
     await db.commit()
-    background_tasks.add_task(cos.delete_object, storage_key)
     await audit.record(
-        "file.delete",
+        "file.detach_workspace",
         actor=user,
         target_type="conversation_file",
         target_id=file_id,

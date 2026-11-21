@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api } from "../../api/client";
+import { useAuthStore } from "../../stores/auth";
 import type { Conversation, ConversationSearchHit } from "../../types";
 
 const props = defineProps<{
   open: boolean;
   conversations: Conversation[];
 }>();
+
+const auth = useAuthStore();
+const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
 
 const emit = defineEmits<{
   close: [];
@@ -79,7 +83,7 @@ function formatTime(iso: string): string {
 function roleLabel(hit: ConversationSearchHit): string {
   if (hit.match_in === "title") return "标题";
   if (hit.role === "user") return "我";
-  if (hit.role === "assistant") return "Whitz";
+  if (hit.role === "assistant") return assistantName.value;
   return "正文";
 }
 
@@ -287,7 +291,7 @@ onBeforeUnmount(() => {
             <!-- Empty query: recent conversations -->
             <template v-if="!query.trim()">
               <div v-if="recentConversations.length" class="space-y-1">
-                <p class="px-3 pb-1.5 text-[12px] font-medium text-fg-faint">最近对话</p>
+                <p class="px-3 pb-1.5 text-[12px] font-medium text-fg-faint">最近聊天</p>
                 <button
                   v-for="(c, idx) in recentConversations"
                   :key="c.id"
@@ -297,7 +301,17 @@ onBeforeUnmount(() => {
                   @mouseenter="activeIndex = idx"
                   @click="chooseAt(idx)"
                 >
-                  <span class="min-w-0 truncate text-[14.5px] font-medium text-fg">{{ c.title }}</span>
+                  <span class="flex min-w-0 items-center gap-2">
+                    <span class="truncate text-[14.5px] font-medium text-fg">
+                      {{ c.kind === "main" ? assistantName : c.title }}
+                    </span>
+                    <span
+                      v-if="c.kind === 'main'"
+                      class="shrink-0 rounded-full bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted"
+                    >
+                      主聊
+                    </span>
+                  </span>
                   <span class="shrink-0 text-[12px] tabular-nums text-fg-faint">
                     {{ formatTime(c.last_message_at ?? c.updated_at ?? c.created_at) }}
                   </span>

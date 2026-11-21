@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { streamSSE } from "../../api/sse";
 import type { Conversation } from "../../types";
 import { useAuthStore } from "../../stores/auth";
@@ -13,8 +14,10 @@ import BaseModal from "../ui/BaseModal.vue";
 import BaseInput from "../ui/BaseInput.vue";
 
 const props = defineProps<{
-  conversations: Conversation[];
+  mainConversation: Conversation | null;
+  sideConversations: Conversation[];
   currentId: string | null;
+  activeView: "chat" | "library";
   loading?: boolean;
   open?: boolean;
   collapsed?: boolean;
@@ -22,7 +25,10 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   select: [string];
-  create: [];
+  "select-main": [];
+  "create-side": [];
+  "switch-view": ["chat" | "library"];
+  "toggle-collapse": [];
   rename: [string, string];
   pin: [string, boolean];
   delete: [string];
@@ -31,6 +37,7 @@ const emit = defineEmits<{
   "drag-progress": [number | null];
 }>();
 
+const router = useRouter();
 const auth = useAuthStore();
 const credits = useCreditsStore();
 const { preference, set: setTheme } = useTheme();
@@ -41,7 +48,7 @@ const themeOptions: { value: ThemePreference; label: string }[] = [
   { value: "dark", label: "深色" },
 ];
 
-// Track desktop breakpoint so mobile drawer always renders full expanded layout.
+// Track desktop breakpoint so mobile drawer always renders full dual-column layout.
 const isDesktop = ref(typeof window !== "undefined" ? window.innerWidth >= 768 : true);
 let mediaQuery: MediaQueryList | null = null;
 function onMediaChange(e: MediaQueryListEvent) {
@@ -49,9 +56,17 @@ function onMediaChange(e: MediaQueryListEvent) {
   if (!e.matches) hideTooltip();
 }
 
-const isRail = computed(() => Boolean(props.collapsed && isDesktop.value));
+const isSecondaryCollapsed = computed(() => Boolean(props.collapsed && isDesktop.value));
 const isMobileDrawer = computed(() => !isDesktop.value);
 const inDesktop = computed(() => isDesktopShell() || isDesktopHost());
+
+// Assistant identity for the pinned Main Chat entry
+const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
+const assistantAvatarUrl = computed(() => auth.user?.assistant_avatar_url ?? null);
+const assistantAvatarFailed = ref(false);
+watch(assistantAvatarUrl, () => {
+  assistantAvatarFailed.value = false;
+});
 
 // 1:1 finger-following left-swipe to close on mobile
 const asideRef = ref<HTMLElement | null>(null);
@@ -61,7 +76,7 @@ let swipeStartX = 0;
 let swipeStartY = 0;
 let swipeStartTime = 0;
 let swipeLocked: "horizontal" | "vertical" | null = null;
-let drawerWidth = 276;
+let drawerWidth = 312;
 
 function resetSwipe() {
   isSwiping.value = false;
@@ -77,7 +92,7 @@ function onTouchStart(e: TouchEvent) {
   swipeStartY = t.clientY;
   swipeStartTime = performance.now();
   swipeLocked = null;
-  drawerWidth = asideRef.value?.offsetWidth || 276;
+  drawerWidth = asideRef.value?.offsetWidth || 312;
 }
 
 function onTouchMove(e: TouchEvent) {
@@ -144,25 +159,20 @@ const drawerStyle = computed(() => {
   };
 });
 
-// Quick card popover (opened by clicking avatar)
+// Quick settings card (opened by clicking bottom avatar in primary rail)
 const quickCardOpen = ref(false);
 const avatarBtnRef = ref<HTMLElement | null>(null);
-const quickCardStyle = ref<{ left: string; bottom: string }>({ left: "16px", bottom: "60px" });
+const quickCardStyle = ref<{ left: string; bottom: string }>({ left: "72px", bottom: "16px" });
 
 function updateQuickCardPosition() {
   const rect = avatarBtnRef.value?.getBoundingClientRect();
   if (!rect) return;
-  if (isRail.value) {
-    quickCardStyle.value = {
-      left: `${rect.right + 12}px`,
-      bottom: `${Math.max(12, window.innerHeight - rect.bottom)}px`,
-    };
-  } else {
-    quickCardStyle.value = {
-      left: `${rect.left}px`,
-      bottom: `${window.innerHeight - rect.top + 8}px`,
-    };
-  }
+  const left = Math.min(window.innerWidth - 304, rect.right + 12);
+  const bottom = Math.max(12, window.innerHeight - rect.bottom);
+  quickCardStyle.value = {
+    left: `${Math.max(12, left)}px`,
+    bottom: `${bottom}px`,
+  };
 }
 
 function toggleQuickCard() {
@@ -174,15 +184,18 @@ function toggleQuickCard() {
   }
 }
 
-watch(isRail, () => {
+function goToSettings() {
   quickCardOpen.value = false;
-});
+  hideTooltip();
+  emit("close");
+  void router.push("/settings");
+}
 
-// Floating tooltip for collapsed rail (teleported to body to avoid overflow clipping)
+// Floating tooltip for primary icon rail
 const tooltip = ref<{ title: string; sub?: string; top: number; left: number } | null>(null);
 
 function showTooltip(event: MouseEvent | FocusEvent, title: string, sub?: string) {
-  if (!isRail.value) return;
+  if (!isDesktop.value) return;
   const target = event.currentTarget as HTMLElement | null;
   if (!target) return;
   const rect = target.getBoundingClientRect();
@@ -190,7 +203,7 @@ function showTooltip(event: MouseEvent | FocusEvent, title: string, sub?: string
     title,
     sub,
     top: rect.top + rect.height / 2,
-    left: rect.right + 12,
+    left: rect.right + 10,
   };
 }
 
@@ -198,20 +211,33 @@ function hideTooltip() {
   tooltip.value = null;
 }
 
-function openSearch() {
+function onClickChatRail() {
+  hideTooltip();
+  quickCardOpen.value = false;
+  if (props.activeView !== "chat") {
+    emit("switch-view", "chat");
+  } else if (isSecondaryCollapsed.value) {
+    emit("toggle-collapse");
+  }
+}
+
+function onClickSearchRail() {
   hideTooltip();
   quickCardOpen.value = false;
   emit("open-search");
   emit("close");
 }
 
+function onClickLibraryRail() {
+  hideTooltip();
+  quickCardOpen.value = false;
+  emit("switch-view", "library");
+  emit("close");
+}
+
 const tierBadgeClass = computed(() => {
-  if (credits.tier === "pro") {
-    return "bg-primary text-primary-fg";
-  }
-  if (credits.tier === "plus") {
-    return "bg-active text-fg";
-  }
+  if (credits.tier === "pro") return "bg-primary text-primary-fg";
+  if (credits.tier === "plus") return "bg-active text-fg";
   return "bg-surface text-fg-muted";
 });
 
@@ -235,20 +261,19 @@ let titleController: AbortController | null = null;
 const deleteTarget = ref<Conversation | null>(null);
 const openMenuId = ref<string | null>(null);
 
-const sortedConversations = computed(() => sortConversations(props.conversations));
-const pinnedConversations = computed(() => sortedConversations.value.filter((c) => c.is_pinned));
-const recentConversations = computed(() => sortedConversations.value.filter((c) => !c.is_pinned));
-const conversationSections = computed(() => {
-  if (!pinnedConversations.value.length) {
-    return recentConversations.value.length
-      ? [{ key: "all", label: "", items: recentConversations.value }]
-      : [];
+const sortedSides = computed(() => sortConversations(props.sideConversations));
+const pinnedSides = computed(() => sortedSides.value.filter((c) => c.is_pinned));
+const recentSides = computed(() => sortedSides.value.filter((c) => !c.is_pinned));
+
+const sideSections = computed(() => {
+  if (!pinnedSides.value.length) {
+    return recentSides.value.length ? [{ key: "all", label: "", items: recentSides.value }] : [];
   }
   const sections: { key: string; label: string; items: Conversation[] }[] = [
-    { key: "pinned", label: "置顶对话", items: pinnedConversations.value },
+    { key: "pinned", label: "置顶旁聊", items: pinnedSides.value },
   ];
-  if (recentConversations.value.length) {
-    sections.push({ key: "recent", label: "最近对话", items: recentConversations.value });
+  if (recentSides.value.length) {
+    sections.push({ key: "recent", label: "最近旁聊", items: recentSides.value });
   }
   return sections;
 });
@@ -267,7 +292,15 @@ const initials = computed(() => {
   return auth.user?.email?.slice(0, 1).toUpperCase() ?? "U";
 });
 
-function select(id: string) {
+function selectMain() {
+  openMenuId.value = null;
+  quickCardOpen.value = false;
+  hideTooltip();
+  emit("select-main");
+  emit("close");
+}
+
+function selectSide(id: string) {
   openMenuId.value = null;
   quickCardOpen.value = false;
   hideTooltip();
@@ -275,11 +308,11 @@ function select(id: string) {
   emit("close");
 }
 
-function create() {
+function createSide() {
   openMenuId.value = null;
   quickCardOpen.value = false;
   hideTooltip();
-  emit("create");
+  emit("create-side");
   emit("close");
 }
 
@@ -297,8 +330,16 @@ function closePopovers() {
   quickCardOpen.value = false;
 }
 
+function onEscapeKey(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    if (quickCardOpen.value) quickCardOpen.value = false;
+    if (openMenuId.value) openMenuId.value = null;
+  }
+}
+
 onMounted(() => {
   document.addEventListener("click", closePopovers);
+  document.addEventListener("keydown", onEscapeKey);
   if (typeof window !== "undefined") {
     mediaQuery = window.matchMedia("(min-width: 768px)");
     isDesktop.value = mediaQuery.matches;
@@ -309,6 +350,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener("click", closePopovers);
+  document.removeEventListener("keydown", onEscapeKey);
   mediaQuery?.removeEventListener("change", onMediaChange);
   stopTitleGeneration();
 });
@@ -376,10 +418,12 @@ function confirmRename() {
   }
   closeRename();
 }
+
 function askDelete(c: Conversation) {
   openMenuId.value = null;
   deleteTarget.value = c;
 }
+
 function confirmDelete() {
   if (deleteTarget.value) emit("delete", deleteTarget.value.id);
   deleteTarget.value = null;
@@ -393,9 +437,13 @@ const ACTIVE_RUN_STATUSES = new Set([
   "waiting_for_clarify",
 ]);
 
-function isRunning(c: Conversation): boolean {
-  return Boolean(c.active_run_status && ACTIVE_RUN_STATUSES.has(c.active_run_status));
+function isRunning(c: Conversation | null | undefined): boolean {
+  return Boolean(c?.active_run_status && ACTIVE_RUN_STATUSES.has(c.active_run_status));
 }
+
+const isMainActive = computed(
+  () => props.activeView === "chat" && Boolean(props.mainConversation && props.currentId === props.mainConversation.id),
+);
 </script>
 
 <template>
@@ -405,13 +453,12 @@ function isRunning(c: Conversation): boolean {
     :aria-modal="isMobileDrawer && open ? 'true' : undefined"
     :aria-hidden="isMobileDrawer && !open ? 'true' : undefined"
     :inert="isMobileDrawer && !open ? true : undefined"
-    :aria-label="isMobileDrawer ? '对话导航侧栏' : undefined"
-    class="group/sidebar fixed inset-y-0 left-0 z-40 flex w-[276px] shrink-0 touch-pan-y flex-col overflow-x-hidden bg-sidebar text-fg will-change-[translate] md:static md:z-20 md:translate-x-0 md:shadow-none"
+    :aria-label="isMobileDrawer ? '应用导航侧栏' : '主导航'"
+    class="fixed inset-y-0 left-0 z-40 flex h-full shrink-0 touch-pan-y bg-sidebar text-fg will-change-[translate] md:static md:z-20 md:translate-x-0 md:shadow-none"
     :class="[
       open
-        ? 'translate-x-0 shadow-2xl transition-[width,translate] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]'
-        : '-translate-x-full transition-[width,translate] duration-200 ease-in',
-      isRail ? 'md:w-[68px]' : 'md:w-[276px]',
+        ? 'translate-x-0 shadow-2xl transition-[translate] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]'
+        : '-translate-x-full transition-[translate] duration-200 ease-in',
     ]"
     :style="drawerStyle"
     @touchstart.passive="onTouchStart"
@@ -420,297 +467,357 @@ function isRunning(c: Conversation): boolean {
     @touchcancel="resetSwipe"
     @keydown="onDrawerKeydown"
   >
-    <!-- Subtle atmospheric top aura -->
-    <div class="pointer-events-none absolute inset-x-0 top-0 h-44 overflow-hidden">
-      <div
-        class="h-full w-full opacity-55 dark:opacity-35"
-        style="
-          background: radial-gradient(120% 85% at 25% 0%, var(--hover) 0%, transparent 72%);
-        "
-      />
-    </div>
-
-    <!-- Brand header: shown in sidebar on Web; Desktop title bar owns the brand -->
+    <!-- Column 1: Fixed Primary Icon Rail (never expands; Avatar pinned to bottom) -->
     <div
-      v-if="!inDesktop || isMobileDrawer"
-      class="relative z-10 flex shrink-0 items-center justify-between px-3.5 pb-2 pt-3.5"
+      class="relative z-20 flex w-[60px] shrink-0 flex-col items-center border-r border-line/65 bg-sidebar py-3.5"
     >
-      <div v-if="!inDesktop" class="flex min-w-0 items-center">
+      <!-- Web Brand Mark (Desktop title bar owns the brand) -->
+      <button
+        v-if="!inDesktop"
+        type="button"
+        class="focus-ring mb-4 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg transition-transform duration-150 hover:scale-[1.05] active:scale-[0.97]"
+        aria-label="返回主要聊天"
+        @mouseenter="showTooltip($event, assistantName, '回到主要聊天')"
+        @mouseleave="hideTooltip"
+        @click="selectMain"
+      >
+        <span class="brand-mark-tight h-[15px] w-[23px]" aria-hidden="true" />
+      </button>
+
+      <!-- Main Navigation Icons: Chat, Search, Library -->
+      <nav aria-label="主功能导航" class="flex flex-1 flex-col items-center justify-center gap-2.5">
+        <!-- 聊天 -->
         <button
           type="button"
-          class="focus-ring relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg transition-transform duration-200 hover:scale-[1.04] active:scale-[0.97]"
-          title="Whitz"
-          aria-label="Whitz 新建对话"
-          @click="create"
+          class="focus-ring flex h-10 w-10 items-center justify-center rounded-full transition-colors"
+          :class="
+            activeView === 'chat'
+              ? 'bg-hover text-fg shadow-xs dark:bg-active'
+              : 'text-fg-muted hover:bg-hover/70 hover:text-fg'
+          "
+          :aria-current="activeView === 'chat' ? 'page' : undefined"
+          aria-label="聊天"
+          @mouseenter="showTooltip($event, '聊天', '主聊天与旁聊')"
+          @mouseleave="hideTooltip"
+          @focus="showTooltip($event, '聊天', '主聊天与旁聊')"
+          @blur="hideTooltip"
+          @click="onClickChatRail"
         >
-          <span class="brand-mark-tight h-[16px] w-[24px]" aria-hidden="true" />
+          <svg class="h-[20px] w-[20px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.95">
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"
+            />
+          </svg>
         </button>
 
-        <span
-          class="-ml-[7px] translate-y-[0.5px] select-none whitespace-nowrap text-[22px] font-semibold leading-none tracking-tight text-fg transition-opacity duration-200"
-          :class="isRail ? 'pointer-events-none opacity-0' : 'opacity-100'"
+        <!-- 搜索 -->
+        <button
+          type="button"
+          class="focus-ring flex h-10 w-10 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-hover/70 hover:text-fg"
+          aria-label="搜索"
+          @mouseenter="showTooltip($event, '搜索', '搜索标题与正文 (Ctrl+K)')"
+          @mouseleave="hideTooltip"
+          @focus="showTooltip($event, '搜索', '搜索标题与正文 (Ctrl+K)')"
+          @blur="hideTooltip"
+          @click="onClickSearchRail"
         >
-          hitz
-        </span>
-      </div>
-
-      <!-- Mobile close drawer button -->
-      <button
-        type="button"
-        class="focus-ring ml-auto rounded-xl p-1.5 text-fg-faint transition-colors hover:bg-hover hover:text-fg md:hidden"
-        aria-label="关闭侧栏"
-        @click="emit('close')"
-      >
-        <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-        </svg>
-      </button>
-    </div>
-
-    <!-- Action zone: New Chat + Search (fixed px-3.5 and w-10 icon slots so icons stay 100% stationary) -->
-    <div class="relative z-10 mt-5 shrink-0 space-y-2.5 px-3.5 pb-2">
-      <!-- New Chat CTA (bigger, bolder icon & text, borderless directly on sidebar) -->
-      <button
-        type="button"
-        class="focus-ring group/new flex h-10.5 w-full items-center overflow-hidden rounded-xl text-[14.5px] font-semibold text-fg/90 transition-colors duration-150 hover:bg-hover/80 hover:text-fg"
-        aria-label="新建对话"
-        @mouseenter="showTooltip($event, '新建对话', '开启一段新的会话')"
-        @mouseleave="hideTooltip"
-        @click="create"
-      >
-        <span class="flex h-10.5 w-10 shrink-0 items-center justify-center">
-          <svg
-            class="h-[21px] w-[21px] text-fg transition-transform duration-150 group-hover/new:scale-105"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.4"
-          >
-            <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-          </svg>
-        </span>
-        <span
-          class="whitespace-nowrap pr-2.5 text-left transition-opacity duration-200"
-          :class="isRail ? 'pointer-events-none opacity-0' : 'opacity-100'"
-        >
-          新建对话
-        </span>
-      </button>
-
-      <!-- Search CTA (borderless, no background, opens central search modal) -->
-      <button
-        type="button"
-        class="focus-ring group/search flex h-10.5 w-full items-center overflow-hidden rounded-xl text-[14.5px] font-semibold text-fg/85 transition-colors duration-150 hover:bg-hover/80 hover:text-fg"
-        aria-label="搜索对话"
-        @mouseenter="showTooltip($event, '搜索对话', '搜索标题与正文 (Ctrl+K)')"
-        @mouseleave="hideTooltip"
-        @click="openSearch"
-      >
-        <span class="flex h-10.5 w-10 shrink-0 items-center justify-center">
-          <svg
-            class="h-5 w-5 text-fg-muted transition-colors group-hover/search:text-fg"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.2"
-          >
+          <svg class="h-[20px] w-[20px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="11" cy="11" r="7" />
             <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
           </svg>
-        </span>
-        <span
-          class="whitespace-nowrap pr-2.5 text-left transition-opacity duration-200"
-          :class="isRail ? 'pointer-events-none opacity-0' : 'opacity-100'"
+        </button>
+
+        <!-- 资料库 -->
+        <button
+          type="button"
+          class="focus-ring flex h-10 w-10 items-center justify-center rounded-full transition-colors"
+          :class="
+            activeView === 'library'
+              ? 'bg-hover text-fg shadow-xs dark:bg-active'
+              : 'text-fg-muted hover:bg-hover/70 hover:text-fg'
+          "
+          :aria-current="activeView === 'library' ? 'page' : undefined"
+          aria-label="资料库"
+          @mouseenter="showTooltip($event, '资料库', '统一管理所有聊天文件')"
+          @mouseleave="hideTooltip"
+          @focus="showTooltip($event, '资料库', '统一管理所有聊天文件')"
+          @blur="hideTooltip"
+          @click="onClickLibraryRail"
         >
-          搜索对话
-        </span>
-      </button>
+          <svg class="h-[20px] w-[20px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 19.5A2.5 2.5 0 016.5 17H20" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
+            <path stroke-linecap="round" d="M9 7h7M9 11h5" />
+          </svg>
+        </button>
+      </nav>
+
+      <!-- Bottom Pinned User Avatar (Opens Quick Settings Card) -->
+      <div class="mt-auto pt-3">
+        <button
+          ref="avatarBtnRef"
+          type="button"
+          class="focus-ring flex h-10 w-10 items-center justify-center rounded-full transition-transform duration-150 hover:scale-[1.04]"
+          aria-label="账号与快捷设置"
+          :aria-expanded="quickCardOpen"
+          @mouseenter="showTooltip($event, auth.user?.display_name || '账号与设置', credits.tierLabel)"
+          @mouseleave="hideTooltip"
+          @click.stop="toggleQuickCard"
+        >
+          <img
+            v-if="auth.user?.avatar_url && !avatarLoadFailed"
+            :src="auth.user.avatar_url"
+            alt=""
+            class="h-9 w-9 rounded-full bg-surface object-cover ring-1 ring-line"
+            @error="avatarLoadFailed = true"
+          />
+          <span
+            v-else
+            class="flex h-9 w-9 items-center justify-center rounded-full bg-surface text-[13px] font-semibold text-fg ring-1 ring-line transition-colors hover:bg-hover"
+          >
+            {{ initials }}
+          </span>
+        </button>
+      </div>
     </div>
 
-    <!-- Conversation list (hidden when collapsed) -->
-    <nav v-scrollbar class="custom-scrollbar relative z-10 flex-1 overflow-y-auto pl-3 pr-1 pb-3">
-      <template v-if="!isRail">
-        <!-- Loading skeleton -->
-        <div v-if="loading && !conversations.length" class="space-y-2 py-3 px-1">
-          <div
-            v-for="i in 4"
-            :key="i"
-            class="h-10 w-full animate-pulse rounded-xl bg-surface"
-          />
+    <!-- Column 2: Collapsible Secondary Sidebar (Search + Main Chat + Side Chats) -->
+    <div
+      class="relative flex h-full flex-col overflow-hidden bg-sidebar transition-[width,opacity] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
+      :class="
+        isSecondaryCollapsed
+          ? 'pointer-events-none w-0 opacity-0'
+          : 'w-[252px] opacity-100'
+      "
+      :aria-hidden="isSecondaryCollapsed ? 'true' : undefined"
+      :inert="isSecondaryCollapsed ? true : undefined"
+    >
+      <div class="flex h-full w-[252px] flex-col">
+        <!-- Top Search Pill & Collapse / Mobile Close -->
+        <div class="flex shrink-0 items-center gap-2 px-3 pb-2.5 pt-3.5">
+          <button
+            type="button"
+            class="focus-ring flex h-9.5 min-w-0 flex-1 items-center gap-2 rounded-full border border-line/80 bg-canvas/85 px-3 text-left text-[13.5px] text-fg-faint transition-colors hover:border-line-strong hover:text-fg-muted dark:bg-surface/80"
+            @click="onClickSearchRail"
+          >
+            <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="7" />
+              <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
+            </svg>
+            <span class="truncate">搜索</span>
+          </button>
+
+          <!-- Desktop collapse button -->
+          <button
+            type="button"
+            class="focus-ring hidden h-9 w-9 shrink-0 items-center justify-center rounded-xl text-fg-faint transition-colors hover:bg-hover hover:text-fg md:flex"
+            aria-label="收起侧栏"
+            title="收起侧栏 (Ctrl+B)"
+            @click="emit('toggle-collapse')"
+          >
+            <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.95">
+              <rect x="3" y="4" width="18" height="16" rx="2.5" />
+              <path stroke-linecap="round" d="M9 4v16" />
+            </svg>
+          </button>
+
+          <!-- Mobile close drawer button -->
+          <button
+            type="button"
+            class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-fg-faint transition-colors hover:bg-hover hover:text-fg md:hidden"
+            aria-label="关闭侧栏"
+            @click="emit('close')"
+          >
+            <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
         </div>
 
-        <!-- Conversation List (split into 置顶对话 / 最近对话 when any pinned exists) -->
-        <template v-else>
-          <div v-if="conversationSections.length" class="pt-2">
-            <div v-for="(section, sIdx) in conversationSections" :key="section.key" :class="sIdx > 0 ? 'mt-3' : ''">
-              <p v-if="section.label" class="px-3 pb-1 text-[11.5px] font-medium text-fg-faint">
-                {{ section.label }}
-              </p>
-              <div class="space-y-0.5">
-                <div
-                  v-for="c in section.items"
-                  :key="c.id"
-                  class="group/item relative flex items-center rounded-xl pr-1 transition-colors duration-150"
-                  :class="c.id === currentId ? 'bg-hover/90 dark:bg-active' : 'hover:bg-hover/65'"
-                >
-                  <button
-                    type="button"
-                    class="focus-ring flex h-10 min-w-0 flex-1 items-center gap-2 rounded-xl pl-3 pr-1 text-left text-[14px] transition-colors"
-                    :class="c.id === currentId ? 'font-medium text-fg' : 'text-fg-muted hover:text-fg'"
-                    @click="select(c.id)"
-                  >
-                    <span
-                      v-if="isRunning(c)"
-                      class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
-                    />
-                    <svg
-                      v-if="c.is_pinned"
-                      class="h-3.5 w-3.5 shrink-0 text-fg-faint"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                      aria-label="已置顶"
-                    >
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        d="M12 17v5M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 2 2 0 000-4H8a2 2 0 000 4 1 1 0 011 1v3.76z"
-                      />
-                    </svg>
-                    <span class="truncate">{{ c.title }}</span>
-                  </button>
+        <!-- Pinned Main Chat Entry (Assistant Avatar + Custom Nickname + 主聊 tag) -->
+        <div class="shrink-0 px-3 pb-2">
+          <button
+            type="button"
+            class="focus-ring flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition-colors"
+            :class="
+              isMainActive
+                ? 'bg-hover/95 text-fg dark:bg-active'
+                : 'text-fg/90 hover:bg-hover/65 hover:text-fg'
+            "
+            @click="selectMain"
+          >
+            <span class="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full bg-canvas ring-1 ring-line/80 dark:bg-surface">
+              <img
+                v-if="assistantAvatarUrl && !assistantAvatarFailed"
+                :src="assistantAvatarUrl"
+                :alt="assistantName"
+                class="h-full w-full object-cover"
+                @error="assistantAvatarFailed = true"
+              />
+              <span v-else class="brand-mark-tight h-[10px] w-[15px] text-fg" aria-hidden="true" />
+            </span>
 
-                  <button
-                    type="button"
-                    class="focus-ring flex h-7.5 w-7.5 shrink-0 items-center justify-center rounded-lg text-fg-faint transition-opacity hover:bg-surface hover:text-fg md:opacity-0 md:group-hover/item:opacity-100"
-                    :class="openMenuId === c.id ? 'md:opacity-100 bg-surface text-fg' : ''"
-                    aria-label="更多操作"
-                    @click.stop="toggleMenu(c)"
-                  >
-                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-                      <circle cx="5" cy="12" r="1.6" />
-                      <circle cx="12" cy="12" r="1.6" />
-                      <circle cx="19" cy="12" r="1.6" />
-                    </svg>
-                  </button>
+            <span class="min-w-0 flex-1 truncate text-[14px] font-medium">
+              {{ assistantName }}
+            </span>
 
+            <span
+              v-if="isRunning(mainConversation)"
+              class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
+              aria-label="运行中"
+            />
+
+            <span class="shrink-0 rounded-full bg-surface px-1.5 py-0.5 text-[10.5px] font-medium leading-none text-fg-muted dark:bg-canvas/70">
+              主聊
+            </span>
+          </button>
+        </div>
+
+        <!-- Side Chats Section Header + New Side Chat Button -->
+        <div class="flex shrink-0 items-center justify-between px-4 pb-1 pt-2">
+          <span class="text-[12.5px] font-medium text-fg-faint">旁聊</span>
+          <button
+            type="button"
+            class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+            aria-label="新建旁聊"
+            title="新建旁聊"
+            @click="createSide"
+          >
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- Side Chats List -->
+        <nav v-scrollbar class="custom-scrollbar flex-1 overflow-y-auto pl-3 pr-1 pb-4">
+          <div v-if="loading && !sideConversations.length && !mainConversation" class="space-y-2 px-1 py-2">
+            <div v-for="i in 4" :key="i" class="h-9.5 w-full animate-pulse rounded-xl bg-surface" />
+          </div>
+
+          <template v-else>
+            <div v-if="sideSections.length" class="pt-0.5">
+              <div v-for="(section, sIdx) in sideSections" :key="section.key" :class="sIdx > 0 ? 'mt-3' : ''">
+                <p v-if="section.label" class="px-2.5 pb-1 text-[11px] font-medium text-fg-faint">
+                  {{ section.label }}
+                </p>
+                <div class="space-y-0.5">
                   <div
-                    v-if="openMenuId === c.id"
-                    class="animate-rise absolute right-1 top-10.5 z-30 w-36 origin-top-right rounded-xl bg-canvas p-1 shadow-lg dark:bg-[#161615]"
-                    style="box-shadow: var(--shadow)"
-                    @click.stop
+                    v-for="c in section.items"
+                    :key="c.id"
+                    class="group/item relative flex items-center rounded-xl pr-1 transition-colors duration-150"
+                    :class="
+                      activeView === 'chat' && c.id === currentId
+                        ? 'bg-hover/90 dark:bg-active'
+                        : 'hover:bg-hover/65'
+                    "
                   >
                     <button
                       type="button"
-                      class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13.5px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
-                      @click="togglePin(c)"
+                      class="focus-ring flex h-9.5 min-w-0 flex-1 items-center gap-2 rounded-xl pl-2.5 pr-1 text-left text-[13.5px] transition-colors"
+                      :class="
+                        activeView === 'chat' && c.id === currentId
+                          ? 'font-medium text-fg'
+                          : 'text-fg-muted hover:text-fg'
+                      "
+                      @click="selectSide(c.id)"
                     >
-                      <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                      <span
+                        v-if="isRunning(c)"
+                        class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
+                      />
+                      <svg
+                        v-if="c.is_pinned"
+                        class="h-3.5 w-3.5 shrink-0 text-fg-faint"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        aria-label="已置顶"
+                      >
                         <path
                           stroke-linecap="round"
                           stroke-linejoin="round"
                           d="M12 17v5M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 2 2 0 000-4H8a2 2 0 000 4 1 1 0 011 1v3.76z"
                         />
                       </svg>
-                      {{ c.is_pinned ? "取消置顶" : "置顶" }}
+                      <span class="truncate">{{ c.title }}</span>
                     </button>
+
                     <button
                       type="button"
-                      class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13.5px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
-                      @click="openRename(c)"
+                      class="focus-ring flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-fg-faint transition-opacity hover:bg-surface hover:text-fg md:opacity-0 md:group-hover/item:opacity-100"
+                      :class="openMenuId === c.id ? 'bg-surface text-fg md:opacity-100' : ''"
+                      aria-label="更多操作"
+                      @click.stop="toggleMenu(c)"
                     >
-                      <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+                        <circle cx="5" cy="12" r="1.6" />
+                        <circle cx="12" cy="12" r="1.6" />
+                        <circle cx="19" cy="12" r="1.6" />
                       </svg>
-                      重命名
                     </button>
-                    <button
-                      type="button"
-                      class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13.5px] text-danger transition-colors hover:bg-danger-weak"
-                      @click="askDelete(c)"
+
+                    <div
+                      v-if="openMenuId === c.id"
+                      class="animate-rise absolute right-1 top-10 z-30 w-36 origin-top-right rounded-xl bg-canvas p-1 shadow-lg dark:bg-[#161615]"
+                      style="box-shadow: var(--shadow)"
+                      @click.stop
                     >
-                      <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
-                      </svg>
-                      删除
-                    </button>
+                      <button
+                        type="button"
+                        class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+                        @click="togglePin(c)"
+                      >
+                        <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                          <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            d="M12 17v5M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 2 2 0 000-4H8a2 2 0 000 4 1 1 0 011 1v3.76z"
+                          />
+                        </svg>
+                        {{ c.is_pinned ? "取消置顶" : "置顶" }}
+                      </button>
+                      <button
+                        type="button"
+                        class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+                        @click="openRename(c)"
+                      >
+                        <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                        </svg>
+                        重命名
+                      </button>
+                      <button
+                        type="button"
+                        class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-danger transition-colors hover:bg-danger-weak"
+                        @click="askDelete(c)"
+                      >
+                        <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
+                        </svg>
+                        删除
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
 
-          <p
-            v-if="!loading && !conversations.length"
-            class="px-2 py-10 text-center text-[13px] leading-relaxed text-fg-faint"
-          >
-            还没有对话<br />点击上方「新建对话」开始
-          </p>
-        </template>
-      </template>
-    </nav>
-
-    <!-- Bottom Profile & Settings (fixed px-3.5 py-3 and w-10 avatar slot so avatar never moves) -->
-    <div class="relative z-20 shrink-0 px-3.5 py-3">
-      <div class="flex items-center gap-1.5">
-        <button
-          ref="avatarBtnRef"
-          type="button"
-          class="focus-ring flex min-w-0 items-center gap-2 rounded-xl text-left transition-colors"
-          :class="isRail ? 'w-10' : 'flex-1 pr-2 hover:bg-hover/65'"
-          aria-label="个人快捷面板"
-          @mouseenter="showTooltip($event, auth.user?.display_name || '个人快捷面板', credits.tierLabel)"
-          @mouseleave="hideTooltip"
-          @click.stop="toggleQuickCard"
-        >
-          <span class="flex h-10 w-10 shrink-0 items-center justify-center">
-            <img
-              v-if="auth.user?.avatar_url && !avatarLoadFailed"
-              :src="auth.user.avatar_url"
-              alt=""
-              class="h-9 w-9 rounded-full bg-surface object-cover"
-              @error="avatarLoadFailed = true"
-            />
-            <span
-              v-else
-              class="flex h-9 w-9 items-center justify-center rounded-full bg-surface text-[13px] font-semibold text-fg transition-colors hover:bg-hover"
+            <p
+              v-if="!loading && !sideConversations.length"
+              class="px-3 py-8 text-center text-[12.5px] leading-relaxed text-fg-faint"
             >
-              {{ initials }}
-            </span>
-          </span>
-          <span
-            class="min-w-0 flex-1 items-center gap-1.5 whitespace-nowrap transition-opacity duration-200"
-            :class="isRail ? 'hidden' : 'flex'"
-          >
-            <span class="truncate text-[14px] font-medium text-fg">
-              {{ auth.user?.display_name || auth.user?.email }}
-            </span>
-            <span
-              class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold leading-none"
-              :class="tierBadgeClass"
-            >
-              {{ credits.tierLabel }}
-            </span>
-          </span>
-        </button>
-
-        <router-link
-          v-if="!isRail"
-          to="/settings"
-          class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/70 hover:text-fg"
-          aria-label="设置"
-          title="设置"
-        >
-          <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85">
-            <circle cx="12" cy="12" r="3" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z" />
-          </svg>
-        </router-link>
+              还没有旁聊<br />点击上方「+」新建旁聊
+            </p>
+          </template>
+        </nav>
       </div>
     </div>
 
-    <!-- Teleported Avatar Quick Card (Usage + 3-way Theme Switcher + Settings link) -->
+    <!-- Teleported Avatar Quick Settings Card (Account + Quota + Theme + Real Settings Button) -->
     <Teleport to="body">
       <Transition
         enter-active-class="transition duration-150 ease-out"
@@ -848,24 +955,47 @@ function isRunning(c: Conversation): boolean {
               </button>
             </div>
           </div>
+
+          <!-- Real Settings Button -->
+          <button
+            type="button"
+            class="focus-ring mt-3.5 flex w-full items-center justify-between rounded-xl border border-line/80 bg-sidebar/60 px-3 py-2.5 text-[13px] font-medium text-fg transition-colors hover:bg-hover dark:bg-[#0e0e0e]/70"
+            @click="goToSettings"
+          >
+            <span class="flex items-center gap-2">
+              <svg class="h-4 w-4 text-fg-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+                <circle cx="12" cy="12" r="3" />
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"
+                />
+              </svg>
+              <span>设置</span>
+            </span>
+            <svg class="h-4 w-4 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
+            </svg>
+          </button>
         </div>
       </Transition>
     </Teleport>
 
-    <!-- Teleported Floating Tooltip for Collapsed Rail -->
+    <!-- Teleported Floating Tooltip for Primary Icon Rail -->
     <Teleport to="body">
       <div
-        v-if="tooltip && isRail && !quickCardOpen"
+        v-if="tooltip && isDesktop && !quickCardOpen"
+        role="tooltip"
         class="pointer-events-none fixed z-50 -translate-y-1/2 rounded-xl bg-canvas px-3 py-1.5 shadow-lg dark:bg-[#161615]"
         :style="{ top: `${tooltip.top}px`, left: `${tooltip.left}px`, boxShadow: 'var(--shadow)' }"
       >
-        <p class="max-w-[220px] truncate text-[13.5px] font-medium text-fg">{{ tooltip.title }}</p>
-        <p v-if="tooltip.sub" class="mt-0.5 text-[12px] text-fg-faint">{{ tooltip.sub }}</p>
+        <p class="max-w-[220px] truncate text-[13px] font-medium text-fg">{{ tooltip.title }}</p>
+        <p v-if="tooltip.sub" class="mt-0.5 text-[11.5px] text-fg-faint">{{ tooltip.sub }}</p>
       </div>
     </Teleport>
 
-    <!-- Rename Modal -->
-    <BaseModal :open="!!renameTarget" title="重命名对话" @close="closeRename">
+    <!-- Rename Side Chat Modal -->
+    <BaseModal :open="!!renameTarget" title="重命名旁聊" @close="closeRename">
       <BaseInput
         v-model="renameText"
         label="标题"
@@ -902,10 +1032,10 @@ function isRunning(c: Conversation): boolean {
       </template>
     </BaseModal>
 
-    <!-- Delete Modal -->
-    <BaseModal :open="!!deleteTarget" title="删除对话" @close="deleteTarget = null">
-      <p class="text-[15px] leading-relaxed text-fg-muted">
-        确定删除「<span class="font-medium text-fg">{{ deleteTarget?.title }}</span>」吗？此操作不可撤销。
+    <!-- Delete Side Chat Modal -->
+    <BaseModal :open="!!deleteTarget" title="删除旁聊" @close="deleteTarget = null">
+      <p class="text-[14.5px] leading-relaxed text-fg-muted">
+        确定删除旁聊「<span class="font-medium text-fg">{{ deleteTarget?.title }}</span>」吗？此操作不可撤销；该旁聊中上传的文件仍会保留在资料库中。
       </p>
       <template #footer>
         <BaseButton variant="soft" rounded="full" @click="deleteTarget = null">取消</BaseButton>

@@ -51,12 +51,18 @@ async def test_conversation_tenant_isolation(register, client):
     assert patch.status_code == 404
     delete = await client.delete(f"/api/conversations/{conv['id']}", headers=auth_header(b["access_token"]))
     assert delete.status_code == 404
-    # B's list is empty
+    # B's list only contains B's own auto-created main chat (no side chats, never A's)
     listing = await client.get("/api/conversations", headers=auth_header(b["access_token"]))
-    assert listing.json() == []
-    # A still sees it
+    b_convs = listing.json()
+    assert len(b_convs) == 1
+    assert b_convs[0]["kind"] == "main"
+    assert all(c["id"] != conv["id"] for c in b_convs)
+    # A sees their main chat + the created side chat
     a_list = await client.get("/api/conversations", headers=auth_header(a["access_token"]))
-    assert len(a_list.json()) == 1
+    a_convs = a_list.json()
+    assert len(a_convs) == 2
+    assert a_convs[0]["kind"] == "main"
+    assert any(c["id"] == conv["id"] and c["kind"] == "side" for c in a_convs)
 
 
 async def test_admin_requires_admin(register, client):

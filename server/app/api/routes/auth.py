@@ -34,7 +34,7 @@ from app.core.security import (
 )
 from app.db.models import RefreshToken, User
 from app.db.session import get_db
-from app.services import audit, email as email_service
+from app.services import audit, cross_chat_memory, email as email_service
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -231,6 +231,7 @@ async def register(
         raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已注册") from exc
     await email_service.consume_verification_code("register", email)
     await db.refresh(user)
+    await cross_chat_memory.ensure_main_conversation(db, user)
     tokens = await issue_tokens(db, user, request, response)
     await audit.record("auth.register", actor=user, request=request, session_id=None)
     return tokens

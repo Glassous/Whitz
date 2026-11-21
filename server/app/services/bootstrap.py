@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.security import generate_agent_key, hash_password
 from app.db.models import User
+from app.services import cross_chat_memory
 
 logger = logging.getLogger("whitz.bootstrap")
 
@@ -33,4 +34,6 @@ async def ensure_admin(db: AsyncSession) -> None:
     )
     db.add(admin)
     await db.commit()
+    await db.refresh(admin)
+    await cross_chat_memory.ensure_main_conversation(db, admin)
     logger.info("已创建初始管理员 %s", email)

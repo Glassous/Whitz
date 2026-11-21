@@ -15,7 +15,17 @@ from app.core.config import get_settings
 from app.core.redis import get_redis
 from app.db.models import Conversation, ConversationFile, Message, User
 from app.db.session import SessionLocal
-from app.services import cos, membership, memory_service, profile_context, skills_service, telemetry, titles, usage
+from app.services import (
+    cos,
+    cross_chat_memory,
+    membership,
+    memory_service,
+    profile_context,
+    skills_service,
+    telemetry,
+    titles,
+    usage,
+)
 from app.services.agent_client import AgentClient, AgentError
 
 logger = logging.getLogger("whitz.chat")
@@ -865,7 +875,7 @@ async def _auto_title_events(
     conv: Conversation,
     assistant: Message | None,
 ) -> AsyncIterator[dict]:
-    if conv.title != "新对话" or assistant is None or assistant.status != "completed":
+    if conv.kind == "main" or conv.title not in ("新对话", "新旁聊") or assistant is None or assistant.status != "completed":
         return
     content = (assistant.content or "").strip()
     if not content:
@@ -900,7 +910,7 @@ async def _auto_title_events(
         prompt = titles.build_auto_prompt(user_msg.content, content)
         title = await asyncio.wait_for(titles.complete_title(prompt), timeout=20)
         await db.refresh(conv)
-        if conv.title != "新对话":
+        if conv.kind == "main" or conv.title not in ("新对话", "新旁聊"):
             return
         conv.title = title
         await db.commit()
@@ -920,24 +930,27 @@ def _build_workspace_instructions(
     conv_id: uuid.UUID,
     workspace_files: list[ConversationFile],
     attached_ids: set[uuid.UUID],
+    total_library_count: int = 0,
 ) -> str | None:
     if not workspace_files:
         return None
-    lines = [
-        f"当前对话文件工作区（conversation_id: {conv_id}）共有 {len(workspace_files)} 个已就绪文件：",
-    ]
+    header = f"当前可用的资料库与工作区文件（conversation_id: {conv_id}，当前列出 {len(workspace_files)} 个"
+    if total_library_count > len(workspace_files):
+        header += f"，用户资料库共 {total_library_count} 个已就绪文件"
+    header += "）："
+    lines = [header]
     for f in workspace_files:
         tags: list[str] = []
         if f.id in attached_ids:
             tags.append("本轮新附带")
-        if f.is_global and f.conversation_id != conv_id:
-            tags.append("全局共享文件")
+        if f.conversation_id != conv_id:
+            tags.append("资料库共享")
         tag_str = f" [{' · '.join(tags)}]" if tags else ""
         lines.append(
             f"- {f.filename}{tag_str} (file_id={f.id}, category={f.category}, mime={f.mime_type}, size={f.size_bytes} bytes)"
         )
     lines.append(
-        "若用户询问或需要处理以上任意文件，请优先使用 rag_search_workspace 或 list_workspace_files / read_workspace_file 按需读取真实内容；若需要向用户交付报告、代码、网页、表格等文本产物，可调用 write_workspace_file 写入工作区。"
+        "若用户询问或需要处理以上任意文件或资料库中其他历史文件，请优先使用 rag_search_workspace 或 list_workspace_files / read_workspace_file 按需读取真实内容；若需要向用户交付报告、代码、网页、表格等文本产物，可调用 write_workspace_file 写入工作区。"
     )
     return "\n".join(lines)
 
@@ -1011,10 +1024,12 @@ async def _pending_events_since(
 async def _prepare_turn_context(
     db: AsyncSession,
     user: User,
-    conv_id: uuid.UUID,
+    conv: Conversation,
     file_ids: list[uuid.UUID] | None,
     skill_names: list[str] | None,
+    query_text: str = "",
 ) -> dict[str, Any]:
+    conv_id = conv.id
     conv_files = list(
         (
             await db.execute(
@@ -1044,7 +1059,6 @@ async def _prepare_turn_context(
                         ConversationFile.id.in_(missing_requested),
                         ConversationFile.user_id == user.id,
                         ConversationFile.status == "ready",
-                        ConversationFile.is_global.is_(True),
                     )
                     .order_by(ConversationFile.created_at.asc())
                 )
@@ -1053,7 +1067,26 @@ async def _prepare_turn_context(
             .all()
         )
 
-    all_context_files = [*conv_files, *global_attached]
+    # Include recent library files from across all chats (capped to avoid prompt bloat)
+    seen_file_ids = {f.id for f in [*conv_files, *global_attached]}
+    recent_library_files = list(
+        (
+            await db.execute(
+                select(ConversationFile)
+                .where(
+                    ConversationFile.user_id == user.id,
+                    ConversationFile.status == "ready",
+                )
+                .order_by(ConversationFile.created_at.desc())
+                .limit(30)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    extra_library = [f for f in recent_library_files if f.id not in seen_file_ids]
+    all_context_files = [*conv_files, *global_attached, *extra_library[: max(0, 30 - len(seen_file_ids))]]
+    total_library_count = len(recent_library_files)
     by_id = {f.id: f for f in all_context_files}
     attached_files = [by_id[fid] for fid in requested_ids if fid in by_id]
 
@@ -1087,7 +1120,7 @@ async def _prepare_turn_context(
                 "ext": f.ext,
                 "category": f.category,
                 "size_bytes": f.size_bytes,
-                "is_global": f.is_global,
+                "is_global": True,
             }
             for f in attached_files
         ]
@@ -1103,8 +1136,8 @@ async def _prepare_turn_context(
             "category": f.category,
             "mime_type": f.mime_type,
             "size_bytes": f.size_bytes,
-            "is_global": bool(f.is_global),
-            "scope": "global" if f.is_global else "conversation",
+            "is_global": True,
+            "scope": "conversation" if f.conversation_id == conv_id else "library",
             "attached": f.id in {af.id for af in attached_files},
         }
         for f in all_context_files
@@ -1132,15 +1165,37 @@ async def _prepare_turn_context(
             skill_lines.append(f"- {sname}" + (f"：{desc}" if desc else ""))
         instruction_parts.append("\n".join(skill_lines))
 
-    workspace_ctx = _build_workspace_instructions(conv_id, all_context_files, {f.id for f in attached_files})
+    workspace_ctx = _build_workspace_instructions(
+        conv_id,
+        all_context_files,
+        {f.id for f in attached_files},
+        total_library_count=total_library_count,
+    )
     if workspace_ctx:
         instruction_parts.append(workspace_ctx)
+
+    rolling_summary = ""
+    cross_chat_context = ""
+    if conv.kind == "main":
+        try:
+            mem_ctx = await cross_chat_memory.build_main_chat_memory_context(
+                db, user, conv, query_text=query_text
+            )
+            rolling_summary = mem_ctx.get("rolling_summary") or ""
+            cross_chat_context = mem_ctx.get("cross_chat_context") or ""
+        except Exception as exc:
+            logger.warning("Main chat cross-session memory lookup failed: %s", exc)
+            rolling_summary = (conv.rolling_summary or "").strip()
 
     return {
         "user_payload": user_payload or None,
         "instructions": "\n\n".join(instruction_parts) if instruction_parts else None,
         "profile_context": prof_ctx,
         "persona": user.persona or "",
+        "assistant_name": (getattr(user, "assistant_name", None) or "").strip() or "Whitz",
+        "conversation_kind": conv.kind or "side",
+        "rolling_summary": rolling_summary,
+        "cross_chat_context": cross_chat_context,
         "timezone": (getattr(user, "timezone", None) or "").strip() or "Asia/Shanghai",
         "memory_enabled": bool(user.memory_enabled and user.memory_consented_at),
         "memory_require_confirm": bool(user.memory_require_confirm),
@@ -1173,6 +1228,10 @@ async def _run_pipeline_turn(
         agent_namespace=user.agent_namespace,
         agent_api_key=user.agent_api_key,
         conversation_id=str(conv.id),
+        conversation_kind=str(turn_ctx.get("conversation_kind") or conv.kind or "side"),
+        assistant_name=str(turn_ctx.get("assistant_name") or getattr(user, "assistant_name", None) or "Whitz"),
+        rolling_summary=turn_ctx.get("rolling_summary") or None,
+        cross_chat_context=turn_ctx.get("cross_chat_context") or None,
         input_text=prompt_content,
         instructions=turn_ctx.get("instructions"),
         conversation_history=conversation_history,
@@ -1208,6 +1267,11 @@ async def _run_pipeline_turn(
         yield ev
     if pipeline.terminal:
         await _settle_usage(db, user.id, assistant)
+        if assistant.status == "completed":
+            if conv.kind == "side":
+                cross_chat_memory.schedule_side_chat_digest_refresh(conv.id, user.id)
+            elif conv.kind == "main":
+                cross_chat_memory.schedule_main_compaction_check(conv.id)
         for ev in await _pending_events_since(db, user.id, initial_mem_ids, initial_skill_ids):
             yield ev
         async for ev in _auto_title_events(db, conv, assistant):
@@ -1249,7 +1313,7 @@ async def stream_chat(
                 conv.thread_id = str(uuid.uuid4())
                 await db.commit()
 
-            turn_ctx = await _prepare_turn_context(db, user, conv.id, file_ids, skill_names)
+            turn_ctx = await _prepare_turn_context(db, user, conv, file_ids, skill_names, query_text=content)
 
             user_msg = Message(
                 conversation_id=conv.id,
@@ -1381,7 +1445,9 @@ async def stream_regenerate(
                         pass
             skill_names = [str(s) for s in (prompt_payload.get("skills") or []) if str(s).strip()]
 
-            turn_ctx = await _prepare_turn_context(db, user, conv.id, file_ids, skill_names)
+            turn_ctx = await _prepare_turn_context(
+                db, user, conv, file_ids, skill_names, query_text=user_msg.content
+            )
 
             # Rotate thread_id so discarded turns never pollute LangGraph checkpoint state.
             old_thread_id = conv.thread_id
@@ -1495,7 +1561,7 @@ async def stream_edit(
             if delete_ids:
                 await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
 
-            turn_ctx = await _prepare_turn_context(db, user, conv.id, file_ids, skill_names)
+            turn_ctx = await _prepare_turn_context(db, user, conv, file_ids, skill_names, query_text=content)
 
             old_thread_id = conv.thread_id
             conv.thread_id = str(uuid.uuid4())

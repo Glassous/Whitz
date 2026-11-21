@@ -88,6 +88,10 @@ class AgentClient:
         agent_api_key: str,
         conversation_id: str,
         input_text: str,
+        conversation_kind: str = "side",
+        assistant_name: str = "Whitz",
+        rolling_summary: str | None = None,
+        cross_chat_context: str | None = None,
         instructions: str | None = None,
         conversation_history: list[dict[str, str]] | None = None,
         model_route: str = "auto",
@@ -107,6 +111,8 @@ class AgentClient:
             "agent_namespace": agent_namespace,
             "agent_api_key": agent_api_key,
             "conversation_id": conversation_id,
+            "conversation_kind": conversation_kind or "side",
+            "assistant_name": (assistant_name or "").strip() or "Whitz",
             "input": input_text,
             "model_route": model_route or "auto",
             "persona": persona or "",
@@ -114,6 +120,10 @@ class AgentClient:
             "memory_enabled": bool(memory_enabled),
             "memory_require_confirm": bool(memory_require_confirm),
         }
+        if rolling_summary:
+            payload["rolling_summary"] = rolling_summary
+        if cross_chat_context:
+            payload["cross_chat_context"] = cross_chat_context
         if instructions:
             payload["instructions"] = instructions
         if conversation_history:

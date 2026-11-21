@@ -150,13 +150,25 @@ async def test_conversation_file_workspace_lifecycle_and_isolation(client, regis
     assert dl.status_code == 200
     assert "q-signature=" in dl.json()["url"]
 
-    # Delete file
+    # Remove from side-chat workspace detaches (stays in global library, COS object NOT deleted yet)
     dele = await client.delete(f"/api/conversations/{conv_id}/files/{file_id}", headers=h1)
     assert dele.status_code == 204
-    assert len(deleted_keys) == 1
+    assert len(deleted_keys) == 0
 
     listed_after = await client.get(f"/api/conversations/{conv_id}/files", headers=h1)
     assert listed_after.json() == []
+
+    # Still exists in global Library until explicitly deleted from Library
+    lib_before = await client.get("/api/library/files", headers=h1)
+    assert lib_before.status_code == 200
+    assert lib_before.json()["total"] == 1
+
+    lib_del = await client.delete(f"/api/library/files/{file_id}", headers=h1)
+    assert lib_del.status_code == 204
+    assert len(deleted_keys) == 1
+
+    lib_after = await client.get("/api/library/files", headers=h1)
+    assert lib_after.json()["total"] == 0
 
 
 def test_build_workspace_instructions_includes_ready_files():
@@ -318,7 +330,7 @@ async def test_pending_cleanup_preview_content_and_global_library(client, regist
     assert patched.json()["is_global"] is True
     assert patched.json()["filename"] == "landing.html"
 
-    # Attach to conv2 clones COS object with a new unique storage_key
+    # Attach to conv2 references existing global library file without cloning duplicate COS objects
     attached = await client.post(
         f"/api/conversations/{conv2_id}/files/attach",
         json={"file_ids": [str(ready_id)]},
@@ -326,11 +338,10 @@ async def test_pending_cleanup_preview_content_and_global_library(client, regist
     )
     assert attached.status_code == 200, attached.text
     assert len(attached.json()) == 1
-    assert attached.json()[0]["id"] != str(ready_id)
-    assert attached.json()[0]["conversation_id"] == conv2_id
-    assert len(copied_puts) == 1
+    assert attached.json()[0]["id"] == str(ready_id)
+    assert len(copied_puts) == 0
 
-    # Deleting conv1 preserves is_global=True file (conversation_id -> None), deletes non-global chart.png
+    # Deleting conv1 preserves ALL files globally in Library (conversation_id -> None, is_global -> True)
     del_conv1 = await client.delete(f"/api/conversations/{conv1_id}", headers=h1)
     assert del_conv1.status_code == 204
     db.expire_all()
@@ -338,9 +349,11 @@ async def test_pending_cleanup_preview_content_and_global_library(client, regist
     assert survived is not None
     assert survived.conversation_id is None
     assert survived.is_global is True
-    assert await db.get(ConversationFile, img_id) is None
-    assert any(str(img_id) in k for k in deleted_keys)
-    assert all(str(ready_id) not in k for k in deleted_keys)
+    survived_img = await db.get(ConversationFile, img_id)
+    assert survived_img is not None
+    assert survived_img.conversation_id is None
+    assert survived_img.is_global is True
+    assert all(str(ready_id) not in k and str(img_id) not in k for k in deleted_keys)
 
 
 @pytest.mark.asyncio
@@ -382,16 +395,17 @@ async def test_file_complete_indexes_chunks_and_syncs_global_flag(client, regist
         )
     ).scalars().all()
     assert len(chunks) >= 2
-    assert chunks[0].is_global is False
+    assert chunks[0].is_global is True
     assert chunks[0].search_tsv is not None
     assert "LangGraph" in chunks[0].content
 
     patched = await client.patch(
         f"/api/library/files/{file_id}",
-        json={"is_global": True},
+        json={"filename": "arch_v2.md"},
         headers=h1,
     )
     assert patched.status_code == 200
+    assert patched.json()["filename"] == "arch_v2.md"
     db.expire_all()
     chunks_after = (
         await db.execute(select(FileChunk).where(FileChunk.file_id == uuid.UUID(file_id)))

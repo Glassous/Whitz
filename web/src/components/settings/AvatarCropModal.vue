@@ -8,6 +8,8 @@ import BaseButton from "../ui/BaseButton.vue";
 const props = defineProps<{
   open: boolean;
   file: File | null;
+  endpoint?: string;
+  title?: string;
 }>();
 
 const emit = defineEmits<{
@@ -176,7 +178,7 @@ async function confirmUpload() {
   }
   uploading.value = true;
   try {
-    await api.put("/users/me/avatar", { data_url: dataUrl });
+    await api.put(props.endpoint || "/users/me/avatar", { data_url: dataUrl });
     await auth.refreshUser();
     emit("uploaded");
     emit("close");
@@ -191,7 +193,7 @@ onBeforeUnmount(revokeUrl);
 </script>
 
 <template>
-  <BaseModal :open="open" title="裁切头像" @close="emit('close')">
+  <BaseModal :open="open" :title="title || '裁切头像'" @close="emit('close')">
     <div class="flex flex-col items-center gap-4">
       <div
         class="relative touch-none select-none overflow-hidden rounded-2xl bg-surface ring-1 ring-line"

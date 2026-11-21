@@ -103,7 +103,8 @@ async def test_conversation_pinning_and_ordering(register, client, db):
     assert pin_c1.status_code == 200
 
     listed = (await client.get("/api/conversations", headers=headers)).json()
-    assert [item["id"] for item in listed] == [c1["id"], c3["id"], c2["id"]]
+    assert listed[0]["kind"] == "main"
+    assert [item["id"] for item in listed if item["kind"] == "side"] == [c1["id"], c3["id"], c2["id"]]
 
     unpin_c1 = await client.patch(
         f"/api/conversations/{c1['id']}",
@@ -115,7 +116,8 @@ async def test_conversation_pinning_and_ordering(register, client, db):
     assert unpin_c1.json()["pinned_at"] is None
 
     listed2 = (await client.get("/api/conversations", headers=headers)).json()
-    assert [item["id"] for item in listed2] == [c3["id"], c2["id"], c1["id"]]
+    assert listed2[0]["kind"] == "main"
+    assert [item["id"] for item in listed2 if item["kind"] == "side"] == [c3["id"], c2["id"], c1["id"]]
 
 
 async def test_send_message_injects_profile_skills_global_file_artifacts_graph_and_pending_events(

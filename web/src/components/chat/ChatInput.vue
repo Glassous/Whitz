@@ -13,6 +13,7 @@ const props = defineProps<{
   uploads?: UploadTask[];
   attachedFiles?: ConversationFile[];
   selectedSkills?: string[];
+  assistantName?: string;
 }>();
 
 const emit = defineEmits<{
@@ -179,9 +180,10 @@ function onSmChange(e: MediaQueryListEvent) {
 }
 
 const inputPlaceholder = computed(() => {
+  const name = props.assistantName?.trim() || "Whitz";
   if (props.disabled) return "助理正在初始化，请稍候…";
   if (props.uploading) return isWideInput.value ? "文件正在直传 COS，上传完成后即可发送…" : "文件上传中…";
-  return isWideInput.value ? "给 Whitz 发送消息，或拖拽文件到此处上传…" : "给 Whitz 发送消息";
+  return isWideInput.value ? `给 ${name} 发送消息，或拖拽文件到此处上传…` : `给 ${name} 发送消息`;
 });
 
 watch(text, () => {

@@ -28,6 +28,9 @@ import ReasoningEntry from "./ReasoningEntry.vue";
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
 const props = defineProps<{
+  mode?: "main" | "side";
+  assistantName?: string;
+  assistantAvatarUrl?: string | null;
   plan: Plan | null;
   reasoning: ReasoningBlock[];
   streaming: boolean;
@@ -46,6 +49,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:activeTab": [TaskPanelTab];
+  "edit-assistant": [];
   upload: [files: FileList, dataTransfer?: DataTransfer | null];
   "cancel-upload": [localId: string];
   "dismiss-upload": [localId: string];
@@ -55,6 +59,16 @@ const emit = defineEmits<{
   "close-preview": [];
   "attach-library": [fileIds: string[]];
 }>();
+
+const isMainMode = computed(() => props.mode === "main");
+const resolvedAssistantName = computed(() => props.assistantName?.trim() || "Whitz");
+const assistantAvatarFailed = ref(false);
+watch(
+  () => props.assistantAvatarUrl,
+  () => {
+    assistantAvatarFailed.value = false;
+  },
+);
 
 const filesStore = useFilesStore();
 
@@ -124,6 +138,7 @@ function onFileChange(e: Event) {
 }
 
 function onDragEnter(e: DragEvent) {
+  if (isMainMode.value) return;
   const check = validateDragItems(e.dataTransfer);
   if (!check.hasFiles) return;
   e.preventDefault();
@@ -133,6 +148,7 @@ function onDragEnter(e: DragEvent) {
 }
 
 function onDragOver(e: DragEvent) {
+  if (isMainMode.value) return;
   const check = validateDragItems(e.dataTransfer);
   if (!check.hasFiles) return;
   e.preventDefault();
@@ -144,6 +160,7 @@ function onDragOver(e: DragEvent) {
 }
 
 function onDragLeave(e: DragEvent) {
+  if (isMainMode.value) return;
   if (dragDepth.value <= 0) return;
   const check = validateDragItems(e.dataTransfer);
   if (!check.hasFiles && dragDepth.value === 0) return;
@@ -155,6 +172,7 @@ function onDragLeave(e: DragEvent) {
 }
 
 function onDrop(e: DragEvent) {
+  if (isMainMode.value) return;
   const hadFiles = e.dataTransfer?.types?.includes("Files") || (e.dataTransfer?.files?.length ?? 0) > 0;
   dragDepth.value = 0;
   dragValid.value = true;
@@ -309,7 +327,6 @@ const libraryLoading = ref(false);
 const libraryAttaching = ref(false);
 const libraryError = ref<string | null>(null);
 const libraryQuery = ref("");
-const libraryOnlyGlobal = ref(true);
 const libraryItems = ref<LibraryFileItem[]>([]);
 const selectedLibraryIds = ref<Set<string>>(new Set());
 
@@ -318,7 +335,6 @@ const existingFileIds = computed(() => new Set(props.files.map((f) => f.id)));
 const filteredLibraryItems = computed(() => {
   const q = libraryQuery.value.trim().toLowerCase();
   return libraryItems.value.filter((item) => {
-    if (libraryOnlyGlobal.value && !item.is_global) return false;
     if (!q) return true;
     return (
       item.filename.toLowerCase().includes(q) ||
@@ -388,20 +404,51 @@ function confirmLibraryAttach() {
     />
 
     <template v-else>
-      <!-- Desktop Header (hidden on mobile where drawer provides top header) -->
-      <div v-if="!hideHeader" class="shrink-0 px-5 pb-2 pt-3.5 lg:pr-14">
+      <!-- Main Chat Right-Side Header: Assistant Avatar & Nickname (clickable to customize) -->
+      <div v-if="isMainMode" class="shrink-0 px-4 pb-2.5 pt-3.5" :class="hideHeader ? 'pt-2' : 'lg:pr-14'">
+        <button
+          type="button"
+          class="focus-ring group flex w-full items-center gap-3 rounded-2xl bg-canvas/85 p-2.5 text-left transition-colors hover:bg-canvas dark:bg-surface/75 dark:hover:bg-surface"
+          title="点击自定义助手头像与昵称"
+          @click="emit('edit-assistant')"
+        >
+          <span class="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-full bg-surface ring-1 ring-line">
+            <img
+              v-if="assistantAvatarUrl && !assistantAvatarFailed"
+              :src="assistantAvatarUrl"
+              :alt="resolvedAssistantName"
+              class="h-full w-full object-cover"
+              @error="assistantAvatarFailed = true"
+            />
+            <span v-else class="brand-mark-tight h-[15px] w-[23px] text-fg" aria-hidden="true" />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-[15px] font-semibold text-fg">{{ resolvedAssistantName }}</span>
+            <span class="mt-0.5 block text-[11.5px] text-fg-faint">专属主助手 · 点击自定义</span>
+          </span>
+          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-faint transition-colors group-hover:bg-hover group-hover:text-fg">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+          </span>
+        </button>
+      </div>
+
+      <!-- Side Chat Desktop Header (hidden on mobile where drawer provides top header) -->
+      <div v-else-if="!hideHeader" class="shrink-0 px-5 pb-2 pt-3.5 lg:pr-14">
         <div class="flex h-10 items-center justify-between">
           <h3 class="text-[16px] font-semibold text-fg">任务面板</h3>
         </div>
       </div>
 
-      <!-- Split-pane container: Top = Steps, Draggable Handle, Bottom = Files -->
+      <!-- Split-pane container: Main Chat = Steps only (100%); Side Chat = Steps + Handle + Files -->
     <div ref="splitContainerRef" class="flex min-h-0 flex-1 flex-col">
       <!-- Top Pane: Steps -->
       <section
         aria-label="步骤"
         class="flex min-h-0 flex-col overflow-hidden"
-        :style="{ flexBasis: `${stepsRatio}%`, flexGrow: 0, flexShrink: 0 }"
+        :class="isMainMode ? 'flex-1' : ''"
+        :style="isMainMode ? undefined : { flexBasis: `${stepsRatio}%`, flexGrow: 0, flexShrink: 0 }"
       >
         <div class="flex shrink-0 items-center justify-between px-4 pb-1.5 pt-2">
           <div class="flex items-center gap-1.5">
@@ -526,8 +573,9 @@ function confirmLibraryAttach() {
         </div>
       </section>
 
-      <!-- Draggable Split Handle -->
+      <!-- Draggable Split Handle (Side Chat only) -->
       <div
+        v-if="!isMainMode"
         role="separator"
         tabindex="0"
         aria-orientation="horizontal"
@@ -551,8 +599,8 @@ function confirmLibraryAttach() {
         />
       </div>
 
-      <!-- Bottom Pane: Files -->
-      <section aria-label="文件" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <!-- Bottom Pane: Files (Side Chat only; Main Chat manages files in Library) -->
+      <section v-if="!isMainMode" aria-label="文件" class="flex min-h-0 flex-1 flex-col overflow-hidden">
         <div class="flex shrink-0 items-center justify-between gap-2 px-4 pb-2 pt-2.5">
           <div class="flex items-center gap-1.5">
             <span class="text-[13px] font-semibold text-fg">文件</span>
@@ -666,12 +714,6 @@ function confirmLibraryAttach() {
                   >
                     AI
                   </span>
-                  <span
-                    v-if="f.is_global"
-                    class="rounded bg-surface px-1 py-0.2 text-[10px] font-medium text-fg-muted"
-                  >
-                    全局
-                  </span>
                 </div>
               </div>
               <div class="flex shrink-0 items-center gap-0.5" @click.stop>
@@ -702,20 +744,20 @@ function confirmLibraryAttach() {
                 <button
                   type="button"
                   class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-danger-weak hover:text-danger"
-                  aria-label="删除文件"
-                  title="从当前对话工作区移除"
+                  aria-label="从当前旁聊工作区移除"
+                  title="仅从当前旁聊工作区移除（文件仍保留在资料库中，彻底删除请前往资料库）"
                   :disabled="deletingId === f.id"
                   @click="onDeleteClick(f.id)"
                 >
                   <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4h8v2m-9 0l1 14h8l1-14" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M18 6L6 18" />
                   </svg>
                 </button>
               </div>
             </div>
 
             <p class="pt-1 text-[12px] leading-relaxed text-fg-faint">
-              点击任意文件可在线预览；当前对话内 AI 可随时读取工作区内的全部文件。
+              所有已发送文件自动全局共享给主聊天和旁聊；如需彻底删除，请前往左侧「资料库」。
             </p>
           </div>
 
@@ -751,17 +793,9 @@ function confirmLibraryAttach() {
           <input
             v-model="libraryQuery"
             type="text"
-            placeholder="搜索文件名或来源对话…"
+            placeholder="搜索文件名或来源聊天…"
             class="focus-ring h-9 min-w-0 flex-1 rounded-xl bg-surface px-3 text-[13.5px] text-fg placeholder:text-fg-faint"
           />
-          <button
-            type="button"
-            class="focus-ring h-9 rounded-xl px-3 text-[12.5px] font-medium transition-colors"
-            :class="libraryOnlyGlobal ? 'bg-accent-weak text-accent' : 'bg-surface text-fg-muted hover:text-fg'"
-            @click="libraryOnlyGlobal = !libraryOnlyGlobal"
-          >
-            {{ libraryOnlyGlobal ? "仅全局共享" : "全部资料库" }}
-          </button>
         </div>
 
         <div v-scrollbar class="custom-scrollbar max-h-72 overflow-y-auto space-y-1.5 pr-1">
@@ -800,16 +834,10 @@ function confirmLibraryAttach() {
                 </span>
               </span>
               <span v-if="existingFileIds.has(item.id)" class="shrink-0 text-[11px] text-fg-faint">已在工作区</span>
-              <span
-                v-else-if="item.is_global"
-                class="shrink-0 rounded-full bg-surface px-2 py-0.5 text-[10.5px] font-medium text-fg-muted"
-              >
-                全局
-              </span>
             </button>
           </div>
           <p v-else class="py-8 text-center text-[13px] text-fg-faint">
-            {{ libraryOnlyGlobal ? "暂无全局共享文件，可切换「全部资料库」查看" : "资料库暂无可用文件" }}
+            资料库暂无可用文件
           </p>
         </div>
       </div>

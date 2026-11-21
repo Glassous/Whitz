@@ -18,6 +18,7 @@ from app.api.schemas import (
     CreditStatusOut,
     ProfileContextUpdateRequest,
     RedeemRequest,
+    UpdateAssistantRequest,
     UpdatePersonaRequest,
     UpdateProfileRequest,
     UserOut,
@@ -54,6 +55,31 @@ def _remove_user_avatars(user_id: uuid.UUID) -> None:
         candidate = root / f"{user_id}.{ext}"
         if candidate.exists():
             candidate.unlink(missing_ok=True)
+
+
+def _remove_assistant_avatars(user_id: uuid.UUID) -> None:
+    root = _avatars_dir()
+    for ext in ("webp", "png", "jpg"):
+        candidate = root / f"assistant_{user_id}.{ext}"
+        if candidate.exists():
+            candidate.unlink(missing_ok=True)
+
+
+def _decode_validated_avatar(data_url: str) -> tuple[str, bytes]:
+    match = _AVATAR_DATA_URL_RE.match(data_url.strip())
+    if not match:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "仅支持 PNG、JPEG 或 WebP 格式图片")
+    fmt, b64 = match.group(1), match.group(2)
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "头像图片数据无效") from exc
+    if not raw or len(raw) > _MAX_AVATAR_BYTES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "裁切后的头像大小不能超过 1MB")
+    if not _valid_image_magic(fmt, raw):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "头像文件内容与格式不匹配")
+    ext, _ = _AVATAR_EXT_MAP[fmt]
+    return ext, raw
 
 
 def _valid_image_magic(fmt: str, data: bytes) -> bool:
@@ -225,20 +251,7 @@ async def upload_avatar(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    match = _AVATAR_DATA_URL_RE.match(body.data_url.strip())
-    if not match:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "仅支持 PNG、JPEG 或 WebP 格式图片")
-    fmt, b64 = match.group(1), match.group(2)
-    try:
-        raw = base64.b64decode(b64, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "头像图片数据无效") from exc
-    if not raw or len(raw) > _MAX_AVATAR_BYTES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "裁切后的头像大小不能超过 1MB")
-    if not _valid_image_magic(fmt, raw):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "头像文件内容与格式不匹配")
-
-    ext, _ = _AVATAR_EXT_MAP[fmt]
+    ext, raw = _decode_validated_avatar(body.data_url)
     _remove_user_avatars(user.id)
     target = _avatars_dir() / f"{user.id}.{ext}"
     target.write_bytes(raw)
@@ -257,6 +270,73 @@ async def delete_avatar(
     user.avatar_url = None
     await db.commit()
     await db.refresh(user)
+    return user
+
+
+@router.patch("/me/assistant", response_model=UserOut)
+async def update_assistant_profile(
+    body: UpdateAssistantRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    if "assistant_name" in body.model_fields_set:
+        cleaned = (body.assistant_name or "").strip()
+        user.assistant_name = cleaned or "Whitz"
+    await db.commit()
+    await db.refresh(user)
+    await audit.record(
+        "user.assistant_update",
+        actor=user,
+        target_type="user",
+        target_id=user.id,
+        request=request,
+        metadata={"assistant_name": user.assistant_name},
+    )
+    return user
+
+
+@router.put("/me/assistant/avatar", response_model=UserOut)
+async def upload_assistant_avatar(
+    body: AvatarUploadRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    ext, raw = _decode_validated_avatar(body.data_url)
+    _remove_assistant_avatars(user.id)
+    target = _avatars_dir() / f"assistant_{user.id}.{ext}"
+    target.write_bytes(raw)
+    user.assistant_avatar_url = f"/api/users/{user.id}/assistant-avatar?v={int(time.time() * 1000)}"
+    await db.commit()
+    await db.refresh(user)
+    await audit.record(
+        "user.assistant_avatar_update",
+        actor=user,
+        target_type="user",
+        target_id=user.id,
+        request=request,
+    )
+    return user
+
+
+@router.delete("/me/assistant/avatar", response_model=UserOut)
+async def delete_assistant_avatar(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    _remove_assistant_avatars(user.id)
+    user.assistant_avatar_url = None
+    await db.commit()
+    await db.refresh(user)
+    await audit.record(
+        "user.assistant_avatar_reset",
+        actor=user,
+        target_type="user",
+        target_id=user.id,
+        request=request,
+    )
     return user
 
 
@@ -438,3 +518,17 @@ async def get_avatar(user_id: uuid.UUID) -> Response:
                 headers={"Cache-Control": "public, max-age=31536000, immutable"},
             )
     raise HTTPException(status.HTTP_404_NOT_FOUND, "头像不存在")
+
+
+@router.get("/{user_id}/assistant-avatar")
+async def get_assistant_avatar(user_id: uuid.UUID) -> Response:
+    root = _avatars_dir()
+    for ext, mime in (("webp", "image/webp"), ("png", "image/png"), ("jpg", "image/jpeg")):
+        candidate = root / f"assistant_{user_id}.{ext}"
+        if candidate.is_file():
+            return Response(
+                content=candidate.read_bytes(),
+                media_type=mime,
+                headers={"Cache-Control": "public, max-age=31536000, immutable"},
+            )
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "助手头像不存在")

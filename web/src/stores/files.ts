@@ -456,10 +456,9 @@ export const useFilesStore = defineStore("files", () => {
     return { content: "" };
   }
 
-  async function fetchLibraryFiles(opts?: { q?: string; is_global?: boolean; page?: number; page_size?: number }): Promise<LibraryFileItem[]> {
+  async function fetchLibraryFiles(opts?: { q?: string; page?: number; page_size?: number }): Promise<LibraryFileItem[]> {
     const params = new URLSearchParams();
     if (opts?.q?.trim()) params.set("q", opts.q.trim());
-    if (opts?.is_global !== undefined) params.set("is_global", String(opts.is_global));
     params.set("page", String(opts?.page ?? 1));
     params.set("page_size", String(opts?.page_size ?? 40));
     const res = await api.get<unknown>(`/library/files?${params.toString()}`);
@@ -468,6 +467,36 @@ export const useFilesStore = defineStore("files", () => {
       return (res as any).items as LibraryFileItem[];
     }
     return [];
+  }
+
+  async function uploadToLibrary(
+    inputFiles: FileList | File[],
+    dataTransfer?: DataTransfer | null,
+  ): Promise<{ uploaded: LibraryFileItem[]; errors: string[] }> {
+    const { accepted, rejected } = validateSelectedFiles(inputFiles, dataTransfer);
+    const errors: string[] = rejected.map((r) => `${r.filename}（${r.reason}）`);
+    const uploaded: LibraryFileItem[] = [];
+    for (const file of accepted) {
+      try {
+        const presign = await api.post<PresignResponse>("/library/files/presign", {
+          filename: file.name,
+          mime_type: file.type || "",
+          size_bytes: file.size,
+        });
+        const { etag } = await putToCos(
+          presign.upload_url,
+          presign.headers,
+          file,
+          () => {},
+          () => {},
+        );
+        const completed = await api.post<LibraryFileItem>(`/library/files/${presign.file_id}/complete`, { etag });
+        uploaded.push(completed);
+      } catch (e: any) {
+        errors.push(`${file.name}：${errorText(e, "上传失败")}`);
+      }
+    }
+    return { uploaded, errors };
   }
 
   async function attachLibraryFiles(
@@ -483,13 +512,17 @@ export const useFilesStore = defineStore("files", () => {
     );
     const attachedList = Array.isArray(res) ? res : Array.isArray(res?.files) ? res.files : [];
     for (const f of attachedList) {
-      upsertFile(f);
+      const idx = files.value.findIndex((item) => item.id === f.id);
+      if (idx >= 0) {
+        const next = [...files.value];
+        next[idx] = { ...next[idx], ...f };
+        files.value = next;
+      } else {
+        files.value = [...files.value, f];
+      }
       if (attachToMessage && !attachedIds.value.includes(f.id)) {
         attachedIds.value = [...attachedIds.value, f.id];
       }
-    }
-    if (!attachedList.length) {
-      await load(cid);
     }
     return attachedList;
   }
@@ -520,6 +553,7 @@ export const useFilesStore = defineStore("files", () => {
     refreshFileUrls,
     fetchPreviewContent,
     fetchLibraryFiles,
+    uploadToLibrary,
     attachLibraryFiles,
   };
 });

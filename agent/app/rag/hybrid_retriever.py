@@ -163,12 +163,11 @@ class HybridRetriever:
                        COALESCE(cf.filename, '') AS filename,
                        fc.chunk_index, fc.locator, fc.content
                 FROM file_chunks fc
-                LEFT JOIN conversation_files cf ON cf.id = fc.file_id
+                INNER JOIN conversation_files cf ON cf.id = fc.file_id AND cf.status = 'ready'
                 WHERE fc.user_id = %s
                   AND fc.embedding IS NOT NULL
-                  AND (fc.conversation_id = %s OR fc.is_global = TRUE)
             """
-            params: list[Any] = [user_uuid, conv_uuid]
+            params: list[Any] = [user_uuid]
             if file_uuid is not None:
                 sql += " AND fc.file_id = %s"
                 params.append(file_uuid)
@@ -201,12 +200,11 @@ class HybridRetriever:
                        COALESCE(cf.filename, '') AS filename,
                        fc.chunk_index, fc.locator, fc.content
                 FROM file_chunks fc
-                LEFT JOIN conversation_files cf ON cf.id = fc.file_id
+                INNER JOIN conversation_files cf ON cf.id = fc.file_id AND cf.status = 'ready'
                 WHERE fc.user_id = %s
-                  AND (fc.conversation_id = %s OR fc.is_global = TRUE)
                   AND fc.search_tsv @@ plainto_tsquery('simple', %s)
             """
-            params: list[Any] = [user_uuid, conv_uuid, query]
+            params: list[Any] = [user_uuid, query]
             if file_uuid is not None:
                 sql += " AND fc.file_id = %s"
                 params.append(file_uuid)
@@ -239,12 +237,11 @@ class HybridRetriever:
                        COALESCE(cf.filename, '') AS filename,
                        fc.chunk_index, fc.locator, fc.content
                 FROM file_chunks fc
-                LEFT JOIN conversation_files cf ON cf.id = fc.file_id
+                INNER JOIN conversation_files cf ON cf.id = fc.file_id AND cf.status = 'ready'
                 WHERE fc.user_id = %s
-                  AND (fc.conversation_id = %s OR fc.is_global = TRUE)
                   AND fc.content ILIKE %s
             """
-            params: list[Any] = [user_uuid, conv_uuid, f"%{query}%"]
+            params: list[Any] = [user_uuid, f"%{query}%"]
             if file_uuid is not None:
                 sql += " AND fc.file_id = %s"
                 params.append(file_uuid)

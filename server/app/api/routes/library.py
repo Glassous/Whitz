@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_owned_conversation
@@ -16,14 +17,18 @@ from app.api.routes.files import (
 from app.api.schemas import (
     AttachLibraryFilesRequest,
     ConversationFileOut,
+    FileCompleteRequest,
     FileDownloadUrlOut,
+    FilePresignOut,
+    FilePresignRequest,
     LibraryFileOut,
     LibraryFileUpdateRequest,
 )
 from app.core.config import get_settings
-from app.db.models import Conversation, ConversationFile, FileChunk, User
+from app.db.models import Conversation, ConversationFile, User
 from app.db.session import get_db
-from app.services import audit, cos, file_types
+from app.services import audit, cos, file_chunks, file_types
+from app.services.file_types import FileValidationError, validate_upload_request
 
 router = APIRouter(tags=["library"])
 
@@ -58,7 +63,7 @@ async def list_library_files(
     await cleanup_expired_pending_files(db, user_id=user.id, background_tasks=background_tasks)
 
     stmt = (
-        select(ConversationFile, Conversation.title)
+        select(ConversationFile, Conversation.title, Conversation.kind)
         .outerjoin(Conversation, ConversationFile.conversation_id == Conversation.id)
         .where(
             ConversationFile.user_id == user.id,
@@ -70,8 +75,6 @@ async def list_library_files(
         stmt = stmt.where(ConversationFile.filename.ilike(pattern, escape="\\"))
     if category and category.strip():
         stmt = stmt.where(ConversationFile.category == category.strip())
-    if is_global is not None:
-        stmt = stmt.where(ConversationFile.is_global.is_(is_global))
     if source and source.strip():
         stmt = stmt.where(ConversationFile.source == source.strip())
 
@@ -85,9 +88,17 @@ async def list_library_files(
     ).all()
 
     settings = get_settings()
+    assistant_label = (user.assistant_name or "").strip() or "Whitz"
     items = [
-        serialize_file_out(file_row, settings=settings, conversation_title=conv_title, as_library=True)
-        for file_row, conv_title in rows
+        serialize_file_out(
+            file_row,
+            settings=settings,
+            conversation_title=(
+                f"{assistant_label}（主聊）" if conv_kind == "main" else conv_title
+            ),
+            as_library=True,
+        )
+        for file_row, conv_title, conv_kind in rows
     ]
     return {
         "items": items,
@@ -95,6 +106,135 @@ async def list_library_files(
         "page": page,
         "page_size": page_size,
     }
+
+
+@router.post("/api/library/files/presign", response_model=FilePresignOut)
+async def presign_library_upload(
+    body: FilePresignRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    if not settings.cos_configured:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "文件存储服务尚未配置")
+
+    try:
+        info = validate_upload_request(
+            body.filename,
+            body.mime_type,
+            body.size_bytes,
+            settings.max_file_size_bytes,
+        )
+    except FileValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    await cleanup_expired_pending_files(db, user_id=user.id, background_tasks=background_tasks)
+
+    file_id = uuid.uuid4()
+    storage_key = cos.build_storage_key(user.id, None, file_id, info.filename, settings=settings)
+    try:
+        signed = await cos.presign_put(
+            key=storage_key,
+            content_type=info.mime_type,
+            content_length=info.size_bytes,
+            settings=settings,
+        )
+    except cos.CosError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+    ttl = max(60, int(settings.pending_file_ttl_seconds or 1800))
+    record = ConversationFile(
+        id=file_id,
+        conversation_id=None,
+        user_id=user.id,
+        filename=info.filename,
+        ext=info.ext,
+        mime_type=info.mime_type,
+        category=info.category,
+        size_bytes=info.size_bytes,
+        storage_key=storage_key,
+        status="pending",
+        source="user",
+        is_global=True,
+        expires_cleanup_at=datetime.now(timezone.utc) + timedelta(seconds=ttl),
+    )
+    db.add(record)
+    await db.commit()
+
+    await audit.record(
+        "library.file_presign",
+        actor=user,
+        target_type="conversation_file",
+        target_id=file_id,
+        request=request,
+        metadata={"filename": info.filename, "size_bytes": info.size_bytes},
+    )
+    return {
+        "file_id": file_id,
+        "filename": info.filename,
+        "ext": info.ext,
+        "category": info.category,
+        "mime_type": info.mime_type,
+        "size_bytes": info.size_bytes,
+        "upload_url": signed["url"],
+        "method": signed["method"],
+        "headers": signed["headers"],
+        "expires_in": signed["expires_in"],
+    }
+
+
+@router.post("/api/library/files/{file_id}/complete", response_model=LibraryFileOut)
+async def complete_library_upload(
+    file_id: uuid.UUID,
+    request: Request,
+    body: FileCompleteRequest | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> LibraryFileOut:
+    record = await _get_owned_library_file(file_id, user, db)
+    settings = get_settings()
+    if record.status == "ready":
+        return serialize_file_out(record, settings=settings, conversation_title=None, as_library=True)
+
+    try:
+        meta = await cos.head_object(record.storage_key)
+    except cos.CosError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+    if meta is None:
+        record.status = "failed"
+        record.error_message = "COS 中未找到已上传对象"
+        await db.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件尚未上传完成，请重试")
+
+    actual_size = meta.get("content_length")
+    if actual_size is not None and actual_size != record.size_bytes:
+        record.status = "failed"
+        record.error_message = f"文件大小校验不匹配: 预期 {record.size_bytes}, 实际 {actual_size}"
+        await db.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "上传文件大小与签名不一致")
+
+    record.status = "ready"
+    record.is_global = True
+    record.error_message = None
+    record.expires_cleanup_at = None
+    record.etag = (body.etag if body and body.etag else None) or meta.get("etag")
+    await db.commit()
+    await db.refresh(record)
+
+    await file_chunks.index_file_chunks_safe(db, record)
+
+    await audit.record(
+        "library.file_complete",
+        actor=user,
+        target_type="conversation_file",
+        target_id=record.id,
+        request=request,
+        metadata={"filename": record.filename},
+    )
+    return serialize_file_out(record, settings=settings, conversation_title=None, as_library=True)
 
 
 @router.patch("/api/library/files/{file_id}", response_model=LibraryFileOut)
@@ -110,12 +250,9 @@ async def update_library_file(
         raise HTTPException(status.HTTP_409_CONFLICT, "文件尚未就绪")
 
     changes: dict = {}
-    if body.is_global is not None and body.is_global != row.is_global:
-        row.is_global = body.is_global
-        changes["is_global"] = body.is_global
-        await db.execute(
-            update(FileChunk).where(FileChunk.file_id == row.id).values(is_global=body.is_global)
-        )
+    # All library files are globally shared; keep is_global=True regardless of legacy payloads.
+    if not row.is_global:
+        row.is_global = True
 
     if body.filename is not None:
         cleaned = file_types.sanitize_filename(body.filename)
@@ -241,68 +378,7 @@ async def attach_library_files(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "部分文件不存在、未就绪或无权访问")
 
     settings = get_settings()
-    need_clone = [by_id[fid] for fid in unique_ids if by_id[fid].conversation_id != conv.id]
-    if need_clone:
-        existing_count = await db.scalar(
-            select(func.count())
-            .select_from(ConversationFile)
-            .where(
-                ConversationFile.conversation_id == conv.id,
-                ConversationFile.status.in_(("ready", "pending")),
-            )
-        )
-        if int(existing_count or 0) + len(need_clone) > settings.max_files_per_conversation:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"单个对话最多包含 {settings.max_files_per_conversation} 个文件，请先清理部分文件",
-            )
-        if not settings.cos_configured:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "文件存储服务尚未配置")
-
-    attached_rows: list[ConversationFile] = []
-    created_rows: list[ConversationFile] = []
-    for fid in unique_ids:
-        src = by_id[fid]
-        if src.conversation_id == conv.id:
-            attached_rows.append(src)
-            continue
-
-        max_copy_bytes = max(settings.max_file_size_bytes, int(src.size_bytes or 0) + 1024)
-        try:
-            raw = await cos.get_object_bytes(
-                src.storage_key,
-                max_bytes=max_copy_bytes,
-                settings=settings,
-            )
-            new_id = uuid.uuid4()
-            new_key = cos.build_storage_key(user.id, conv.id, new_id, src.filename, settings=settings)
-            etag = await cos.put_object_bytes(new_key, raw, src.mime_type, settings=settings)
-        except cos.CosError as exc:
-            raise HTTPException(exc.status_code, exc.detail) from exc
-
-        clone = ConversationFile(
-            id=new_id,
-            conversation_id=conv.id,
-            user_id=user.id,
-            filename=src.filename,
-            ext=src.ext,
-            mime_type=src.mime_type,
-            category=src.category,
-            size_bytes=len(raw) if raw is not None else src.size_bytes,
-            storage_key=new_key,
-            etag=etag,
-            status="ready",
-            source=src.source,
-            is_global=False,
-        )
-        db.add(clone)
-        created_rows.append(clone)
-        attached_rows.append(clone)
-
-    if created_rows:
-        await db.commit()
-        for clone in created_rows:
-            await db.refresh(clone)
+    attached_rows = [by_id[fid] for fid in unique_ids]
 
     await audit.record(
         "library.file_attach",
@@ -310,6 +386,6 @@ async def attach_library_files(
         target_type="conversation",
         target_id=conv.id,
         request=request,
-        metadata={"requested": len(unique_ids), "cloned": len(created_rows)},
+        metadata={"requested": len(unique_ids), "cloned": 0},
     )
     return [serialize_file_out(row, settings=settings) for row in attached_rows]

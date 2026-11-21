@@ -86,6 +86,8 @@ class UserOut(BaseModel):
     email: str
     display_name: str
     avatar_url: str | None = None
+    assistant_name: str = "Whitz"
+    assistant_avatar_url: str | None = None
     bio: str = ""
     gender: str | None = None
     birthday: date | None = None
@@ -195,8 +197,15 @@ class UpdatePersonaRequest(BaseModel):
     persona: str = Field(max_length=4000)
 
 
+class UpdateAssistantRequest(BaseModel):
+    assistant_name: str | None = Field(default=None, max_length=80)
+
+
+ConversationKind = Literal["main", "side"]
+
+
 class ConversationCreate(BaseModel):
-    title: str = Field(default="新对话", max_length=200)
+    title: str = Field(default="新旁聊", max_length=200)
 
 
 class ConversationUpdate(BaseModel):
@@ -221,6 +230,7 @@ class ConversationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    kind: ConversationKind = "side"
     title: str
     is_pinned: bool = False
     pinned_at: datetime | None = None
@@ -238,6 +248,7 @@ class ConversationDetail(ConversationOut):
 
 class ConversationSearchHit(BaseModel):
     conversation_id: uuid.UUID
+    conversation_kind: ConversationKind = "side"
     conversation_title: str
     message_id: uuid.UUID | None = None
     role: str | None = None
@@ -302,7 +313,7 @@ class ConversationFileOut(BaseModel):
     size_bytes: int
     status: str
     source: str = "user"
-    is_global: bool = False
+    is_global: bool = True
     message_id: uuid.UUID | None = None
     preview_url: str | None = None
     thumb_url: str | None = None
@@ -450,6 +461,8 @@ class AdminUserOut(BaseModel):
     email: str
     display_name: str
     avatar_url: str | None = None
+    assistant_name: str = "Whitz"
+    assistant_avatar_url: str | None = None
     bio: str = ""
     gender: str | None = None
     birthday: date | None = None

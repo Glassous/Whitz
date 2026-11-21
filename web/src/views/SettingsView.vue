@@ -17,6 +17,7 @@ import SkillsPanel from "../components/settings/SkillsPanel.vue";
 import LibraryPanel from "../components/settings/LibraryPanel.vue";
 import DevicesPanel from "../components/settings/DevicesPanel.vue";
 import AvatarCropModal from "../components/settings/AvatarCropModal.vue";
+import AssistantProfileModal from "../components/chat/AssistantProfileModal.vue";
 
 type SettingsTab = "profile" | "library" | "memory" | "skills" | "membership" | "persona" | "devices";
 type SettingsPage = SettingsTab | "password";
@@ -131,13 +132,21 @@ const themeOptions: { value: ThemePreference; label: string }[] = [
 
 const navItems: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "profile", label: "用户信息", desc: "头像、个人资料与隐私上下文" },
-  { key: "library", label: "个人资料库", desc: "全部对话文件与全局共享资料" },
+  { key: "library", label: "资料库", desc: "统一管理全部聊天文件与 AI 产出" },
   { key: "memory", label: "长期记忆", desc: "记忆开关、待确认与条目管理" },
   { key: "skills", label: "技能管理", desc: "内置、自定义与 GitHub 技能" },
   { key: "membership", label: "会员与额度", desc: "当前档位、用量与兑换码" },
-  { key: "persona", label: "助理人设", desc: "定制语气、角色与回答方式" },
+  { key: "persona", label: "专属助手", desc: "助手头像、昵称与人设风格" },
   { key: "devices", label: "登录设备", desc: "管理活跃会话与设备安全" },
 ];
+
+const assistantProfileOpen = ref(false);
+const assistantNameDisplay = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
+const assistantAvatarUrl = computed(() => auth.user?.assistant_avatar_url ?? null);
+const assistantAvatarLoadFailed = ref(false);
+watch(assistantAvatarUrl, () => {
+  assistantAvatarLoadFailed.value = false;
+});
 
 const pageTitle = computed(() => {
   if (activePage.value === "password") return "修改密码";
@@ -1332,11 +1341,11 @@ async function disableProfileContext() {
           </form>
         </div>
 
-        <!-- Page 2: Personal Library -->
+        <!-- Page 2: Library -->
         <div v-else-if="activePage === 'library'" class="w-full space-y-5">
           <div class="hidden md:block">
-            <h1 class="text-[20px] font-semibold tracking-tight text-fg">个人资料库</h1>
-            <p class="mt-1 text-[13.5px] text-fg-muted">集中管理你在各对话中上传的文件与 AI 产出资料，支持设为全局共享或引用到当前对话。</p>
+            <h1 class="text-[20px] font-semibold tracking-tight text-fg">资料库</h1>
+            <p class="mt-1 text-[13.5px] text-fg-muted">集中管理主聊天与旁聊中的所有上传文件与 AI 产出，所有文件默认全局可参考。</p>
           </div>
           <LibraryPanel />
         </div>
@@ -1370,11 +1379,32 @@ async function disableProfileContext() {
           </div>
         </div>
 
-        <!-- Page 6: Persona -->
+        <!-- Page 6: Assistant Profile & Persona -->
         <div v-else-if="activePage === 'persona'" class="w-full space-y-5">
           <div class="hidden md:block">
-            <h1 class="text-[20px] font-semibold tracking-tight text-fg">助理人设</h1>
-            <p class="mt-1 text-[13.5px] text-fg-muted">定制你的个人 AI 助理语气、专业角色与回答规范。</p>
+            <h1 class="text-[20px] font-semibold tracking-tight text-fg">专属助手</h1>
+            <p class="mt-1 text-[13.5px] text-fg-muted">自定义主聊天助手的头像、昵称，以及个人 AI 助理的语气与回答规范。</p>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-4 rounded-[24px] bg-sidebar p-5 sm:p-6 dark:bg-surface">
+            <div class="flex min-w-0 items-center gap-3.5">
+              <span class="flex h-13 w-13 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-canvas ring-1 ring-line">
+                <img
+                  v-if="assistantAvatarUrl && !assistantAvatarLoadFailed"
+                  :src="assistantAvatarUrl"
+                  :alt="assistantNameDisplay"
+                  class="h-full w-full object-cover"
+                  @error="assistantAvatarLoadFailed = true"
+                />
+                <span v-else class="brand-mark-tight h-[17px] w-[26px] text-fg" aria-hidden="true" />
+              </span>
+              <div class="min-w-0">
+                <p class="truncate text-[15px] font-semibold text-fg">{{ assistantNameDisplay }}</p>
+                <p class="mt-0.5 text-[12.5px] text-fg-muted">主聊天助手头像与昵称，默认显示 Whitz 图标与名称。</p>
+              </div>
+            </div>
+            <BaseButton variant="secondary" size="sm" rounded="full" @click="assistantProfileOpen = true">
+              自定义头像与昵称
+            </BaseButton>
           </div>
           <div class="rounded-[24px] bg-sidebar p-5 sm:p-6 dark:bg-surface">
             <PersonaEditor :persona="auth.user?.persona ?? ''" />
@@ -1449,6 +1479,12 @@ async function disableProfileContext() {
       :file="pendingAvatarFile"
       @close="cropModalOpen = false"
       @uploaded="onAvatarUploaded"
+    />
+
+    <!-- Assistant Profile Modal -->
+    <AssistantProfileModal
+      :open="assistantProfileOpen"
+      @close="assistantProfileOpen = false"
     />
 
     <!-- Logout Confirmation Modal -->

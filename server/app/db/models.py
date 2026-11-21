@@ -114,6 +114,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(80))
     avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    assistant_name: Mapped[str] = mapped_column(String(80), default="Whitz", server_default="Whitz")
+    assistant_avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     bio: Mapped[str] = mapped_column(String(300), default="", server_default="")
     gender: Mapped[str | None] = mapped_column(String(40), nullable=True)
     birthday: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -288,16 +290,23 @@ class AuditLog(Base):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        Index("uq_conversations_user_main", "user_id", unique=True, postgresql_where=text("kind = 'main'")),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     thread_id: Mapped[str] = mapped_column(String(128), default="", server_default="")
-    title: Mapped[str] = mapped_column(String(200), default="新对话")
+    kind: Mapped[str] = mapped_column(String(16), default="side", server_default="side", index=True)
+    title: Mapped[str] = mapped_column(String(200), default="新旁聊")
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
     pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     plan: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     active_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     active_run_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    rolling_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_cursor_msg_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    summary_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -310,6 +319,36 @@ class Conversation(Base):
     )
     files: Mapped[list["ConversationFile"]] = relationship(
         back_populates="conversation", passive_deletes=True, order_by="ConversationFile.created_at"
+    )
+
+
+class ConversationDigest(Base):
+    """Incremental semantic & FTS summary of a side chat for main-chat cross-session memory."""
+
+    __tablename__ = "conversation_digests"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", name="uq_conversation_digests_conv"),
+        Index("ix_conversation_digests_user_recent", "user_id", "last_message_at"),
+        Index("ix_conversation_digests_search_tsv", "search_tsv", postgresql_using="gin"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    summary: Mapped[str] = mapped_column(Text, default="", server_default="")
+    key_facts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    keywords: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    message_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
 
@@ -335,7 +374,7 @@ class ConversationFile(Base):
     etag: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="pending", server_default="pending")
     source: Mapped[str] = mapped_column(String(24), default="user", server_default="user")
-    is_global: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    is_global: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
     message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     expires_cleanup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -459,7 +498,7 @@ class FileChunk(Base):
         ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
     )
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    is_global: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    is_global: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
     chunk_index: Mapped[int] = mapped_column(Integer)
     locator: Mapped[str] = mapped_column(String(160), default="", server_default="")
     content: Mapped[str] = mapped_column(Text)

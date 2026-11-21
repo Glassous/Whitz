@@ -300,3 +300,80 @@ async def test_time_injection_message_hygiene_and_thinking_escalation(monkeypatc
     assert meta["status"] == "completed"
     assert seen_thinking == [False, True]
     assert "深度推演" in meta["output"]
+
+
+@pytest.mark.asyncio
+async def test_main_chat_prompt_ordering_token_budget_and_cross_chat_tools():
+    from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+    from app.graph.builder import SYSTEM_CONTEXT_MSG_ID, _build_system_prompt, _prepare_llm_messages
+    from app.tools.builtin_tools import get_builtin_tools
+    from tests.conftest import FakePGPool
+
+    # 1. Prefix-cache-friendly ordering: assistant_name + rolling_summary before dynamic time & cross_chat_context
+    prompt = _build_system_prompt(
+        {
+            "conversation_kind": "main",
+            "assistant_name": "小智",
+            "persona": "直接、清晰",
+            "profile_context": "后端工程师",
+            "rolling_summary": "之前讨论过 PostgreSQL 索引优化。",
+            "cross_chat_context": "### 近期旁聊目录\n- [id=abc] Vim 调研",
+            "timezone": "Asia/Shanghai",
+        },
+        {},
+    )
+    assert "你是 小智 智能助理" in prompt
+    assert "## 主聊天历史滚动摘要" in prompt
+    assert "## 跨旁聊全局记忆" in prompt
+    assert prompt.index("## 主聊天历史滚动摘要") < prompt.index("## 当前时间") < prompt.index("## 跨旁聊全局记忆")
+
+    # 2. Hard token budget trims older turns while preserving tool_call / ToolMessage boundaries
+    sys_msg = SystemMessage(id=SYSTEM_CONTEXT_MSG_ID, content="SYS")
+    msgs: list[BaseMessage] = [sys_msg]
+    for i in range(12):
+        msgs.append(HumanMessage(content=f"旧问题 {i}: " + ("数据" * 200)))
+        msgs.append(AIMessage(content="", tool_calls=[{"id": f"tc_{i}", "name": "web_search", "args": {"query": f"q{i}"}}]))
+        msgs.append(ToolMessage(tool_call_id=f"tc_{i}", name="web_search", content="结果" * 200))
+        msgs.append(AIMessage(content=f"旧回答 {i}: " + ("总结" * 150)))
+
+    trimmed = _prepare_llm_messages(msgs, max_prompt_tokens=900, max_verbatim_messages=4)
+    assert isinstance(trimmed[0], SystemMessage)
+    assert len(trimmed) < len(msgs)
+    # First non-system message must never be an orphan ToolMessage
+    assert not isinstance(trimmed[1], ToolMessage)
+    # Latest user/assistant turn is preserved
+    assert any("旧回答 11" in str(m.content) for m in trimmed)
+
+    # 3. Cross-chat tools are exposed ONLY when include_cross_chat=True and enforce user_id filter
+    from datetime import datetime, timezone
+
+    uid = str(uuid.uuid4())
+    cid = str(uuid.uuid4())
+    mid = str(uuid.uuid4())
+    now_dt = datetime(2026, 11, 20, 10, 0, tzinfo=timezone.utc)
+    side_tools = {t.name for t in get_builtin_tools(include_cross_chat=False)}
+    assert "search_chat_history" not in side_tools
+    assert "read_conversation_history" not in side_tools
+
+    def responder(sql: str, params: tuple):
+        if "FROM conversations WHERE id = %s AND user_id = %s" in sql:
+            return [(uuid.UUID(cid), "side", "Vim 调研")]
+        if "FROM messages" in sql and "ORDER BY created_at ASC" in sql:
+            return [(uuid.UUID(mid), "user", "怎么配置 LazyVim？", now_dt)]
+        if "FROM messages m" in sql:
+            return [(uuid.UUID(mid), uuid.UUID(cid), "side", "Vim 调研", "user", "LazyVim 快捷键", now_dt)]
+        return []
+
+    pool = FakePGPool(responder=responder)
+    main_tools = {t.name: t for t in get_builtin_tools(include_cross_chat=True)}
+    assert "search_chat_history" in main_tools
+    assert "read_conversation_history" in main_tools
+
+    cfg = {"configurable": {"pool": pool, "user_id": uid, "conversation_id": cid}}
+    search_out = await main_tools["search_chat_history"].ainvoke({"query": "LazyVim"}, config=cfg)
+    assert "Vim 调研" in search_out
+    assert any("c.user_id = %s" in sql and params[0] == uuid.UUID(uid) for sql, params in pool.queries)
+
+    read_out = await main_tools["read_conversation_history"].ainvoke({"conversation_id": cid}, config=cfg)
+    assert "怎么配置 LazyVim" in read_out
+    assert any("WHERE id = %s AND user_id = %s" in sql and params[1] == uuid.UUID(uid) for sql, params in pool.queries)

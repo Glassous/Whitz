@@ -151,8 +151,6 @@ async def _owned_ready_file(
     row = await db.get(ConversationFile, file_uuid)
     if row is None or row.user_id != user.id or row.status != "ready":
         return None
-    if row.conversation_id != conv.id and not row.is_global:
-        return None
     return row
 
 
@@ -171,24 +169,15 @@ async def call_tool(
     if name == "list_workspace_files":
         include_global = args.get("include_global")
         want_global = True if include_global is None else bool(include_global)
-        if want_global:
-            condition = or_(
-                ConversationFile.conversation_id == conv.id,
-                ConversationFile.is_global.is_(True),
-            )
-        else:
-            condition = ConversationFile.conversation_id == conv.id
+        stmt = select(ConversationFile).where(
+            ConversationFile.user_id == user.id,
+            ConversationFile.status == "ready",
+        )
+        if not want_global:
+            stmt = stmt.where(ConversationFile.conversation_id == conv.id)
 
         rows = (
-            await db.execute(
-                select(ConversationFile)
-                .where(
-                    ConversationFile.user_id == user.id,
-                    ConversationFile.status == "ready",
-                    condition,
-                )
-                .order_by(ConversationFile.created_at.asc())
-            )
+            await db.execute(stmt.order_by(ConversationFile.created_at.asc()))
         ).scalars().all()
         return _text_result(
             {
@@ -203,8 +192,8 @@ async def call_tool(
                         "mime_type": r.mime_type,
                         "size_bytes": r.size_bytes,
                         "source": r.source,
-                        "is_global": r.is_global,
-                        "scope": "conversation" if r.conversation_id == conv.id else "global",
+                        "is_global": True,
+                        "scope": "conversation" if r.conversation_id == conv.id else "library",
                         "created_at": r.created_at.isoformat(),
                     }
                     for r in rows
@@ -290,10 +279,6 @@ async def call_tool(
                         .where(
                             ConversationFile.user_id == user.id,
                             ConversationFile.status == "ready",
-                            or_(
-                                ConversationFile.conversation_id == conv.id,
-                                ConversationFile.is_global.is_(True),
-                            ),
                         )
                         .order_by(ConversationFile.created_at.asc())
                     )
@@ -385,6 +370,7 @@ async def call_tool(
             existing.size_bytes = len(raw_bytes)
             existing.etag = etag
             existing.source = "assistant"
+            existing.is_global = True
             existing.message_id = None
             existing.updated_at = datetime.now(timezone.utc)
             await db.commit()
@@ -438,7 +424,7 @@ async def call_tool(
             etag=etag,
             status="ready",
             source="assistant",
-            is_global=False,
+            is_global=True,
         )
         db.add(row)
         await db.commit()

@@ -12,6 +12,10 @@ class AgentState(TypedDict, total=False):
     run_id: str
     thread_id: str
     conversation_id: str
+    conversation_kind: str
+    assistant_name: str
+    rolling_summary: str
+    cross_chat_context: str
     user_id: str
     agent_namespace: str
     persona: str

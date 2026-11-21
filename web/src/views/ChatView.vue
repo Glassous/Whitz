@@ -17,6 +17,8 @@ import ClarifyCard from "../components/chat/ClarifyCard.vue";
 import MemoryPendingCard from "../components/chat/MemoryPendingCard.vue";
 import SkillPendingCard from "../components/chat/SkillPendingCard.vue";
 import SearchModal from "../components/chat/SearchModal.vue";
+import AssistantProfileModal from "../components/chat/AssistantProfileModal.vue";
+import LibraryPanel from "../components/settings/LibraryPanel.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -27,6 +29,19 @@ const credits = useCreditsStore();
 const filesStore = useFilesStore();
 
 const routeConversationId = computed(() => (typeof route.params.id === "string" && route.params.id ? route.params.id : null));
+const isNewSideDraft = computed(() => route.query.new === "1");
+
+const activeView = ref<"chat" | "library">("chat");
+const assistantModalOpen = ref(false);
+
+const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
+const assistantAvatarUrl = computed(() => auth.user?.assistant_avatar_url ?? null);
+const isMainChat = computed(() => conversations.current?.kind === "main");
+const headerTitle = computed(() => {
+  if (activeView.value === "library") return "资料库";
+  if (isMainChat.value) return "主要聊天";
+  return conversations.current?.title ?? "新旁聊";
+});
 
 const PANEL_WIDTH_STORAGE_KEY = "whitz_task_panel_width";
 const DEFAULT_PANEL_WIDTH = 340;
@@ -206,7 +221,12 @@ async function openConversation(id: string): Promise<boolean> {
   try {
     const detail = await conversations.open(id);
     chat.loadFromConversation(detail);
-    void filesStore.load(id);
+    if (detail.kind !== "main") {
+      void filesStore.load(id);
+    } else {
+      filesStore.reset();
+      filesStore.convId = id;
+    }
     return true;
   } catch {
     conversations.clearCurrent();
@@ -216,7 +236,38 @@ async function openConversation(id: string): Promise<boolean> {
   }
 }
 
-function createConversation() {
+async function openMainConversation() {
+  activeView.value = "chat";
+  sidebarOpen.value = false;
+  mobileStepsOpen.value = false;
+  focusMessageId.value = null;
+  const mainId = conversations.mainConversation?.id;
+  if (mainId && mainId === conversations.current?.id) {
+    if (routeConversationId.value !== mainId) {
+      void router.replace({ name: "chat-conversation", params: { id: mainId } });
+    }
+    return;
+  }
+  chat.abort();
+  previewTarget.value = null;
+  selectedSkills.value = [];
+  try {
+    const detail = mainId ? await conversations.open(mainId) : await conversations.openMain();
+    chat.loadFromConversation(detail);
+    filesStore.reset();
+    filesStore.convId = detail.id;
+    showPlan.value = true;
+    planTab.value = "steps";
+    if (routeConversationId.value !== detail.id) {
+      void router.replace({ name: "chat-conversation", params: { id: detail.id } });
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function createSideConversation() {
+  activeView.value = "chat";
   chat.abort();
   conversations.clearCurrent();
   chat.reset();
@@ -225,12 +276,21 @@ function createConversation() {
   selectedSkills.value = [];
   showPlan.value = false;
   planTab.value = "steps";
-  if (routeConversationId.value) {
-    void router.push({ name: "chat" });
+  void router.push({ name: "chat", query: { new: "1" } });
+}
+
+function onSwitchView(view: "chat" | "library") {
+  activeView.value = view;
+  if (view === "library") {
+    previewTarget.value = null;
+    mobileStepsOpen.value = false;
+  } else if (!conversations.current && !isNewSideDraft.value) {
+    void openMainConversation();
   }
 }
 
 async function onSelect(id: string) {
+  activeView.value = "chat";
   sidebarOpen.value = false;
   mobileStepsOpen.value = false;
   focusMessageId.value = null;
@@ -253,6 +313,7 @@ async function onSelect(id: string) {
 }
 
 async function onSelectFromSearch(conversationId: string, messageId: string | null) {
+  activeView.value = "chat";
   sidebarOpen.value = false;
   mobileStepsOpen.value = false;
   if (conversationId !== conversations.current?.id) {
@@ -284,27 +345,24 @@ async function onDelete(id: string) {
     chat.reset();
     previewTarget.value = null;
     selectedSkills.value = [];
-    if (conversations.conversations.length) {
-      const nextId = conversations.conversations[0].id;
-      const ok = await openConversation(nextId);
+    const fallback = conversations.sideConversations[0] ?? conversations.mainConversation;
+    if (fallback) {
+      const ok = await openConversation(fallback.id);
       if (ok) {
         showPlan.value = true;
-        void router.replace({ name: "chat-conversation", params: { id: nextId } });
+        void router.replace({ name: "chat-conversation", params: { id: fallback.id } });
       } else {
-        void router.replace({ name: "chat" });
+        void openMainConversation();
       }
     } else {
-      conversations.clearCurrent();
-      filesStore.reset();
-      showPlan.value = false;
-      void router.replace({ name: "chat" });
+      void openMainConversation();
     }
   }
 }
 
 async function ensureConversationId(): Promise<string> {
   if (conversations.current?.id) return conversations.current.id;
-  const conv = await conversations.create();
+  const conv = await conversations.create("新旁聊");
   await openConversation(conv.id);
   void router.replace({ name: "chat-conversation", params: { id: conv.id } });
   return conv.id;
@@ -312,13 +370,13 @@ async function ensureConversationId(): Promise<string> {
 
 async function onUploadFiles(fileList: FileList, dataTransfer?: DataTransfer | null, switchToFilesTab = false) {
   if (!agent.value?.ready) return;
-  if (switchToFilesTab) {
+  if (switchToFilesTab && !isMainChat.value) {
     previewTarget.value = null;
     showPlan.value = true;
     planTab.value = "files";
   }
   const started = await filesStore.enqueueFiles(fileList, ensureConversationId, dataTransfer);
-  if (started && window.innerWidth >= 1024) {
+  if (started && !isMainChat.value && window.innerWidth >= 1024) {
     showPlan.value = true;
   }
 }
@@ -513,8 +571,9 @@ watch(
   },
 );
 
-watch(routeConversationId, async (nextId) => {
+watch([routeConversationId, isNewSideDraft], async ([nextId, draft]) => {
   if (nextId) {
+    activeView.value = "chat";
     if (nextId !== conversations.current?.id) {
       chat.abort();
       previewTarget.value = null;
@@ -524,17 +583,22 @@ watch(routeConversationId, async (nextId) => {
         showPlan.value = true;
       } else {
         showPlan.value = false;
-        void router.replace({ name: "chat" });
+        void openMainConversation();
       }
     }
-  } else if (conversations.current) {
-    chat.abort();
-    conversations.clearCurrent();
-    chat.reset();
-    filesStore.reset();
-    previewTarget.value = null;
-    selectedSkills.value = [];
-    showPlan.value = false;
+  } else if (draft) {
+    activeView.value = "chat";
+    if (conversations.current) {
+      chat.abort();
+      conversations.clearCurrent();
+      chat.reset();
+      filesStore.reset();
+      previewTarget.value = null;
+      selectedSkills.value = [];
+      showPlan.value = false;
+    }
+  } else if (!conversations.current && conversations.mainConversation) {
+    void openMainConversation();
   }
 });
 
@@ -554,12 +618,13 @@ onMounted(async () => {
     if (ok) {
       showPlan.value = true;
     } else {
-      showPlan.value = false;
-      void router.replace({ name: "chat" });
+      await openMainConversation();
     }
-  } else {
+  } else if (isNewSideDraft.value) {
     conversations.clearCurrent();
     chat.reset();
+  } else {
+    await openMainConversation();
   }
 });
 
@@ -591,13 +656,18 @@ onBeforeUnmount(() => {
     </Transition>
 
     <ConversationSidebar
-      :conversations="conversations.conversations"
+      :main-conversation="conversations.mainConversation"
+      :side-conversations="conversations.sideConversations"
       :current-id="conversations.current?.id ?? null"
+      :active-view="activeView"
       :loading="conversations.loading"
       :open="sidebarOpen"
       :collapsed="sidebarCollapsed"
       @select="onSelect"
-      @create="createConversation"
+      @select-main="openMainConversation"
+      @create-side="createSideConversation"
+      @switch-view="onSwitchView"
+      @toggle-collapse="toggleSidebarCollapsed"
       @rename="onRename"
       @pin="onPin"
       @delete="onDelete"
@@ -607,19 +677,46 @@ onBeforeUnmount(() => {
     />
 
     <main class="relative flex min-w-0 flex-1" :inert="(!isDesktop && sidebarOpen) || undefined">
+      <!-- Embedded Library View inside Homepage Main Area -->
+      <template v-if="activeView === 'library'">
+        <div class="relative flex min-w-0 flex-1 flex-col">
+          <div class="flex shrink-0 items-center gap-2.5 border-b border-line/60 px-3.5 py-3">
+            <button
+              type="button"
+              class="focus-ring flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
+              :aria-label="sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
+              :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
+              @click="onSidebarToggleClick"
+            >
+              <svg class="h-[22px] w-[22px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3">
+                <path stroke-linecap="round" d="M4 8.5h16M4 15.5h10" />
+              </svg>
+            </button>
+            <h1 class="min-w-0 truncate text-[16px] font-semibold text-fg">资料库</h1>
+          </div>
+          <div v-scrollbar class="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+            <div class="mx-auto w-full max-w-6xl">
+              <LibraryPanel embedded />
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Chat Workspace View (Main Chat & Side Chats) -->
+      <template v-else>
       <!-- Fixed task panel toggle (top-right inside panel when expanded, same position when collapsed) -->
       <button
         type="button"
         class="focus-ring absolute right-3.5 top-3.5 z-30 inline-flex h-10 w-10 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
-        :aria-label="showPlan ? '收起任务面板' : '展开任务面板'"
-        :title="showPlan ? '收起任务面板' : '展开任务面板'"
+        :aria-label="showPlan ? '收起右侧栏' : '展开右侧栏'"
+        :title="showPlan ? '收起右侧栏' : '展开右侧栏'"
         @click="onPlanToggleClick"
       >
         <svg class="h-[21px] w-[21px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
           <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v14H3zM15 5v14" />
         </svg>
         <span
-          v-if="filesStore.fileCount > 0 && !showPlan"
+          v-if="!isMainChat && filesStore.fileCount > 0 && !showPlan"
           class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-accent"
           aria-hidden="true"
         />
@@ -645,7 +742,7 @@ onBeforeUnmount(() => {
           </button>
 
           <h1 class="min-w-0 truncate text-[15.5px] font-semibold text-fg">
-            {{ conversations.current?.title ?? "新对话" }}
+            {{ headerTitle }}
           </h1>
         </div>
 
@@ -671,7 +768,12 @@ onBeforeUnmount(() => {
                   {{ greeting }}<template v-if="userName">，{{ userName }}</template>
                 </h1>
                 <p class="mx-auto mt-3.5 max-w-lg text-[16px] text-fg-muted sm:text-[17px]">
-                  我可以帮你规划任务、联网检索、整理信息。今天想做点什么？
+                  <template v-if="isMainChat">
+                    我是你的专属助手 {{ assistantName }}，随时关联你的所有旁聊与资料库。今天想做点什么？
+                  </template>
+                  <template v-else>
+                    新建旁聊专注讨论单个主题；发送的文件会自动沉淀到全局资料库。
+                  </template>
                 </p>
 
                 <p
@@ -777,6 +879,7 @@ onBeforeUnmount(() => {
               :uploading="filesStore.hasActiveUploads"
               :uploads="filesStore.uploads"
               :attached-files="filesStore.attachedFiles"
+              :assistant-name="assistantName"
               @send="onSend"
               @stop="chat.stop"
               @upload="(files, dt) => onUploadFiles(files, dt, false)"
@@ -824,6 +927,9 @@ onBeforeUnmount(() => {
         <div class="h-full" :style="{ width: `${panelWidth}px` }">
           <PlanPanel
             v-model:active-tab="planTab"
+            :mode="isMainChat ? 'main' : 'side'"
+            :assistant-name="assistantName"
+            :assistant-avatar-url="assistantAvatarUrl"
             :plan="chat.viewPlan"
             :reasoning="chat.viewReasoning"
             :streaming="chat.viewStreaming"
@@ -836,6 +942,7 @@ onBeforeUnmount(() => {
             :upload-disabled="!agent?.ready"
             :preview-target="previewTarget"
             :resizing="isResizingPanel"
+            @edit-assistant="assistantModalOpen = true"
             @upload="(files, dt) => onUploadFiles(files, dt, true)"
             @cancel-upload="filesStore.cancelUpload"
             @dismiss-upload="filesStore.dismissUpload"
@@ -847,6 +954,7 @@ onBeforeUnmount(() => {
           />
         </div>
       </aside>
+      </template>
     </main>
 
     <Transition
@@ -857,14 +965,14 @@ onBeforeUnmount(() => {
       leave-from-class="opacity-100 [&>div:last-child]:translate-x-0"
       leave-to-class="opacity-0 [&>div:last-child]:translate-x-full"
     >
-      <div v-if="mobileStepsOpen" class="fixed inset-0 z-40 lg:hidden">
+      <div v-if="mobileStepsOpen && activeView === 'chat'" class="fixed inset-0 z-40 lg:hidden">
         <div class="absolute inset-0 bg-black/40" @click="closeMobileDrawer" />
         <div
           class="absolute inset-y-0 right-0 flex flex-col bg-sidebar shadow-2xl transition-[width,transform] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
           :class="previewTarget ? 'w-full max-w-[100dvw] overflow-x-hidden' : 'w-[min(360px,90dvw)]'"
         >
           <div class="flex h-13 shrink-0 items-center justify-between pl-4 pr-2.5">
-            <h3 class="text-[16px] font-semibold text-fg">任务面板</h3>
+            <h3 class="text-[16px] font-semibold text-fg">{{ isMainChat ? "助手与步骤" : "任务面板" }}</h3>
             <button
               type="button"
               class="focus-ring flex h-9 w-9 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover hover:text-fg"
@@ -880,6 +988,9 @@ onBeforeUnmount(() => {
             <PlanPanel
               v-model:active-tab="planTab"
               :hide-header="true"
+              :mode="isMainChat ? 'main' : 'side'"
+              :assistant-name="assistantName"
+              :assistant-avatar-url="assistantAvatarUrl"
               :plan="chat.viewPlan"
               :reasoning="chat.viewReasoning"
               :streaming="chat.viewStreaming"
@@ -891,6 +1002,7 @@ onBeforeUnmount(() => {
               :files-loading="filesStore.loading"
               :upload-disabled="!agent?.ready"
               :preview-target="previewTarget"
+              @edit-assistant="assistantModalOpen = true"
               @upload="(files, dt) => onUploadFiles(files, dt, true)"
               @cancel-upload="filesStore.cancelUpload"
               @dismiss-upload="filesStore.dismissUpload"
@@ -909,6 +1021,10 @@ onBeforeUnmount(() => {
       :conversations="conversations.conversations"
       @close="searchOpen = false"
       @select="onSelectFromSearch"
+    />
+    <AssistantProfileModal
+      :open="assistantModalOpen"
+      @close="assistantModalOpen = false"
     />
   </div>
 </template>

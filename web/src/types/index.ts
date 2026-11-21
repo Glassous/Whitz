@@ -5,6 +5,8 @@ export interface User {
   email: string;
   display_name: string;
   avatar_url?: string | null;
+  assistant_name?: string;
+  assistant_avatar_url?: string | null;
   bio?: string;
   gender?: string | null;
   birthday?: string | null;
@@ -88,8 +90,11 @@ export interface Plan {
   items: PlanItem[];
 }
 
+export type ConversationKind = "main" | "side";
+
 export interface Conversation {
   id: string;
+  kind?: ConversationKind;
   title: string;
   plan: Plan | null;
   active_run_id: string | null;
@@ -103,6 +108,7 @@ export interface Conversation {
 
 export interface ConversationSearchHit {
   conversation_id: string;
+  conversation_kind?: ConversationKind;
   conversation_title: string;
   message_id: string | null;
   role: "user" | "assistant" | null;

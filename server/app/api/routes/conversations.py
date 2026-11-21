@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sse_starlette.sse import EventSourceResponse
@@ -16,9 +16,9 @@ from app.api.schemas import (
     ConversationSearchHit,
     ConversationUpdate,
 )
-from app.db.models import Conversation, ConversationFile, Message, User
+from app.db.models import Conversation, ConversationFile, FileChunk, Message, User
 from app.db.session import get_db
-from app.services import audit, cos, titles
+from app.services import audit, cross_chat_memory, titles
 from app.services.agent_client import AgentClient, AgentError
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -28,10 +28,13 @@ router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 async def list_conversations(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> list[Conversation]:
+    await cross_chat_memory.ensure_main_conversation(db, user)
+    main_first = case((Conversation.kind == "main", 0), else_=1)
     result = await db.execute(
         select(Conversation)
         .where(Conversation.user_id == user.id)
         .order_by(
+            main_first.asc(),
             Conversation.is_pinned.desc(),
             Conversation.pinned_at.desc().nullslast(),
             Conversation.last_message_at.desc().nullslast(),
@@ -39,6 +42,22 @@ async def list_conversations(
         )
     )
     return list(result.scalars().all())
+
+
+@router.get("/main", response_model=ConversationDetail)
+async def get_main_conversation(
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+) -> Conversation:
+    main_conv = await cross_chat_memory.ensure_main_conversation(db, user)
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.id == main_conv.id)
+        .options(selectinload(Conversation.messages))
+    )
+    conv = result.scalar_one()
+    role_order = {"user": 0, "assistant": 1, "tool": 2}
+    conv.messages.sort(key=lambda m: (m.created_at, role_order.get(m.role, 3)))
+    return conv
 
 
 def _escape_like(term: str) -> str:
@@ -73,7 +92,7 @@ async def search_conversations(
 
     msg_rows = (
         await db.execute(
-            select(Message, Conversation.title)
+            select(Message, Conversation.title, Conversation.kind)
             .join(Conversation, Message.conversation_id == Conversation.id)
             .where(
                 Conversation.user_id == user.id,
@@ -88,8 +107,9 @@ async def search_conversations(
     hits: list[ConversationSearchHit] = []
     per_conv_counts: dict[uuid.UUID, int] = {}
     matched_conv_ids: set[uuid.UUID] = set()
+    assistant_label = (user.assistant_name or "").strip() or "Whitz"
 
-    for msg, conv_title in msg_rows:
+    for msg, conv_title, conv_kind in msg_rows:
         cnt = per_conv_counts.get(msg.conversation_id, 0)
         if cnt >= 3:
             continue
@@ -98,10 +118,12 @@ async def search_conversations(
             continue
         per_conv_counts[msg.conversation_id] = cnt + 1
         matched_conv_ids.add(msg.conversation_id)
+        display_title = assistant_label if conv_kind == "main" else conv_title
         hits.append(
             ConversationSearchHit(
                 conversation_id=msg.conversation_id,
-                conversation_title=conv_title,
+                conversation_kind="main" if conv_kind == "main" else "side",
+                conversation_title=display_title,
                 message_id=msg.id,
                 role=msg.role,
                 snippet=snippet,
@@ -128,10 +150,12 @@ async def search_conversations(
         for conv in title_convs:
             if conv.id in matched_conv_ids:
                 continue
+            display_title = assistant_label if conv.kind == "main" else conv.title
             hits.append(
                 ConversationSearchHit(
                     conversation_id=conv.id,
-                    conversation_title=conv.title,
+                    conversation_kind="main" if conv.kind == "main" else "side",
+                    conversation_title=display_title,
                     message_id=None,
                     role=None,
                     snippet="",
@@ -153,7 +177,7 @@ async def create_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Conversation:
-    conv = Conversation(user_id=user.id, title=body.title, thread_id=str(uuid.uuid4()))
+    conv = Conversation(user_id=user.id, kind="side", title=body.title, thread_id=str(uuid.uuid4()))
     db.add(conv)
     await db.commit()
     await db.refresh(conv)
@@ -190,6 +214,9 @@ async def rename_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Conversation:
+    if conv.kind == "main":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "主聊天不支持置顶或重命名，请前往助手设置修改昵称")
+
     title_changed = False
     pin_changed = False
 
@@ -256,20 +283,10 @@ async def delete_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    if conv.kind == "main":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "主聊天不可删除")
+
     conv_id = conv.id
-    non_global_files = list(
-        (
-            await db.execute(
-                select(ConversationFile).where(
-                    ConversationFile.conversation_id == conv_id,
-                    ConversationFile.is_global.is_(False),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    file_keys = [f.storage_key for f in non_global_files if f.storage_key]
     if conv.thread_id:
         client = AgentClient(user.agent_namespace, user.agent_api_key)
         try:
@@ -279,18 +296,20 @@ async def delete_conversation(
         finally:
             await client.aclose()
 
+    # All uploaded & generated files remain globally shared in the Library after deleting a side chat.
     await db.execute(
         update(ConversationFile)
-        .where(ConversationFile.conversation_id == conv_id, ConversationFile.is_global.is_(True))
-        .values(conversation_id=None)
+        .where(ConversationFile.conversation_id == conv_id)
+        .values(conversation_id=None, is_global=True)
     )
-    for row in non_global_files:
-        await db.delete(row)
+    await db.execute(
+        update(FileChunk)
+        .where(FileChunk.conversation_id == conv_id)
+        .values(conversation_id=None, is_global=True)
+    )
 
     await db.delete(conv)
     await db.commit()
-    if file_keys:
-        background_tasks.add_task(cos.delete_objects, file_keys)
     await audit.record(
         "conversation.delete",
         actor=user,

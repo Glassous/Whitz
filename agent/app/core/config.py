@@ -72,6 +72,11 @@ class AgentSettings(BaseSettings):
     event_stream_ttl_seconds: int = 3600
     run_state_ttl_seconds: int = 86400
 
+    # Context window & cost guardrails
+    main_max_prompt_tokens: int = 24000
+    side_max_prompt_tokens: int = 20000
+    recent_verbatim_messages: int = 16
+
     # LangSmith
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""

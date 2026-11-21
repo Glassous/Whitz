@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { api } from "../api/client";
 import type { Conversation, ConversationDetail } from "../types";
 
@@ -11,6 +11,9 @@ function timeMs(value: string | null | undefined): number {
 
 export function sortConversations(list: Conversation[]): Conversation[] {
   return list.toSorted((a, b) => {
+    const aMain = a.kind === "main";
+    const bMain = b.kind === "main";
+    if (aMain !== bMain) return aMain ? -1 : 1;
     const aPinned = Boolean(a.is_pinned);
     const bPinned = Boolean(b.is_pinned);
     if (aPinned !== bPinned) return aPinned ? -1 : 1;
@@ -29,6 +32,13 @@ export const useConversationsStore = defineStore("conversations", () => {
   const current = ref<ConversationDetail | null>(null);
   const loading = ref(false);
 
+  const mainConversation = computed<Conversation | null>(
+    () => conversations.value.find((c) => c.kind === "main") ?? null,
+  );
+  const sideConversations = computed<Conversation[]>(() =>
+    conversations.value.filter((c) => c.kind !== "main"),
+  );
+
   async function fetchList() {
     loading.value = true;
     try {
@@ -39,7 +49,12 @@ export const useConversationsStore = defineStore("conversations", () => {
     }
   }
 
-  async function create(title = "新对话"): Promise<Conversation> {
+  async function openMain(): Promise<ConversationDetail> {
+    current.value = await api.get<ConversationDetail>("/conversations/main");
+    return current.value;
+  }
+
+  async function create(title = "新旁聊"): Promise<Conversation> {
     const conv = await api.post<Conversation>("/conversations", { title });
     conversations.value = sortConversations([conv, ...conversations.value]);
     return conv;
@@ -51,6 +66,8 @@ export const useConversationsStore = defineStore("conversations", () => {
   }
 
   async function rename(id: string, title: string) {
+    const target = conversations.value.find((c) => c.id === id);
+    if (target?.kind === "main") return;
     const updated = await api.patch<Conversation>(`/conversations/${id}`, { title });
     const idx = conversations.value.findIndex((c) => c.id === id);
     if (idx >= 0) {
@@ -78,11 +95,16 @@ export const useConversationsStore = defineStore("conversations", () => {
 
   function applyTitle(id: string, title: string) {
     const idx = conversations.value.findIndex((c) => c.id === id);
-    if (idx >= 0) conversations.value[idx] = { ...conversations.value[idx], title };
-    if (current.value?.id === id) current.value.title = title;
+    if (idx >= 0) {
+      if (conversations.value[idx].kind === "main") return;
+      conversations.value[idx] = { ...conversations.value[idx], title };
+    }
+    if (current.value?.id === id && current.value.kind !== "main") current.value.title = title;
   }
 
   async function remove(id: string) {
+    const target = conversations.value.find((c) => c.id === id);
+    if (target?.kind === "main") return;
     await api.delete(`/conversations/${id}`);
     conversations.value = conversations.value.filter((c) => c.id !== id);
     if (current.value?.id === id) current.value = null;
@@ -100,9 +122,12 @@ export const useConversationsStore = defineStore("conversations", () => {
 
   return {
     conversations,
+    mainConversation,
+    sideConversations,
     current,
     loading,
     fetchList,
+    openMain,
     create,
     open,
     rename,

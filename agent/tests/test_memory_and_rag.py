@@ -110,7 +110,7 @@ def test_rrf_fuse_combines_vector_and_fts_ranks():
 
 
 @pytest.mark.asyncio
-async def test_hybrid_retriever_enforces_user_and_scope_filters():
+async def test_hybrid_retriever_enforces_user_and_global_library_filters():
     uid = str(uuid.uuid4())
     cid = str(uuid.uuid4())
     fid = str(uuid.uuid4())
@@ -118,7 +118,7 @@ async def test_hybrid_retriever_enforces_user_and_scope_filters():
 
     def responder(sql: str, params: tuple):
         return [
-            (chunk_uuid, uuid.UUID(fid), uuid.UUID(cid), False, "spec.md", 0, "lines 1-20", "Hybrid RAG spec")
+            (chunk_uuid, uuid.UUID(fid), uuid.UUID(cid), True, "spec.md", 0, "lines 1-20", "Hybrid RAG spec")
         ]
 
     pool = FakePGPool(responder=responder)
@@ -126,4 +126,8 @@ async def test_hybrid_retriever_enforces_user_and_scope_filters():
     hits = await retriever.search(user_id=uid, conversation_id=cid, query="Hybrid RAG", top_k=5)
     assert len(hits) == 1
     assert hits[0]["filename"] == "spec.md"
-    assert any("fc.user_id = %s" in sql and "fc.conversation_id = %s OR fc.is_global = TRUE" in sql for sql, _ in pool.queries)
+    assert any(
+        "fc.user_id = %s" in sql
+        and "INNER JOIN conversation_files cf ON cf.id = fc.file_id AND cf.status = 'ready'" in sql
+        for sql, _ in pool.queries
+    )

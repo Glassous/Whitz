@@ -409,7 +409,203 @@ async def delegate_subtask(
     return json.dumps({"role": role, "task": task, "context": context}, ensure_ascii=False)
 
 
-def get_builtin_tools(*, include_delegation: bool = True, include_hitl: bool = True) -> list[BaseTool]:
+@tool
+async def search_chat_history(
+    query: str,
+    scope: str = "all",
+    limit: int = 8,
+    config: RunnableConfig = None,  # type: ignore[assignment]
+) -> str:
+    """检索用户全部旁聊与历史主聊天记录（摘要 + 原始消息全文），用于回忆具体细节、决定、代码或历史上下文。
+
+    scope: 'all'（全部聊天）| 'side'（仅旁聊）| 'main'（仅主聊天历史）。
+    """
+    cfg = _cfg(config)
+    pool = cfg.get("pool")
+    user_id = str(cfg.get("user_id") or "")
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return json.dumps({"results": [], "error": "query 不能为空"}, ensure_ascii=False)
+    if pool is None or not user_id:
+        return json.dumps({"results": [], "note": "History database not configured."}, ensure_ascii=False)
+
+    norm_scope = (scope or "all").strip().lower()
+    if norm_scope not in ("all", "side", "main"):
+        norm_scope = "all"
+    lim = max(1, min(int(limit or 8), 20))
+    user_uuid = uuid.UUID(user_id)
+    pattern = f"%{cleaned}%"
+
+    results: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                # 1. Search side-chat digests when scope includes side chats
+                if norm_scope in ("all", "side"):
+                    await cur.execute(
+                        """
+                        SELECT d.conversation_id, d.title, d.summary, d.key_facts, d.last_message_at
+                        FROM conversation_digests d
+                        WHERE d.user_id = %s
+                          AND (
+                              d.title ILIKE %s
+                              OR d.summary ILIKE %s
+                              OR d.search_tsv @@ plainto_tsquery('simple', %s)
+                          )
+                        ORDER BY d.last_message_at DESC NULLS LAST, d.updated_at DESC
+                        LIMIT %s
+                        """,
+                        (user_uuid, pattern, pattern, cleaned, lim),
+                    )
+                    for row in await cur.fetchall():
+                        cid = str(row[0])
+                        seen_keys.add(f"digest:{cid}")
+                        results.append(
+                            {
+                                "match_type": "digest",
+                                "conversation_id": cid,
+                                "kind": "side",
+                                "title": str(row[1] or ""),
+                                "snippet": str(row[2] or "")[:400],
+                                "key_facts": row[3] if isinstance(row[3], list) else [],
+                                "timestamp": row[4].isoformat() if row[4] is not None else None,
+                            }
+                        )
+
+                # 2. Search raw verbatim messages across side chats and/or main chat
+                kind_clause = ""
+                params: list[Any] = [user_uuid, pattern]
+                if norm_scope in ("side", "main"):
+                    kind_clause = "AND c.kind = %s"
+                    params.append(norm_scope)
+                params.append(lim * 2)
+                await cur.execute(
+                    f"""
+                    SELECT m.id, m.conversation_id, c.kind, c.title, m.role, m.content, m.created_at
+                    FROM messages m
+                    INNER JOIN conversations c ON c.id = m.conversation_id
+                    WHERE c.user_id = %s
+                      AND m.role IN ('user', 'assistant')
+                      AND m.content ILIKE %s
+                      {kind_clause}
+                    ORDER BY m.created_at DESC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                )
+                for row in await cur.fetchall():
+                    mid = str(row[0])
+                    if mid in seen_keys:
+                        continue
+                    seen_keys.add(mid)
+                    content = str(row[5] or "")
+                    idx = content.lower().find(cleaned.lower())
+                    if idx >= 0:
+                        start = max(0, idx - 120)
+                        end = min(len(content), idx + len(cleaned) + 240)
+                        snippet = ("…" if start > 0 else "") + content[start:end] + ("…" if end < len(content) else "")
+                    else:
+                        snippet = content[:360]
+                    results.append(
+                        {
+                            "match_type": "message",
+                            "message_id": mid,
+                            "conversation_id": str(row[1]),
+                            "kind": str(row[2] or "side"),
+                            "title": str(row[3] or ""),
+                            "role": str(row[4] or ""),
+                            "snippet": snippet,
+                            "timestamp": row[6].isoformat() if row[6] is not None else None,
+                        }
+                    )
+                    if len(results) >= lim:
+                        break
+    except Exception as exc:
+        return json.dumps({"results": [], "error": f"检索历史聊天失败: {exc}"}, ensure_ascii=False)
+
+    return json.dumps({"query": cleaned, "count": len(results), "results": results[:lim]}, ensure_ascii=False)
+
+
+@tool
+async def read_conversation_history(
+    conversation_id: str,
+    limit: int = 20,
+    offset: int = 0,
+    config: RunnableConfig = None,  # type: ignore[assignment]
+) -> str:
+    """按 conversation_id 读取某条旁聊或主聊天中的真实历史对话消息（按时间顺序分页）。"""
+    cfg = _cfg(config)
+    pool = cfg.get("pool")
+    user_id = str(cfg.get("user_id") or "")
+    if pool is None or not user_id:
+        return json.dumps({"messages": [], "error": "History database not configured."}, ensure_ascii=False)
+    try:
+        user_uuid = uuid.UUID(user_id)
+        conv_uuid = uuid.UUID(str(conversation_id))
+    except ValueError:
+        return json.dumps({"messages": [], "error": "无效的 conversation_id"}, ensure_ascii=False)
+
+    lim = max(1, min(int(limit or 20), 40))
+    off = max(0, int(offset or 0))
+
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, kind, title FROM conversations WHERE id = %s AND user_id = %s LIMIT 1",
+                    (conv_uuid, user_uuid),
+                )
+                conv_row = await cur.fetchone()
+                if conv_row is None:
+                    return json.dumps({"messages": [], "error": "对话不存在或无权访问"}, ensure_ascii=False)
+
+                await cur.execute(
+                    """
+                    SELECT id, role, content, created_at
+                    FROM messages
+                    WHERE conversation_id = %s
+                      AND role IN ('user', 'assistant')
+                      AND status NOT IN ('failed', 'cancelled')
+                    ORDER BY created_at ASC, id ASC
+                    OFFSET %s
+                    LIMIT %s
+                    """,
+                    (conv_uuid, off, lim),
+                )
+                msg_rows = await cur.fetchall()
+    except Exception as exc:
+        return json.dumps({"messages": [], "error": f"读取对话历史失败: {exc}"}, ensure_ascii=False)
+
+    messages_out = [
+        {
+            "message_id": str(r[0]),
+            "role": str(r[1]),
+            "content": str(r[2] or "")[:1500] + ("…" if len(str(r[2] or "")) > 1500 else ""),
+            "created_at": r[3].isoformat() if r[3] is not None else None,
+        }
+        for r in msg_rows
+    ]
+    return json.dumps(
+        {
+            "conversation_id": str(conv_row[0]),
+            "kind": str(conv_row[1] or "side"),
+            "title": str(conv_row[2] or ""),
+            "offset": off,
+            "count": len(messages_out),
+            "messages": messages_out,
+        },
+        ensure_ascii=False,
+    )
+
+
+def get_builtin_tools(
+    *,
+    include_delegation: bool = True,
+    include_hitl: bool = True,
+    include_cross_chat: bool = False,
+) -> list[BaseTool]:
     tools: list[BaseTool] = [
         rag_search_workspace,
         memory_search,
@@ -420,6 +616,8 @@ def get_builtin_tools(*, include_delegation: bool = True, include_hitl: bool = T
         skill_view,
         request_deep_thinking,
     ]
+    if include_cross_chat:
+        tools.extend([search_chat_history, read_conversation_history])
     if include_hitl:
         tools.extend([clarify, execute_code])
     if include_delegation:
