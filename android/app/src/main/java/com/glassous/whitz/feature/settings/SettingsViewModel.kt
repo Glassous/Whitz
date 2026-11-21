@@ -12,6 +12,7 @@ import com.glassous.whitz.core.model.MemoryOverview
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.model.ThemePreference
+import com.glassous.whitz.core.model.UserFeedbackItem
 import com.glassous.whitz.core.model.UserSessionItem
 import com.glassous.whitz.core.network.AvatarUploadRequest
 import com.glassous.whitz.core.network.CreateSkillRequest
@@ -23,10 +24,12 @@ import com.glassous.whitz.core.network.PendingActionRequest
 import com.glassous.whitz.core.network.ProfileContextRequest
 import com.glassous.whitz.core.network.RedeemRequest
 import com.glassous.whitz.core.network.SkillPatchRequest
+import com.glassous.whitz.core.network.UpdateAiReactionsRequest
 import com.glassous.whitz.core.network.UpdateAssistantRequest
 import com.glassous.whitz.core.network.UpdatePasswordRequest
 import com.glassous.whitz.core.network.UpdatePersonaRequest
 import com.glassous.whitz.core.network.UpdateProfileRequest
+import com.glassous.whitz.core.network.UserFeedbackCreateRequest
 import com.glassous.whitz.core.network.extractErrorMessage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -52,6 +55,10 @@ data class SettingsUiState(
     val githubPreview: GithubSkillPreviewResponse? = null,
     // Sessions
     val sessions: List<UserSessionItem> = emptyList(),
+    // Feedback
+    val feedbacks: List<UserFeedbackItem> = emptyList(),
+    val feedbackSubmitting: Boolean = false,
+    val aiReactionSaving: Boolean = false,
 )
 
 class SettingsViewModel(
@@ -517,6 +524,59 @@ class SettingsViewModel(
                 _ui.update { it.copy(message = "已下线全部其他设备") }
             } catch (t: Throwable) {
                 _ui.update { it.copy(error = extractErrorMessage(t, "操作失败")) }
+            }
+        }
+    }
+
+    // --- Feedback & AI Positive Reactions ---
+    fun toggleAiReactions(enabled: Boolean) {
+        if (_ui.value.aiReactionSaving) return
+        viewModelScope.launch {
+            _ui.update { it.copy(aiReactionSaving = true, error = null, message = null) }
+            try {
+                val updated = container.network.api.updateAiReactions(UpdateAiReactionsRequest(enabled))
+                container.authManager.updateUser(updated)
+                _ui.update {
+                    it.copy(
+                        aiReactionSaving = false,
+                        message = if (enabled) "已开启 AI 正向点赞互动" else "已关闭 AI 正向点赞互动",
+                    )
+                }
+            } catch (t: Throwable) {
+                _ui.update { it.copy(aiReactionSaving = false, error = extractErrorMessage(t, "更新偏好失败")) }
+            }
+        }
+    }
+
+    fun loadFeedbacks() {
+        viewModelScope.launch {
+            try {
+                val items = container.network.api.getMyFeedback()
+                _ui.update { it.copy(feedbacks = items) }
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    fun submitFeedback(rating: Int, category: String, content: String, onSuccess: () -> Unit = {}) {
+        val cleaned = content.trim()
+        if (cleaned.isEmpty() || _ui.value.feedbackSubmitting) return
+        viewModelScope.launch {
+            _ui.update { it.copy(feedbackSubmitting = true, error = null, message = null) }
+            try {
+                val created = container.network.api.createMyFeedback(
+                    UserFeedbackCreateRequest(rating = rating, category = category, content = cleaned)
+                )
+                _ui.update {
+                    it.copy(
+                        feedbackSubmitting = false,
+                        feedbacks = listOf(created) + it.feedbacks,
+                        message = "感谢你的评价与反馈！我们会持续改进产品体验。",
+                    )
+                }
+                onSuccess()
+            } catch (t: Throwable) {
+                _ui.update { it.copy(feedbackSubmitting = false, error = extractErrorMessage(t, "提交失败，请稍后重试")) }
             }
         }
     }

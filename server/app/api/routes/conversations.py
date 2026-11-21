@@ -52,7 +52,7 @@ async def get_main_conversation(
     result = await db.execute(
         select(Conversation)
         .where(Conversation.id == main_conv.id)
-        .options(selectinload(Conversation.messages))
+        .options(selectinload(Conversation.messages).selectinload(Message.reactions))
     )
     conv = result.scalar_one()
     role_order = {"user": 0, "assistant": 1, "tool": 2}
@@ -203,7 +203,7 @@ async def get_conversation(
     result = await db.execute(
         select(Conversation)
         .where(Conversation.id == conv.id)
-        .options(selectinload(Conversation.messages))
+        .options(selectinload(Conversation.messages).selectinload(Message.reactions))
     )
     conv = result.scalar_one()
     role_order = {"user": 0, "assistant": 1, "tool": 2}

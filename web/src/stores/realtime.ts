@@ -89,6 +89,15 @@ export const useRealtimeStore = defineStore("realtime", () => {
       return;
     }
 
+    if (event === "message.reaction_updated") {
+      const cid = typeof d.conversation_id === "string" ? d.conversation_id : null;
+      const mid = typeof d.message_id === "string" ? d.message_id : null;
+      if (cid && chat.convId === cid && mid && Array.isArray(d.reactions)) {
+        chat.applyMessageReactions(mid, d.reactions);
+      }
+      return;
+    }
+
     if (event === "conversation.updated") {
       const cid = typeof d.conversation_id === "string" ? d.conversation_id : null;
       const action = typeof d.action === "string" ? d.action : "";

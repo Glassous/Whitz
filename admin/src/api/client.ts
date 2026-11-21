@@ -210,8 +210,21 @@ export async function revokeSession(): Promise<void> {
 export const api = {
   get: <T>(path: string, opts?: RequestOptions) => request<T>("GET", path, opts),
   post: <T>(path: string, body?: unknown, opts?: RequestOptions) => request<T>("POST", path, { ...opts, body }),
+  put: <T>(path: string, body?: unknown, opts?: RequestOptions) => request<T>("PUT", path, { ...opts, body }),
   patch: <T>(path: string, body?: unknown, opts?: RequestOptions) => request<T>("PATCH", path, { ...opts, body }),
   delete: <T>(path: string, opts?: RequestOptions) => request<T>("DELETE", path, opts),
+  async download(path: string, fallbackFilename: string): Promise<void> {
+    const resp = await request<Response>("GET", path, { raw: true });
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fallbackFilename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
 };
 
 export async function loginRequest(email: string, password: string): Promise<AuthResponse> {

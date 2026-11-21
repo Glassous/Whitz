@@ -267,6 +267,88 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!-- SLO 错误预算与 Z-Score 异常检测 -->
+    <div v-if="inspection?.slo" class="grid gap-4 lg:grid-cols-2">
+      <div class="rounded-2xl border border-line bg-surface p-5">
+        <div class="mb-3 flex items-center justify-between">
+          <div>
+            <h2 class="text-[14px] font-semibold text-fg">SLO 与错误预算燃烧率 (Error Budget)</h2>
+            <p class="text-[12px] text-fg-muted">
+              目标可用性 ≥ {{ inspection.slo.availability_target_pct }}% · P95 ≤ {{ inspection.slo.p95_target_ms }}ms
+            </p>
+          </div>
+          <BaseBadge
+            :tone="inspection.slo.status === 'critical' ? 'red' : inspection.slo.status === 'warning' ? 'amber' : 'green'"
+          >
+            {{ inspection.slo.status === "critical" ? "预算告急" : inspection.slo.status === "warning" ? "需关注" : "健康" }}
+          </BaseBadge>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div class="rounded-xl border border-line bg-canvas p-3">
+            <p class="text-[11px] text-fg-faint">7d 剩余预算</p>
+            <p
+              class="mt-1 text-lg font-semibold"
+              :class="inspection.slo.error_budget_remaining_pct <= 20 ? 'text-danger' : 'text-fg'"
+            >
+              {{ inspection.slo.error_budget_remaining_pct }}%
+            </p>
+          </div>
+          <div class="rounded-xl border border-line bg-canvas p-3">
+            <p class="text-[11px] text-fg-faint">1h / 24h 燃烧率</p>
+            <p class="mt-1 text-lg font-semibold text-fg">
+              {{ inspection.slo.burn_rate_1h }}x
+              <span class="text-[12px] font-normal text-fg-muted">/ {{ inspection.slo.burn_rate_24h }}x</span>
+            </p>
+          </div>
+          <div class="rounded-xl border border-line bg-canvas p-3">
+            <p class="text-[11px] text-fg-faint">24h 成功率 / P95</p>
+            <p class="mt-1 text-lg font-semibold text-fg">
+              {{ inspection.slo.actual_success_rate_24h_pct }}%
+            </p>
+            <p class="text-[10.5px] text-fg-faint">P95: {{ inspection.slo.actual_p95_24h_ms }} ms</p>
+          </div>
+          <div class="rounded-xl border border-line bg-canvas p-3">
+            <p class="text-[11px] text-fg-faint">1h / 24h 模型开销</p>
+            <p class="mt-1 text-lg font-semibold text-fg">${{ inspection.slo.cost_1h_usd.toFixed(3) }}</p>
+            <p class="text-[10.5px] text-fg-faint">24h: ${{ inspection.slo.cost_24h_usd.toFixed(3) }}</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="rounded-2xl border border-line bg-surface p-5">
+        <div class="mb-3 flex items-center justify-between">
+          <div>
+            <h2 class="text-[14px] font-semibold text-fg">Z-Score 统计异常检测 (1h vs 7d 基线)</h2>
+            <p class="text-[12px] text-fg-muted">Z-Score ≥ 2.5 判定为统计离群突刺</p>
+          </div>
+        </div>
+        <div v-if="!inspection.anomalies?.length" class="py-6 text-center text-[13px] text-fg-faint">
+          暂无足够基线样本
+        </div>
+        <div v-else class="space-y-2">
+          <div
+            v-for="anom in inspection.anomalies"
+            :key="anom.metric"
+            class="flex items-center justify-between rounded-xl border border-line bg-canvas px-3 py-2 text-[12.5px]"
+          >
+            <div>
+              <span class="font-medium text-fg">{{ anom.label }}</span>
+              <span class="ml-2 text-[11px] text-fg-faint">
+                基线 {{ anom.baseline_mean }} ± {{ anom.baseline_std }} ({{ anom.sample_hours }}h)
+              </span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="font-mono text-fg">{{ anom.current }} {{ anom.unit }}</span>
+              <BaseBadge :tone="anom.is_anomaly ? 'red' : Math.abs(anom.z_score) >= 1.5 ? 'amber' : 'gray'">
+                z={{ anom.z_score }}
+              </BaseBadge>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 基础设施资源卡片 -->
     <div v-if="inspection" class="grid gap-4 lg:grid-cols-3">
       <!-- Postgres -->

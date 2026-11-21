@@ -83,6 +83,13 @@ async def get_ops_inspection(
     return await ops_service.collect_ops_inspection(db, admin)
 
 
+@router.get("/slo")
+async def get_ops_slo(
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return await ops_service.compute_slo_and_anomalies(db)
+
+
 @router.get("/alerts")
 async def list_alerts(
     event_status: str | None = Query(default=None),
@@ -139,11 +146,14 @@ async def create_alert_rule(
 async def update_alert_rule(
     rule_id: uuid.UUID,
     body: AlertRuleUpdate,
+    request: Request,
+    admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     rule = await db.get(OpsAlertRule, rule_id)
     if rule is None:
         raise HTTPException(status_code=404, detail="alert_rule_not_found")
+    before = _serialize_rule(rule)
     for field in ("name", "operator", "threshold", "window_minutes", "cooldown_minutes", "severity", "enabled"):
         val = getattr(body, field)
         if val is not None:
@@ -152,19 +162,42 @@ async def update_alert_rule(
         rule.webhook_url = body.webhook_url.strip() or None
     await db.commit()
     await db.refresh(rule)
-    return _serialize_rule(rule)
+    after = _serialize_rule(rule)
+    await audit.record(
+        "ops.alert_rule.update",
+        actor=admin,
+        target_type="ops_alert_rule",
+        target_id=str(rule.id),
+        request=request,
+        metadata={"name": rule.name, "metric_key": rule.metric_key},
+        diff={"before": before, "after": after},
+    )
+    return after
 
 
 @router.delete("/alerts/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_alert_rule(
     rule_id: uuid.UUID,
+    request: Request,
+    admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     rule = await db.get(OpsAlertRule, rule_id)
     if rule is None:
         raise HTTPException(status_code=404, detail="alert_rule_not_found")
+    snapshot = _serialize_rule(rule)
     await db.delete(rule)
     await db.commit()
+    await audit.record(
+        "ops.alert_rule.delete",
+        actor=admin,
+        target_type="ops_alert_rule",
+        target_id=str(rule_id),
+        severity="warning",
+        request=request,
+        metadata={"name": snapshot["name"], "metric_key": snapshot["metric_key"]},
+        diff={"before": snapshot, "after": None},
+    )
 
 
 @router.post("/alerts/rules/{rule_id}/test")
@@ -195,17 +228,28 @@ async def test_alert_rule_webhook(
 @router.post("/alerts/{event_id}/ack")
 async def ack_alert_event(
     event_id: uuid.UUID,
+    request: Request,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     ev = await db.get(OpsAlertEvent, event_id)
     if ev is None:
         raise HTTPException(status_code=404, detail="alert_event_not_found")
+    prev_status = ev.status
     ev.status = "acked"
     ev.acked_by = admin.id
     ev.acked_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(ev)
+    await audit.record(
+        "ops.alert.ack",
+        actor=admin,
+        target_type="ops_alert_event",
+        target_id=str(ev.id),
+        request=request,
+        metadata={"rule_name": ev.rule_name, "metric_key": ev.metric_key},
+        diff={"before": {"status": prev_status}, "after": {"status": "acked"}},
+    )
     return _serialize_event(ev)
 
 

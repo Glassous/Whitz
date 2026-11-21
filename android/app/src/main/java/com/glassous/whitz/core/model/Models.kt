@@ -34,6 +34,7 @@ data class User(
     @SerialName("memory_enabled") val memoryEnabled: Boolean = false,
     @SerialName("memory_consented_at") val memoryConsentedAt: String? = null,
     @SerialName("memory_require_confirm") val memoryRequireConfirm: Boolean = true,
+    @SerialName("ai_reactions_enabled") val aiReactionsEnabled: Boolean = true,
     @SerialName("created_at") val createdAt: String = "",
 )
 
@@ -234,6 +235,31 @@ data class ToolPayload(
 )
 
 @Serializable
+data class MessageReaction(
+    val id: String,
+    @SerialName("message_id") val messageId: String,
+    @SerialName("author_type") val authorType: String = "user",
+    val reaction: String,
+    @SerialName("reason_code") val reasonCode: String? = null,
+    val comment: String? = null,
+    @SerialName("created_at") val createdAt: String = "",
+)
+
+@Serializable
+data class UserFeedbackItem(
+    val id: String,
+    @SerialName("user_id") val userId: String = "",
+    val rating: Int = 5,
+    val sentiment: String = "positive",
+    val category: String = "general",
+    val content: String = "",
+    val status: String = "new",
+    @SerialName("admin_note") val adminNote: String? = null,
+    @SerialName("created_at") val createdAt: String = "",
+    @SerialName("updated_at") val updatedAt: String = "",
+)
+
+@Serializable
 data class Message(
     val id: String,
     val role: String,
@@ -243,6 +269,7 @@ data class Message(
     val status: String = "completed",
     @SerialName("run_id") val runId: String? = null,
     @SerialName("created_at") val createdAt: String = "",
+    val reactions: List<MessageReaction> = emptyList(),
 )
 
 @Serializable

@@ -116,11 +116,46 @@ export interface AuditLog {
   target_id: string | null;
   outcome: string;
   severity: string;
+  risk_score: number;
   ip: string | null;
   user_agent: string | null;
   request_id: string | null;
   session_id: string | null;
   metadata: Record<string, unknown> | null;
+  diff?: { before?: unknown; after?: unknown } | null;
+  prev_hash?: string | null;
+  record_hash?: string | null;
+}
+
+export interface AuditVerifyResult {
+  valid: boolean;
+  checked_count: number;
+  hashed_count: number;
+  legacy_unhashed_count: number;
+  broken_at_id: number | null;
+  reason: string | null;
+  first_id: number | null;
+  last_id: number | null;
+}
+
+export interface AuditAnalytics {
+  window_days: number;
+  summary: {
+    total_events: number;
+    failures: number;
+    failure_rate_pct: number;
+    high_risk_events: number;
+  };
+  daily: Array<{ day: string; total: number; failures: number; high_risk: number }>;
+  top_actions: Array<{ action: string; count: number; failures: number; avg_risk: number }>;
+  top_ips: Array<{ ip: string; count: number; failures: number }>;
+  generated_at: string;
+}
+
+export interface AuditTraceResponse {
+  trace_id: string;
+  count: number;
+  items: AuditLog[];
 }
 
 export interface AuditLogList {
@@ -351,8 +386,38 @@ export interface OpsInspection {
     p95_latency_15m_ms: number;
     firing_alerts: number;
   };
+  slo?: OpsSlo;
+  anomalies?: OpsAnomaly[];
   supported_metrics: Record<string, { label: string; unit: string }>;
   generated_at: string;
+}
+
+export interface OpsSlo {
+  availability_target_pct: number;
+  p95_target_ms: number;
+  ttft_p95_target_ms: number;
+  actual_success_rate_24h_pct: number;
+  actual_success_rate_7d_pct: number;
+  actual_p95_24h_ms: number;
+  actual_ttft_p95_24h_ms: number;
+  error_budget_remaining_pct: number;
+  burn_rate_1h: number;
+  burn_rate_24h: number;
+  cost_1h_usd: number;
+  cost_24h_usd: number;
+  status: "healthy" | "warning" | "critical";
+}
+
+export interface OpsAnomaly {
+  metric: string;
+  label: string;
+  unit: string;
+  current: number;
+  baseline_mean: number;
+  baseline_std: number;
+  z_score: number;
+  is_anomaly: boolean;
+  sample_hours: number;
 }
 
 export interface OpsAlertRule {
@@ -415,6 +480,25 @@ export interface QuantSummary {
     completion_tokens: number;
     prompt_ratio_pct: number;
   };
+  finops?: {
+    total_cost_usd: number;
+    avg_cost_per_run_usd: number;
+    baseline_reasoning_cost_usd: number;
+    routing_savings_usd: number;
+    routing_savings_pct: number;
+  };
+  quality?: {
+    regenerate_count: number;
+    regenerate_rate_pct: number;
+    hitl_denied_count: number;
+    hitl_deny_rate_pct: number;
+    tool_calls_total: number;
+    tool_error_rate_pct: number;
+    user_reactions_total: number;
+    user_positive_reactions: number;
+    csat_pct: number | null;
+    ai_positive_reactions: number;
+  };
   daily_latency: Array<{
     day: string;
     runs: number;
@@ -423,6 +507,7 @@ export interface QuantSummary {
     tokens: number;
     p50_ms: number | null;
     p95_ms: number | null;
+    cost_usd?: number;
   }>;
   generated_at: string;
 }
@@ -437,12 +522,22 @@ export interface QuantModelsTools {
     total_tokens: number;
     avg_tokens: number;
     p95_ms: number | null;
+    cost_usd?: number;
   }>;
   models: Array<{
     model: string;
     runs: number;
     total_tokens: number;
     avg_ms: number | null;
+    cost_usd?: number;
+  }>;
+  tier_economics?: Array<{
+    tier: string;
+    active_users: number;
+    runs: number;
+    tokens: number;
+    cost_usd: number;
+    avg_cost_per_user_usd: number;
   }>;
   tools: Array<{
     name: string;
@@ -460,6 +555,11 @@ export interface QuantModelsTools {
 
 export interface QuantRetention {
   window_days: number;
+  stickiness?: {
+    dau: number;
+    mau: number;
+    dau_mau_pct: number;
+  };
   funnel: Array<{ stage: string; count: number; pct: number }>;
   cohorts: Array<{
     cohort_day: string;
@@ -467,8 +567,63 @@ export interface QuantRetention {
     d1_pct: number | null;
     d3_pct: number | null;
     d7_pct: number | null;
+    d14_pct?: number | null;
+    d30_pct?: number | null;
   }>;
   generated_at: string;
+}
+
+export interface QuantFeedbackOverview {
+  window_days: number;
+  reactions: {
+    user_breakdown: Record<string, number>;
+    user_total: number;
+    ai_breakdown: Record<string, number>;
+    ai_total: number;
+    dislike_reasons: Array<{ reason: string; count: number }>;
+  };
+  product_feedback: {
+    total: number;
+    avg_rating: number | null;
+    items: Array<{
+      id: string;
+      user_id: string;
+      user_email: string;
+      user_display_name: string;
+      rating: number;
+      sentiment: string;
+      category: string;
+      content: string;
+      status: "new" | "reviewed" | "resolved";
+      admin_note: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+  };
+  generated_at: string;
+}
+
+export interface ModelPricingResponse {
+  custom: Array<{
+    id: string;
+    model_pattern: string;
+    display_name: string;
+    input_usd_per_1m: number;
+    output_usd_per_1m: number;
+    is_active: boolean;
+    updated_at: string | null;
+  }>;
+  defaults: Array<{
+    model_pattern: string;
+    display_name: string;
+    input_usd_per_1m: number;
+    output_usd_per_1m: number;
+  }>;
+  route_fallbacks: Array<{
+    route: string;
+    input_usd_per_1m: number;
+    output_usd_per_1m: number;
+  }>;
 }
 
 export interface EvalRunItem {

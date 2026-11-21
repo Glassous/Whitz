@@ -7,7 +7,7 @@ import logging
 import re
 import socket
 import uuid
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -715,11 +715,52 @@ async def read_conversation_history(
     )
 
 
+_POSITIVE_USER_REACTIONS = frozenset({"like", "love", "sparkle", "insightful"})
+
+
+@tool
+async def react_to_user_message(
+    reaction: Literal["like", "love", "sparkle", "insightful"],
+    note: str = "",
+    config: RunnableConfig = None,  # type: ignore[assignment]
+) -> str:
+    """对用户当前这条消息给出轻量的正向鼓励/点赞回应（仅限正向：like👍 / love❤️ / sparkle✨ / insightful💡）。
+
+    严禁任何负面评价。仅当用户提出独到见解、高质量问题、清晰上下文或表达友好致谢时偶尔使用，避免每轮滥用。
+    """
+    cfg = _cfg(config)
+    if not bool(cfg.get("ai_reactions_enabled", True)):
+        return json.dumps({"ok": False, "reason": "ai_reactions_disabled"}, ensure_ascii=False)
+    cleaned = str(reaction or "").strip().lower()
+    if cleaned not in _POSITIVE_USER_REACTIONS:
+        return json.dumps(
+            {"ok": False, "error": "仅允许使用正向鼓励表情 (like, love, sparkle, insightful)"},
+            ensure_ascii=False,
+        )
+    cleaned_note = str(note or "").strip()[:120]
+    try:
+        from langgraph.config import get_stream_writer
+
+        writer = get_stream_writer()
+        writer(
+            {
+                "type": "message.reaction",
+                "author_type": "assistant",
+                "reaction": cleaned,
+                "note": cleaned_note,
+            }
+        )
+    except Exception:
+        pass
+    return json.dumps({"ok": True, "reaction": cleaned, "note": cleaned_note}, ensure_ascii=False)
+
+
 def get_builtin_tools(
     *,
     include_delegation: bool = True,
     include_hitl: bool = True,
     include_cross_chat: bool = False,
+    include_user_reaction: bool = True,
 ) -> list[BaseTool]:
     tools: list[BaseTool] = [
         rag_search_workspace,
@@ -731,6 +772,8 @@ def get_builtin_tools(
         skill_view,
         request_deep_thinking,
     ]
+    if include_user_reaction:
+        tools.append(react_to_user_message)
     if include_cross_chat:
         tools.extend([search_chat_history, read_conversation_history])
     if include_hitl:

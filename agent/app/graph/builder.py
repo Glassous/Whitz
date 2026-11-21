@@ -111,7 +111,8 @@ def _base_agent_prompt(assistant_name: str = "Whitz", *, is_main_chat: bool = Fa
         "   - 需要实时外部资料时使用 `web_search`，摘要不足时再调用 `web_extract` 精读关键页面；\n"
         "   - 复杂多步骤任务使用 `todo_list` 维护进度计划，或通过 `delegate_subtask` 委派给 `researcher` / `coder` 子智能体；\n"
         "   - 需要精确计算或验证代码时调用 `execute_code`（系统会自动暂停等待用户审批）；遇到关键歧义时调用 `clarify` 向用户追问；\n"
-        "   - 若技能摘要与当前任务相关，调用 `skill_view` 按需加载完整技能指南后再执行。\n"
+        "   - 若技能摘要与当前任务相关，调用 `skill_view` 按需加载完整技能指南后再执行；\n"
+        "   - 当用户提出精彩见解、高质量背景描述或友好致谢且工具可用时，可适度调用 `react_to_user_message` 给出正向点赞（`like`/`love`/`sparkle`/`insightful`，严禁负面回应，勿每轮刷屏）。\n"
         "3. 思考模式自主升档：若当前处于常规非思考模式，但你在分析或工具返回中发现逻辑复杂、信息矛盾或需要深度推演，可调用 `request_deep_thinking` 立即开启深度思考模式再继续作答。\n"
         "4. 回复质量规范：复杂调研、对比或技术方案采用「核心结论前置 + 清晰分点 + 来源引用」结构；简单问题直击要点、简明自然。"
     )
@@ -410,6 +411,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             include_delegation=True,
             include_hitl=True,
             include_cross_chat=is_main,
+            include_user_reaction=bool(cfg.get("ai_reactions_enabled", True)),
         )
         if not include_thinking_tool:
             builtin = [t for t in builtin if t.name != "request_deep_thinking"]

@@ -149,6 +149,7 @@ class User(Base):
     memory_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     memory_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     memory_require_confirm: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    ai_reactions_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     agent_namespace: Mapped[str] = mapped_column(String(64), unique=True)
     agent_api_key: Mapped[str] = mapped_column(String(128))
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -286,6 +287,7 @@ class AuditLog(Base):
         Index("ix_audit_logs_actor_created", "actor_user_id", "created_at"),
         Index("ix_audit_logs_action_created", "action", "created_at"),
         Index("ix_audit_logs_severity_created", "severity", "created_at"),
+        Index("ix_audit_logs_risk_created", "risk_score", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -297,11 +299,15 @@ class AuditLog(Base):
     target_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     outcome: Mapped[str] = mapped_column(String(16), default="success")
     severity: Mapped[str] = mapped_column(String(16), default="info", index=True)
+    risk_score: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
+    diff: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    prev_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
 class Conversation(Base):
@@ -425,6 +431,12 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+    reactions: Mapped[list["MessageReaction"]] = relationship(
+        back_populates="message",
+        cascade="all, delete-orphan",
+        order_by="MessageReaction.created_at",
+        lazy="noload",
+    )
 
 
 class MemoryEntry(Base):
@@ -588,6 +600,8 @@ class RunTelemetry(Base):
     tools_summary: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     skills_used: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    is_regenerated: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    hitl_denied_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -656,3 +670,74 @@ class EvalRun(Base):
     git_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     triggered_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MessageReaction(Base):
+    """Emoji/quality reactions on messages from users (including negative) or AI (positive-only)."""
+
+    __tablename__ = "message_reactions"
+    __table_args__ = (
+        UniqueConstraint("message_id", "author_type", "user_id", name="uq_message_reactions_msg_actor_user"),
+        Index("ix_message_reactions_conv_created", "conversation_id", "created_at"),
+        Index("ix_message_reactions_author_created", "author_type", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    author_type: Mapped[str] = mapped_column(String(16), default="user", server_default="user")
+    reaction: Mapped[str] = mapped_column(String(24))
+    reason_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    comment: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    message: Mapped[Message] = relationship(back_populates="reactions")
+
+
+class UserFeedback(Base):
+    """Product-level feedback & rating submitted from user Settings."""
+
+    __tablename__ = "user_feedbacks"
+    __table_args__ = (
+        Index("ix_user_feedbacks_user_created", "user_id", "created_at"),
+        Index("ix_user_feedbacks_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    rating: Mapped[int] = mapped_column(Integer, default=5, server_default="5")
+    sentiment: Mapped[str] = mapped_column(String(16), default="positive", server_default="positive")
+    category: Mapped[str] = mapped_column(String(32), default="general", server_default="general")
+    content: Mapped[str] = mapped_column(Text, default="", server_default="")
+    status: Mapped[str] = mapped_column(String(24), default="new", server_default="new")
+    admin_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ModelPricing(Base):
+    """Configurable per-1M-token USD pricing table for FinOps cost & routing-savings telemetry."""
+
+    __tablename__ = "model_pricing"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    model_pattern: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    input_usd_per_1m: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    output_usd_per_1m: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

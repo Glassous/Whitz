@@ -21,6 +21,7 @@ from app.services import (
     limits,
     membership,
     memory_service,
+    reactions,
     realtime_bus,
     skills_service,
     telemetry,
@@ -252,6 +253,46 @@ class SupervisedRun:
                             "control.resolved",
                             {"conversation_id": str(self.conv_id), "run_id": self.run_id},
                         )
+                    elif ev_name == "message.reaction":
+                        try:
+                            rd = json.loads(ev.get("data") or "{}")
+                            reaction_val = reactions.validate_reaction(
+                                author_type="assistant",
+                                reaction=str(rd.get("reaction") or ""),
+                            )
+                            if self.user_msg_id is not None:
+                                user_msg = await db.get(Message, self.user_msg_id)
+                                if user_msg is not None and user_msg.role == "user":
+                                    row = await reactions.upsert_reaction(
+                                        db,
+                                        message=user_msg,
+                                        user_id=self.user_id,
+                                        author_type="assistant",
+                                        reaction=reaction_val,
+                                        comment=str(rd.get("note") or "")[:500] or None,
+                                    )
+                                    items = await reactions.list_message_reactions(db, user_msg.id)
+                                    ev = chat_stream.sse(
+                                        "message.reaction",
+                                        {
+                                            "conversation_id": str(self.conv_id),
+                                            "message_id": str(user_msg.id),
+                                            "reaction": reactions.serialize_reaction(row),
+                                            "reactions": items,
+                                        },
+                                    )
+                                    await realtime_bus.publish_user_event(
+                                        self.user_id,
+                                        "message.reaction_updated",
+                                        {
+                                            "conversation_id": str(self.conv_id),
+                                            "message_id": str(user_msg.id),
+                                            "reactions": items,
+                                        },
+                                    )
+                        except Exception:
+                            logger.debug("Ignored invalid assistant message.reaction event", exc_info=True)
+                            continue
                     elif ev_name == "tool.started":
                         try:
                             td = json.loads(ev.get("data") or "{}")

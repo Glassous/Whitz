@@ -11,6 +11,7 @@ from app.tools.builtin_tools import (
     memory_propose,
     memory_search,
     rag_search_workspace,
+    react_to_user_message,
     skill_view,
     todo_list,
     web_extract,
@@ -126,3 +127,41 @@ async def test_builtin_tools_and_ssrf_guard():
     assert mem_s_out["count"] == 1
     mem_p_out = json.loads(await memory_propose.ainvoke({"content": "Uses Vim"}, config=run_cfg))
     assert mem_p_out["status"] == "pending_confirmation"
+
+
+@pytest.mark.asyncio
+async def test_react_to_user_message_positive_only():
+    emitted: list[dict] = []
+    with patch("langgraph.config.get_stream_writer", return_value=lambda ev: emitted.append(ev)):
+        ok_res = json.loads(
+            await react_to_user_message.ainvoke(
+                {"reaction": "love", "note": "思路很清晰"},
+                config={"configurable": {"ai_reactions_enabled": True}},
+            )
+        )
+        assert ok_res["ok"] is True
+        assert ok_res["reaction"] == "love"
+        assert emitted == [
+            {
+                "type": "message.reaction",
+                "author_type": "assistant",
+                "reaction": "love",
+                "note": "思路很清晰",
+            }
+        ]
+
+        disabled_res = json.loads(
+            await react_to_user_message.ainvoke(
+                {"reaction": "like"},
+                config={"configurable": {"ai_reactions_enabled": False}},
+            )
+        )
+        assert disabled_res["ok"] is False
+        assert disabled_res["reason"] == "ai_reactions_disabled"
+
+    # Negative reactions must be rejected at schema/runtime level
+    with pytest.raises(Exception):
+        await react_to_user_message.ainvoke(
+            {"reaction": "dislike"},
+            config={"configurable": {"ai_reactions_enabled": True}},
+        )

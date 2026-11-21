@@ -306,6 +306,7 @@ async def _build_runtime_config(
             "agent_namespace": agent_namespace,
             "memory_enabled": bool(payload.get("memory_enabled")),
             "memory_require_confirm": bool(payload.get("memory_require_confirm", True)),
+            "ai_reactions_enabled": bool(payload.get("ai_reactions_enabled", True)),
             "requested_route": str(payload.get("model_route") or "auto"),
             "timezone": str(payload.get("timezone") or "Asia/Shanghai"),
             "skills_catalog": skills_catalog,
@@ -932,6 +933,7 @@ async def execute_run(
             "requested_skills": list(payload.get("requested_skills") or payload.get("skill_names") or []),
             "memory_enabled": bool(payload.get("memory_enabled")),
             "memory_require_confirm": bool(payload.get("memory_require_confirm", True)),
+            "ai_reactions_enabled": bool(payload.get("ai_reactions_enabled", True)),
             "requested_route": str(payload.get("model_route") or "auto"),
         }
         await _stream_graph(

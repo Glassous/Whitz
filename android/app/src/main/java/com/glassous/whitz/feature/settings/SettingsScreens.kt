@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -44,6 +46,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.RateReview
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -112,6 +115,7 @@ object SettingsRoutes {
     const val ASSISTANT = "settings/assistant"
     const val PERSONA = "settings/persona"
     const val DEVICES = "settings/devices"
+    const val FEEDBACK = "settings/feedback"
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -380,6 +384,8 @@ fun SettingsHomeScreen(
                     SettingsMenuRow(Icons.Default.SmartToy, "专属助手", null) { go(SettingsRoutes.PERSONA) }
                     HorizontalDivider(color = colors.line)
                     SettingsMenuRow(Icons.Default.Devices, "登录设备", null) { go(SettingsRoutes.DEVICES) }
+                    HorizontalDivider(color = colors.line)
+                    SettingsMenuRow(Icons.Default.RateReview, "反馈与评价", null) { go(SettingsRoutes.FEEDBACK) }
                 }
             }
 
@@ -1506,6 +1512,287 @@ fun DevicesSettingsScreen(
                             if (!s.isCurrent) {
                                 TextButton(onClick = { vm.deleteSession(s.sessionId) }) {
                                     Text("下线", color = colors.danger)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private val FEEDBACK_RATINGS = listOf(
+    Triple(1, "😞", "很不满意"),
+    Triple(2, "😕", "有待改善"),
+    Triple(3, "😐", "一般般"),
+    Triple(4, "😊", "比较满意"),
+    Triple(5, "🥰", "非常棒"),
+)
+
+private val FEEDBACK_CATEGORIES = listOf(
+    "general" to "整体体验",
+    "quality" to "回答质量",
+    "speed" to "响应速度",
+    "ui" to "界面交互",
+    "feature" to "功能建议",
+    "bug" to "问题反馈",
+)
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
+@Composable
+fun FeedbackSettingsScreen(
+    vm: SettingsViewModel,
+    onBack: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val user by vm.user.collectAsState()
+    val ui by vm.ui.collectAsState()
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+    var rating by remember { mutableStateOf(5) }
+    var category by remember { mutableStateOf("general") }
+    var content by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) { vm.loadFeedbacks() }
+
+    SettingsPageScaffold(
+        title = "反馈与评价",
+        ui = ui,
+        onBack = {
+            vm.clearFeedback()
+            onBack()
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .padding(bottom = navBottom + 24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            // AI Positive Reaction Toggle
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = colors.surface,
+                border = BorderStroke(0.5.dp, colors.line),
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("AI 正向互动点赞", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = colors.fg)
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                            ) {
+                                Text(
+                                    text = "仅正向激励",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "开启后，助手可能会对你的精彩见解或清晰提问送上 👍、❤️、✨ 或 💡 等正向鼓励（永不出现负面评价）。",
+                            fontSize = 12.5.sp,
+                            color = colors.fgMuted,
+                            lineHeight = 18.sp,
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Switch(
+                        checked = user?.aiReactionsEnabled ?: true,
+                        enabled = !ui.aiReactionSaving,
+                        onCheckedChange = { vm.toggleAiReactions(it) },
+                    )
+                }
+            }
+
+            // Submit Feedback Form
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = colors.surface,
+                border = BorderStroke(0.5.dp, colors.line),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Column {
+                        Text("提交产品评价与建议", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = colors.fg)
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text("你的评分与建议将直接进入后台量化分析看板，帮助持续优化产品。", fontSize = 12.5.sp, color = colors.fgMuted)
+                    }
+
+                    Text("整体满意度", fontSize = 12.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        FEEDBACK_RATINGS.forEach { (valNum, emoji, label) ->
+                            val selected = rating == valNum
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { rating = valNum },
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else colors.canvas,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (selected) MaterialTheme.colorScheme.primary else colors.line,
+                                ),
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 2.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    Text(emoji, fontSize = 18.sp)
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(label, fontSize = 10.5.sp, color = if (selected) colors.fg else colors.fgMuted, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+
+                    Text("反馈分类", fontSize = 12.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                    androidx.compose.foundation.layout.FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        FEEDBACK_CATEGORIES.forEach { (key, label) ->
+                            val selected = category == key
+                            Surface(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .clickable { category = key },
+                                shape = RoundedCornerShape(999.dp),
+                                color = if (selected) MaterialTheme.colorScheme.primary else colors.canvas,
+                                border = BorderStroke(0.8.dp, if (selected) MaterialTheme.colorScheme.primary else colors.line),
+                            ) {
+                                Text(
+                                    text = label,
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = if (selected) MaterialTheme.colorScheme.onPrimary else colors.fgMuted,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    WhitzTextField(
+                        value = content,
+                        onValueChange = { content = it },
+                        placeholder = "告诉我们你最喜欢的功能、遇到的问题或建议…",
+                        singleLine = false,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        Button(
+                            onClick = {
+                                vm.submitFeedback(rating, category, content) {
+                                    content = ""
+                                    rating = 5
+                                }
+                            },
+                            enabled = content.isNotBlank() && !ui.feedbackSubmitting,
+                            shapes = ButtonDefaults.shapesFor(40.dp),
+                        ) {
+                            Text(if (ui.feedbackSubmitting) "提交中…" else "提交评价反馈")
+                        }
+                    }
+                }
+            }
+
+            // History
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = colors.surface,
+                border = BorderStroke(0.5.dp, colors.line),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("我的反馈记录", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = colors.fg)
+                        Text("共 ${ui.feedbacks.size} 条", fontSize = 12.sp, color = colors.fgFaint)
+                    }
+                    if (ui.feedbacks.isEmpty()) {
+                        Text(
+                            text = "还没有提交过产品评价，欢迎随时分享你的体验。",
+                            fontSize = 13.sp,
+                            color = colors.fgFaint,
+                            modifier = Modifier.padding(vertical = 8.dp),
+                        )
+                    } else {
+                        ui.feedbacks.forEach { item ->
+                            val ratingEmoji = FEEDBACK_RATINGS.firstOrNull { it.first == item.rating }?.second ?: "😊"
+                            val catLabel = FEEDBACK_CATEGORIES.firstOrNull { it.first == item.category }?.second ?: item.category
+                            val statusText = when (item.status) {
+                                "resolved" -> "已解决"
+                                "reviewed" -> "已查看"
+                                else -> "待处理"
+                            }
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
+                                color = colors.canvas,
+                                border = BorderStroke(0.5.dp, colors.line),
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            text = "$ratingEmoji ${item.rating}/5 · $catLabel · $statusText",
+                                            fontSize = 12.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = colors.fg,
+                                        )
+                                        Text(
+                                            text = DateTimeUtils.formatShort(item.createdAt),
+                                            fontSize = 11.5.sp,
+                                            color = colors.fgFaint,
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(item.content, fontSize = 13.5.sp, color = colors.fg, lineHeight = 19.sp)
+                                    if (!item.adminNote.isNullOrBlank()) {
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = colors.surface,
+                                        ) {
+                                            Text(
+                                                text = "官方回复：${item.adminNote}",
+                                                fontSize = 12.sp,
+                                                color = colors.fgMuted,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

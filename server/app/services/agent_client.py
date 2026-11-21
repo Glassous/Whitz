@@ -158,6 +158,7 @@ class AgentClient:
         timezone: str | None = None,
         memory_enabled: bool = False,
         memory_require_confirm: bool = True,
+        ai_reactions_enabled: bool = True,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -174,6 +175,7 @@ class AgentClient:
             "timezone": (timezone or "").strip() or "Asia/Shanghai",
             "memory_enabled": bool(memory_enabled),
             "memory_require_confirm": bool(memory_require_confirm),
+            "ai_reactions_enabled": bool(ai_reactions_enabled),
         }
         if rolling_summary:
             payload["rolling_summary"] = rolling_summary

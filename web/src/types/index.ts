@@ -27,6 +27,7 @@ export interface User {
   memory_enabled: boolean;
   memory_consented_at: string | null;
   memory_require_confirm: boolean;
+  ai_reactions_enabled?: boolean;
   created_at: string;
 }
 
@@ -236,6 +237,32 @@ export interface ToolPayload {
   artifacts?: WorkspaceArtifactMeta[];
 }
 
+export type UserReactionType = "like" | "love" | "insightful" | "celebrate" | "dislike";
+export type AiReactionType = "like" | "love" | "sparkle" | "insightful";
+
+export interface MessageReaction {
+  id: string;
+  message_id: string;
+  author_type: "user" | "assistant" | string;
+  reaction: UserReactionType | AiReactionType | string;
+  reason_code?: string | null;
+  comment?: string | null;
+  created_at: string;
+}
+
+export interface UserFeedbackItem {
+  id: string;
+  user_id: string;
+  rating: number;
+  sentiment: "positive" | "neutral" | "negative" | string;
+  category: "general" | "quality" | "speed" | "ui" | "feature" | "bug" | string;
+  content: string;
+  status: "new" | "reviewed" | "resolved" | string;
+  admin_note?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
@@ -245,6 +272,7 @@ export interface Message {
   status: MessageStatus;
   run_id: string | null;
   created_at: string;
+  reactions?: MessageReaction[];
 }
 
 export interface ConversationDetail extends Conversation {

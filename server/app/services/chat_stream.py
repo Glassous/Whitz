@@ -720,6 +720,9 @@ class ChatPipeline:
             await self.db.commit()
             yield sse(name, payload)
 
+        elif name == "message.reaction":
+            yield sse("message.reaction", payload)
+
         elif name == "run.completed":
             self.terminal = True
             for art in await self._collect_new_artifacts():
@@ -1258,6 +1261,7 @@ async def _prepare_turn_context(
         "timezone": (getattr(user, "timezone", None) or "").strip() or "Asia/Shanghai",
         "memory_enabled": bool(user.memory_enabled and user.memory_consented_at),
         "memory_require_confirm": bool(user.memory_require_confirm),
+        "ai_reactions_enabled": bool(getattr(user, "ai_reactions_enabled", True)),
         "attachments": attachments_meta,
         "skills": active_skills_meta,
         "requested_skills": cleaned_skills,
@@ -1306,6 +1310,7 @@ async def _launch_supervised_turn(
         timezone=turn_ctx.get("timezone") or getattr(user, "timezone", None) or "Asia/Shanghai",
         memory_enabled=bool(turn_ctx.get("memory_enabled")),
         memory_require_confirm=bool(turn_ctx.get("memory_require_confirm", True)),
+        ai_reactions_enabled=bool(turn_ctx.get("ai_reactions_enabled", True)),
         idempotency_key=idempotency_key or uuid.uuid4().hex,
     )
     run_id = str(run.get("run_id") or run.get("id"))

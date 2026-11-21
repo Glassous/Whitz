@@ -83,6 +83,7 @@ class CreateRunRequest(BaseModel):
     skill_names: list[str] = Field(default_factory=list)
     memory_enabled: bool = False
     memory_require_confirm: bool = True
+    ai_reactions_enabled: bool = True
     model_route: str = "auto"
     idempotency_key: str | None = None
 

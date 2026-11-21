@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.metrics import record_run_metrics
 from app.db.models import Message, RunTelemetry
-from app.services import usage
+from app.services import pricing, usage
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,14 @@ async def record_run_telemetry(
         tools_summary=tools_summary,
     )
 
+    estimated_cost_usd = await pricing.resolve_and_calculate_cost(
+        db,
+        model_name=model_name,
+        model_route=route,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+
     try:
         stmt = (
             insert(RunTelemetry)
@@ -127,7 +135,7 @@ async def record_run_telemetry(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
-                estimated_cost_usd=0.0,
+                estimated_cost_usd=estimated_cost_usd,
                 tool_calls_count=tool_calls_count,
                 tool_errors_count=tool_errors_count,
                 tools_summary=tools_summary or None,

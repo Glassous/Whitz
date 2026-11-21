@@ -3,10 +3,15 @@ package com.glassous.whitz.feature.chat
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,6 +36,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
@@ -46,6 +52,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SentimentSatisfied
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -73,8 +80,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -103,6 +116,30 @@ import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
 import com.glassous.whitz.ui.theme.WhitzTextField
 
+internal data class ReactionOption(val key: String, val emoji: String, val label: String)
+
+internal val USER_REACTION_OPTIONS = listOf(
+    ReactionOption("like", "👍", "赞"),
+    ReactionOption("love", "❤️", "超喜欢"),
+    ReactionOption("insightful", "💡", "有启发"),
+    ReactionOption("celebrate", "🎉", "太棒了"),
+    ReactionOption("dislike", "👎", "需改进"),
+)
+
+private val AI_REACTION_LABELS = mapOf(
+    "like" to ("👍" to "点赞"),
+    "love" to ("❤️" to "比心"),
+    "sparkle" to ("✨" to "亮点"),
+    "insightful" to ("💡" to "有洞察"),
+)
+
+private val DISLIKE_REASON_OPTIONS = listOf(
+    "inaccurate" to "事实有误",
+    "incomplete" to "不够完整",
+    "slow" to "响应偏慢",
+    "other" to "其他",
+)
+
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun MessageBubble(
@@ -113,144 +150,189 @@ fun MessageBubble(
     waitingFirstByte: Boolean = false,
     isActiveTurn: Boolean,
     isSelectedTurn: Boolean = false,
+    isEditing: Boolean = false,
+    isSelectingText: Boolean = false,
+    showDislikeReasons: Boolean = false,
     liveLabel: String? = null,
     turnPlan: Plan? = null,
     turnReasoning: List<ReasoningBlock>? = null,
     convFiles: List<ConversationFile>,
-    onCopy: (String) -> Unit,
+    assistantName: String = "Whitz",
     onRegenerate: (String) -> Unit,
-    onEditSubmit: (String, String) -> Unit,
+    onExitTextSelection: () -> Unit = {},
+    onDismissDislikeReasons: () -> Unit = {},
+    onLongPress: (Offset) -> Unit = {},
     onOpenTurnDetails: (String) -> Unit,
     onOpenFile: (ConversationFile) -> Unit,
+    onReact: (messageId: String, reaction: String, reasonCode: String?) -> Unit = { _, _, _ -> },
 ) {
     val colors = LocalWhitzColors.current
-    val clipboard = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
 
     when (message.role) {
         "user" -> {
-            var editing by remember(message.id) { mutableStateOf(false) }
-            var draft by remember(message.id, message.content) { mutableStateOf(message.content) }
-
-            BackHandler(enabled = editing) {
-                editing = false
-                draft = message.content
-            }
+            var bubbleCoords by remember(message.id) { mutableStateOf<LayoutCoordinates?>(null) }
 
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.End,
             ) {
-                if (editing) {
+                val attachments = message.toolPayload?.attachments.orEmpty()
+                val skills = message.toolPayload?.skills.orEmpty()
+                val bubbleShape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
+
+                if (isEditing || isSelectingText) {
                     Surface(
-                        modifier = Modifier.fillMaxWidth(0.92f),
-                        shape = RoundedCornerShape(18.dp),
+                        modifier = Modifier.padding(bottom = 5.dp),
+                        shape = RoundedCornerShape(999.dp),
                         color = colors.surface,
-                        border = BorderStroke(1.dp, colors.lineStrong),
+                        border = BorderStroke(0.8.dp, colors.lineStrong),
                     ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            WhitzTextField(
-                                value = draft,
-                                onValueChange = { draft = it },
-                                singleLine = false,
-                                maxLines = 8,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                                TextButton(onClick = { editing = false; draft = message.content }) {
-                                    Text("取消", color = colors.fgMuted)
-                                }
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Button(
-                                    onClick = {
-                                        editing = false
-                                        onEditSubmit(message.id, draft)
-                                    },
-                                    shapes = ButtonDefaults.shapesFor(36.dp),
-                                    enabled = draft.isNotBlank() && !streaming && !hasActiveUploads,
-                                    modifier = Modifier.height(36.dp),
-                                    contentPadding = PaddingValues(horizontal = 14.dp),
-                                ) { Text("保存并重发", fontSize = 13.sp) }
+                        Row(
+                            modifier = Modifier
+                                .clickable(enabled = isSelectingText, onClick = onExitTextSelection)
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            if (isEditing) {
+                                Icon(
+                                    Icons.Default.Edit,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(12.dp),
+                                )
+                                Text(
+                                    text = "正在编辑此消息",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = colors.fg,
+                                )
+                            } else {
+                                Text(
+                                    text = "长按拖动选择文字",
+                                    fontSize = 11.5.sp,
+                                    color = colors.fgMuted,
+                                )
+                                Text(
+                                    text = "完成",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
                             }
                         }
                     }
-                } else {
-                    val attachments = message.toolPayload?.attachments.orEmpty()
-                    val skills = message.toolPayload?.skills.orEmpty()
+                }
 
-                    Column(
-                        modifier = Modifier
-                            .widthIn(max = 320.dp)
-                            .clip(RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
-                            .background(MaterialTheme.colorScheme.primary)
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                    ) {
-                        if (attachments.isNotEmpty()) {
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier.padding(bottom = if (message.content.isNotBlank()) 6.dp else 0.dp),
-                            ) {
-                                attachments.forEach { att ->
-                                    val targetFile = convFiles.firstOrNull { it.id == att.id } ?: ConversationFile(
-                                        id = att.id,
-                                        filename = att.filename,
-                                        ext = att.ext,
-                                        category = att.category,
-                                        sizeBytes = att.sizeBytes,
+                Column(
+                    modifier = Modifier
+                        .widthIn(max = 320.dp)
+                        .clip(bubbleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                        .then(
+                            if (isEditing || isSelectingText) {
+                                Modifier.border(1.5.dp, colors.fgMuted.copy(alpha = 0.7f), bubbleShape)
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .onGloballyPositioned { bubbleCoords = it }
+                        .then(
+                            if (!isSelectingText) {
+                                Modifier.pointerInput(message.id) {
+                                    detectTapGestures(
+                                        onLongPress = { localOffset ->
+                                            val coords = bubbleCoords
+                                            if (coords != null && coords.isAttached) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                onLongPress(coords.localToWindow(localOffset))
+                                            }
+                                        },
                                     )
-                                    Row(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.14f))
-                                            .clickable { onOpenFile(targetFile) }
-                                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Icon(
-                                            Icons.Default.AttachFile,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.onPrimary,
-                                            modifier = Modifier.size(13.dp),
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            text = att.filename,
-                                            color = MaterialTheme.colorScheme.onPrimary,
-                                            fontSize = 12.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
+                                }
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                ) {
+                    if (attachments.isNotEmpty()) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.padding(bottom = if (message.content.isNotBlank()) 6.dp else 0.dp),
+                        ) {
+                            attachments.forEach { att ->
+                                val targetFile = convFiles.firstOrNull { it.id == att.id } ?: ConversationFile(
+                                    id = att.id,
+                                    filename = att.filename,
+                                    ext = att.ext,
+                                    category = att.category,
+                                    sizeBytes = att.sizeBytes,
+                                )
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.14f))
+                                        .clickable { onOpenFile(targetFile) }
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        Icons.Default.AttachFile,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier.size(13.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = att.filename,
+                                        color = MaterialTheme.colorScheme.onPrimary,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
                             }
                         }
-                        if (skills.isNotEmpty()) {
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier.padding(bottom = 6.dp),
-                            ) {
-                                skills.forEach { sk ->
-                                    Row(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.16f))
-                                            .padding(horizontal = 6.dp, vertical = 2.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Icon(
-                                            Icons.Default.AutoAwesome,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.onPrimary,
-                                            modifier = Modifier.size(11.dp),
-                                        )
-                                        Spacer(modifier = Modifier.width(3.dp))
-                                        Text(sk, color = MaterialTheme.colorScheme.onPrimary, fontSize = 11.sp)
-                                    }
+                    }
+                    if (skills.isNotEmpty()) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.padding(bottom = 6.dp),
+                        ) {
+                            skills.forEach { sk ->
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.16f))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier.size(11.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(sk, color = MaterialTheme.colorScheme.onPrimary, fontSize = 11.sp)
                                 }
                             }
                         }
-                        if (message.content.isNotBlank()) {
+                    }
+                    if (message.content.isNotBlank()) {
+                        if (isSelectingText) {
+                            SelectionContainer {
+                                Text(
+                                    text = message.content,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    fontSize = 15.sp,
+                                    lineHeight = 22.sp,
+                                )
+                            }
+                        } else {
                             Text(
                                 text = message.content,
                                 color = MaterialTheme.colorScheme.onPrimary,
@@ -259,26 +341,38 @@ fun MessageBubble(
                             )
                         }
                     }
+                }
 
-                    Row(
-                        modifier = Modifier.padding(top = 2.dp),
-                        horizontalArrangement = Arrangement.End,
+                val aiReaction = message.reactions.firstOrNull { it.authorType == "assistant" }
+                if (aiReaction != null) {
+                    val (emoji, label) = AI_REACTION_LABELS[aiReaction.reaction] ?: ("👍" to "点赞")
+                    Surface(
+                        modifier = Modifier.padding(top = 4.dp),
+                        shape = RoundedCornerShape(999.dp),
+                        color = colors.surface,
+                        border = BorderStroke(0.5.dp, colors.line),
                     ) {
-                        IconButton(
-                            onClick = {
-                                clipboard.setText(AnnotatedString(message.content))
-                                onCopy(message.content)
-                            },
-                            modifier = Modifier.size(28.dp),
+                        Row(
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = "复制", tint = colors.fgFaint, modifier = Modifier.size(14.dp))
-                        }
-                        if (!streaming) {
-                            IconButton(
-                                onClick = { editing = true },
-                                modifier = Modifier.size(28.dp),
-                            ) {
-                                Icon(Icons.Default.Edit, contentDescription = "编辑", tint = colors.fgFaint, modifier = Modifier.size(14.dp))
+                            Text(emoji, fontSize = 12.sp)
+                            Text(
+                                text = "$assistantName · $label",
+                                fontSize = 11.5.sp,
+                                color = colors.fgMuted,
+                            )
+                            val note = aiReaction.comment
+                            if (!note.isNullOrBlank()) {
+                                Text(
+                                    text = "· $note",
+                                    fontSize = 11.sp,
+                                    color = colors.fgFaint,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 150.dp),
+                                )
                             }
                         }
                     }
@@ -296,8 +390,60 @@ fun MessageBubble(
             val stepsCount = computeStepsCount(effectivePlan, effectiveReasoning)
             val hasStepsOrReasoning = effectiveReasoning.isNotEmpty() || !effectivePlan?.items.isNullOrEmpty()
             val artifacts = message.toolPayload?.artifacts.orEmpty()
+            val canOpenMenu = !isLive && (message.content.isNotBlank() || isFailureOrCancelled)
+            var assistantCoords by remember(message.id) { mutableStateOf<LayoutCoordinates?>(null) }
 
-            Column(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onGloballyPositioned { assistantCoords = it }
+                    .then(
+                        if (canOpenMenu && !isSelectingText) {
+                            Modifier.pointerInput(message.id, canOpenMenu) {
+                                detectTapGestures(
+                                    onLongPress = { localOffset ->
+                                        val coords = assistantCoords
+                                        if (coords != null && coords.isAttached) {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            onLongPress(coords.localToWindow(localOffset))
+                                        }
+                                    },
+                                )
+                            }
+                        } else {
+                            Modifier
+                        },
+                    ),
+            ) {
+                if (isSelectingText) {
+                    Surface(
+                        modifier = Modifier.padding(bottom = 8.dp),
+                        shape = RoundedCornerShape(999.dp),
+                        color = colors.surface,
+                        border = BorderStroke(0.8.dp, colors.lineStrong),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .clickable(onClick = onExitTextSelection)
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = "长按拖动选择文字",
+                                fontSize = 11.5.sp,
+                                color = colors.fgMuted,
+                            )
+                            Text(
+                                text = "完成",
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
+
                 if (hasStepsOrReasoning || isLive) {
                     val primaryColor = MaterialTheme.colorScheme.primary
                     Row(
@@ -341,10 +487,19 @@ fun MessageBubble(
                 }
 
                 if (message.content.isNotBlank()) {
-                    MarkdownText(
-                        markdown = message.content,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    if (isSelectingText) {
+                        SelectionContainer {
+                            MarkdownText(
+                                markdown = message.content,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    } else {
+                        MarkdownText(
+                            markdown = message.content,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 } else if (message.status == "streaming") {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
                         WhitzLoadingIndicator(size = 16.dp)
@@ -424,29 +579,70 @@ fun MessageBubble(
                     }
                 }
 
-                if (!isLive && (message.content.isNotBlank() || isFailureOrCancelled)) {
-                    Row(
-                        modifier = Modifier.padding(top = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (message.content.isNotBlank()) {
-                            IconButton(
-                                onClick = {
-                                    clipboard.setText(AnnotatedString(message.content))
-                                    onCopy(message.content)
-                                },
-                                modifier = Modifier.size(30.dp),
+                if (canOpenMenu) {
+                    val userReaction = message.reactions.firstOrNull { it.authorType == "user" }
+                    val selectedMeta = USER_REACTION_OPTIONS.firstOrNull { it.key == userReaction?.reaction }
+
+                    if (selectedMeta != null) {
+                        Surface(
+                            modifier = Modifier.padding(top = 6.dp),
+                            shape = RoundedCornerShape(999.dp),
+                            color = if (selectedMeta.key == "dislike") colors.dangerWeak else colors.surface,
+                            border = BorderStroke(
+                                0.5.dp,
+                                if (selectedMeta.key == "dislike") colors.danger.copy(alpha = 0.4f) else colors.line,
+                            ),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = "复制", tint = colors.fgFaint, modifier = Modifier.size(15.dp))
+                                Text(selectedMeta.emoji, fontSize = 12.sp)
+                                Text(
+                                    text = selectedMeta.label,
+                                    fontSize = 11.5.sp,
+                                    color = if (selectedMeta.key == "dislike") colors.danger else colors.fgMuted,
+                                )
                             }
                         }
-                        if (!streaming) {
-                            IconButton(
-                                onClick = { onRegenerate(message.id) },
-                                enabled = !hasActiveUploads,
-                                modifier = Modifier.size(30.dp),
-                            ) {
-                                Icon(Icons.Default.Refresh, contentDescription = "重新生成", tint = colors.fgFaint, modifier = Modifier.size(15.dp))
+                    }
+
+                    if (showDislikeReasons && userReaction?.reaction == "dislike") {
+                        FlowRow(
+                            modifier = Modifier.padding(top = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = "反馈原因：",
+                                fontSize = 11.5.sp,
+                                color = colors.fgFaint,
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                            )
+                            DISLIKE_REASON_OPTIONS.forEach { (code, label) ->
+                                val selected = userReaction.reasonCode == code
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = if (selected) colors.dangerWeak else colors.surface,
+                                    border = BorderStroke(
+                                        0.8.dp,
+                                        if (selected) colors.danger.copy(alpha = 0.5f) else colors.line,
+                                    ),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .clickable {
+                                            onReact(message.id, "dislike", code)
+                                            onDismissDislikeReasons()
+                                        },
+                                ) {
+                                    Text(
+                                        text = label,
+                                        fontSize = 11.5.sp,
+                                        color = if (selected) colors.danger else colors.fgMuted,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    )
+                                }
                             }
                         }
                     }

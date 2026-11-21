@@ -1,8 +1,12 @@
 import asyncio
+import csv
+import io
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import Date, and_, case, cast, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -973,23 +977,66 @@ async def revoke_user_session(
     )
 
 
-@router.get("/audit-logs")
-async def list_audit_logs(
-    q: str | None = Query(default=None, max_length=200),
-    action: str | None = Query(default=None, max_length=80),
-    severity: str | None = Query(default=None, pattern="^(info|warning|critical)$"),
-    outcome: str | None = Query(default=None, pattern="^(success|failure)$"),
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=50, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
-) -> dict:
-    stmt = select(AuditLog)
+def _serialize_audit_row(row: AuditLog, *, mask_pii: bool = False) -> dict:
+    email = audit.mask_email(row.actor_email) if mask_pii else row.actor_email
+    ip = audit.mask_ip(row.ip) if mask_pii else row.ip
+    return {
+        "id": row.id,
+        "created_at": row.created_at,
+        "actor_user_id": str(row.actor_user_id) if row.actor_user_id else None,
+        "actor_email": email,
+        "action": row.action,
+        "target_type": row.target_type,
+        "target_id": row.target_id,
+        "outcome": row.outcome,
+        "severity": row.severity,
+        "risk_score": int(getattr(row, "risk_score", 0) or 0),
+        "ip": ip,
+        "user_agent": row.user_agent,
+        "request_id": row.request_id,
+        "session_id": str(row.session_id) if row.session_id else None,
+        "metadata": row.metadata_,
+        "diff": getattr(row, "diff", None),
+        "prev_hash": getattr(row, "prev_hash", None),
+        "record_hash": getattr(row, "record_hash", None),
+    }
+
+
+def _apply_audit_filters(
+    stmt,
+    *,
+    q: str | None = None,
+    action: str | None = None,
+    action_prefix: str | None = None,
+    severity: str | None = None,
+    outcome: str | None = None,
+    ip: str | None = None,
+    request_id: str | None = None,
+    session_id: uuid.UUID | None = None,
+    min_risk: int | None = None,
+    from_at: datetime | None = None,
+    to_at: datetime | None = None,
+):
     if action:
         stmt = stmt.where(AuditLog.action == action)
+    if action_prefix:
+        stmt = stmt.where(AuditLog.action.startswith(action_prefix.strip()))
     if severity:
         stmt = stmt.where(AuditLog.severity == severity)
     if outcome:
         stmt = stmt.where(AuditLog.outcome == outcome)
+    if ip:
+        stmt = stmt.where(AuditLog.ip == ip.strip())
+    if request_id:
+        stmt = stmt.where(AuditLog.request_id == request_id.strip())
+    if session_id:
+        stmt = stmt.where(AuditLog.session_id == session_id)
+    if min_risk is not None and min_risk > 0:
+        stmt = stmt.where(AuditLog.risk_score >= min_risk)
+    if from_at is not None:
+        stmt = stmt.where(AuditLog.created_at >= _aware(from_at))
+    if to_at is not None:
+        stmt = stmt.where(AuditLog.created_at <= _aware(to_at))
     if q:
         pattern = f"%{q.lower()}%"
         stmt = stmt.where(
@@ -997,32 +1044,267 @@ async def list_audit_logs(
                 func.lower(func.coalesce(AuditLog.actor_email, "")).like(pattern),
                 func.lower(AuditLog.action).like(pattern),
                 func.lower(func.coalesce(AuditLog.target_id, "")).like(pattern),
+                func.lower(func.coalesce(AuditLog.ip, "")).like(pattern),
+                func.lower(func.coalesce(AuditLog.request_id, "")).like(pattern),
             )
         )
+    return stmt
+
+
+@router.get("/audit-logs")
+async def list_audit_logs(
+    q: str | None = Query(default=None, max_length=200),
+    action: str | None = Query(default=None, max_length=80),
+    action_prefix: str | None = Query(default=None, max_length=64),
+    severity: str | None = Query(default=None, pattern="^(info|warning|critical)$"),
+    outcome: str | None = Query(default=None, pattern="^(success|failure)$"),
+    ip: str | None = Query(default=None, max_length=64),
+    request_id: str | None = Query(default=None, max_length=64),
+    session_id: uuid.UUID | None = Query(default=None),
+    min_risk: int | None = Query(default=None, ge=0, le=100),
+    from_at: datetime | None = Query(default=None),
+    to_at: datetime | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    stmt = _apply_audit_filters(
+        select(AuditLog),
+        q=q,
+        action=action,
+        action_prefix=action_prefix,
+        severity=severity,
+        outcome=outcome,
+        ip=ip,
+        request_id=request_id,
+        session_id=session_id,
+        min_risk=min_risk,
+        from_at=from_at,
+        to_at=to_at,
+    )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     result = await db.execute(
         stmt.order_by(AuditLog.id.desc()).offset((page - 1) * page_size).limit(page_size)
     )
-    items = [
-        {
-            "id": row.id,
-            "created_at": row.created_at,
-            "actor_user_id": str(row.actor_user_id) if row.actor_user_id else None,
-            "actor_email": row.actor_email,
-            "action": row.action,
-            "target_type": row.target_type,
-            "target_id": row.target_id,
-            "outcome": row.outcome,
-            "severity": row.severity,
-            "ip": row.ip,
-            "user_agent": row.user_agent,
-            "request_id": row.request_id,
-            "session_id": str(row.session_id) if row.session_id else None,
-            "metadata": row.metadata_,
-        }
-        for row in result.scalars().all()
-    ]
+    items = [_serialize_audit_row(row) for row in result.scalars().all()]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/audit-logs/verify")
+async def verify_audit_chain(
+    limit: int = Query(default=1000, ge=1, le=10000),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return await audit.verify_hash_chain(db, limit=limit)
+
+
+@router.get("/audit-logs/analytics")
+async def audit_analytics(
+    days: int = Query(default=14, ge=1, le=90),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    now = datetime.now(timezone.utc)
+    end_day = now.date()
+    start_day = end_day - timedelta(days=days - 1)
+    since = datetime.combine(start_day, datetime.min.time(), tzinfo=timezone.utc)
+
+    day_expr = _utc_day_expr(AuditLog.created_at)
+    daily_rows = (
+        await db.execute(
+            select(
+                day_expr,
+                func.count(AuditLog.id),
+                func.coalesce(func.sum(case((AuditLog.outcome != "success", 1), else_=0)), 0),
+                func.coalesce(func.sum(case((AuditLog.risk_score >= 60, 1), else_=0)), 0),
+            )
+            .where(AuditLog.created_at >= since)
+            .group_by(day_expr)
+            .order_by(day_expr.asc())
+        )
+    ).all()
+    by_day = {r[0]: (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0)) for r in daily_rows}
+    daily = [
+        {
+            "day": (start_day + timedelta(days=i)).isoformat(),
+            "total": by_day.get(start_day + timedelta(days=i), (0, 0, 0))[0],
+            "failures": by_day.get(start_day + timedelta(days=i), (0, 0, 0))[1],
+            "high_risk": by_day.get(start_day + timedelta(days=i), (0, 0, 0))[2],
+        }
+        for i in range(days)
+    ]
+
+    top_actions_rows = (
+        await db.execute(
+            select(
+                AuditLog.action,
+                func.count(AuditLog.id),
+                func.coalesce(func.sum(case((AuditLog.outcome != "success", 1), else_=0)), 0),
+                func.avg(AuditLog.risk_score),
+            )
+            .where(AuditLog.created_at >= since)
+            .group_by(AuditLog.action)
+            .order_by(func.count(AuditLog.id).desc())
+            .limit(10)
+        )
+    ).all()
+    top_actions = [
+        {
+            "action": str(r[0]),
+            "count": int(r[1] or 0),
+            "failures": int(r[2] or 0),
+            "avg_risk": round(float(r[3] or 0.0), 1),
+        }
+        for r in top_actions_rows
+    ]
+
+    top_ip_rows = (
+        await db.execute(
+            select(
+                AuditLog.ip,
+                func.count(AuditLog.id),
+                func.coalesce(func.sum(case((AuditLog.outcome != "success", 1), else_=0)), 0),
+            )
+            .where(AuditLog.created_at >= since, AuditLog.ip.is_not(None), AuditLog.ip != "")
+            .group_by(AuditLog.ip)
+            .order_by(func.sum(case((AuditLog.outcome != "success", 1), else_=0)).desc(), func.count(AuditLog.id).desc())
+            .limit(8)
+        )
+    ).all()
+    top_ips = [
+        {"ip": str(r[0]), "count": int(r[1] or 0), "failures": int(r[2] or 0)}
+        for r in top_ip_rows
+    ]
+
+    total_events = sum(d["total"] for d in daily)
+    total_failures = sum(d["failures"] for d in daily)
+    total_high_risk = sum(d["high_risk"] for d in daily)
+
+    return {
+        "window_days": days,
+        "summary": {
+            "total_events": total_events,
+            "failures": total_failures,
+            "failure_rate_pct": round((total_failures / max(1, total_events)) * 100, 2) if total_events else 0.0,
+            "high_risk_events": total_high_risk,
+        },
+        "daily": daily,
+        "top_actions": top_actions,
+        "top_ips": top_ips,
+        "generated_at": now.isoformat(),
+    }
+
+
+@router.get("/audit-logs/trace/{trace_id}")
+async def trace_audit_timeline(
+    trace_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    cleaned = trace_id.strip()
+    if not cleaned:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "trace_id_required")
+    cond = AuditLog.request_id == cleaned
+    try:
+        sid = uuid.UUID(cleaned)
+        cond = or_(AuditLog.request_id == cleaned, AuditLog.session_id == sid)
+    except ValueError:
+        pass
+    rows = (
+        await db.execute(select(AuditLog).where(cond).order_by(AuditLog.created_at.asc(), AuditLog.id.asc()).limit(200))
+    ).scalars().all()
+    return {
+        "trace_id": cleaned,
+        "count": len(rows),
+        "items": [_serialize_audit_row(r) for r in rows],
+    }
+
+
+@router.get("/audit-logs/export")
+async def export_audit_logs(
+    request: Request,
+    format: str = Query(default="csv", pattern="^(csv|jsonl)$"),
+    mask_pii: bool = Query(default=True),
+    q: str | None = Query(default=None, max_length=200),
+    action: str | None = Query(default=None, max_length=80),
+    action_prefix: str | None = Query(default=None, max_length=64),
+    severity: str | None = Query(default=None, pattern="^(info|warning|critical)$"),
+    outcome: str | None = Query(default=None, pattern="^(success|failure)$"),
+    min_risk: int | None = Query(default=None, ge=0, le=100),
+    limit: int = Query(default=2000, ge=1, le=5000),
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = _apply_audit_filters(
+        select(AuditLog),
+        q=q,
+        action=action,
+        action_prefix=action_prefix,
+        severity=severity,
+        outcome=outcome,
+        min_risk=min_risk,
+    )
+    rows = (await db.execute(stmt.order_by(AuditLog.id.desc()).limit(limit))).scalars().all()
+    serialized = [_serialize_audit_row(r, mask_pii=mask_pii) for r in rows]
+
+    await audit.record(
+        "admin.audit_export",
+        actor=admin,
+        target_type="audit_log",
+        severity="warning" if not mask_pii else "info",
+        request=request,
+        metadata={"format": format, "mask_pii": mask_pii, "exported_count": len(serialized)},
+    )
+
+    ts_tag = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    if format == "jsonl":
+        body = "\n".join(json.dumps(item, ensure_ascii=False, default=str) for item in serialized)
+        return Response(
+            content=body,
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition": f'attachment; filename="whitz-audit-{ts_tag}.jsonl"'},
+        )
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "id",
+            "created_at",
+            "actor_email",
+            "action",
+            "target_type",
+            "target_id",
+            "outcome",
+            "severity",
+            "risk_score",
+            "ip",
+            "request_id",
+            "session_id",
+            "record_hash",
+        ]
+    )
+    for item in serialized:
+        writer.writerow(
+            [
+                item["id"],
+                item["created_at"].isoformat() if hasattr(item["created_at"], "isoformat") else item["created_at"],
+                item["actor_email"] or "",
+                item["action"],
+                item["target_type"] or "",
+                item["target_id"] or "",
+                item["outcome"],
+                item["severity"],
+                item["risk_score"],
+                item["ip"] or "",
+                item["request_id"] or "",
+                item["session_id"] or "",
+                item["record_hash"] or "",
+            ]
+        )
+    return StreamingResponse(
+        iter([buf.getvalue().encode("utf-8-sig")]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="whitz-audit-{ts_tag}.csv"'},
+    )
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserOut)
@@ -1040,9 +1322,13 @@ async def update_user(
         if body.is_active is False or (body.role is not None and body.role != "admin"):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能禁用或降级自己的管理员账号")
 
+    before_state: dict = {}
+    after_state: dict = {}
     changes: dict = {}
     if body.is_active is not None and body.is_active != user.is_active:
+        before_state["is_active"] = user.is_active
         user.is_active = body.is_active
+        after_state["is_active"] = body.is_active
         changes["is_active"] = body.is_active
         if not body.is_active:
             user.token_version = (user.token_version or 0) + 1
@@ -1052,7 +1338,9 @@ async def update_user(
                 .values(revoked_at=datetime.now(timezone.utc))
             )
     if body.role is not None and body.role != user.role:
+        before_state["role"] = user.role
         user.role = body.role
+        after_state["role"] = body.role
         changes["role"] = body.role
     await db.commit()
     await db.refresh(user)
@@ -1064,5 +1352,6 @@ async def update_user(
             target_id=user.id,
             request=request,
             metadata={"changes": changes, "email": user.email},
+            diff={"before": before_state, "after": after_state},
         )
     return user

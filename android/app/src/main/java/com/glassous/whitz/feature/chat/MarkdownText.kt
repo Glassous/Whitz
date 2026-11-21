@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
@@ -32,11 +31,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -175,14 +176,19 @@ private fun buildInlineAnnotated(
                     if (closeParen > closeBracket + 2) {
                         val label = text.substring(idx + 1, closeBracket)
                         val url = text.substring(closeBracket + 2, closeParen)
-                        val start = length
-                        append(label)
-                        addStyle(
-                            SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline),
-                            start,
-                            length,
-                        )
-                        addStringAnnotation("URL", url, start, length)
+                        withLink(
+                            LinkAnnotation.Url(
+                                url = url,
+                                styles = TextLinkStyles(
+                                    style = SpanStyle(
+                                        color = linkColor,
+                                        textDecoration = TextDecoration.Underline,
+                                    ),
+                                ),
+                            ),
+                        ) {
+                            append(label)
+                        }
                         idx = closeParen + 1
                         continue
                     }
@@ -251,7 +257,6 @@ private fun buildInlineAnnotated(
     }
 }
 
-@Suppress("DEPRECATION")
 @Composable
 private fun InlineMdText(
     text: String,
@@ -259,26 +264,16 @@ private fun InlineMdText(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalWhitzColors.current
-    val uriHandler = LocalUriHandler.current
     val annotated = buildInlineAnnotated(
         text = text,
         linkColor = if (colors.isDark) Color(0xFF93C5FD) else Color(0xFF2563EB),
         codeBg = colors.surface,
         codeFg = colors.fg,
     )
-    ClickableText(
+    Text(
         text = annotated,
         style = style,
         modifier = modifier,
-        onClick = { offset ->
-            annotated.getStringAnnotations("URL", offset, offset).firstOrNull()?.let { ann ->
-                try {
-                    uriHandler.openUri(ann.item)
-                } catch (_: Exception) {
-                    /* ignore invalid URI */
-                }
-            }
-        },
     )
 }
 

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -13,12 +13,14 @@ from app.api.schemas import (
     ChatTicketRequest,
     ClarifyRequest,
     EditMessageRequest,
+    MessageReactionCreateRequest,
+    MessageReactionOut,
     RegenerateMessageRequest,
     SendMessageRequest,
 )
-from app.db.models import Conversation, Message, User
+from app.db.models import Conversation, Message, RunTelemetry, User
 from app.db.session import get_db
-from app.services import audit, chat_stream, chat_tickets, limits, membership, realtime_bus
+from app.services import audit, chat_stream, chat_tickets, limits, membership, reactions, realtime_bus
 from app.services.agent_client import AgentClient, AgentError
 
 router = APIRouter(prefix="/api/conversations", tags=["chat"])
@@ -218,6 +220,12 @@ async def regenerate_message(
         audit_action="chat.regenerate",
         audit_metadata={"target_message_id": str(message_id), "model_route": route},
     )
+    await db.execute(
+        update(RunTelemetry)
+        .where(RunTelemetry.message_id == message_id)
+        .values(is_regenerated=True)
+    )
+    await db.commit()
     idemp = request.headers.get("idempotency-key") or request.headers.get("x-idempotency-key")
     inner = chat_stream.stream_regenerate(
         conv.id,
@@ -406,6 +414,12 @@ async def approval(
     ).scalars().first()
     if assistant is not None and assistant.status == "waiting":
         assistant.status = "streaming"
+    if body.choice == "deny":
+        await db.execute(
+            update(RunTelemetry)
+            .where(RunTelemetry.run_id == run_id)
+            .values(hitl_denied_count=RunTelemetry.hitl_denied_count + 1)
+        )
     await db.commit()
     await realtime_bus.publish_user_event(
         user.id,
@@ -471,6 +485,12 @@ async def clarify(
     ).scalars().first()
     if assistant is not None and assistant.status == "waiting":
         assistant.status = "streaming"
+    if body.choice == "deny":
+        await db.execute(
+            update(RunTelemetry)
+            .where(RunTelemetry.run_id == run_id)
+            .values(hitl_denied_count=RunTelemetry.hitl_denied_count + 1)
+        )
     await db.commit()
     await realtime_bus.publish_user_event(
         user.id,
@@ -489,3 +509,88 @@ async def clarify(
     )
     await audit.record("chat.clarify", actor=user, target_type="conversation", target_id=conv.id, request=request)
     return result
+
+
+@router.post("/{conversation_id}/messages/{message_id}/reactions", response_model=MessageReactionOut)
+async def react_to_message(
+    message_id: uuid.UUID,
+    body: MessageReactionCreateRequest,
+    request: Request,
+    conv: Conversation = Depends(get_owned_conversation),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    msg = await db.get(Message, message_id)
+    if msg is None or msg.conversation_id != conv.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "消息不存在")
+    if msg.role != "assistant":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "仅支持对助手回复进行评价")
+
+    row = await reactions.upsert_reaction(
+        db,
+        message=msg,
+        user_id=user.id,
+        author_type="user",
+        reaction=body.reaction,
+        reason_code=body.reason_code,
+        comment=body.comment,
+    )
+    items = await reactions.list_message_reactions(db, msg.id)
+    await realtime_bus.publish_user_event(
+        user.id,
+        "message.reaction_updated",
+        {
+            "conversation_id": str(conv.id),
+            "message_id": str(msg.id),
+            "reactions": items,
+        },
+    )
+    await audit.record(
+        "message.reaction",
+        actor=user,
+        target_type="message",
+        target_id=msg.id,
+        request=request,
+        metadata={"reaction": row.reaction, "reason_code": row.reason_code},
+    )
+    return {
+        "id": row.id,
+        "message_id": row.message_id,
+        "author_type": row.author_type,
+        "reaction": row.reaction,
+        "reason_code": row.reason_code,
+        "comment": row.comment,
+        "created_at": row.created_at,
+    }
+
+
+@router.delete("/{conversation_id}/messages/{message_id}/reactions", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_message_reaction(
+    message_id: uuid.UUID,
+    request: Request,
+    conv: Conversation = Depends(get_owned_conversation),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    msg = await db.get(Message, message_id)
+    if msg is None or msg.conversation_id != conv.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "消息不存在")
+    deleted = await reactions.delete_reaction(db, message_id=msg.id, user_id=user.id, author_type="user")
+    if deleted:
+        items = await reactions.list_message_reactions(db, msg.id)
+        await realtime_bus.publish_user_event(
+            user.id,
+            "message.reaction_updated",
+            {
+                "conversation_id": str(conv.id),
+                "message_id": str(msg.id),
+                "reactions": items,
+            },
+        )
+        await audit.record(
+            "message.reaction_delete",
+            actor=user,
+            target_type="message",
+            target_id=msg.id,
+            request=request,
+        )

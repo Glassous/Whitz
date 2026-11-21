@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -17,9 +18,15 @@ from app.services.agent_client import AgentClient
 
 logger = logging.getLogger(__name__)
 
+SLO_AVAILABILITY_TARGET_PCT = 99.0
+SLO_P95_LATENCY_TARGET_MS = 15000.0
+SLO_TTFT_P95_TARGET_MS = 2500.0
+
 SUPPORTED_METRICS: dict[str, dict[str, str]] = {
     "agent_error_rate_pct": {"label": "Agent 失败率 (%)", "unit": "%"},
     "p95_latency_ms": {"label": "P95 响应延迟 (ms)", "unit": "ms"},
+    "slo_burn_rate_1h": {"label": "1h SLO 错误预算燃烧率 (x)", "unit": "x"},
+    "cost_usd_1h": {"label": "近 1h 模型成本 (USD)", "unit": "$"},
     "redis_memory_pct": {"label": "Redis 内存水位 (%)", "unit": "%"},
     "pg_conn_pct": {"label": "Postgres 连接占比 (%)", "unit": "%"},
     "arq_queue_depth": {"label": "ARQ 队列积压数", "unit": "jobs"},
@@ -190,6 +197,152 @@ async def _inspect_agent(admin: User | None) -> dict[str, Any]:
             pass
 
 
+async def compute_slo_and_anomalies(db: AsyncSession) -> dict[str, Any]:
+    """Compute multi-window SLO error-budget burn rate and Z-score statistical anomaly signals."""
+    now = datetime.now(timezone.utc)
+    since_1h = now - timedelta(hours=1)
+    since_24h = now - timedelta(hours=24)
+    since_7d = now - timedelta(days=7)
+
+    async def _window_stats(since: datetime) -> dict[str, Any]:
+        row = (
+            await db.execute(
+                select(
+                    func.count(RunTelemetry.id),
+                    func.coalesce(func.sum(case((RunTelemetry.status == "failed", 1), else_=0)), 0),
+                    func.coalesce(func.sum(RunTelemetry.estimated_cost_usd), 0.0),
+                    func.coalesce(func.sum(RunTelemetry.total_tokens), 0),
+                ).where(RunTelemetry.created_at >= since)
+            )
+        ).one()
+        total = int(row[0] or 0)
+        failed = int(row[1] or 0)
+        cost_usd = round(float(row[2] or 0.0), 4)
+        tokens = int(row[3] or 0)
+        err_rate = (failed / total) if total > 0 else 0.0
+        pct = (
+            await db.execute(
+                text(
+                    "SELECT "
+                    "percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms), "
+                    "percentile_cont(0.95) WITHIN GROUP (ORDER BY ttft_ms) "
+                    "FROM run_telemetry WHERE created_at >= :since"
+                ),
+                {"since": since},
+            )
+        ).one()
+        p95_ms = round(float(pct[0]), 1) if pct[0] is not None else 0.0
+        ttft_p95_ms = round(float(pct[1]), 1) if pct[1] is not None else 0.0
+        return {
+            "runs": total,
+            "failed": failed,
+            "error_rate": err_rate,
+            "success_rate_pct": round((1.0 - err_rate) * 100, 2),
+            "p95_ms": p95_ms,
+            "ttft_p95_ms": ttft_p95_ms,
+            "cost_usd": cost_usd,
+            "tokens": tokens,
+        }
+
+    w1h = await _window_stats(since_1h)
+    w24h = await _window_stats(since_24h)
+    w7d = await _window_stats(since_7d)
+
+    allowed_error_rate = max(1e-6, (100.0 - SLO_AVAILABILITY_TARGET_PCT) / 100.0)
+    burn_rate_1h = round(w1h["error_rate"] / allowed_error_rate, 2)
+    burn_rate_24h = round(w24h["error_rate"] / allowed_error_rate, 2)
+    consumed_budget_pct = (w7d["error_rate"] / allowed_error_rate) * 100.0 if w7d["runs"] > 0 else 0.0
+    budget_remaining_pct = round(max(0.0, 100.0 - consumed_budget_pct), 1)
+    if burn_rate_1h >= 6.0 or budget_remaining_pct <= 10.0:
+        slo_status = "critical"
+    elif burn_rate_1h >= 2.0 or budget_remaining_pct <= 40.0 or w24h["p95_ms"] > SLO_P95_LATENCY_TARGET_MS:
+        slo_status = "warning"
+    else:
+        slo_status = "healthy"
+
+    # Hourly buckets over last 7 days (excluding the current active hour) for Z-score baseline
+    hourly_rows = (
+        await db.execute(
+            text(
+                "SELECT date_trunc('hour', created_at) AS hr, "
+                "count(*) AS runs, "
+                "sum(case when status = 'failed' then 1 else 0 end) AS failed, "
+                "percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms, "
+                "coalesce(sum(total_tokens), 0) AS tokens, "
+                "coalesce(sum(estimated_cost_usd), 0) AS cost_usd "
+                "FROM run_telemetry "
+                "WHERE created_at >= :since_7d AND created_at < :since_1h "
+                "GROUP BY 1 ORDER BY 1"
+            ),
+            {"since_7d": since_7d, "since_1h": since_1h},
+        )
+    ).all()
+
+    def _zscore_check(metric: str, label: str, unit: str, current: float, series: list[float]) -> dict[str, Any]:
+        if len(series) < 3:
+            return {
+                "metric": metric,
+                "label": label,
+                "unit": unit,
+                "current": round(current, 3),
+                "baseline_mean": round(sum(series) / len(series), 3) if series else 0.0,
+                "baseline_std": 0.0,
+                "z_score": 0.0,
+                "is_anomaly": False,
+                "sample_hours": len(series),
+            }
+        mean = sum(series) / len(series)
+        var = sum((x - mean) ** 2 for x in series) / len(series)
+        std = math.sqrt(var)
+        if std < 1e-6:
+            z = 0.0 if abs(current - mean) < 1e-6 else (3.0 if current > mean * 1.5 and current > 0 else 0.0)
+        else:
+            z = (current - mean) / std
+        is_anom = z >= 2.5 and current > 0
+        return {
+            "metric": metric,
+            "label": label,
+            "unit": unit,
+            "current": round(current, 3),
+            "baseline_mean": round(mean, 3),
+            "baseline_std": round(std, 3),
+            "z_score": round(z, 2),
+            "is_anomaly": is_anom,
+            "sample_hours": len(series),
+        }
+
+    err_series = [(int(r[2] or 0) / int(r[1])) * 100.0 for r in hourly_rows if int(r[1] or 0) > 0]
+    p95_series = [float(r[3]) for r in hourly_rows if r[3] is not None]
+    tok_series = [float(r[4] or 0) for r in hourly_rows]
+    cost_series = [float(r[5] or 0.0) for r in hourly_rows]
+
+    anomalies = [
+        _zscore_check("error_rate_pct", "小时错误率 (%)", "%", w1h["error_rate"] * 100.0, err_series),
+        _zscore_check("p95_latency_ms", "小时 P95 延迟", "ms", w1h["p95_ms"], p95_series),
+        _zscore_check("tokens_per_hour", "小时 Token 消耗", "tokens", float(w1h["tokens"]), tok_series),
+        _zscore_check("cost_usd_per_hour", "小时模型费用", "USD", float(w1h["cost_usd"]), cost_series),
+    ]
+
+    return {
+        "slo": {
+            "availability_target_pct": SLO_AVAILABILITY_TARGET_PCT,
+            "p95_target_ms": SLO_P95_LATENCY_TARGET_MS,
+            "ttft_p95_target_ms": SLO_TTFT_P95_TARGET_MS,
+            "actual_success_rate_24h_pct": w24h["success_rate_pct"],
+            "actual_success_rate_7d_pct": w7d["success_rate_pct"],
+            "actual_p95_24h_ms": w24h["p95_ms"],
+            "actual_ttft_p95_24h_ms": w24h["ttft_p95_ms"],
+            "error_budget_remaining_pct": budget_remaining_pct,
+            "burn_rate_1h": burn_rate_1h,
+            "burn_rate_24h": burn_rate_24h,
+            "cost_1h_usd": w1h["cost_usd"],
+            "cost_24h_usd": w24h["cost_usd"],
+            "status": slo_status,
+        },
+        "anomalies": anomalies,
+    }
+
+
 async def collect_ops_inspection(db: AsyncSession, admin: User | None) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     settings = get_settings()
@@ -242,6 +395,7 @@ async def collect_ops_inspection(db: AsyncSession, admin: User | None) -> dict[s
     firing_alerts = int(
         await db.scalar(select(func.count(OpsAlertEvent.id)).where(OpsAlertEvent.status == "firing")) or 0
     )
+    slo_data = await compute_slo_and_anomalies(db)
 
     return {
         "postgres": pg_info,
@@ -257,6 +411,8 @@ async def collect_ops_inspection(db: AsyncSession, admin: User | None) -> dict[s
             "p95_latency_15m_ms": p95_latency_15m,
             "firing_alerts": firing_alerts,
         },
+        "slo": slo_data["slo"],
+        "anomalies": slo_data["anomalies"],
         "supported_metrics": SUPPORTED_METRICS,
         "generated_at": now.isoformat(),
     }
@@ -325,6 +481,21 @@ async def compute_metric_value(
 
     if inspection is None:
         inspection = await collect_ops_inspection(db, None)
+
+    if metric_key == "slo_burn_rate_1h":
+        slo_info = (inspection or {}).get("slo")
+        if not isinstance(slo_info, dict):
+            slo_info = (await compute_slo_and_anomalies(db))["slo"]
+        return float(slo_info.get("burn_rate_1h") or 0.0)
+
+    if metric_key == "cost_usd_1h":
+        since_1h = now - timedelta(hours=1)
+        val = await db.scalar(
+            select(func.coalesce(func.sum(RunTelemetry.estimated_cost_usd), 0.0)).where(
+                RunTelemetry.created_at >= since_1h
+            )
+        )
+        return round(float(val or 0.0), 4)
 
     if metric_key == "redis_memory_pct":
         return float(inspection.get("redis", {}).get("memory_pct") or 0.0)

@@ -9,12 +9,14 @@ import type {
   MemoryOverview,
   MemoryPendingItem,
   Message,
+  MessageReaction,
   PendingControl,
   Plan,
   PlanItem,
   ReasoningBlock,
   SkillPendingItem,
   ToolPayload,
+  UserReactionType,
   WorkspaceArtifactMeta,
 } from "../types";
 import { useConversationsStore } from "./conversations";
@@ -422,6 +424,13 @@ export const useChatStore = defineStore("chat", () => {
       case "run.started":
         activeRunId.value = d.run_id ?? null;
         break;
+      case "message.reaction": {
+        const mid = typeof d.message_id === "string" ? d.message_id : "";
+        if (mid && Array.isArray(d.reactions)) {
+          applyMessageReactions(mid, d.reactions as MessageReaction[]);
+        }
+        break;
+      }
       case "title.updated":
       case "conversation.title_updated": {
         const id = typeof d.conversation_id === "string" ? d.conversation_id : convId.value;
@@ -1146,6 +1155,58 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
+  function applyMessageReactions(messageId: string, reactionsList: MessageReaction[]) {
+    const idx = messages.value.findIndex((m) => m.id === messageId);
+    if (idx < 0) return;
+    messages.value[idx] = { ...messages.value[idx], reactions: [...reactionsList] };
+  }
+
+  async function reactToMessage(
+    messageId: string,
+    reaction: UserReactionType,
+    reasonCode?: string,
+    comment?: string,
+  ): Promise<void> {
+    const targetConvId = convId.value;
+    if (!targetConvId) return;
+    const msg = messages.value.find((m) => m.id === messageId);
+    if (!msg) return;
+    const existing = (msg.reactions ?? []).find((r) => r.author_type === "user");
+    // Toggle off when clicking the exact same reaction without adding a new reason
+    if (existing && existing.reaction === reaction && !reasonCode && !comment) {
+      await removeReaction(messageId);
+      return;
+    }
+    try {
+      const saved = await api.post<MessageReaction>(
+        `/conversations/${targetConvId}/messages/${messageId}/reactions`,
+        {
+          reaction,
+          reason_code: reasonCode ?? null,
+          comment: comment ?? null,
+        },
+      );
+      const others = (msg.reactions ?? []).filter((r) => r.author_type !== "user");
+      applyMessageReactions(messageId, [...others, saved]);
+    } catch (e: any) {
+      error.value = apiErrorMessage(e, "评价提交失败");
+    }
+  }
+
+  async function removeReaction(messageId: string): Promise<void> {
+    const targetConvId = convId.value;
+    if (!targetConvId) return;
+    const msg = messages.value.find((m) => m.id === messageId);
+    if (!msg) return;
+    try {
+      await api.delete(`/conversations/${targetConvId}/messages/${messageId}/reactions`);
+      const others = (msg.reactions ?? []).filter((r) => r.author_type !== "user");
+      applyMessageReactions(messageId, others);
+    } catch (e: any) {
+      error.value = apiErrorMessage(e, "取消评价失败");
+    }
+  }
+
   function abort() {
     clearPendingPoll();
     controller?.abort();
@@ -1161,5 +1222,6 @@ export const useChatStore = defineStore("chat", () => {
     loadFromConversation, reset, send, regenerate, editAndResend, reconnect, recoverIfNeeded,
     stop, approve, clarify, abort, clearPendingControlFromSync,
     resolvePendingMemory, resolvePendingSkill,
+    applyMessageReactions, reactToMessage, removeReaction,
   };
 });

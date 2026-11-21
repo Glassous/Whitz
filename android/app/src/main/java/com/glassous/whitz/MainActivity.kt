@@ -40,6 +40,7 @@ import com.glassous.whitz.feature.settings.AddMemoryScreen
 import com.glassous.whitz.feature.settings.AssistantSettingsScreen
 import com.glassous.whitz.feature.settings.CreateSkillScreen
 import com.glassous.whitz.feature.settings.DevicesSettingsScreen
+import com.glassous.whitz.feature.settings.FeedbackSettingsScreen
 import com.glassous.whitz.feature.settings.GithubSkillInstallScreen
 import com.glassous.whitz.feature.settings.LibrarySettingsScreen
 import com.glassous.whitz.feature.settings.MembershipSettingsScreen
@@ -322,6 +323,14 @@ private fun WhitzRoot(container: AppContainer) {
             composable(SettingsRoutes.DEVICES) { entry ->
                 rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
                     DevicesSettingsScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.FEEDBACK) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    FeedbackSettingsScreen(
                         vm = vm,
                         onBack = { navController.popBackStack() },
                     )

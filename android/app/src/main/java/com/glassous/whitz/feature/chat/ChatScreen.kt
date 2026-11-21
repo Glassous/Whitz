@@ -8,6 +8,7 @@ import androidx.compose.animation.BoundsTransform
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -23,6 +24,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -51,8 +53,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -65,13 +67,16 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloseFullscreen
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
@@ -102,6 +107,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -114,18 +120,25 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -138,11 +151,11 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil3.compose.AsyncImage
 import com.glassous.whitz.R
 import com.glassous.whitz.core.model.Conversation
+import com.glassous.whitz.core.model.Message
 import com.glassous.whitz.core.model.UploadTaskStatus
 import com.glassous.whitz.core.model.User
 import com.glassous.whitz.core.model.quotaPercentLabel
 import com.glassous.whitz.core.model.resolvedAssistantName
-import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzBrandMark
 import com.glassous.whitz.ui.theme.WhitzGlassCircleButton
@@ -194,10 +207,14 @@ fun ChatScreen(
     val colors = LocalWhitzColors.current
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
+    val conversationScrollKey = ui.currentConvId ?: "local-new"
+    val listState = rememberSaveable(conversationScrollKey, saver = LazyListState.Saver) {
+        LazyListState()
+    }
     val snackbarHostState = remember { SnackbarHostState() }
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
+    val clipboard = LocalClipboardManager.current
     val inputFocusRequester = remember { FocusRequester() }
     val headerHazeState = rememberHazeState()
 
@@ -212,6 +229,26 @@ fun ChatScreen(
     var desktopSidebarCollapsed by rememberSaveable { mutableStateOf(false) }
     var mainPanelOpen by rememberSaveable { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
+    var editingMessage by remember { mutableStateOf<Message?>(null) }
+    var savedDraftBeforeEdit by remember { mutableStateOf<String?>(null) }
+    var selectingTextMessageId by remember { mutableStateOf<String?>(null) }
+    var dislikeReasonMessageId by remember { mutableStateOf<String?>(null) }
+    var messageMenuVisible by remember { mutableStateOf(false) }
+    var messageMenuTarget by remember { mutableStateOf<MessageMenuTarget?>(null) }
+
+    val cancelEdit = {
+        editingMessage = null
+        savedDraftBeforeEdit?.let { inputText = it }
+        savedDraftBeforeEdit = null
+    }
+
+    LaunchedEffect(conversationScrollKey) {
+        editingMessage = null
+        savedDraftBeforeEdit = null
+        selectingTextMessageId = null
+        dislikeReasonMessageId = null
+        messageMenuVisible = false
+    }
 
     LaunchedEffect(ui.isMainChat) {
         if (!ui.isMainChat) mainPanelOpen = false
@@ -344,7 +381,6 @@ fun ChatScreen(
     val revealTopOffsetPx = with(density) {
         (WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + if (ui.isMainChat) 130.dp else 68.dp).roundToPx()
     }
-    val conversationScrollKey = ui.currentConvId ?: "local-new"
     var revealedConversationKey by rememberSaveable { mutableStateOf<String?>(null) }
     var lastScrolledMsgCount by rememberSaveable { mutableIntStateOf(0) }
     var lastScrolledLastLen by rememberSaveable { mutableIntStateOf(0) }
@@ -379,8 +415,20 @@ fun ChatScreen(
         }
     }
 
+    val locateMessage: (String) -> Unit = { msgId ->
+        val idx = visibleMessages.indexOfFirst { it.id == msgId }
+        if (idx >= 0) {
+            scope.launch {
+                listState.animateScrollToItem(idx, scrollOffset = -revealTopOffsetPx)
+            }
+        }
+    }
+
     // Back key handling: overlays & drawer close before exiting
     BackHandler(enabled = ui.previewTarget != null) { vm.closeFilePreview() }
+    BackHandler(enabled = messageMenuVisible) { messageMenuVisible = false }
+    BackHandler(enabled = selectingTextMessageId != null) { selectingTextMessageId = null }
+    BackHandler(enabled = editingMessage != null) { cancelEdit() }
     BackHandler(enabled = showSearch) { showSearch = false }
     BackHandler(enabled = showSkillPicker) { showSkillPicker = false }
     BackHandler(enabled = showLibraryPicker) { showLibraryPicker = false }
@@ -510,53 +558,81 @@ fun ChatScreen(
                                 )
                             }
                         } else {
-                            LazyColumn(
-                                state = listState,
-                                modifier = Modifier.fillMaxSize(),
-                                contentPadding = PaddingValues(
-                                    start = if (isExpandedScreen) 32.dp else 16.dp,
-                                    end = if (isExpandedScreen) 32.dp else 16.dp,
-                                    top = listTopPadding,
-                                    bottom = listBottomPadding,
-                                ),
-                                verticalArrangement = Arrangement.spacedBy(16.dp),
-                            ) {
-                                items(visibleMessages, key = { it.id }) { msg ->
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .animateItem(),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Box(modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth()) {
-                                            val isSelected = msg.id == resolvedTurn.turnId
-                                            MessageBubble(
-                                                message = msg,
-                                                streaming = ui.streaming,
-                                                hasActiveUploads = ui.hasActiveUploads,
-                                                reconnecting = ui.reconnecting,
-                                                waitingFirstByte = ui.waitingFirstByte,
-                                                isActiveTurn = msg.id == ui.activeAssistantId,
-                                                isSelectedTurn = isSelected,
-                                                liveLabel = if (msg.id == ui.activeAssistantId && ui.streaming) liveStepLabel else null,
-                                                turnPlan = if (isSelected) resolvedTurn.plan else null,
-                                                turnReasoning = if (isSelected) resolvedTurn.reasoning else null,
-                                                convFiles = ui.files,
-                                                onCopy = {
-                                                    scope.launch { snackbarHostState.showSnackbar("已复制到剪贴板") }
-                                                },
-                                                onRegenerate = { vm.regenerate(it) },
-                                                onEditSubmit = { id, content -> vm.editAndResend(id, content) },
-                                                onOpenTurnDetails = { id ->
-                                                    vm.selectTurn(id)
-                                                    if (ui.isMainChat) {
-                                                        mainPanelOpen = true
-                                                    } else {
-                                                        onOpenTaskDetails(0)
-                                                    }
-                                                },
-                                                onOpenFile = { f -> vm.openFilePreview(f) },
-                                            )
+                            key(conversationScrollKey) {
+                                LazyColumn(
+                                    state = listState,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentPadding = PaddingValues(
+                                        start = if (isExpandedScreen) 32.dp else 16.dp,
+                                        end = if (isExpandedScreen) 32.dp else 16.dp,
+                                        top = listTopPadding,
+                                        bottom = listBottomPadding,
+                                    ),
+                                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                                ) {
+                                    items(visibleMessages, key = { it.id }) { msg ->
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .animateItem(fadeOutSpec = null),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Box(modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth()) {
+                                                val isSelected = msg.id == resolvedTurn.turnId
+                                                MessageBubble(
+                                                    message = msg,
+                                                    streaming = ui.streaming,
+                                                    hasActiveUploads = ui.hasActiveUploads,
+                                                    reconnecting = ui.reconnecting,
+                                                    waitingFirstByte = ui.waitingFirstByte,
+                                                    isActiveTurn = msg.id == ui.activeAssistantId,
+                                                    isSelectedTurn = isSelected,
+                                                    isEditing = msg.id == editingMessage?.id,
+                                                    isSelectingText = msg.id == selectingTextMessageId,
+                                                    showDislikeReasons = msg.id == dislikeReasonMessageId,
+                                                    liveLabel = if (msg.id == ui.activeAssistantId && ui.streaming) liveStepLabel else null,
+                                                    turnPlan = if (isSelected) resolvedTurn.plan else null,
+                                                    turnReasoning = if (isSelected) resolvedTurn.reasoning else null,
+                                                    convFiles = ui.files,
+                                                    assistantName = user?.resolvedAssistantName() ?: "Whitz",
+                                                    onRegenerate = { vm.regenerate(it) },
+                                                    onExitTextSelection = {
+                                                        if (selectingTextMessageId == msg.id) {
+                                                            selectingTextMessageId = null
+                                                        }
+                                                    },
+                                                    onDismissDislikeReasons = {
+                                                        if (dislikeReasonMessageId == msg.id) {
+                                                            dislikeReasonMessageId = null
+                                                        }
+                                                    },
+                                                    onLongPress = { windowOffset ->
+                                                        val stage = stageCoords
+                                                        if (stage != null && stage.isAttached) {
+                                                            focusManager.clearFocus()
+                                                            dismissPlusMenu()
+                                                            selectingTextMessageId = null
+                                                            messageMenuTarget = MessageMenuTarget(
+                                                                message = msg,
+                                                                anchorInStage = stage.windowToLocal(windowOffset),
+                                                            )
+                                                            messageMenuVisible = true
+                                                        }
+                                                    },
+                                                    onOpenTurnDetails = { id ->
+                                                        vm.selectTurn(id)
+                                                        if (ui.isMainChat) {
+                                                            mainPanelOpen = true
+                                                        } else {
+                                                            onOpenTaskDetails(0)
+                                                        }
+                                                    },
+                                                    onOpenFile = { f -> vm.openFilePreview(f) },
+                                                    onReact = { msgId, reaction, reasonCode ->
+                                                        vm.reactToMessage(msgId, reaction, reasonCode)
+                                                    },
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -747,6 +823,41 @@ fun ChatScreen(
                         }
                     }
 
+                    // 2d. Conversation switching loading indicator
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = ui.switchingConversation && !mainPanelOpen,
+                        enter = fadeIn(tween(180)) + scaleIn(
+                            initialScale = 0.90f,
+                            animationSpec = tween(220, easing = FastOutSlowInEasing),
+                        ),
+                        exit = fadeOut(tween(160)) + scaleOut(
+                            targetScale = 0.94f,
+                            animationSpec = tween(160, easing = FastOutSlowInEasing),
+                        ),
+                        modifier = Modifier.align(Alignment.Center),
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = colors.surface.copy(alpha = 0.95f),
+                            border = BorderStroke(0.5.dp, colors.line),
+                            shadowElevation = 8.dp,
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                WhitzLoadingIndicator(size = 20.dp)
+                                Text(
+                                    text = "正在加载对话…",
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = colors.fg,
+                                )
+                            }
+                        }
+                    }
+
                     // 3. Bottom Gradient Scrim + Floating Composer & Pending Cards
                     val bottomBlurHeightDp = if (bottomBlurHeightPx > 0) {
                         with(density) { bottomBlurHeightPx.toDp() }
@@ -762,7 +873,8 @@ fun ChatScreen(
 
                     val hasAttachmentsOrSkills = ui.uploads.isNotEmpty() ||
                         ui.attachedIds.isNotEmpty() ||
-                        ui.selectedSkillNames.isNotEmpty()
+                        ui.selectedSkillNames.isNotEmpty() ||
+                        editingMessage != null
                     val isComposerActive = isInputFocused || inputText.isNotEmpty() || hasAttachmentsOrSkills
 
                     val composerBottomPadding by animateDpAsState(
@@ -932,6 +1044,74 @@ fun ChatScreen(
                                                 .padding(horizontal = 12.dp, vertical = 6.dp),
                                             verticalArrangement = Arrangement.Center,
                                         ) {
+                                            editingMessage?.let { editMsg ->
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(bottom = 6.dp)
+                                                        .clip(RoundedCornerShape(12.dp))
+                                                        .background(colors.canvas)
+                                                        .border(0.5.dp, colors.line, RoundedCornerShape(12.dp))
+                                                        .clickable { locateMessage(editMsg.id) }
+                                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                ) {
+                                                    Icon(
+                                                        Icons.Default.Edit,
+                                                        contentDescription = null,
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(14.dp),
+                                                    )
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            text = "编辑后发送",
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                        )
+                                                        Text(
+                                                            text = editMsg.content.replace('\n', ' '),
+                                                            fontSize = 12.sp,
+                                                            color = colors.fgMuted,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                        )
+                                                    }
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .clip(RoundedCornerShape(8.dp))
+                                                            .clickable { locateMessage(editMsg.id) }
+                                                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Default.MyLocation,
+                                                            contentDescription = "定位原消息",
+                                                            tint = colors.fgMuted,
+                                                            modifier = Modifier.size(13.dp),
+                                                        )
+                                                        Text(
+                                                            text = "定位",
+                                                            fontSize = 11.sp,
+                                                            color = colors.fgMuted,
+                                                        )
+                                                    }
+                                                    IconButton(
+                                                        onClick = cancelEdit,
+                                                        modifier = Modifier.size(24.dp),
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Default.Close,
+                                                            contentDescription = "取消编辑",
+                                                            tint = colors.fgFaint,
+                                                            modifier = Modifier.size(14.dp),
+                                                        )
+                                                    }
+                                                }
+                                            }
+
                                             val attachedFiles = ui.files.filter { it.id in ui.attachedIds }
                                             if (ui.uploads.isNotEmpty() || attachedFiles.isNotEmpty() || ui.selectedSkillNames.isNotEmpty()) {
                                                 FlowRow(
@@ -1129,7 +1309,16 @@ fun ChatScreen(
                                                     canSend = canSend,
                                                     onStop = { vm.stopRun() },
                                                     onSend = {
-                                                        if (hasActiveUploads) {
+                                                        val editTarget = editingMessage
+                                                        if (editTarget != null) {
+                                                            val text = inputText
+                                                            editingMessage = null
+                                                            savedDraftBeforeEdit = null
+                                                            inputText = ""
+                                                            composerExpanded = false
+                                                            dismissPlusMenu()
+                                                            vm.editAndResend(editTarget.id, text)
+                                                        } else if (hasActiveUploads) {
                                                             queuedSend = true
                                                         } else {
                                                             val text = inputText
@@ -1273,6 +1462,54 @@ fun ChatScreen(
                     onOpenSkillPicker = {
                         dismissPlusMenu()
                         showSkillPicker = true
+                    },
+                )
+
+                val latestMenuMessage = messageMenuTarget?.let { target ->
+                    ui.messages.firstOrNull { it.id == target.message.id } ?: target.message
+                }
+                MessageActionMenuOverlay(
+                    visible = messageMenuVisible,
+                    message = latestMenuMessage,
+                    anchorInStage = messageMenuTarget?.anchorInStage,
+                    streaming = ui.streaming,
+                    hasActiveUploads = ui.hasActiveUploads,
+                    onDismiss = { messageMenuVisible = false },
+                    onCopy = { content ->
+                        messageMenuVisible = false
+                        clipboard.setText(AnnotatedString(content))
+                        scope.launch { snackbarHostState.showSnackbar("已复制到剪贴板") }
+                    },
+                    onEdit = { msg ->
+                        messageMenuVisible = false
+                        if (editingMessage == null) {
+                            savedDraftBeforeEdit = inputText
+                        }
+                        editingMessage = msg
+                        inputText = msg.content
+                        selectingTextMessageId = null
+                        locateMessage(msg.id)
+                        inputFocusRequester.requestFocus()
+                    },
+                    onSelectText = { msgId ->
+                        messageMenuVisible = false
+                        selectingTextMessageId = msgId
+                        locateMessage(msgId)
+                    },
+                    onRegenerate = { msgId ->
+                        messageMenuVisible = false
+                        vm.regenerate(msgId)
+                    },
+                    onReact = { msg, reactionKey ->
+                        messageMenuVisible = false
+                        if (reactionKey == "dislike") {
+                            val wasDisliked = msg.reactions.any { it.authorType == "user" && it.reaction == "dislike" }
+                            vm.reactToMessage(msg.id, "dislike", null)
+                            dislikeReasonMessageId = if (!wasDisliked) msg.id else null
+                        } else {
+                            if (dislikeReasonMessageId == msg.id) dislikeReasonMessageId = null
+                            vm.reactToMessage(msg.id, reactionKey, null)
+                        }
                     },
                 )
             }
@@ -1459,6 +1696,17 @@ private fun SidebarContent(
     val mainConv = ui.mainConversation
     val isMainSelected = mainConv != null && ui.currentConvId == mainConv.id
 
+    var sidebarCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var convMenuVisible by remember { mutableStateOf(false) }
+    var convMenuTarget by remember { mutableStateOf<SidebarConvMenuTarget?>(null) }
+
+    BackHandler(enabled = convMenuVisible) { convMenuVisible = false }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .onGloballyPositioned { sidebarCoords = it },
+    ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1579,23 +1827,10 @@ private fun SidebarContent(
                 if (isConvRunning(mainConv)) {
                     Box(
                         modifier = Modifier
-                            .padding(end = 6.dp)
+                            .padding(start = 6.dp)
                             .size(6.dp)
                             .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.primary),
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(colors.canvas)
-                        .padding(horizontal = 7.dp, vertical = 3.dp),
-                ) {
-                    Text(
-                        text = "主聊",
-                        fontSize = 10.5.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = colors.fgMuted,
                     )
                 }
             }
@@ -1690,9 +1925,16 @@ private fun SidebarContent(
                                         conv = conv,
                                         selected = conv.id == ui.currentConvId,
                                         onSelect = { onSelectConv(conv.id) },
-                                        onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
-                                        onRename = { onRename(conv) },
-                                        onDelete = { onDelete(conv) },
+                                        onLongPress = { windowOffset ->
+                                            val coords = sidebarCoords
+                                            if (coords != null && coords.isAttached) {
+                                                convMenuTarget = SidebarConvMenuTarget(
+                                                    conv = conv,
+                                                    anchorInSidebar = coords.windowToLocal(windowOffset),
+                                                )
+                                                convMenuVisible = true
+                                            }
+                                        },
                                     )
                                 }
                             }
@@ -1714,9 +1956,16 @@ private fun SidebarContent(
                                         conv = conv,
                                         selected = conv.id == ui.currentConvId,
                                         onSelect = { onSelectConv(conv.id) },
-                                        onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
-                                        onRename = { onRename(conv) },
-                                        onDelete = { onDelete(conv) },
+                                        onLongPress = { windowOffset ->
+                                            val coords = sidebarCoords
+                                            if (coords != null && coords.isAttached) {
+                                                convMenuTarget = SidebarConvMenuTarget(
+                                                    conv = conv,
+                                                    anchorInSidebar = coords.windowToLocal(windowOffset),
+                                                )
+                                                convMenuVisible = true
+                                            }
+                                        },
                                     )
                                 }
                             }
@@ -1783,6 +2032,29 @@ private fun SidebarContent(
             }
         }
     }
+
+        val latestConv = convMenuTarget?.let { target ->
+            ui.conversations.firstOrNull { it.id == target.conv.id } ?: target.conv
+        }
+        SidebarConvMenuOverlay(
+            visible = convMenuVisible,
+            conv = latestConv,
+            anchorInSidebar = convMenuTarget?.anchorInSidebar,
+            onDismiss = { convMenuVisible = false },
+            onTogglePin = { conv ->
+                convMenuVisible = false
+                onTogglePin(conv.id, !conv.isPinned)
+            },
+            onRename = { conv ->
+                convMenuVisible = false
+                onRename(conv)
+            },
+            onDelete = { conv ->
+                convMenuVisible = false
+                onDelete(conv)
+            },
+        )
+    }
 }
 
 @Composable
@@ -1790,20 +2062,31 @@ private fun ConversationRow(
     conv: Conversation,
     selected: Boolean,
     onSelect: () -> Unit,
-    onTogglePin: () -> Unit,
-    onRename: () -> Unit,
-    onDelete: () -> Unit,
+    onLongPress: (Offset) -> Unit,
 ) {
     val colors = LocalWhitzColors.current
-    var menuOpen by remember(conv.id) { mutableStateOf(false) }
+    val haptic = LocalHapticFeedback.current
+    var rowCoords by remember(conv.id) { mutableStateOf<LayoutCoordinates?>(null) }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) colors.hover else colors.sidebar)
-            .clickable(onClick = onSelect)
-            .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            .background(if (selected) colors.hover else Color.Transparent)
+            .onGloballyPositioned { rowCoords = it }
+            .pointerInput(conv.id) {
+                detectTapGestures(
+                    onTap = { onSelect() },
+                    onLongPress = { localOffset ->
+                        val coords = rowCoords
+                        if (coords != null && coords.isAttached) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onLongPress(coords.localToWindow(localOffset))
+                        }
+                    },
+                )
+            }
+            .padding(horizontal = 12.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (isConvRunning(conv)) {
@@ -1813,7 +2096,7 @@ private fun ConversationRow(
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.primary),
             )
-            Spacer(modifier = Modifier.width(6.dp))
+            Spacer(modifier = Modifier.width(8.dp))
         }
         if (conv.isPinned) {
             Icon(
@@ -1824,49 +2107,431 @@ private fun ConversationRow(
             )
             Spacer(modifier = Modifier.width(6.dp))
         }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = conv.title.ifBlank { "新旁聊" },
-                fontSize = 13.5.sp,
-                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-                color = if (selected) colors.fg else colors.fgMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+        Text(
+            text = conv.title.ifBlank { "新旁聊" },
+            fontSize = 14.sp,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+            color = if (selected) colors.fg else colors.fgMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+private data class SidebarConvMenuTarget(
+    val conv: Conversation,
+    val anchorInSidebar: Offset,
+)
+
+private data class MessageMenuTarget(
+    val message: Message,
+    val anchorInStage: Offset,
+)
+
+@Composable
+private fun WhitzFloatingMenuCard(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = colors.hover,
+        border = BorderStroke(0.5.dp, colors.line),
+        shadowElevation = 8.dp,
+        modifier = modifier.clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+            onClick = {},
+        ),
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun WhitzFloatingMenuItem(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    tint: Color = LocalWhitzColors.current.fg,
+    highlighted: Boolean = false,
+) {
+    val colors = LocalWhitzColors.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(42.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (highlighted) colors.active else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = label,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            color = tint,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+private val FloatingMenuEnterCurve = CubicBezierEasing(0.18f, 1.0f, 0.30f, 1.0f)
+private val FloatingMenuExitCurve = CubicBezierEasing(0.4f, 0.0f, 0.2f, 1.0f)
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun SidebarConvMenuOverlay(
+    visible: Boolean,
+    conv: Conversation?,
+    anchorInSidebar: Offset?,
+    onDismiss: () -> Unit,
+    onTogglePin: (Conversation) -> Unit,
+    onRename: (Conversation) -> Unit,
+    onDelete: (Conversation) -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val density = LocalDensity.current
+    val statusTopPx = with(density) { WindowInsets.statusBars.asPaddingValues().calculateTopPadding().toPx() }
+    val navBottomPx = with(density) { WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding().toPx() }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val containerWidthPx = with(density) { maxWidth.toPx() }
+        val containerHeightPx = with(density) { maxHeight.toPx() }
+        val edgePaddingPx = with(density) { 12.dp.toPx() }
+        val verticalGapPx = with(density) { 8.dp.toPx() }
+        val topSafePx = statusTopPx + edgePaddingPx
+        val bottomSafePx = navBottomPx + edgePaddingPx
+        val cardWidthDp = 176.dp
+        val cardWidthPx = with(density) { cardWidthDp.toPx() }
+        val estCardHeightPx = with(density) { 150.dp.toPx() }
+
+        val anchor = anchorInSidebar ?: Offset.Zero
+        val spaceAbove = anchor.y - verticalGapPx - topSafePx
+        val spaceBelow = containerHeightPx - anchor.y - verticalGapPx - bottomSafePx
+        // Prefer expanding upward unless space above is insufficient
+        val expandUpward = spaceAbove >= estCardHeightPx || spaceAbove >= spaceBelow
+        val estLeftX = (anchor.x - cardWidthPx / 2f).coerceIn(
+            edgePaddingPx,
+            (containerWidthPx - cardWidthPx - edgePaddingPx).coerceAtLeast(edgePaddingPx),
+        )
+        val pivotX = ((anchor.x - estLeftX) / cardWidthPx).coerceIn(0.15f, 0.85f)
+        val transformOrigin = TransformOrigin(pivotX, if (expandUpward) 1f else 0f)
+
+        if (visible) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDismiss,
+                    ),
             )
-            val time = DateTimeUtils.formatShort(conv.lastMessageAt ?: conv.updatedAt)
-            if (time.isNotBlank()) {
-                Text(time, fontSize = 10.5.sp, color = colors.fgFaint)
+        }
+
+        Layout(
+            modifier = Modifier.fillMaxSize(),
+            content = {
+                AnimatedVisibility(
+                    visible = visible && conv != null && anchorInSidebar != null,
+                    enter = scaleIn(
+                        initialScale = 0.62f,
+                        transformOrigin = transformOrigin,
+                        animationSpec = tween(durationMillis = 260, easing = FloatingMenuEnterCurve),
+                    ) + slideInVertically(
+                        animationSpec = tween(durationMillis = 260, easing = FloatingMenuEnterCurve),
+                    ) { if (expandUpward) (it * 0.24f).roundToInt() else -(it * 0.24f).roundToInt() } +
+                        fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
+                    exit = scaleOut(
+                        targetScale = 0.72f,
+                        transformOrigin = transformOrigin,
+                        animationSpec = tween(durationMillis = 180, easing = FloatingMenuExitCurve),
+                    ) + slideOutVertically(
+                        animationSpec = tween(durationMillis = 180, easing = FloatingMenuExitCurve),
+                    ) { if (expandUpward) (it * 0.18f).roundToInt() else -(it * 0.18f).roundToInt() } +
+                        fadeOut(animationSpec = tween(durationMillis = 140, easing = FloatingMenuExitCurve)),
+                ) {
+                    val target = conv ?: return@AnimatedVisibility
+                    WhitzFloatingMenuCard {
+                        Column(
+                            modifier = Modifier
+                                .width(cardWidthDp)
+                                .padding(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            WhitzFloatingMenuItem(
+                                icon = Icons.Default.PushPin,
+                                label = if (target.isPinned) "取消置顶" else "置顶",
+                                onClick = { onTogglePin(target) },
+                            )
+                            WhitzFloatingMenuItem(
+                                icon = Icons.Default.Edit,
+                                label = "重命名",
+                                onClick = { onRename(target) },
+                            )
+                            WhitzFloatingMenuItem(
+                                icon = Icons.Default.Delete,
+                                label = "删除",
+                                tint = colors.danger,
+                                onClick = { onDelete(target) },
+                            )
+                        }
+                    }
+                }
+            },
+        ) { measurables, constraints ->
+            val placeables = measurables.map { it.measure(constraints.copy(minWidth = 0, minHeight = 0)) }
+            val padPx = edgePaddingPx.roundToInt()
+            val topPadPx = topSafePx.roundToInt()
+            val bottomPadPx = bottomSafePx.roundToInt()
+            val gapPx = verticalGapPx.roundToInt()
+            layout(constraints.maxWidth, constraints.maxHeight) {
+                if (anchorInSidebar != null) {
+                    placeables.forEach { placeable ->
+                        val x = (anchorInSidebar.x - placeable.width / 2f).roundToInt().coerceIn(
+                            padPx,
+                            (constraints.maxWidth - placeable.width - padPx).coerceAtLeast(padPx),
+                        )
+                        val y = if (expandUpward) {
+                            (anchorInSidebar.y - gapPx - placeable.height).roundToInt().coerceAtLeast(topPadPx)
+                        } else {
+                            (anchorInSidebar.y + gapPx).roundToInt().coerceIn(
+                                topPadPx,
+                                (constraints.maxHeight - placeable.height - bottomPadPx).coerceAtLeast(topPadPx),
+                            )
+                        }
+                        placeable.place(x, y)
+                    }
+                }
             }
         }
-        Box {
-            IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Default.MoreHoriz, contentDescription = "更多", tint = colors.fgFaint, modifier = Modifier.size(16.dp))
-            }
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text(if (conv.isPinned) "取消置顶" else "置顶") },
-                    leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null) },
-                    onClick = {
-                        menuOpen = false
-                        onTogglePin()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("重命名") },
-                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
-                    onClick = {
-                        menuOpen = false
-                        onRename()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("删除", color = colors.danger) },
-                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = colors.danger) },
-                    onClick = {
-                        menuOpen = false
-                        onDelete()
-                    },
-                )
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun MessageActionMenuOverlay(
+    visible: Boolean,
+    message: Message?,
+    anchorInStage: Offset?,
+    streaming: Boolean,
+    hasActiveUploads: Boolean,
+    onDismiss: () -> Unit,
+    onCopy: (String) -> Unit,
+    onEdit: (Message) -> Unit,
+    onSelectText: (String) -> Unit,
+    onRegenerate: (String) -> Unit,
+    onReact: (Message, String) -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val density = LocalDensity.current
+    val statusTopPx = with(density) { WindowInsets.statusBars.asPaddingValues().calculateTopPadding().toPx() }
+    val navBottomPx = with(density) { WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding().toPx() }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val containerWidthPx = with(density) { maxWidth.toPx() }
+        val containerHeightPx = with(density) { maxHeight.toPx() }
+        val edgePaddingPx = with(density) { 12.dp.toPx() }
+        val verticalGapPx = with(density) { 10.dp.toPx() }
+        val topSafePx = statusTopPx + edgePaddingPx
+        val bottomSafePx = navBottomPx + edgePaddingPx
+        val isAssistant = message != null && message.role != "user"
+        val actionCardWidthDp = 176.dp
+        val estWidthPx = with(density) { (if (isAssistant) 216.dp else actionCardWidthDp).toPx() }
+        val estHeightPx = with(density) { (if (isAssistant) 224.dp else 154.dp).toPx() }
+
+        val anchor = anchorInStage ?: Offset.Zero
+        val spaceAbove = anchor.y - verticalGapPx - topSafePx
+        val spaceBelow = containerHeightPx - anchor.y - verticalGapPx - bottomSafePx
+        // Prefer expanding upward unless space above is insufficient
+        val expandUpward = spaceAbove >= estHeightPx || spaceAbove >= spaceBelow
+        val estLeftX = (anchor.x - estWidthPx / 2f).coerceIn(
+            edgePaddingPx,
+            (containerWidthPx - estWidthPx - edgePaddingPx).coerceAtLeast(edgePaddingPx),
+        )
+        val pivotX = ((anchor.x - estLeftX) / estWidthPx).coerceIn(0.15f, 0.85f)
+        val transformOrigin = TransformOrigin(pivotX, if (expandUpward) 1f else 0f)
+
+        if (visible) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDismiss,
+                    ),
+            )
+        }
+
+        Layout(
+            modifier = Modifier.fillMaxSize(),
+            content = {
+                AnimatedVisibility(
+                    visible = visible && message != null && anchorInStage != null,
+                    enter = scaleIn(
+                        initialScale = 0.62f,
+                        transformOrigin = transformOrigin,
+                        animationSpec = tween(durationMillis = 260, easing = FloatingMenuEnterCurve),
+                    ) + slideInVertically(
+                        animationSpec = tween(durationMillis = 260, easing = FloatingMenuEnterCurve),
+                    ) { if (expandUpward) (it * 0.24f).roundToInt() else -(it * 0.24f).roundToInt() } +
+                        fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
+                    exit = scaleOut(
+                        targetScale = 0.72f,
+                        transformOrigin = transformOrigin,
+                        animationSpec = tween(durationMillis = 180, easing = FloatingMenuExitCurve),
+                    ) + slideOutVertically(
+                        animationSpec = tween(durationMillis = 180, easing = FloatingMenuExitCurve),
+                    ) { if (expandUpward) (it * 0.18f).roundToInt() else -(it * 0.18f).roundToInt() } +
+                        fadeOut(animationSpec = tween(durationMillis = 140, easing = FloatingMenuExitCurve)),
+                ) {
+                    val target = message ?: return@AnimatedVisibility
+                    val userReaction = target.reactions.firstOrNull { it.authorType == "user" }
+                    val horizontalAlign = if (target.role == "user") Alignment.End else Alignment.Start
+
+                    val emojiCard: (@Composable () -> Unit)? = if (target.role != "user") {
+                        {
+                            WhitzFloatingMenuCard {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    USER_REACTION_OPTIONS.forEach { opt ->
+                                        val active = userReaction?.reaction == opt.key
+                                        val activeBg = when {
+                                            !active -> Color.Transparent
+                                            opt.key == "dislike" -> colors.dangerWeak
+                                            else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .clip(CircleShape)
+                                                .background(activeBg)
+                                                .clickable { onReact(target, opt.key) },
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Text(opt.emoji, fontSize = 18.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else null
+
+                    val hasActionItems = if (target.role == "user") {
+                        target.content.isNotBlank() || !streaming
+                    } else {
+                        target.content.isNotBlank() || (!streaming && !hasActiveUploads)
+                    }
+
+                    val actionCard: (@Composable () -> Unit)? = if (hasActionItems) {
+                        {
+                            WhitzFloatingMenuCard {
+                                Column(
+                                    modifier = Modifier
+                                        .width(actionCardWidthDp)
+                                        .padding(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    if (target.role == "user") {
+                                        if (target.content.isNotBlank()) {
+                                            WhitzFloatingMenuItem(
+                                                icon = Icons.Default.ContentCopy,
+                                                label = "复制",
+                                                onClick = { onCopy(target.content) },
+                                            )
+                                            WhitzFloatingMenuItem(
+                                                icon = Icons.Default.SelectAll,
+                                                label = "选中文字",
+                                                onClick = { onSelectText(target.id) },
+                                            )
+                                        }
+                                        if (!streaming) {
+                                            WhitzFloatingMenuItem(
+                                                icon = Icons.Default.Edit,
+                                                label = "编辑后发送",
+                                                onClick = { onEdit(target) },
+                                            )
+                                        }
+                                    } else {
+                                        if (target.content.isNotBlank()) {
+                                            WhitzFloatingMenuItem(
+                                                icon = Icons.Default.ContentCopy,
+                                                label = "复制",
+                                                onClick = { onCopy(target.content) },
+                                            )
+                                            WhitzFloatingMenuItem(
+                                                icon = Icons.Default.SelectAll,
+                                                label = "选中文字",
+                                                onClick = { onSelectText(target.id) },
+                                            )
+                                        }
+                                        if (!streaming && !hasActiveUploads) {
+                                            WhitzFloatingMenuItem(
+                                                icon = Icons.Default.Refresh,
+                                                label = "重新生成",
+                                                onClick = { onRegenerate(target.id) },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else null
+
+                    Column(
+                        horizontalAlignment = horizontalAlign,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (expandUpward) {
+                            actionCard?.invoke()
+                            emojiCard?.invoke()
+                        } else {
+                            emojiCard?.invoke()
+                            actionCard?.invoke()
+                        }
+                    }
+                }
+            },
+        ) { measurables, constraints ->
+            val placeables = measurables.map { it.measure(constraints.copy(minWidth = 0, minHeight = 0)) }
+            val padPx = edgePaddingPx.roundToInt()
+            val topPadPx = topSafePx.roundToInt()
+            val bottomPadPx = bottomSafePx.roundToInt()
+            val gapPx = verticalGapPx.roundToInt()
+            layout(constraints.maxWidth, constraints.maxHeight) {
+                if (anchorInStage != null) {
+                    placeables.forEach { placeable ->
+                        val x = (anchorInStage.x - placeable.width / 2f).roundToInt().coerceIn(
+                            padPx,
+                            (constraints.maxWidth - placeable.width - padPx).coerceAtLeast(padPx),
+                        )
+                        val y = if (expandUpward) {
+                            (anchorInStage.y - gapPx - placeable.height).roundToInt().coerceAtLeast(topPadPx)
+                        } else {
+                            (anchorInStage.y + gapPx).roundToInt().coerceIn(
+                                topPadPx,
+                                (constraints.maxHeight - placeable.height - bottomPadPx).coerceAtLeast(topPadPx),
+                            )
+                        }
+                        placeable.place(x, y)
+                    }
+                }
             }
         }
     }
@@ -1886,10 +2551,6 @@ private fun ComposerPlusMenuOverlay(
     onPickFromLibrary: () -> Unit,
     onOpenSkillPicker: () -> Unit,
 ) {
-    val colors = LocalWhitzColors.current
-    val spatialFloatSpec = MaterialTheme.motionScheme.fastSpatialSpec<Float>()
-    val effectsSpec = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
-
     // Scrim outside the card: tapping any other area dismisses the card
     if (visible) {
         Box(
@@ -1910,25 +2571,23 @@ private fun ComposerPlusMenuOverlay(
             AnimatedVisibility(
                 visible = visible && anchorBounds() != null,
                 enter = scaleIn(
-                    initialScale = 0.55f,
+                    initialScale = 0.62f,
                     transformOrigin = TransformOrigin(0f, 1f),
-                    animationSpec = spatialFloatSpec,
-                ) + fadeIn(animationSpec = effectsSpec),
+                    animationSpec = tween(durationMillis = 260, easing = FloatingMenuEnterCurve),
+                ) + slideInVertically(
+                    animationSpec = tween(durationMillis = 260, easing = FloatingMenuEnterCurve),
+                ) { (it * 0.24f).roundToInt() } +
+                    fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
                 exit = scaleOut(
-                    targetScale = 0.55f,
+                    targetScale = 0.72f,
                     transformOrigin = TransformOrigin(0f, 1f),
-                    animationSpec = spatialFloatSpec,
-                ) + fadeOut(animationSpec = effectsSpec),
+                    animationSpec = tween(durationMillis = 180, easing = FloatingMenuExitCurve),
+                ) + slideOutVertically(
+                    animationSpec = tween(durationMillis = 180, easing = FloatingMenuExitCurve),
+                ) { (it * 0.18f).roundToInt() } +
+                    fadeOut(animationSpec = tween(durationMillis = 140, easing = FloatingMenuExitCurve)),
             ) {
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = colors.hover,
-                    modifier = Modifier.clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = {},
-                    ),
-                ) {
+                WhitzFloatingMenuCard {
                     Column(
                         modifier = Modifier
                             .width(172.dp)
@@ -1936,29 +2595,11 @@ private fun ComposerPlusMenuOverlay(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         Box {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(42.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .clickable(onClick = onOpenAttachMenu)
-                                    .padding(horizontal = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(
-                                    Icons.Default.AttachFile,
-                                    contentDescription = "文件上传",
-                                    tint = colors.fg,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(
-                                    text = "文件上传",
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = colors.fg,
-                                )
-                            }
+                            WhitzFloatingMenuItem(
+                                icon = Icons.Default.AttachFile,
+                                label = "文件上传",
+                                onClick = onOpenAttachMenu,
+                            )
                             DropdownMenu(
                                 expanded = showAttachMenu,
                                 onDismissRequest = onDismissAttachMenu,
@@ -1976,32 +2617,12 @@ private fun ComposerPlusMenuOverlay(
                             }
                         }
 
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(42.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(if (selectedSkillCount > 0) colors.active else Color.Transparent)
-                                .clickable(onClick = onOpenSkillPicker)
-                                .padding(horizontal = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(
-                                Icons.Default.AutoAwesome,
-                                contentDescription = "技能",
-                                tint = colors.fg,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                text = if (selectedSkillCount > 0) "技能 ($selectedSkillCount)" else "技能",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = colors.fg,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
+                        WhitzFloatingMenuItem(
+                            icon = Icons.Default.AutoAwesome,
+                            label = if (selectedSkillCount > 0) "技能 ($selectedSkillCount)" else "技能",
+                            highlighted = selectedSkillCount > 0,
+                            onClick = onOpenSkillPicker,
+                        )
                     }
                 }
             }

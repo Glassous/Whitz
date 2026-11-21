@@ -16,10 +16,11 @@ import MemoryPanel from "../components/settings/MemoryPanel.vue";
 import SkillsPanel from "../components/settings/SkillsPanel.vue";
 import LibraryPanel from "../components/settings/LibraryPanel.vue";
 import DevicesPanel from "../components/settings/DevicesPanel.vue";
+import FeedbackPanel from "../components/settings/FeedbackPanel.vue";
 import AvatarCropModal from "../components/settings/AvatarCropModal.vue";
 import AssistantProfileModal from "../components/chat/AssistantProfileModal.vue";
 
-type SettingsTab = "profile" | "library" | "memory" | "skills" | "membership" | "persona" | "devices";
+type SettingsTab = "profile" | "library" | "memory" | "skills" | "membership" | "persona" | "devices" | "feedback";
 type SettingsPage = SettingsTab | "password";
 
 const VALID_TABS: readonly SettingsTab[] = [
@@ -30,6 +31,7 @@ const VALID_TABS: readonly SettingsTab[] = [
   "membership",
   "persona",
   "devices",
+  "feedback",
 ];
 
 function parseTabQuery(raw: unknown): SettingsTab | null {
@@ -138,6 +140,7 @@ const navItems: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "membership", label: "会员与额度", desc: "当前档位、用量与兑换码" },
   { key: "persona", label: "专属助手", desc: "助手头像、昵称与人设风格" },
   { key: "devices", label: "登录设备", desc: "管理活跃会话与设备安全" },
+  { key: "feedback", label: "反馈与评价", desc: "产品满意度评价与 AI 正向点赞设置" },
 ];
 
 const assistantProfileOpen = ref(false);
@@ -693,6 +696,10 @@ async function disableProfileContext() {
             </svg>
             <svg v-else-if="item.key === 'persona'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3zM5 17l.9 2.1L8 20l-2.1.9L5 23l-.9-2.1L2 20l2.1-.9L5 17z" />
+            </svg>
+            <svg v-else-if="item.key === 'feedback'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 10h6M12 7v6" />
             </svg>
             <svg v-else class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
               <rect x="3" y="4" width="18" height="12" rx="2" />
@@ -1418,6 +1425,15 @@ async function disableProfileContext() {
             <p class="mt-1 text-[13.5px] text-fg-muted">查看当前所有活跃登录会话，可随时将异常或不再使用的设备下线。</p>
           </div>
           <DevicesPanel />
+        </div>
+
+        <!-- Page 8: Feedback -->
+        <div v-else-if="activePage === 'feedback'" class="w-full space-y-5">
+          <div class="hidden md:block">
+            <h1 class="text-[20px] font-semibold tracking-tight text-fg">反馈与评价</h1>
+            <p class="mt-1 text-[13.5px] text-fg-muted">提交产品评分与改进建议，并管理 AI 对你消息的正向点赞互动。</p>
+          </div>
+          <FeedbackPanel />
         </div>
       </div>
     </main>

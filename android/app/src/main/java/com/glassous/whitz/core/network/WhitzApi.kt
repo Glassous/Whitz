@@ -11,11 +11,13 @@ import com.glassous.whitz.core.model.DownloadUrlResponse
 import com.glassous.whitz.core.model.EmailCodeResponse
 import com.glassous.whitz.core.model.GithubSkillPreviewResponse
 import com.glassous.whitz.core.model.MemoryOverview
+import com.glassous.whitz.core.model.MessageReaction
 import com.glassous.whitz.core.model.PresignResponse
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.model.TicketResponse
 import com.glassous.whitz.core.model.User
+import com.glassous.whitz.core.model.UserFeedbackItem
 import com.glassous.whitz.core.model.UserSessionItem
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -187,6 +189,25 @@ data class GithubInstallRequest(
 @Serializable
 data class LibraryFilePatchRequest(@SerialName("is_global") val isGlobal: Boolean)
 
+@Serializable
+data class UpdateAiReactionsRequest(
+    @SerialName("ai_reactions_enabled") val aiReactionsEnabled: Boolean,
+)
+
+@Serializable
+data class UserFeedbackCreateRequest(
+    val rating: Int,
+    val category: String,
+    val content: String,
+)
+
+@Serializable
+data class MessageReactionCreateRequest(
+    val reaction: String,
+    @SerialName("reason_code") val reasonCode: String? = null,
+    val comment: String? = null,
+)
+
 interface WhitzApi {
     // --- Auth ---
     @POST("auth/email-code")
@@ -246,6 +267,15 @@ interface WhitzApi {
 
     @POST("users/me/redeem")
     suspend fun redeemCode(@Body body: RedeemRequest): CreditStatus
+
+    @PUT("users/me/ai-reactions")
+    suspend fun updateAiReactions(@Body body: UpdateAiReactionsRequest): User
+
+    @GET("users/me/feedback")
+    suspend fun getMyFeedback(): List<UserFeedbackItem>
+
+    @POST("users/me/feedback")
+    suspend fun createMyFeedback(@Body body: UserFeedbackCreateRequest): UserFeedbackItem
 
     // --- Sessions / Devices ---
     @GET("users/me/sessions")
@@ -354,6 +384,19 @@ interface WhitzApi {
         @Path("id") id: String,
         @Body body: ClarifyRequest,
         @HeaderMap headers: Map<String, String>,
+    ): Response<Unit>
+
+    @POST("conversations/{id}/messages/{messageId}/reactions")
+    suspend fun reactToMessage(
+        @Path("id") id: String,
+        @Path("messageId") messageId: String,
+        @Body body: MessageReactionCreateRequest,
+    ): MessageReaction
+
+    @DELETE("conversations/{id}/messages/{messageId}/reactions")
+    suspend fun deleteMessageReaction(
+        @Path("id") id: String,
+        @Path("messageId") messageId: String,
     ): Response<Unit>
 
     // --- Files & Library ---

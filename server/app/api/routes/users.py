@@ -21,9 +21,12 @@ from app.api.schemas import (
     CreditStatusOut,
     ProfileContextUpdateRequest,
     RedeemRequest,
+    UpdateAiReactionsRequest,
     UpdateAssistantRequest,
     UpdatePersonaRequest,
     UpdateProfileRequest,
+    UserFeedbackCreateRequest,
+    UserFeedbackOut,
     UserOut,
     UserSessionOut,
 )
@@ -35,7 +38,7 @@ from app.core.security import (
     revoke_session,
     verify_password,
 )
-from app.db.models import RefreshToken, User
+from app.db.models import RefreshToken, User, UserFeedback
 from app.db.session import get_db
 from app.services import audit, membership
 
@@ -583,6 +586,76 @@ async def revoke_all_my_sessions(
         request=request,
         metadata={"exclude_current": exclude_current, "revoked_sessions": len(revoke_ids)},
     )
+
+
+@router.put("/me/ai-reactions", response_model=UserOut)
+async def update_ai_reactions(
+    body: UpdateAiReactionsRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    prev = bool(user.ai_reactions_enabled)
+    next_val = bool(body.ai_reactions_enabled)
+    if prev != next_val:
+        user.ai_reactions_enabled = next_val
+        await db.commit()
+        await db.refresh(user)
+        await audit.record(
+            "user.ai_reactions_toggle",
+            actor=user,
+            target_type="user",
+            target_id=user.id,
+            request=request,
+            diff={"before": {"ai_reactions_enabled": prev}, "after": {"ai_reactions_enabled": next_val}},
+        )
+    return user
+
+
+@router.get("/me/feedback", response_model=list[UserFeedbackOut])
+async def list_my_feedback(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[UserFeedback]:
+    rows = (
+        await db.execute(
+            select(UserFeedback)
+            .where(UserFeedback.user_id == user.id)
+            .order_by(UserFeedback.created_at.desc())
+            .limit(30)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+@router.post("/me/feedback", response_model=UserFeedbackOut, status_code=status.HTTP_201_CREATED)
+async def create_my_feedback(
+    body: UserFeedbackCreateRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserFeedback:
+    sentiment = "positive" if body.rating >= 4 else ("neutral" if body.rating == 3 else "negative")
+    row = UserFeedback(
+        user_id=user.id,
+        rating=body.rating,
+        sentiment=sentiment,
+        category=body.category,
+        content=body.content.strip(),
+        status="new",
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    await audit.record(
+        "user.feedback_submit",
+        actor=user,
+        target_type="user_feedback",
+        target_id=row.id,
+        request=request,
+        metadata={"rating": row.rating, "category": row.category, "sentiment": row.sentiment},
+    )
+    return row
 
 
 @router.get("/{user_id}/avatar")

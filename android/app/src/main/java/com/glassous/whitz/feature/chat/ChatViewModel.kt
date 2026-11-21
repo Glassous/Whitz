@@ -18,6 +18,7 @@ import com.glassous.whitz.core.model.CreditStatus
 import com.glassous.whitz.core.model.FileAttachmentMeta
 import com.glassous.whitz.core.model.MemoryPendingItem
 import com.glassous.whitz.core.model.Message
+import com.glassous.whitz.core.model.MessageReaction
 import com.glassous.whitz.core.model.PendingControl
 import com.glassous.whitz.core.model.Plan
 import com.glassous.whitz.core.model.PlanItem
@@ -36,6 +37,7 @@ import com.glassous.whitz.core.network.AvatarUploadRequest
 import com.glassous.whitz.core.network.ClarifyRequest
 import com.glassous.whitz.core.network.CompleteUploadRequest
 import com.glassous.whitz.core.network.CreateConversationRequest
+import com.glassous.whitz.core.network.MessageReactionCreateRequest
 import com.glassous.whitz.core.network.PatchConversationRequest
 import com.glassous.whitz.core.network.PendingActionRequest
 import com.glassous.whitz.core.network.PresignRequest
@@ -88,6 +90,7 @@ data class ChatUiState(
     val conversationsRefreshing: Boolean = false,
     val showingCachedData: Boolean = false,
     val initialRefreshing: Boolean = false,
+    val switchingConversation: Boolean = false,
     val currentConvId: String? = null,
     val currentConvKind: String = "main",
     val currentConvTitle: String = "主聊",
@@ -345,6 +348,7 @@ class ChatViewModel(
         _ui.update {
             it.copy(
                 isNewSideDraft = true,
+                switchingConversation = false,
                 currentConvId = null,
                 currentConvKind = "side",
                 currentConvTitle = "新旁聊",
@@ -391,6 +395,7 @@ class ChatViewModel(
         _ui.update {
             it.copy(
                 isNewSideDraft = false,
+                switchingConversation = true,
                 previewTarget = null,
                 selectedSkillNames = emptyList(),
             )
@@ -407,7 +412,12 @@ class ChatViewModel(
                 _ui.update { it.copy(files = emptyList(), filesLoading = false) }
             } catch (t: Throwable) {
                 if (mySeq != openSeq) return@launch
-                _ui.update { it.copy(error = extractErrorMessage(t, "加载主要聊天失败")) }
+                _ui.update {
+                    it.copy(
+                        switchingConversation = false,
+                        error = extractErrorMessage(t, "加载主要聊天失败"),
+                    )
+                }
             }
         }
     }
@@ -425,6 +435,7 @@ class ChatViewModel(
         _ui.update {
             it.copy(
                 isNewSideDraft = false,
+                switchingConversation = true,
                 previewTarget = null,
             )
         }
@@ -440,7 +451,12 @@ class ChatViewModel(
                 }
             } catch (t: Throwable) {
                 if (mySeq != openSeq) return@launch
-                _ui.update { it.copy(error = extractErrorMessage(t, "加载对话失败")) }
+                _ui.update {
+                    it.copy(
+                        switchingConversation = false,
+                        error = extractErrorMessage(t, "加载对话失败"),
+                    )
+                }
             }
         }
     }
@@ -463,6 +479,7 @@ class ChatViewModel(
                 currentConvKind = detail.kind,
                 currentConvTitle = detail.title,
                 isNewSideDraft = false,
+                switchingConversation = false,
                 showingCachedData = false,
                 messages = detail.messages,
                 plan = detail.plan,
@@ -1220,6 +1237,16 @@ class ChatViewModel(
             }
             "run.started" -> {
                 _ui.update { it.copy(activeRunId = d.str("run_id")) }
+            }
+            "message.reaction" -> {
+                val msgId = d.str("message_id")
+                val arr = d["reactions"] as? JsonArray
+                if (!msgId.isNullOrBlank() && arr != null) {
+                    val parsed = arr.mapNotNull {
+                        runCatching { WhitzJson.decodeFromJsonElement(MessageReaction.serializer(), it) }.getOrNull()
+                    }
+                    applyMessageReactions(msgId, parsed)
+                }
             }
             "title.updated", "conversation.title_updated" -> {
                 val id = d.str("conversation_id") ?: _ui.value.currentConvId
@@ -2310,6 +2337,17 @@ class ChatViewModel(
                     clearPendingControlFromSync()
                 }
             }
+            "message.reaction_updated" -> {
+                val cid = d.str("conversation_id")
+                val msgId = d.str("message_id")
+                val arr = d["reactions"] as? JsonArray
+                if (cid != null && cid == _ui.value.currentConvId && !msgId.isNullOrBlank() && arr != null) {
+                    val parsed = arr.mapNotNull {
+                        runCatching { WhitzJson.decodeFromJsonElement(MessageReaction.serializer(), it) }.getOrNull()
+                    }
+                    applyMessageReactions(msgId, parsed)
+                }
+            }
             "conversation.updated" -> {
                 val cid = d.str("conversation_id")
                 val action = d.str("action") ?: ""
@@ -2366,6 +2404,62 @@ class ChatViewModel(
                     }
                 }
                 library.handleRealtimeLibraryEvent(action, fileId, idxStatus, idxChunks)
+            }
+        }
+    }
+
+    fun applyMessageReactions(messageId: String, reactions: List<MessageReaction>) {
+        _ui.update { state ->
+            state.copy(
+                messages = state.messages.map { m ->
+                    if (m.id == messageId) m.copy(reactions = reactions) else m
+                }
+            )
+        }
+    }
+
+    fun reactToMessage(
+        messageId: String,
+        reaction: String,
+        reasonCode: String? = null,
+        comment: String? = null,
+    ) {
+        val convId = _ui.value.currentConvId ?: return
+        val msg = _ui.value.messages.firstOrNull { it.id == messageId } ?: return
+        val existing = msg.reactions.firstOrNull { it.authorType == "user" }
+        if (existing != null && existing.reaction == reaction && reasonCode == null && comment == null) {
+            removeReaction(messageId)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val saved = container.network.api.reactToMessage(
+                    convId,
+                    messageId,
+                    MessageReactionCreateRequest(
+                        reaction = reaction,
+                        reasonCode = reasonCode,
+                        comment = comment,
+                    ),
+                )
+                val others = msg.reactions.filterNot { it.authorType == "user" }
+                applyMessageReactions(messageId, others + saved)
+            } catch (t: Throwable) {
+                _ui.update { it.copy(error = extractErrorMessage(t, "评价提交失败")) }
+            }
+        }
+    }
+
+    fun removeReaction(messageId: String) {
+        val convId = _ui.value.currentConvId ?: return
+        val msg = _ui.value.messages.firstOrNull { it.id == messageId } ?: return
+        viewModelScope.launch {
+            try {
+                container.network.api.deleteMessageReaction(convId, messageId)
+                val others = msg.reactions.filterNot { it.authorType == "user" }
+                applyMessageReactions(messageId, others)
+            } catch (t: Throwable) {
+                _ui.update { it.copy(error = extractErrorMessage(t, "取消评价失败")) }
             }
         }
     }

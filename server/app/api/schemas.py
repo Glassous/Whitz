@@ -105,6 +105,7 @@ class UserOut(BaseModel):
     memory_enabled: bool = False
     memory_consented_at: datetime | None = None
     memory_require_confirm: bool = True
+    ai_reactions_enabled: bool = True
     email_verified_at: datetime | None = None
     membership_tier: str
     membership_expires_at: datetime | None
@@ -213,6 +214,49 @@ class ConversationUpdate(BaseModel):
     is_pinned: bool | None = None
 
 
+class MessageReactionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    message_id: uuid.UUID
+    author_type: str
+    reaction: str
+    reason_code: str | None = None
+    comment: str | None = None
+    created_at: datetime
+
+
+class MessageReactionCreateRequest(BaseModel):
+    reaction: Literal["like", "love", "insightful", "celebrate", "dislike"]
+    reason_code: str | None = Field(default=None, max_length=40)
+    comment: str | None = Field(default=None, max_length=500)
+
+
+class UserFeedbackCreateRequest(BaseModel):
+    rating: int = Field(ge=1, le=5)
+    category: Literal["general", "quality", "speed", "ui", "feature", "bug"] = "general"
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class UserFeedbackOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    rating: int
+    sentiment: str
+    category: str
+    content: str
+    status: str
+    admin_note: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UpdateAiReactionsRequest(BaseModel):
+    ai_reactions_enabled: bool
+
+
 class MessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -224,6 +268,7 @@ class MessageOut(BaseModel):
     status: str
     run_id: str | None
     created_at: datetime
+    reactions: list[MessageReactionOut] = Field(default_factory=list)
 
 
 class ConversationOut(BaseModel):

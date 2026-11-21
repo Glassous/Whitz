@@ -260,4 +260,49 @@ class WhitzCoreTests {
         assertEquals(2, decoded.mainConversation?.messages?.size)
         assertEquals("你好！", decoded.mainConversation?.messages?.last()?.content)
     }
+
+    @Test
+    fun models_decodeMessageReactionsAndUserFeedback() {
+        val msgRaw = """
+            {
+              "id": "m-1",
+              "role": "user",
+              "content": "思路很清晰对吧",
+              "status": "completed",
+              "reactions": [
+                {
+                  "id": "r-1",
+                  "message_id": "m-1",
+                  "author_type": "assistant",
+                  "reaction": "sparkle",
+                  "comment": "精准定位问题",
+                  "created_at": "2026-11-21T12:00:00Z"
+                }
+              ]
+            }
+        """.trimIndent()
+        val msg = WhitzJson.decodeFromString(Message.serializer(), msgRaw)
+        assertEquals(1, msg.reactions.size)
+        assertEquals("assistant", msg.reactions.first().authorType)
+        assertEquals("sparkle", msg.reactions.first().reaction)
+
+        val fbRaw = """
+            {
+              "id": "fb-1",
+              "user_id": "u-1",
+              "rating": 5,
+              "sentiment": "positive",
+              "category": "quality",
+              "content": "响应很快",
+              "status": "resolved",
+              "admin_note": "感谢反馈",
+              "created_at": "2026-11-21T12:00:00Z",
+              "updated_at": "2026-11-21T12:05:00Z"
+            }
+        """.trimIndent()
+        val fb = WhitzJson.decodeFromString(com.glassous.whitz.core.model.UserFeedbackItem.serializer(), fbRaw)
+        assertEquals(5, fb.rating)
+        assertEquals("resolved", fb.status)
+        assertEquals("感谢反馈", fb.adminNote)
+    }
 }
