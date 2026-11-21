@@ -35,6 +35,11 @@ object DateTimeUtils {
 object ConversationSorter {
     fun sort(list: List<Conversation>): List<Conversation> {
         return list.sortedWith { a, b ->
+            val aMain = a.kind == "main"
+            val bMain = b.kind == "main"
+            if (aMain != bMain) {
+                return@sortedWith if (aMain) -1 else 1
+            }
             if (a.isPinned != b.isPinned) {
                 return@sortedWith if (a.isPinned) -1 else 1
             }

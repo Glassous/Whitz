@@ -60,7 +60,7 @@ data class ResetPasswordRequest(
 data class RefreshRequest(@SerialName("refresh_token") val refreshToken: String)
 
 @Serializable
-data class CreateConversationRequest(val title: String = "新对话")
+data class CreateConversationRequest(val title: String = "新旁聊")
 
 @Serializable
 data class PatchConversationRequest(
@@ -132,6 +132,9 @@ data class AvatarUploadRequest(@SerialName("data_url") val dataUrl: String)
 
 @Serializable
 data class UpdatePersonaRequest(val persona: String)
+
+@Serializable
+data class UpdateAssistantRequest(@SerialName("assistant_name") val assistantName: String? = null)
 
 @Serializable
 data class MemorySettingsRequest(
@@ -229,6 +232,15 @@ interface WhitzApi {
     @DELETE("users/me/avatar")
     suspend fun deleteAvatar(): User
 
+    @PATCH("users/me/assistant")
+    suspend fun updateAssistantProfile(@Body body: UpdateAssistantRequest): User
+
+    @PUT("users/me/assistant/avatar")
+    suspend fun uploadAssistantAvatar(@Body body: AvatarUploadRequest): User
+
+    @DELETE("users/me/assistant/avatar")
+    suspend fun deleteAssistantAvatar(): User
+
     @GET("users/me/credits")
     suspend fun getCredits(): CreditStatus
 
@@ -299,6 +311,9 @@ interface WhitzApi {
     // --- Conversations ---
     @GET("conversations")
     suspend fun getConversations(): List<Conversation>
+
+    @GET("conversations/main")
+    suspend fun getMainConversation(): ConversationDetail
 
     @POST("conversations")
     suspend fun createConversation(@Body body: CreateConversationRequest): Conversation
@@ -380,10 +395,32 @@ interface WhitzApi {
     @GET("library/files")
     suspend fun getLibraryFiles(
         @Query("q") q: String? = null,
+        @Query("category") category: String? = null,
+        @Query("source") source: String? = null,
         @Query("is_global") isGlobal: Boolean? = null,
         @Query("page") page: Int = 1,
         @Query("page_size") pageSize: Int = 40,
     ): JsonElement
+
+    @POST("library/files/presign")
+    suspend fun presignLibraryUpload(@Body body: PresignRequest): PresignResponse
+
+    @POST("library/files/{fileId}/complete")
+    suspend fun completeLibraryUpload(
+        @Path("fileId") fileId: String,
+        @Body body: CompleteUploadRequest,
+    ): ConversationFile
+
+    @GET("library/files/{fileId}/download-url")
+    suspend fun getLibraryDownloadUrl(
+        @Path("fileId") fileId: String,
+        @Query("inline") inline: Boolean = false,
+    ): DownloadUrlResponse
+
+    @GET("library/files/{fileId}/preview-content")
+    suspend fun getLibraryPreviewContent(
+        @Path("fileId") fileId: String,
+    ): ResponseBody
 
     @PATCH("library/files/{id}")
     suspend fun patchLibraryFile(@Path("id") id: String, @Body body: LibraryFilePatchRequest): ConversationFile

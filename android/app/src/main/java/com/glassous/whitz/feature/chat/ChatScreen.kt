@@ -55,6 +55,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.Delete
@@ -74,6 +75,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearWavyProgressIndicator
@@ -90,6 +92,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -109,6 +112,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -123,12 +127,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil3.compose.AsyncImage
 import com.glassous.whitz.R
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.UploadTaskStatus
 import com.glassous.whitz.core.model.User
 import com.glassous.whitz.core.model.quotaPercentLabel
+import com.glassous.whitz.core.model.resolvedAssistantName
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzBrandMark
@@ -176,6 +184,7 @@ fun ChatScreen(
     val headerHazeState = rememberHazeState()
 
     var inputText by remember { mutableStateOf("") }
+    var queuedSend by remember { mutableStateOf(false) }
     var isInputFocused by remember { mutableStateOf(false) }
     var composerExpanded by remember { mutableStateOf(false) }
     var plusMenuExpanded by remember { mutableStateOf(false) }
@@ -184,6 +193,18 @@ fun ChatScreen(
     var showLibraryPicker by remember { mutableStateOf(false) }
     var desktopSidebarCollapsed by rememberSaveable { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
+
+    val assistantName = user?.resolvedAssistantName() ?: "Whitz"
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                vm.recoverIfNeeded()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     var renameTarget by remember { mutableStateOf<Conversation?>(null) }
     var deleteTarget by remember { mutableStateOf<Conversation?>(null) }
@@ -237,6 +258,19 @@ fun ChatScreen(
         wasImeVisible = imeVisible
     }
 
+    LaunchedEffect(ui.hasActiveUploads) {
+        if (!ui.hasActiveUploads && queuedSend) {
+            queuedSend = false
+            val trimmed = inputText.trim()
+            if (trimmed.isNotEmpty() && !ui.streaming && !ui.sendingMessage) {
+                inputText = ""
+                composerExpanded = false
+                dismissPlusMenu()
+                vm.sendMessage(trimmed)
+            }
+        }
+    }
+
     val visibleMessages = remember(ui.messages) { filterVisibleMessages(ui.messages) }
     val runningToolName = remember(ui.messages, ui.streaming) {
         if (ui.streaming) computeRunningTool(ui.messages) else null
@@ -244,8 +278,25 @@ fun ChatScreen(
     val currentStepInfo = remember(ui.plan, ui.streaming) {
         if (ui.streaming) computeCurrentStep(ui.plan) else null
     }
-    val liveStepLabel = remember(currentStepInfo, runningToolName, ui.plan, ui.streaming) {
-        if (ui.streaming) computeLiveStepLabel(currentStepInfo, runningToolName, ui.plan) else null
+    val liveStepLabel = remember(
+        currentStepInfo,
+        runningToolName,
+        ui.plan,
+        ui.streaming,
+        ui.stopping,
+        ui.reconnecting,
+        ui.waitingFirstByte,
+    ) {
+        if (ui.streaming) {
+            computeLiveStepLabel(
+                currentStep = currentStepInfo,
+                runningTool = runningToolName,
+                plan = ui.plan,
+                stopping = ui.stopping,
+                reconnecting = ui.reconnecting,
+                waitingFirstByte = ui.waitingFirstByte,
+            )
+        } else null
     }
     val resolvedTurn = remember(
         ui.messages,
@@ -315,6 +366,9 @@ fun ChatScreen(
     BackHandler(enabled = drawerState.isOpen) {
         scope.launch { drawerState.close() }
     }
+    BackHandler(enabled = ui.activeView == ChatMainView.LIBRARY && !drawerState.isOpen) {
+        vm.switchView(ChatMainView.CHAT)
+    }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize().background(colors.canvas)) {
         val isExpandedScreen = maxWidth >= 840.dp
@@ -349,8 +403,11 @@ fun ChatScreen(
                             authReady = authReady,
                             collapsed = desktopSidebarCollapsed,
                             showCloseButton = false,
+                            resolveAssetUrl = { vm.resolveAssetUrl(it) },
                             onCloseDrawer = {},
-                            onNewChat = { vm.startNewConversation() },
+                            onSelectMain = { vm.openMainConversation() },
+                            onCreateSide = { vm.createSideConversation() },
+                            onSwitchView = { vm.switchView(it) },
                             onOpenSearch = { showSearch = true },
                             onRefreshConversations = { vm.refreshConversations() },
                             onSelectConv = { vm.openConversation(it) },
@@ -362,6 +419,60 @@ fun ChatScreen(
                     }
                 }
 
+                // Center Area: Embedded Library View OR Chat Workspace
+                if (ui.activeView == ChatMainView.LIBRARY) {
+                    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+                    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .background(colors.canvas),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = statusTop + 10.dp, start = 10.dp, end = 16.dp, bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            WhitzGlassCircleButton(
+                                hazeState = headerHazeState,
+                                showBorder = true,
+                                onClick = {
+                                    if (isExpandedScreen) {
+                                        desktopSidebarCollapsed = !desktopSidebarCollapsed
+                                    } else {
+                                        scope.launch { drawerState.open() }
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_sidebar_toggle),
+                                    contentDescription = "切换侧栏",
+                                    tint = colors.fgMuted,
+                                    modifier = Modifier.size(23.dp),
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = "资料库",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.fg,
+                            )
+                        }
+                        Box(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            contentAlignment = Alignment.TopCenter,
+                        ) {
+                            LibraryPane(
+                                controller = vm.library,
+                                bottomPadding = navBottom + 24.dp,
+                                modifier = Modifier.widthIn(max = 900.dp).fillMaxSize(),
+                            )
+                        }
+                    }
+                } else {
                 // Center Chat Area (100% edge-to-edge)
                 Box(
                     modifier = Modifier
@@ -413,6 +524,19 @@ fun ChatScreen(
                                     color = colors.fg,
                                     textAlign = TextAlign.Center,
                                 )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    text = if (ui.isMainChat) {
+                                        "我是你的专属助手 $assistantName，随时关联你的所有旁聊与资料库。今天想做点什么？"
+                                    } else {
+                                        "新建旁聊专注讨论单个主题；发送的文件会自动沉淀到全局资料库。"
+                                    },
+                                    fontSize = 14.sp,
+                                    lineHeight = 20.sp,
+                                    color = colors.fgMuted,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.widthIn(max = 460.dp),
+                                )
                             }
                         } else {
                             LazyColumn(
@@ -436,6 +560,9 @@ fun ChatScreen(
                                             MessageBubble(
                                                 message = msg,
                                                 streaming = ui.streaming,
+                                                hasActiveUploads = ui.hasActiveUploads,
+                                                reconnecting = ui.reconnecting,
+                                                waitingFirstByte = ui.waitingFirstByte,
                                                 isActiveTurn = msg.id == ui.activeAssistantId,
                                                 isSelectedTurn = isSelected,
                                                 liveLabel = if (msg.id == ui.activeAssistantId && ui.streaming) liveStepLabel else null,
@@ -515,12 +642,12 @@ fun ChatScreen(
                                 ) {
                                     Icon(
                                         painter = painterResource(R.drawable.ic_task_panel),
-                                        contentDescription = "步骤与文件",
+                                        contentDescription = if (ui.isMainChat) "助手与步骤" else "步骤与文件",
                                         tint = colors.fgMuted,
                                         modifier = Modifier.size(22.dp),
                                     )
                                 }
-                                if (ui.files.isNotEmpty()) {
+                                if (!ui.isMainChat && ui.files.isNotEmpty()) {
                                     Box(
                                         modifier = Modifier
                                             .align(Alignment.TopEnd)
@@ -599,15 +726,24 @@ fun ChatScreen(
                         ) {
                             ui.pendingControl?.let { ctrl ->
                                 if (ctrl.kind == "approval") {
-                                    ApprovalCard(control = ctrl, onApprove = { vm.approveControl(it) })
+                                    ApprovalCard(
+                                        control = ctrl,
+                                        submittingChoice = ui.approvingChoice,
+                                        onApprove = { vm.approveControl(it) },
+                                    )
                                 } else {
-                                    ClarifyCard(control = ctrl, onSubmit = { vm.clarifyControl(it) })
+                                    ClarifyCard(
+                                        control = ctrl,
+                                        submitting = ui.submittingClarify,
+                                        onSubmit = { vm.clarifyControl(it) },
+                                    )
                                 }
                             }
 
                             ui.pendingMemory.forEach { mem ->
                                 MemoryPendingCard(
                                     item = mem,
+                                    busy = mem.id in ui.resolvingMemoryIds,
                                     onResolve = { id, act, c -> vm.resolvePendingMemory(id, act, c) },
                                 )
                             }
@@ -615,6 +751,7 @@ fun ChatScreen(
                             ui.pendingSkills.forEach { sk ->
                                 SkillPendingCard(
                                     item = sk,
+                                    busy = sk.id in ui.resolvingSkillIds,
                                     onResolve = { id, act, c -> vm.resolvePendingSkill(id, act, c) },
                                 )
                             }
@@ -726,14 +863,38 @@ fun ChatScreen(
                                                         ) {
                                                             Column(modifier = Modifier.width(120.dp)) {
                                                                 Text(task.filename, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.fg)
-                                                                if (task.status == UploadTaskStatus.ERROR) {
-                                                                    Text(task.error ?: "失败", fontSize = 10.sp, color = colors.danger, maxLines = 1)
-                                                                } else {
-                                                                    Spacer(modifier = Modifier.height(2.dp))
-                                                                    LinearWavyProgressIndicator(
-                                                                        progress = { task.progress / 100f },
-                                                                        modifier = Modifier.fillMaxWidth().height(4.dp),
-                                                                    )
+                                                                when (task.status) {
+                                                                    UploadTaskStatus.ERROR -> {
+                                                                        Row(
+                                                                            verticalAlignment = Alignment.CenterVertically,
+                                                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                                        ) {
+                                                                            Text(task.error ?: "失败", fontSize = 10.sp, color = colors.danger, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                                                                            if (task.localFile != null) {
+                                                                                Text(
+                                                                                    text = "重试",
+                                                                                    fontSize = 10.5.sp,
+                                                                                    fontWeight = FontWeight.Medium,
+                                                                                    color = MaterialTheme.colorScheme.primary,
+                                                                                    modifier = Modifier.clickable { vm.retryUpload(task.localId) },
+                                                                                )
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    UploadTaskStatus.SIGNING, UploadTaskStatus.COMPLETING -> {
+                                                                        Text(
+                                                                            text = if (task.status == UploadTaskStatus.SIGNING) "签名中…" else "校验中…",
+                                                                            fontSize = 10.sp,
+                                                                            color = colors.fgFaint,
+                                                                        )
+                                                                    }
+                                                                    UploadTaskStatus.UPLOADING -> {
+                                                                        Spacer(modifier = Modifier.height(2.dp))
+                                                                        LinearWavyProgressIndicator(
+                                                                            progress = { task.progress / 100f },
+                                                                            modifier = Modifier.fillMaxWidth().height(4.dp),
+                                                                        )
+                                                                    }
                                                                 }
                                                             }
                                                             Spacer(modifier = Modifier.width(4.dp))
@@ -791,8 +952,33 @@ fun ChatScreen(
                                             }
 
                                             val canExpandInput = inputText.length > 60 || inputText.contains('\n') || composerExpanded
-                                            val hasActiveUploads = ui.uploads.any { it.status != UploadTaskStatus.ERROR }
-                                            val canSend = inputText.isNotBlank() && !hasActiveUploads
+                                            val hasActiveUploads = ui.hasActiveUploads
+                                            val canSend = inputText.isNotBlank() && !ui.streaming && !ui.sendingMessage && ui.agentStatus?.ready != false
+
+                                            if (queuedSend && hasActiveUploads) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                ) {
+                                                    WhitzLoadingIndicator(size = 12.dp)
+                                                    Text(
+                                                        text = "等待上传完成自动发送…",
+                                                        fontSize = 11.5.sp,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.weight(1f),
+                                                    )
+                                                    Text(
+                                                        text = "取消",
+                                                        fontSize = 11.5.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        color = colors.fgMuted,
+                                                        modifier = Modifier.clickable { queuedSend = false },
+                                                    )
+                                                }
+                                            }
 
                                             val inputMinHeight by animateDpAsState(
                                                 targetValue = if (composerExpanded) 200.dp else 24.dp,
@@ -812,8 +998,13 @@ fun ChatScreen(
                                                     modifier = fieldMod.padding(horizontal = 4.dp, vertical = 6.dp),
                                                 ) {
                                                     if (inputText.isEmpty()) {
+                                                        val placeholderText = when {
+                                                            ui.agentStatus?.ready == false -> "助理正在初始化，请稍候…"
+                                                            hasActiveUploads -> "文件上传中，可点发送排队…"
+                                                            else -> "给 $assistantName 发送消息"
+                                                        }
                                                         Text(
-                                                            text = if (ui.agentStatus?.ready == false) "助理初始化中..." else "给 Whitz 发消息...",
+                                                            text = placeholderText,
                                                             color = colors.fgFaint,
                                                             fontSize = 15.sp,
                                                             maxLines = 1,
@@ -845,14 +1036,22 @@ fun ChatScreen(
                                             val sendOrStopContent: @Composable () -> Unit = {
                                                 ComposerSendOrStopButton(
                                                     streaming = ui.streaming,
+                                                    stopping = ui.stopping,
+                                                    sending = ui.sendingMessage || ui.waitingFirstByte,
+                                                    queued = queuedSend && hasActiveUploads,
+                                                    uploading = hasActiveUploads,
                                                     canSend = canSend,
                                                     onStop = { vm.stopRun() },
                                                     onSend = {
-                                                        val text = inputText
-                                                        inputText = ""
-                                                        composerExpanded = false
-                                                        dismissPlusMenu()
-                                                        vm.sendMessage(text)
+                                                        if (hasActiveUploads) {
+                                                            queuedSend = true
+                                                        } else {
+                                                            val text = inputText
+                                                            inputText = ""
+                                                            composerExpanded = false
+                                                            dismissPlusMenu()
+                                                            vm.sendMessage(text)
+                                                        }
                                                     },
                                                 )
                                             }
@@ -948,29 +1147,32 @@ fun ChatScreen(
                             .padding(bottom = 90.dp),
                     )
                 }
+                }
             }
 
-                ComposerPlusMenuOverlay(
-                    visible = plusMenuExpanded,
-                    anchorBounds = { plusAnchorBounds },
-                    selectedSkillCount = ui.selectedSkillNames.size,
-                    showAttachMenu = showAttachMenu,
-                    onDismiss = dismissPlusMenu,
-                    onOpenAttachMenu = { showAttachMenu = true },
-                    onDismissAttachMenu = { showAttachMenu = false },
-                    onUploadLocalFile = {
-                        dismissPlusMenu()
-                        filePickerLauncher.launch(arrayOf("*/*"))
-                    },
-                    onPickFromLibrary = {
-                        dismissPlusMenu()
-                        showLibraryPicker = true
-                    },
-                    onOpenSkillPicker = {
-                        dismissPlusMenu()
-                        showSkillPicker = true
-                    },
-                )
+                if (ui.activeView == ChatMainView.CHAT) {
+                    ComposerPlusMenuOverlay(
+                        visible = plusMenuExpanded,
+                        anchorBounds = { plusAnchorBounds },
+                        selectedSkillCount = ui.selectedSkillNames.size,
+                        showAttachMenu = showAttachMenu,
+                        onDismiss = dismissPlusMenu,
+                        onOpenAttachMenu = { showAttachMenu = true },
+                        onDismissAttachMenu = { showAttachMenu = false },
+                        onUploadLocalFile = {
+                            dismissPlusMenu()
+                            filePickerLauncher.launch(arrayOf("*/*"))
+                        },
+                        onPickFromLibrary = {
+                            dismissPlusMenu()
+                            showLibraryPicker = true
+                        },
+                        onOpenSkillPicker = {
+                            dismissPlusMenu()
+                            showSkillPicker = true
+                        },
+                    )
+                }
             }
         }
 
@@ -991,9 +1193,18 @@ fun ChatScreen(
                             authReady = authReady,
                             collapsed = false,
                             showCloseButton = true,
+                            resolveAssetUrl = { vm.resolveAssetUrl(it) },
                             onCloseDrawer = { scope.launch { drawerState.close() } },
-                            onNewChat = {
-                                vm.startNewConversation()
+                            onSelectMain = {
+                                vm.openMainConversation()
+                                scope.launch { drawerState.close() }
+                            },
+                            onCreateSide = {
+                                vm.createSideConversation()
+                                scope.launch { drawerState.close() }
+                            },
+                            onSwitchView = { view ->
+                                vm.switchView(view)
                                 scope.launch { drawerState.close() }
                             },
                             onOpenSearch = { showSearch = true },
@@ -1018,6 +1229,8 @@ fun ChatScreen(
     // Dialogs & Sheets
     if (showSearch) {
         SearchDialog(
+            recentConversations = ui.conversations,
+            assistantName = assistantName,
             results = ui.searchResults,
             searching = ui.searching,
             onQueryChange = { vm.searchConversations(it) },
@@ -1055,7 +1268,7 @@ fun ChatScreen(
         AlertDialog(
             onDismissRequest = { renameTarget = null },
             containerColor = colors.canvas,
-            title = { Text("重命名对话", fontWeight = FontWeight.SemiBold, color = colors.fg) },
+            title = { Text("重命名旁聊", fontWeight = FontWeight.SemiBold, color = colors.fg) },
             text = {
                 WhitzTextField(
                     value = newTitle,
@@ -1080,8 +1293,13 @@ fun ChatScreen(
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             containerColor = colors.canvas,
-            title = { Text("删除对话", fontWeight = FontWeight.SemiBold, color = colors.fg) },
-            text = { Text("确定要删除「${conv.title}」吗？删除后无法恢复。", color = colors.fgMuted) },
+            title = { Text("删除旁聊", fontWeight = FontWeight.SemiBold, color = colors.fg) },
+            text = {
+                Text(
+                    "确定删除旁聊「${conv.title}」吗？此操作不可撤销；该旁聊中上传的文件仍会保留在资料库中。",
+                    color = colors.fgMuted,
+                )
+            },
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } },
             confirmButton = {
                 Button(
@@ -1097,6 +1315,18 @@ fun ChatScreen(
     }
 }
 
+private val SIDEBAR_ACTIVE_RUN_STATUSES = setOf(
+    "starting",
+    "queued",
+    "running",
+    "waiting",
+    "waiting_for_approval",
+    "waiting_for_clarify",
+)
+
+private fun isConvRunning(c: Conversation?): Boolean =
+    c?.activeRunStatus != null && c.activeRunStatus in SIDEBAR_ACTIVE_RUN_STATUSES
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SidebarContent(
@@ -1105,8 +1335,11 @@ private fun SidebarContent(
     authReady: Boolean,
     collapsed: Boolean,
     showCloseButton: Boolean,
+    resolveAssetUrl: (String?) -> String?,
     onCloseDrawer: () -> Unit,
-    onNewChat: () -> Unit,
+    onSelectMain: () -> Unit,
+    onCreateSide: () -> Unit,
+    onSwitchView: (ChatMainView) -> Unit,
     onOpenSearch: () -> Unit,
     onRefreshConversations: () -> Unit,
     onSelectConv: (String) -> Unit,
@@ -1117,6 +1350,13 @@ private fun SidebarContent(
 ) {
     val colors = LocalWhitzColors.current
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val assistantName = user?.resolvedAssistantName() ?: "Whitz"
+    val assistantAvatarUrl = resolveAssetUrl(user?.assistantAvatarUrl)
+    val userAvatarUrl = resolveAssetUrl(user?.avatarUrl)
+    val mainConv = ui.mainConversation
+    val isMainSelected = ui.activeView == ChatMainView.CHAT &&
+        mainConv != null &&
+        ui.currentConvId == mainConv.id
 
     Column(
         modifier = Modifier
@@ -1136,7 +1376,7 @@ private fun SidebarContent(
                     modifier = Modifier
                         .size(40.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .clickable(onClick = onNewChat),
+                        .clickable(onClick = onSelectMain),
                     contentAlignment = Alignment.Center,
                 ) {
                     WhitzLogoMark(modifier = Modifier.size(26.dp))
@@ -1145,7 +1385,7 @@ private fun SidebarContent(
                 WhitzBrandMark(
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
-                        .clickable(onClick = onNewChat)
+                        .clickable(onClick = onSelectMain)
                         .padding(horizontal = 4.dp, vertical = 4.dp),
                 )
                 Spacer(modifier = Modifier.weight(1f))
@@ -1157,53 +1397,107 @@ private fun SidebarContent(
             }
         }
 
-        // Action Buttons: New Chat & Search
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onNewChat)
-                    .padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "新建对话", tint = colors.fg, modifier = Modifier.size(20.dp))
-                if (!collapsed) {
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text("新建对话", fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, color = colors.fg)
-                }
-            }
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onOpenSearch)
-                    .padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Default.Search, contentDescription = "搜索对话", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
-                if (!collapsed) {
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text("搜索对话", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // Conversation List
         if (collapsed) {
             Spacer(modifier = Modifier.weight(1f))
         } else {
-            val pinned = remember(ui.conversations) { ui.conversations.filter { it.isPinned } }
-            val recent = remember(ui.conversations) { ui.conversations.filterNot { it.isPinned } }
+            // Pinned Main Chat Entry
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (isMainSelected) colors.hover else Color.Transparent)
+                    .clickable(onClick = onSelectMain)
+                    .padding(horizontal = 10.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(colors.canvas),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (!assistantAvatarUrl.isNullOrBlank()) {
+                        AsyncImage(
+                            model = assistantAvatarUrl,
+                            contentDescription = assistantName,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        WhitzLogoMark(modifier = Modifier.size(16.dp))
+                    }
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = assistantName,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (isMainSelected) colors.fg else colors.fgMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (isConvRunning(mainConv)) {
+                    Box(
+                        modifier = Modifier
+                            .padding(end = 6.dp)
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary),
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(colors.canvas)
+                        .padding(horizontal = 7.dp, vertical = 3.dp),
+                ) {
+                    Text(
+                        text = "主聊",
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.fgMuted,
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Side Chats Section Header + New Side Chat '+' Button
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 10.dp, end = 2.dp, top = 4.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "旁聊",
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = colors.fgFaint,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(
+                    onClick = onCreateSide,
+                    modifier = Modifier.size(30.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "新建旁聊",
+                        tint = colors.fgMuted,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+
+            // Side Chats List
+            val sideList = ui.sideConversations
+            val pinned = remember(sideList) { sideList.filter { it.isPinned } }
+            val recent = remember(sideList) { sideList.filterNot { it.isPinned } }
             val showColdStartLoading = (!authReady || ui.conversationsLoading) && ui.conversations.isEmpty()
 
             if (showColdStartLoading) {
-                // Cold-start loading indicator: large, centered, and independent from pull-to-refresh
                 Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     WhitzLoadingIndicator(size = 56.dp)
                 }
@@ -1222,25 +1516,31 @@ private fun SidebarContent(
                     },
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
-                    if (ui.conversations.isEmpty()) {
+                    if (sideList.isEmpty()) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .verticalScroll(rememberScrollState()),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text("暂无历史对话", color = colors.fgFaint, fontSize = 13.sp)
+                            Text(
+                                text = "还没有旁聊\n点击上方「+」新建旁聊",
+                                color = colors.fgFaint,
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.Center,
+                                lineHeight = 20.sp,
+                            )
                         }
                     } else {
                         LazyColumn(
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(vertical = 6.dp),
+                            contentPadding = PaddingValues(vertical = 4.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
                             if (pinned.isNotEmpty()) {
                                 item(key = "hdr-pinned") {
                                     Text(
-                                        text = "置顶对话",
+                                        text = "置顶旁聊",
                                         fontSize = 11.5.sp,
                                         fontWeight = FontWeight.Medium,
                                         color = colors.fgFaint,
@@ -1250,7 +1550,7 @@ private fun SidebarContent(
                                 items(pinned, key = { it.id }) { conv ->
                                     ConversationRow(
                                         conv = conv,
-                                        selected = conv.id == ui.currentConvId,
+                                        selected = ui.activeView == ChatMainView.CHAT && conv.id == ui.currentConvId,
                                         onSelect = { onSelectConv(conv.id) },
                                         onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
                                         onRename = { onRename(conv) },
@@ -1263,7 +1563,7 @@ private fun SidebarContent(
                                 if (pinned.isNotEmpty()) {
                                     item(key = "hdr-recent") {
                                         Text(
-                                            text = "最近对话",
+                                            text = "最近旁聊",
                                             fontSize = 11.5.sp,
                                             fontWeight = FontWeight.Medium,
                                             color = colors.fgFaint,
@@ -1274,7 +1574,7 @@ private fun SidebarContent(
                                 items(recent, key = { it.id }) { conv ->
                                     ConversationRow(
                                         conv = conv,
-                                        selected = conv.id == ui.currentConvId,
+                                        selected = ui.activeView == ChatMainView.CHAT && conv.id == ui.currentConvId,
                                         onSelect = { onSelectConv(conv.id) },
                                         onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
                                         onRename = { onRename(conv) },
@@ -1288,19 +1588,78 @@ private fun SidebarContent(
             }
         }
 
-        // Footer: User profile (pure without divider or settings icon)
+        // Bottom 3 Action Buttons (Horizontal 3-button row in single-column sidebar; vertical stack only if 68dp collapsed rail)
+        HorizontalDivider(color = colors.line.copy(alpha = 0.65f))
+        if (collapsed) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                SidebarRailIconButton(
+                    icon = Icons.Default.ChatBubbleOutline,
+                    label = "聊天",
+                    active = ui.activeView == ChatMainView.CHAT,
+                    onClick = { onSwitchView(ChatMainView.CHAT) },
+                )
+                SidebarRailIconButton(
+                    icon = Icons.Default.Search,
+                    label = "搜索",
+                    active = false,
+                    onClick = onOpenSearch,
+                )
+                SidebarRailIconButton(
+                    icon = Icons.Default.FolderOpen,
+                    label = "资料库",
+                    active = ui.activeView == ChatMainView.LIBRARY,
+                    onClick = { onSwitchView(ChatMainView.LIBRARY) },
+                )
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp, bottom = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SidebarBottomNavButton(
+                    icon = Icons.Default.ChatBubbleOutline,
+                    label = "聊天",
+                    active = ui.activeView == ChatMainView.CHAT,
+                    onClick = { onSwitchView(ChatMainView.CHAT) },
+                    modifier = Modifier.weight(1f),
+                )
+                SidebarBottomNavButton(
+                    icon = Icons.Default.Search,
+                    label = "搜索",
+                    active = false,
+                    onClick = onOpenSearch,
+                    modifier = Modifier.weight(1f),
+                )
+                SidebarBottomNavButton(
+                    icon = Icons.Default.FolderOpen,
+                    label = "资料库",
+                    active = ui.activeView == ChatMainView.LIBRARY,
+                    onClick = { onSwitchView(ChatMainView.LIBRARY) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        // Very Bottom: User profile (kept at the very bottom)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 8.dp, bottom = navBottom + 10.dp)
+                .padding(top = 4.dp, bottom = navBottom + 10.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .clickable(onClick = onOpenSettings)
                 .padding(horizontal = 8.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (!user?.avatarUrl.isNullOrBlank()) {
+            if (!userAvatarUrl.isNullOrBlank()) {
                 AsyncImage(
-                    model = user?.avatarUrl,
+                    model = userAvatarUrl,
                     contentDescription = "头像",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.size(34.dp).clip(CircleShape),
@@ -1348,6 +1707,68 @@ private fun SidebarContent(
 }
 
 @Composable
+private fun SidebarBottomNavButton(
+    icon: ImageVector,
+    label: String,
+    active: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalWhitzColors.current
+    Row(
+        modifier = modifier
+            .height(40.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (active) colors.hover else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (active) colors.fg else colors.fgMuted,
+            modifier = Modifier.size(17.dp),
+        )
+        Spacer(modifier = Modifier.width(5.dp))
+        Text(
+            text = label,
+            fontSize = 12.5.sp,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+            color = if (active) colors.fg else colors.fgMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun SidebarRailIconButton(
+    icon: ImageVector,
+    label: String,
+    active: Boolean,
+    onClick: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .background(if (active) colors.hover else Color.Transparent)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (active) colors.fg else colors.fgMuted,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+@Composable
 private fun ConversationRow(
     conv: Conversation,
     selected: Boolean,
@@ -1368,6 +1789,15 @@ private fun ConversationRow(
             .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (isConvRunning(conv)) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+        }
         if (conv.isPinned) {
             Icon(
                 Icons.Default.PushPin,
@@ -1379,7 +1809,7 @@ private fun ConversationRow(
         }
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = conv.title.ifBlank { "新对话" },
+                text = conv.title.ifBlank { "新旁聊" },
                 fontSize = 13.5.sp,
                 fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
                 color = if (selected) colors.fg else colors.fgMuted,
@@ -1397,7 +1827,7 @@ private fun ConversationRow(
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(
-                    text = { Text(if (conv.isPinned) "取消置顶" else "置顶对话") },
+                    text = { Text(if (conv.isPinned) "取消置顶" else "置顶") },
                     leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null) },
                     onClick = {
                         menuOpen = false
@@ -1522,7 +1952,7 @@ private fun ComposerPlusMenuOverlay(
                                     onClick = onUploadLocalFile,
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("从文件库选择") },
+                                    text = { Text("从资料库选择") },
                                     leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
                                     onClick = onPickFromLibrary,
                                 )
@@ -1581,6 +2011,10 @@ private fun ComposerPlusMenuOverlay(
 @Composable
 private fun ComposerSendOrStopButton(
     streaming: Boolean,
+    stopping: Boolean,
+    sending: Boolean,
+    queued: Boolean,
+    uploading: Boolean,
     canSend: Boolean,
     onStop: () -> Unit,
     onSend: () -> Unit,
@@ -1589,17 +2023,22 @@ private fun ComposerSendOrStopButton(
     if (streaming) {
         IconButton(
             onClick = onStop,
+            enabled = !stopping,
             modifier = Modifier
                 .size(36.dp)
                 .clip(CircleShape)
                 .background(colors.canvas),
         ) {
-            Icon(
-                Icons.Default.Stop,
-                contentDescription = "停止生成",
-                tint = colors.fg,
-                modifier = Modifier.size(18.dp),
-            )
+            if (stopping) {
+                WhitzLoadingIndicator(size = 16.dp, color = colors.fgMuted)
+            } else {
+                Icon(
+                    Icons.Default.Stop,
+                    contentDescription = "停止生成",
+                    tint = colors.fg,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
     } else {
         IconButton(
@@ -1610,12 +2049,19 @@ private fun ComposerSendOrStopButton(
                 .clip(CircleShape)
                 .background(if (canSend) MaterialTheme.colorScheme.primary else colors.hover),
         ) {
-            Icon(
-                Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = "发送",
-                tint = if (canSend) MaterialTheme.colorScheme.onPrimary else colors.fgFaint,
-                modifier = Modifier.size(18.dp),
-            )
+            if (sending || queued || (uploading && canSend)) {
+                WhitzLoadingIndicator(
+                    size = 16.dp,
+                    color = if (canSend) MaterialTheme.colorScheme.onPrimary else colors.fgFaint,
+                )
+            } else {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = "发送",
+                    tint = if (canSend) MaterialTheme.colorScheme.onPrimary else colors.fgFaint,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
     }
 }

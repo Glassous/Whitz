@@ -82,16 +82,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
-import com.glassous.whitz.core.files.FileValidator
 import com.glassous.whitz.core.model.ThemePreference
 import com.glassous.whitz.core.model.availablePercent
 import com.glassous.whitz.core.model.fiveHourPercent
 import com.glassous.whitz.core.model.quotaPercentLabel
+import com.glassous.whitz.core.model.resolvedAssistantName
 import com.glassous.whitz.core.model.weeklyPercent
 import com.glassous.whitz.core.util.DateTimeUtils
+import com.glassous.whitz.feature.chat.AssistantProfileDialog
+import com.glassous.whitz.feature.chat.LibraryPane
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
+import com.glassous.whitz.ui.theme.WhitzLogoMark
 import com.glassous.whitz.ui.theme.WhitzTextField
 
 object SettingsRoutes {
@@ -234,9 +237,10 @@ fun SettingsHomeScreen(
                     modifier = Modifier.padding(14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (!user?.avatarUrl.isNullOrBlank()) {
+                    val avatarUrl = vm.resolveAssetUrl(user?.avatarUrl)
+                    if (!avatarUrl.isNullOrBlank()) {
                         AsyncImage(
-                            model = user?.avatarUrl,
+                            model = avatarUrl,
                             contentDescription = "头像",
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.size(48.dp).clip(CircleShape),
@@ -299,7 +303,7 @@ fun SettingsHomeScreen(
                     HorizontalDivider(color = colors.line)
                     SettingsMenuRow(Icons.Default.Lock, "修改密码", null) { go(SettingsRoutes.PASSWORD) }
                     HorizontalDivider(color = colors.line)
-                    SettingsMenuRow(Icons.Default.Folder, "文件库", null) { go(SettingsRoutes.LIBRARY) }
+                    SettingsMenuRow(Icons.Default.Folder, "资料库", null) { go(SettingsRoutes.LIBRARY) }
                     HorizontalDivider(color = colors.line)
                     SettingsMenuRow(Icons.Default.Psychology, "记忆管理", null) { go(SettingsRoutes.MEMORY) }
                     HorizontalDivider(color = colors.line)
@@ -311,7 +315,7 @@ fun SettingsHomeScreen(
                         ui.credits?.let { "${it.tierLabel} · ${it.quotaPercentLabel()}" },
                     ) { go(SettingsRoutes.MEMBERSHIP) }
                     HorizontalDivider(color = colors.line)
-                    SettingsMenuRow(Icons.Default.SmartToy, "人格设定", null) { go(SettingsRoutes.PERSONA) }
+                    SettingsMenuRow(Icons.Default.SmartToy, "专属助手", null) { go(SettingsRoutes.PERSONA) }
                     HorizontalDivider(color = colors.line)
                     SettingsMenuRow(Icons.Default.Devices, "登录设备", null) { go(SettingsRoutes.DEVICES) }
                 }
@@ -423,9 +427,10 @@ fun ProfileSettingsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (!user?.avatarUrl.isNullOrBlank()) {
+                val userAvatarUrl = vm.resolveAssetUrl(user?.avatarUrl)
+                if (!userAvatarUrl.isNullOrBlank()) {
                     AsyncImage(
-                        model = user?.avatarUrl,
+                        model = userAvatarUrl,
                         contentDescription = "头像",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.size(64.dp).clip(CircleShape),
@@ -576,94 +581,29 @@ fun PasswordSettingsScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun LibrarySettingsScreen(
     vm: SettingsViewModel,
     onBack: () -> Unit,
 ) {
-    val colors = LocalWhitzColors.current
     val ui by vm.ui.collectAsState()
-    var query by remember { mutableStateOf("") }
-    var globalOnly by remember { mutableStateOf<Boolean?>(null) }
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
-    LaunchedEffect(Unit) { vm.loadLibrary() }
+    LaunchedEffect(Unit) { vm.library.loadFiles() }
 
     SettingsPageScaffold(
-        title = "文件库",
+        title = "资料库",
         ui = ui,
         onBack = {
             vm.clearFeedback()
             onBack()
         },
     ) {
-        Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.padding(top = 8.dp),
-            ) {
-                WhitzTextField(
-                    value = query,
-                    onValueChange = {
-                        query = it
-                        vm.loadLibrary(it, globalOnly)
-                    },
-                    placeholder = "搜索文件名...",
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedButton(
-                    onClick = {
-                        globalOnly = if (globalOnly == true) null else true
-                        vm.loadLibrary(query, globalOnly)
-                    },
-                    shapes = ButtonDefaults.shapesFor(40.dp),
-                ) {
-                    Text(if (globalOnly == true) "仅全局" else "全部")
-                }
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            if (ui.loading && ui.libraryFiles.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { WhitzLoadingIndicator() }
-            } else if (ui.libraryFiles.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("暂无文件", color = colors.fgFaint)
-                }
-            } else {
-                LazyColumn(
-                    contentPadding = PaddingValues(bottom = navBottom + 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(ui.libraryFiles, key = { it.id }) { f ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(colors.surface)
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(f.filename, fontWeight = FontWeight.Medium, fontSize = 14.sp, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(
-                                    "${FileValidator.formatSize(f.sizeBytes)} · ${if (f.isGlobal) "全局共享" else "仅对话"}",
-                                    fontSize = 12.sp,
-                                    color = colors.fgFaint,
-                                )
-                            }
-                            Switch(
-                                checked = f.isGlobal,
-                                onCheckedChange = { vm.toggleLibraryGlobal(f.id, it) },
-                            )
-                            IconButton(onClick = { vm.deleteLibraryFile(f.id) }) {
-                                Icon(Icons.Default.Delete, contentDescription = "删除", tint = colors.danger)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        LibraryPane(
+            controller = vm.library,
+            bottomPadding = navBottom + 24.dp,
+            modifier = Modifier.fillMaxSize(),
+        )
     }
 }
 
@@ -1220,12 +1160,17 @@ fun PersonaSettingsScreen(
     vm: SettingsViewModel,
     onBack: () -> Unit,
 ) {
+    val colors = LocalWhitzColors.current
     val user by vm.user.collectAsState()
     val ui by vm.ui.collectAsState()
     var persona by remember(user?.id) { mutableStateOf(user?.persona ?: "") }
+    var assistantModalOpen by remember { mutableStateOf(false) }
+
+    val assistantNameDisplay = user?.resolvedAssistantName() ?: "Whitz"
+    val assistantAvatarUrl = vm.resolveAssetUrl(user?.assistantAvatarUrl)
 
     SettingsPageScaffold(
-        title = "人格设定",
+        title = "专属助手",
         ui = ui,
         onBack = {
             vm.clearFeedback()
@@ -1238,9 +1183,70 @@ fun PersonaSettingsScreen(
                 .verticalScroll(rememberScrollState())
                 .navigationBarsPadding()
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text("自定义 AI 助理的回复风格、角色设定与偏好指令：", fontSize = 13.sp, color = LocalWhitzColors.current.fgMuted)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = colors.surface,
+                border = BorderStroke(0.5.dp, colors.line),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(50.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(colors.canvas),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (!assistantAvatarUrl.isNullOrBlank()) {
+                                AsyncImage(
+                                    model = assistantAvatarUrl,
+                                    contentDescription = assistantNameDisplay,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            } else {
+                                WhitzLogoMark(modifier = Modifier.size(24.dp))
+                            }
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = assistantNameDisplay,
+                                fontSize = 15.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.fg,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = "主聊天助手头像与昵称，默认显示 Whitz 图标与名称。",
+                                fontSize = 12.sp,
+                                color = colors.fgMuted,
+                            )
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            vm.clearAssistantDialogFeedback()
+                            assistantModalOpen = true
+                        },
+                        shapes = ButtonDefaults.shapesFor(38.dp),
+                        modifier = Modifier.fillMaxWidth().height(38.dp),
+                    ) {
+                        Text("自定义头像与昵称", fontSize = 13.sp)
+                    }
+                }
+            }
+
+            Text("自定义 AI 助理的回复风格、角色设定与偏好指令：", fontSize = 13.sp, color = colors.fgMuted)
             WhitzTextField(
                 value = persona,
                 onValueChange = { persona = it },
@@ -1258,6 +1264,24 @@ fun PersonaSettingsScreen(
                 Text(if (ui.loading) "保存中..." else "保存人格设定")
             }
         }
+    }
+
+    if (assistantModalOpen) {
+        AssistantProfileDialog(
+            user = user,
+            resolveAssetUrl = { vm.resolveAssetUrl(it) },
+            saving = ui.assistantSaving,
+            error = ui.assistantError,
+            feedback = ui.assistantFeedback,
+            onPickAvatar = { vm.uploadAssistantAvatar(it) },
+            onResetAvatar = { vm.deleteAssistantAvatar() },
+            onSaveName = { nextName ->
+                vm.updateAssistantName(nextName) {
+                    assistantModalOpen = false
+                }
+            },
+            onDismiss = { assistantModalOpen = false },
+        )
     }
 }
 

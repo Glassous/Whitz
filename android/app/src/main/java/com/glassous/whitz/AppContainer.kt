@@ -3,6 +3,7 @@ package com.glassous.whitz
 import android.content.Context
 import com.glassous.whitz.core.files.CosUploader
 import com.glassous.whitz.core.model.ThemePreference
+import com.glassous.whitz.core.model.resolveServerAssetUrl
 import com.glassous.whitz.core.network.AuthManager
 import com.glassous.whitz.core.network.NetworkModule
 import com.glassous.whitz.core.storage.TokenStorage
@@ -24,4 +25,7 @@ class AppContainer(context: Context) {
         storage.setThemePreference(pref)
         _themePreference.value = pref
     }
+
+    fun resolveAssetUrl(pathOrUrl: String?): String? =
+        resolveServerAssetUrl(storage.getApiBaseUrl(), pathOrUrl)
 }

@@ -187,7 +187,12 @@ fun computeLiveStepLabel(
     currentStep: CurrentStepInfo?,
     runningTool: String?,
     plan: Plan?,
+    stopping: Boolean = false,
+    reconnecting: Boolean = false,
+    waitingFirstByte: Boolean = false,
 ): String {
+    if (stopping) return "正在停止生成…"
+    if (reconnecting) return "网络重连中，正在恢复进度…"
     if (currentStep != null) {
         return if (currentStep.title.isNotBlank()) {
             "步骤 ${currentStep.index}/${currentStep.total} · ${currentStep.title}"
@@ -198,6 +203,7 @@ fun computeLiveStepLabel(
     if (!runningTool.isNullOrBlank()) {
         return "正在使用 $runningTool"
     }
+    if (waitingFirstByte) return "正在连接助理…"
     val items = plan?.items.orEmpty()
     if (items.isNotEmpty() && items.all { it.status == "completed" }) {
         return "正在生成回答…"

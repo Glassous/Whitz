@@ -4,7 +4,9 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.glassous.whitz.AppContainer
+import com.glassous.whitz.core.files.AvatarEncoder
 import com.glassous.whitz.core.files.FileValidator
+import com.glassous.whitz.core.files.LibraryController
 import com.glassous.whitz.core.files.LocalPickedFile
 import com.glassous.whitz.core.files.UriFileReader
 import com.glassous.whitz.core.model.AgentStatus
@@ -27,8 +29,10 @@ import com.glassous.whitz.core.model.ToolPayload
 import com.glassous.whitz.core.model.UploadTask
 import com.glassous.whitz.core.model.UploadTaskStatus
 import com.glassous.whitz.core.model.WorkspaceArtifactMeta
+import com.glassous.whitz.core.network.ApiException
 import com.glassous.whitz.core.network.ApprovalRequest
 import com.glassous.whitz.core.network.AttachFilesRequest
+import com.glassous.whitz.core.network.AvatarUploadRequest
 import com.glassous.whitz.core.network.ClarifyRequest
 import com.glassous.whitz.core.network.CompleteUploadRequest
 import com.glassous.whitz.core.network.CreateConversationRequest
@@ -37,6 +41,7 @@ import com.glassous.whitz.core.network.PendingActionRequest
 import com.glassous.whitz.core.network.PresignRequest
 import com.glassous.whitz.core.network.SseEvent
 import com.glassous.whitz.core.network.TicketRequest
+import com.glassous.whitz.core.network.UpdateAssistantRequest
 import com.glassous.whitz.core.network.WhitzJson
 import com.glassous.whitz.core.network.extractErrorMessage
 import com.glassous.whitz.core.util.ConversationSorter
@@ -46,6 +51,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -66,6 +72,10 @@ import kotlinx.serialization.json.longOrNull
 import java.time.Instant
 import java.util.UUID
 
+enum class ChatMainView {
+    CHAT, LIBRARY
+}
+
 data class PreviewTarget(
     val file: ConversationFile,
     val previewUrl: String? = null,
@@ -76,13 +86,24 @@ data class PreviewTarget(
 )
 
 data class ChatUiState(
+    val activeView: ChatMainView = ChatMainView.CHAT,
     val conversations: List<Conversation> = emptyList(),
     val conversationsLoading: Boolean = false,
     val conversationsRefreshing: Boolean = false,
     val currentConvId: String? = null,
-    val currentConvTitle: String = "新对话",
+    val currentConvKind: String = "side",
+    val currentConvTitle: String = "新旁聊",
+    val isNewSideDraft: Boolean = false,
     val messages: List<Message> = emptyList(),
     val streaming: Boolean = false,
+    val sendingMessage: Boolean = false,
+    val waitingFirstByte: Boolean = false,
+    val stopping: Boolean = false,
+    val reconnecting: Boolean = false,
+    val approvingChoice: String? = null,
+    val submittingClarify: Boolean = false,
+    val resolvingMemoryIds: Set<String> = emptySet(),
+    val resolvingSkillIds: Set<String> = emptySet(),
     val activeAssistantId: String? = null,
     val activeRunId: String? = null,
     val selectedTurnId: String? = null,
@@ -99,6 +120,8 @@ data class ChatUiState(
     val uploads: List<UploadTask> = emptyList(),
     val attachedIds: List<String> = emptyList(),
     val filesLoading: Boolean = false,
+    val deletingFileId: String? = null,
+    val downloadingFileId: String? = null,
     val fileError: String? = null,
     // Skills picker
     val enabledSkills: List<SkillItem> = emptyList(),
@@ -108,7 +131,16 @@ data class ChatUiState(
     val searching: Boolean = false,
     // Preview
     val previewTarget: PreviewTarget? = null,
-)
+    // Assistant Profile dialog
+    val assistantSaving: Boolean = false,
+    val assistantFeedback: String? = null,
+    val assistantError: String? = null,
+) {
+    val isMainChat: Boolean get() = currentConvKind == "main"
+    val mainConversation: Conversation? get() = conversations.firstOrNull { it.kind == "main" }
+    val sideConversations: List<Conversation> get() = conversations.filter { it.kind != "main" }
+    val hasActiveUploads: Boolean get() = uploads.any { it.status != UploadTaskStatus.ERROR }
+}
 
 class ChatViewModel(
     private val container: AppContainer,
@@ -118,16 +150,41 @@ class ChatViewModel(
 
     val user = container.authManager.user
     val authReady = container.authManager.ready
+    val library = LibraryController(viewModelScope, container)
+
+    fun resolveAssetUrl(pathOrUrl: String?): String? = container.resolveAssetUrl(pathOrUrl)
 
     private var streamJob: Job? = null
+    private var pendingPollJob: Job? = null
+    private var realtimeJob: Job? = null
     private val uploadJobs = mutableMapOf<String, Job>()
     private var pendingUserTargetId: String? = null
+    private var lastEventId: String? = null
+    private var openSeq = 0
     private var seq = 0
+    private var initialLoaded = false
+
+    private val activeStatusSet = setOf(
+        "starting",
+        "queued",
+        "running",
+        "waiting",
+        "waiting_for_approval",
+        "waiting_for_clarify",
+    )
 
     private fun tempId(prefix: String): String = "$prefix-${System.currentTimeMillis()}-${seq++}"
 
     fun loadInitialData() {
-        viewModelScope.launch { fetchConversations() }
+        if (initialLoaded) return
+        initialLoaded = true
+        startRealtimeSync()
+        viewModelScope.launch {
+            fetchConversations()
+            if (_ui.value.currentConvId == null && !_ui.value.isNewSideDraft) {
+                openMainConversation()
+            }
+        }
         viewModelScope.launch { fetchAgentStatus() }
         viewModelScope.launch { fetchCredits() }
         viewModelScope.launch { fetchEnabledSkills() }
@@ -200,16 +257,41 @@ class ChatViewModel(
         }
     }
 
+    fun switchView(view: ChatMainView) {
+        _ui.update { it.copy(activeView = view) }
+        if (view == ChatMainView.LIBRARY) {
+            library.loadFiles()
+        } else if (_ui.value.currentConvId == null && !_ui.value.isNewSideDraft) {
+            openMainConversation()
+        }
+    }
+
     fun startNewConversation() {
+        createSideConversation()
+    }
+
+    fun createSideConversation() {
+        pendingPollJob?.cancel()
+        pendingPollJob = null
         streamJob?.cancel()
         streamJob = null
         pendingUserTargetId = null
+        lastEventId = null
         _ui.update {
             it.copy(
+                activeView = ChatMainView.CHAT,
+                isNewSideDraft = true,
                 currentConvId = null,
-                currentConvTitle = "新对话",
+                currentConvKind = "side",
+                currentConvTitle = "新旁聊",
                 messages = emptyList(),
                 streaming = false,
+                sendingMessage = false,
+                waitingFirstByte = false,
+                stopping = false,
+                reconnecting = false,
+                approvingChoice = null,
+                submittingClarify = false,
                 activeAssistantId = null,
                 activeRunId = null,
                 selectedTurnId = null,
@@ -222,57 +304,159 @@ class ChatViewModel(
                 files = emptyList(),
                 uploads = emptyList(),
                 attachedIds = emptyList(),
+                selectedSkillNames = emptyList(),
                 fileError = null,
             )
         }
     }
 
-    fun openConversation(convId: String) {
-        if (_ui.value.currentConvId == convId && _ui.value.messages.isNotEmpty()) return
+    fun openMainConversation() {
+        val state = _ui.value
+        val knownMainId = state.mainConversation?.id
+        if (state.activeView == ChatMainView.CHAT &&
+            knownMainId != null &&
+            state.currentConvId == knownMainId &&
+            state.currentConvKind == "main"
+        ) {
+            return
+        }
+        val mySeq = ++openSeq
+        pendingPollJob?.cancel()
+        pendingPollJob = null
         streamJob?.cancel()
         streamJob = null
+        _ui.update {
+            it.copy(
+                activeView = ChatMainView.CHAT,
+                isNewSideDraft = false,
+                previewTarget = null,
+                selectedSkillNames = emptyList(),
+            )
+        }
+        viewModelScope.launch {
+            try {
+                val detail = if (knownMainId != null) {
+                    container.network.api.getConversation(knownMainId)
+                } else {
+                    container.network.api.getMainConversation()
+                }
+                if (mySeq != openSeq) return@launch
+                loadFromConversation(detail)
+                _ui.update { it.copy(files = emptyList(), filesLoading = false) }
+            } catch (t: Throwable) {
+                if (mySeq != openSeq) return@launch
+                _ui.update { it.copy(error = extractErrorMessage(t, "加载主要聊天失败")) }
+            }
+        }
+    }
+
+    fun openConversation(convId: String) {
+        val state = _ui.value
+        if (state.activeView == ChatMainView.CHAT &&
+            state.currentConvId == convId &&
+            state.messages.isNotEmpty()
+        ) {
+            return
+        }
+        val mySeq = ++openSeq
+        pendingPollJob?.cancel()
+        pendingPollJob = null
+        streamJob?.cancel()
+        streamJob = null
+        _ui.update {
+            it.copy(
+                activeView = ChatMainView.CHAT,
+                isNewSideDraft = false,
+                previewTarget = null,
+            )
+        }
         viewModelScope.launch {
             try {
                 val detail = container.network.api.getConversation(convId)
+                if (mySeq != openSeq) return@launch
                 loadFromConversation(detail)
-                loadFiles(convId)
+                if (detail.kind != "main") {
+                    loadFiles(convId)
+                } else {
+                    _ui.update { it.copy(files = emptyList(), filesLoading = false) }
+                }
             } catch (t: Throwable) {
+                if (mySeq != openSeq) return@launch
                 _ui.update { it.copy(error = extractErrorMessage(t, "加载对话失败")) }
             }
         }
     }
 
     private fun loadFromConversation(detail: ConversationDetail) {
+        pendingPollJob?.cancel()
+        pendingPollJob = null
+        streamJob?.cancel()
+        streamJob = null
+        lastEventId = null
         val lastReasoned = detail.messages.lastOrNull {
             it.role == "assistant" && !it.toolPayload?.reasoning.isNullOrEmpty()
         }
         val lastAssistant = detail.messages.lastOrNull { it.role == "assistant" }
         pendingUserTargetId = null
+        val hydratedControl = hydratePendingControl(detail.pendingControl)
         _ui.update {
             it.copy(
                 currentConvId = detail.id,
+                currentConvKind = detail.kind,
                 currentConvTitle = detail.title,
+                isNewSideDraft = false,
                 messages = detail.messages,
                 plan = detail.plan,
                 reasoning = lastReasoned?.toolPayload?.reasoning ?: emptyList(),
                 selectedTurnId = lastAssistant?.id,
                 activeRunId = detail.activeRunId,
-                pendingControl = null,
+                pendingControl = hydratedControl,
                 pendingMemory = emptyList(),
                 pendingSkills = emptyList(),
                 error = null,
                 streaming = false,
-                activeAssistantId = null,
+                sendingMessage = false,
+                waitingFirstByte = false,
+                stopping = false,
+                reconnecting = false,
+                approvingChoice = null,
+                submittingClarify = false,
+                activeAssistantId = lastAssistant?.id,
                 attachedIds = emptyList(),
             )
         }
-        if (!detail.activeRunId.isNullOrBlank() &&
+        if (detail.activeRunId == "pending") {
+            _ui.update { it.copy(streaming = true, waitingFirstByte = true) }
+            pollPendingRun(detail.id, attemptsLeft = 8)
+        } else if (!detail.activeRunId.isNullOrBlank() &&
             !detail.activeRunStatus.isNullOrBlank() &&
-            detail.activeRunStatus != "completed"
+            detail.activeRunStatus in activeStatusSet
         ) {
             reconnect(detail.id, detail.activeRunId)
         }
         loadConversationPending(detail.id)
+    }
+
+    private fun pollPendingRun(targetConvId: String, attemptsLeft: Int) {
+        pendingPollJob?.cancel()
+        if (attemptsLeft <= 0 || _ui.value.currentConvId != targetConvId) return
+        pendingPollJob = viewModelScope.launch {
+            delay(600L)
+            if (_ui.value.currentConvId != targetConvId) return@launch
+            try {
+                val detail = container.network.api.getConversation(targetConvId)
+                if (_ui.value.currentConvId != targetConvId) return@launch
+                if (!detail.activeRunId.isNullOrBlank() && detail.activeRunId != "pending") {
+                    loadFromConversation(detail)
+                } else if (detail.activeRunId == "pending") {
+                    pollPendingRun(targetConvId, attemptsLeft - 1)
+                } else {
+                    loadFromConversation(detail)
+                }
+            } catch (_: Throwable) {
+                /* ignore */
+            }
+        }
     }
 
     private fun loadConversationPending(targetConvId: String) {
@@ -305,6 +489,8 @@ class ChatViewModel(
     }
 
     fun renameConversation(id: String, title: String) {
+        val target = _ui.value.conversations.firstOrNull { it.id == id }
+        if (target?.kind == "main") return
         val trimmed = title.trim()
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
@@ -324,6 +510,21 @@ class ChatViewModel(
     }
 
     fun togglePin(id: String, isPinned: Boolean) {
+        val target = _ui.value.conversations.firstOrNull { it.id == id }
+        if (target?.kind == "main") return
+        val prevSnapshot = _ui.value.conversations
+        // Optimistic immediate sort
+        _ui.update { state ->
+            val nextList = state.conversations.map {
+                if (it.id == id) {
+                    it.copy(
+                        isPinned = isPinned,
+                        pinnedAt = if (isPinned) Instant.now().toString() else null,
+                    )
+                } else it
+            }
+            state.copy(conversations = ConversationSorter.sort(nextList))
+        }
         viewModelScope.launch {
             try {
                 val updated = container.network.api.patchConversation(id, PatchConversationRequest(isPinned = isPinned))
@@ -332,12 +533,19 @@ class ChatViewModel(
                     state.copy(conversations = ConversationSorter.sort(nextList))
                 }
             } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "置顶操作失败")) }
+                _ui.update {
+                    it.copy(
+                        conversations = prevSnapshot,
+                        error = extractErrorMessage(t, "置顶操作失败"),
+                    )
+                }
             }
         }
     }
 
     fun deleteConversation(id: String) {
+        val target = _ui.value.conversations.firstOrNull { it.id == id }
+        if (target?.kind == "main") return
         viewModelScope.launch {
             try {
                 container.network.api.deleteConversation(id)
@@ -345,7 +553,14 @@ class ChatViewModel(
                 _ui.update { state ->
                     state.copy(conversations = state.conversations.filterNot { it.id == id })
                 }
-                if (wasCurrent) startNewConversation()
+                if (wasCurrent) {
+                    val fallback = _ui.value.sideConversations.firstOrNull() ?: _ui.value.mainConversation
+                    if (fallback != null) {
+                        openConversation(fallback.id)
+                    } else {
+                        openMainConversation()
+                    }
+                }
             } catch (t: Throwable) {
                 _ui.update { it.copy(error = extractErrorMessage(t, "删除失败")) }
             }
@@ -387,11 +602,14 @@ class ChatViewModel(
 
     private suspend fun ensureConversation(): String {
         _ui.value.currentConvId?.let { return it }
-        val conv = container.network.api.createConversation(CreateConversationRequest())
+        val conv = container.network.api.createConversation(CreateConversationRequest("新旁聊"))
         _ui.update { state ->
             state.copy(
                 currentConvId = conv.id,
+                currentConvKind = conv.kind,
                 currentConvTitle = conv.title,
+                isNewSideDraft = false,
+                conversations = ConversationSorter.sort(listOf(conv) + state.conversations.filterNot { it.id == conv.id }),
             )
         }
         return conv.id
@@ -406,21 +624,22 @@ class ChatViewModel(
     fun sendMessage(content: String) {
         val trimmed = content.trim()
         val state = _ui.value
-        if (state.streaming) return
+        if (state.streaming || state.sendingMessage || state.hasActiveUploads) return
         val attachedIds = state.attachedIds
         val attachedFiles = state.files.filter { it.id in attachedIds }
         val skillNames = state.selectedSkillNames
         if (trimmed.isEmpty()) return
 
+        _ui.update { it.copy(sendingMessage = true, error = null) }
         viewModelScope.launch {
             val convId = try {
                 ensureConversation()
             } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "创建对话失败")) }
+                _ui.update { it.copy(sendingMessage = false, error = extractErrorMessage(t, "创建对话失败")) }
                 return@launch
             }
+            _ui.update { it.copy(sendingMessage = false, attachedIds = emptyList(), selectedSkillNames = emptyList()) }
             sendInternal(convId, trimmed, attachedFiles, skillNames)
-            _ui.update { it.copy(attachedIds = emptyList(), selectedSkillNames = emptyList()) }
         }
     }
 
@@ -462,6 +681,9 @@ class ChatViewModel(
                 activeAssistantId = assistantId,
                 selectedTurnId = assistantId,
                 streaming = true,
+                waitingFirstByte = true,
+                stopping = false,
+                reconnecting = false,
             )
         }
 
@@ -530,6 +752,9 @@ class ChatViewModel(
                 activeAssistantId = assistantId,
                 selectedTurnId = assistantId,
                 streaming = true,
+                waitingFirstByte = true,
+                stopping = false,
+                reconnecting = false,
             )
         }
         streamTurn(convId, "/conversations/$convId/messages/$assistantMessageId/regenerate", "{}", "重新生成失败")
@@ -582,6 +807,9 @@ class ChatViewModel(
                 activeAssistantId = assistantId,
                 selectedTurnId = assistantId,
                 streaming = true,
+                waitingFirstByte = true,
+                stopping = false,
+                reconnecting = false,
             )
         }
         val bodyObj = buildJsonObject {
@@ -594,50 +822,198 @@ class ChatViewModel(
 
     private fun streamTurn(convId: String, path: String, bodyJson: String, fallbackError: String) {
         streamJob?.cancel()
+        lastEventId = null
         streamJob = viewModelScope.launch {
             try {
-                val headers = chatTicketHeaders(convId, "send")
+                val ticketHeaders = chatTicketHeaders(convId, "send")
+                val headers = ticketHeaders + ("Idempotency-Key" to UUID.randomUUID().toString())
+                if (_ui.value.currentConvId != convId) return@launch
                 container.network.sseClient.streamPost(path, bodyJson, headers).collect { ev ->
+                    if (_ui.value.currentConvId != convId) return@collect
                     handleSseEvent(ev)
                 }
-                if (_ui.value.streaming) {
-                    finishRun(markFailedIfStreaming = true, errMsg = "连接已结束，未收到完成事件")
+                if (_ui.value.currentConvId == convId && _ui.value.streaming) {
+                    val runId = _ui.value.activeRunId
+                    if (!runId.isNullOrBlank() && runId != "pending") {
+                        autoReconnectLoop(convId, runId)
+                    } else {
+                        try {
+                            val detail = container.network.api.getConversation(convId)
+                            if (_ui.value.currentConvId == convId) loadFromConversation(detail)
+                        } catch (_: Throwable) {
+                            finishRun(markFailedIfStreaming = true, errMsg = "连接中断，请刷新查看最新状态")
+                        }
+                    }
                 }
             } catch (_: CancellationException) {
                 /* aborted by user or navigation */
             } catch (t: Throwable) {
-                finishRun(markFailedIfStreaming = true, errMsg = extractErrorMessage(t, fallbackError))
+                if (_ui.value.currentConvId != convId) return@launch
+                val apiErr = t as? ApiException
+                if (apiErr != null && apiErr.statusCode in 400..499 && apiErr.statusCode != 408) {
+                    finishRun(markFailedIfStreaming = true, errMsg = extractErrorMessage(t, fallbackError))
+                } else if (_ui.value.streaming) {
+                    val runId = _ui.value.activeRunId
+                    if (!runId.isNullOrBlank() && runId != "pending") {
+                        autoReconnectLoop(convId, runId)
+                    } else {
+                        try {
+                            val detail = container.network.api.getConversation(convId)
+                            if (_ui.value.currentConvId == convId) loadFromConversation(detail)
+                        } catch (_: Throwable) {
+                            finishRun(markFailedIfStreaming = true, errMsg = extractErrorMessage(t, fallbackError))
+                        }
+                    }
+                }
             }
         }
     }
 
+    private suspend fun autoReconnectLoop(targetConvId: String, runId: String) {
+        val delays = listOf(1000L, 2000L, 4000L, 8000L, 12000L)
+        _ui.update { it.copy(reconnecting = true) }
+        for (waitMs in delays) {
+            if (_ui.value.currentConvId != targetConvId || !_ui.value.streaming) {
+                _ui.update { it.copy(reconnecting = false) }
+                return
+            }
+            delay(waitMs)
+            if (_ui.value.currentConvId != targetConvId || !_ui.value.streaming) {
+                _ui.update { it.copy(reconnecting = false) }
+                return
+            }
+            try {
+                val headers = chatTicketHeaders(targetConvId, "reconnect").toMutableMap()
+                lastEventId?.let { headers["Last-Event-ID"] = it }
+                container.network.sseClient.streamGet("/conversations/$targetConvId/runs/$runId/events", headers)
+                    .collect { ev ->
+                        if (_ui.value.currentConvId != targetConvId) return@collect
+                        handleSseEvent(ev)
+                    }
+                if (_ui.value.currentConvId != targetConvId || !_ui.value.streaming) {
+                    _ui.update { it.copy(reconnecting = false) }
+                    return
+                }
+            } catch (_: CancellationException) {
+                _ui.update { it.copy(reconnecting = false) }
+                return
+            } catch (t: Throwable) {
+                if (_ui.value.currentConvId != targetConvId) {
+                    _ui.update { it.copy(reconnecting = false) }
+                    return
+                }
+                val apiErr = t as? ApiException
+                if (apiErr?.statusCode == 404) {
+                    try {
+                        val detail = container.network.api.getConversation(targetConvId)
+                        if (_ui.value.currentConvId == targetConvId) loadFromConversation(detail)
+                    } catch (_: Throwable) {
+                        /* ignore */
+                    }
+                    _ui.update { it.copy(reconnecting = false) }
+                    return
+                }
+                if (apiErr != null && apiErr.statusCode in 400..499 && apiErr.statusCode != 408) {
+                    finishRun(markFailedIfStreaming = true, errMsg = extractErrorMessage(t, "请求失败"))
+                    return
+                }
+            }
+        }
+        if (_ui.value.currentConvId == targetConvId && _ui.value.streaming) {
+            _ui.update { it.copy(reconnecting = false) }
+            finishRun(markFailedIfStreaming = true, errMsg = "网络连接中断，请检查网络或下拉刷新同步最新状态")
+        }
+    }
+
     private fun reconnect(convId: String, runId: String) {
+        if (runId.isBlank() || runId == "pending") return
         streamJob?.cancel()
-        _ui.update { it.copy(streaming = true) }
+        _ui.update { it.copy(streaming = true, reconnecting = true) }
         streamJob = viewModelScope.launch {
             try {
-                val headers = chatTicketHeaders(convId, "reconnect")
+                val headers = chatTicketHeaders(convId, "reconnect").toMutableMap()
+                lastEventId?.let { headers["Last-Event-ID"] = it }
                 container.network.sseClient.streamGet("/conversations/$convId/runs/$runId/events", headers)
-                    .collect { ev -> handleSseEvent(ev) }
-                if (_ui.value.streaming) {
-                    finishRun(markFailedIfStreaming = false, errMsg = null)
+                    .collect { ev ->
+                        if (_ui.value.currentConvId != convId) return@collect
+                        handleSseEvent(ev)
+                    }
+                if (_ui.value.currentConvId == convId && _ui.value.streaming) {
+                    autoReconnectLoop(convId, runId)
                 }
             } catch (_: CancellationException) {
                 /* ignore */
             } catch (t: Throwable) {
-                finishRun(markFailedIfStreaming = false, errMsg = extractErrorMessage(t, "连接中断"))
+                if (_ui.value.currentConvId != convId) return@launch
+                val apiErr = t as? ApiException
+                if (apiErr?.statusCode == 404) {
+                    try {
+                        val detail = container.network.api.getConversation(convId)
+                        if (_ui.value.currentConvId == convId) loadFromConversation(detail)
+                    } catch (_: Throwable) {
+                        finishRun(markFailedIfStreaming = false, errMsg = null)
+                    }
+                    return@launch
+                }
+                autoReconnectLoop(convId, runId)
+            } finally {
+                _ui.update { it.copy(reconnecting = false) }
+            }
+        }
+    }
+
+    fun recoverIfNeeded() {
+        val state = _ui.value
+        val cid = state.currentConvId ?: return
+        if (state.streaming && !state.activeRunId.isNullOrBlank() && state.activeRunId != "pending" && streamJob?.isActive != true) {
+            reconnect(cid, state.activeRunId)
+            return
+        }
+        if (!state.streaming) {
+            viewModelScope.launch {
+                try {
+                    val detail = container.network.api.getConversation(cid)
+                    if (_ui.value.currentConvId == cid) {
+                        val hasNewMsgs = detail.messages.size != _ui.value.messages.size
+                        val hasLiveRun = !detail.activeRunId.isNullOrBlank() &&
+                            !detail.activeRunStatus.isNullOrBlank() &&
+                            detail.activeRunStatus in activeStatusSet
+                        if (hasNewMsgs || hasLiveRun) {
+                            loadFromConversation(detail)
+                        }
+                    }
+                } catch (_: Throwable) {
+                    /* ignore */
+                }
             }
         }
     }
 
     fun stopRun() {
         val convId = _ui.value.currentConvId ?: return
+        if (_ui.value.stopping) return
+        _ui.update { it.copy(stopping = true) }
         viewModelScope.launch {
             try {
                 val headers = chatTicketHeaders(convId, "stop")
                 container.network.api.stopRun(convId, headers)
+                delay(2500L)
+                val cur = _ui.value
+                if (cur.currentConvId == convId && cur.stopping && cur.streaming) {
+                    streamJob?.cancel()
+                    _ui.update { st ->
+                        st.copy(
+                            messages = st.messages.map { m ->
+                                if (m.id == st.activeAssistantId && (m.status == "streaming" || m.status == "waiting")) {
+                                    m.copy(status = "cancelled")
+                                } else m
+                            }
+                        )
+                    }
+                    finishRun(markFailedIfStreaming = false, errMsg = null)
+                }
             } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "停止失败")) }
+                _ui.update { it.copy(stopping = false, error = extractErrorMessage(t, "停止失败")) }
             }
         }
     }
@@ -645,6 +1021,8 @@ class ChatViewModel(
     fun approveControl(choice: String) {
         val convId = _ui.value.currentConvId ?: return
         val ctrl = _ui.value.pendingControl ?: return
+        if (_ui.value.approvingChoice != null) return
+        _ui.update { it.copy(approvingChoice = choice) }
         viewModelScope.launch {
             try {
                 val headers = chatTicketHeaders(convId, "approval")
@@ -656,13 +1034,14 @@ class ChatViewModel(
                 _ui.update { state ->
                     state.copy(
                         pendingControl = null,
+                        approvingChoice = null,
                         messages = state.messages.map {
                             if (it.id == state.activeAssistantId) it.copy(status = "streaming") else it
                         },
                     )
                 }
             } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "审批提交失败")) }
+                _ui.update { it.copy(approvingChoice = null, error = extractErrorMessage(t, "审批提交失败")) }
             }
         }
     }
@@ -671,7 +1050,8 @@ class ChatViewModel(
         val convId = _ui.value.currentConvId ?: return
         val ctrl = _ui.value.pendingControl ?: return
         val trimmed = answer.trim()
-        if (trimmed.isEmpty()) return
+        if (trimmed.isEmpty() || _ui.value.submittingClarify) return
+        _ui.update { it.copy(submittingClarify = true) }
         viewModelScope.launch {
             try {
                 val headers = chatTicketHeaders(convId, "clarify")
@@ -683,40 +1063,61 @@ class ChatViewModel(
                 _ui.update { state ->
                     state.copy(
                         pendingControl = null,
+                        submittingClarify = false,
                         messages = state.messages.map {
                             if (it.id == state.activeAssistantId) it.copy(status = "streaming") else it
                         },
                     )
                 }
             } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "提交失败")) }
+                _ui.update { it.copy(submittingClarify = false, error = extractErrorMessage(t, "提交失败")) }
             }
         }
     }
 
     fun resolvePendingMemory(id: String, action: String, content: String? = null) {
+        if (id in _ui.value.resolvingMemoryIds) return
+        _ui.update { it.copy(resolvingMemoryIds = it.resolvingMemoryIds + id) }
         viewModelScope.launch {
             try {
                 container.network.api.resolveMemoryPending(id, PendingActionRequest(action, content))
                 _ui.update { state ->
-                    state.copy(pendingMemory = state.pendingMemory.filterNot { it.id == id })
+                    state.copy(
+                        pendingMemory = state.pendingMemory.filterNot { it.id == id },
+                        resolvingMemoryIds = state.resolvingMemoryIds - id,
+                    )
                 }
             } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "处理记忆请求失败")) }
+                _ui.update {
+                    it.copy(
+                        resolvingMemoryIds = it.resolvingMemoryIds - id,
+                        error = extractErrorMessage(t, "处理记忆请求失败"),
+                    )
+                }
             }
         }
     }
 
     fun resolvePendingSkill(id: String, action: String, content: String? = null) {
+        if (id in _ui.value.resolvingSkillIds) return
+        _ui.update { it.copy(resolvingSkillIds = it.resolvingSkillIds + id) }
         viewModelScope.launch {
             try {
                 container.network.api.resolveSkillPending(id, PendingActionRequest(action, content))
                 _ui.update { state ->
-                    state.copy(pendingSkills = state.pendingSkills.filterNot { it.id == id })
+                    state.copy(
+                        pendingSkills = state.pendingSkills.filterNot { it.id == id },
+                        resolvingSkillIds = state.resolvingSkillIds - id,
+                    )
                 }
                 if (action == "approve") fetchEnabledSkills()
             } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "处理技能请求失败")) }
+                _ui.update {
+                    it.copy(
+                        resolvingSkillIds = it.resolvingSkillIds - id,
+                        error = extractErrorMessage(t, "处理技能请求失败"),
+                    )
+                }
             }
         }
     }
@@ -724,6 +1125,14 @@ class ChatViewModel(
     // --- SSE Event Dispatcher ---
     private fun handleSseEvent(ev: SseEvent) {
         val d = ev.data
+        if (!ev.id.isNullOrBlank() && ev.id != "0-0") {
+            lastEventId = ev.id
+        }
+        if (ev.event !in setOf("run.started", "message.created", "run.reconnected")) {
+            if (_ui.value.waitingFirstByte) {
+                _ui.update { it.copy(waitingFirstByte = false) }
+            }
+        }
         when (ev.event) {
             "message.created" -> {
                 val userMsgId = d.str("user_message_id")
@@ -752,16 +1161,11 @@ class ChatViewModel(
             "run.started" -> {
                 _ui.update { it.copy(activeRunId = d.str("run_id")) }
             }
-            "title.updated" -> {
+            "title.updated", "conversation.title_updated" -> {
                 val id = d.str("conversation_id") ?: _ui.value.currentConvId
                 val title = d.str("title")?.trim()
                 if (!id.isNullOrBlank() && !title.isNullOrBlank()) {
-                    _ui.update { state ->
-                        state.copy(
-                            conversations = state.conversations.map { if (it.id == id) it.copy(title = title) else it },
-                            currentConvTitle = if (state.currentConvId == id) title else state.currentConvTitle,
-                        )
-                    }
+                    applyTitleUpdate(id, title)
                 }
             }
             "run.reconnected" -> {
@@ -773,8 +1177,86 @@ class ChatViewModel(
                         selectedTurnId = asstId ?: state.selectedTurnId,
                         activeRunId = runId ?: state.activeRunId,
                         streaming = true,
+                        reconnecting = false,
                     )
                 }
+            }
+            "run.snapshot" -> {
+                val asstId = d.str("assistant_message_id")
+                val runId = d.str("run_id")
+                val snapLastId = d.str("last_event_id")
+                if (!snapLastId.isNullOrBlank() && snapLastId != "0-0") {
+                    lastEventId = snapLastId
+                }
+                val output = d.str("output")
+                val statusStr = d.str("status")
+                val reasoningArr = d["reasoning"] as? JsonArray
+                val parsedReasoning = reasoningArr?.mapNotNull {
+                    try {
+                        WhitzJson.decodeFromJsonElement(ReasoningBlock.serializer(), it)
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                val parsedPlan = (d["plan"] as? JsonObject)?.let {
+                    try {
+                        WhitzJson.decodeFromJsonElement(Plan.serializer(), it)
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                val parsedArtifacts = (d["artifacts"] as? JsonArray)?.mapNotNull {
+                    try {
+                        WhitzJson.decodeFromJsonElement(WorkspaceArtifactMeta.serializer(), it)
+                    } catch (_: Exception) {
+                        null
+                    }
+                } ?: emptyList()
+
+                val ctrlObj = (d["pending_control"] as? JsonObject)
+                    ?: (d["pending_controls"] as? JsonArray)?.firstOrNull() as? JsonObject
+                val hydratedCtrl = hydratePendingControl(ctrlObj)
+
+                _ui.update { state ->
+                    val nextAsst = asstId ?: state.activeAssistantId
+                    val nextSel = asstId ?: state.selectedTurnId
+                    val nextReasoning = parsedReasoning ?: state.reasoning
+                    val nextPlan = parsedPlan ?: state.plan
+                    val mappedStatus = when (statusStr) {
+                        "waiting_for_approval", "waiting_for_clarify" -> "waiting"
+                        "running", "queued" -> "streaming"
+                        else -> statusStr
+                    }
+                    val nextMsgs = state.messages.map { m ->
+                        if (m.id == nextAsst) {
+                            val prevPayload = m.toolPayload ?: ToolPayload()
+                            val mergedArtifacts = mergeById(prevPayload.artifacts ?: emptyList(), parsedArtifacts) { it.id }
+                            m.copy(
+                                content = output ?: m.content,
+                                status = mappedStatus ?: m.status,
+                                toolPayload = prevPayload.copy(
+                                    reasoning = nextReasoning,
+                                    plan = nextPlan,
+                                    artifacts = mergedArtifacts.ifEmpty { null },
+                                ),
+                            )
+                        } else m
+                    }
+                    state.copy(
+                        activeAssistantId = nextAsst,
+                        selectedTurnId = nextSel,
+                        activeRunId = runId ?: state.activeRunId,
+                        reasoning = nextReasoning,
+                        plan = nextPlan,
+                        pendingControl = hydratedCtrl,
+                        messages = nextMsgs,
+                        reconnecting = false,
+                        waitingFirstByte = false,
+                    )
+                }
+            }
+            "control.resolved", "run.resumed" -> {
+                clearPendingControlFromSync()
             }
             "reasoning.delta" -> {
                 val step = d.int("step")
@@ -846,30 +1328,44 @@ class ChatViewModel(
             "tool.started" -> {
                 val toolName = d.str("tool") ?: "tool"
                 val rawArgs = d["args"]?.let { jsonToPlainString(it) } ?: d.str("preview") ?: ""
-                val msgId = d.str("message_id") ?: tempId("tool")
+                val explicitMsgId = d.str("message_id")
                 val callId = d.str("call_id")
-                val toolMsg = Message(
-                    id = msgId,
-                    role = "tool",
-                    toolName = toolName,
-                    toolPayload = ToolPayload(
-                        args = d["args"] ?: d["preview"],
-                        status = "running",
-                    ),
-                    status = "running",
-                    runId = _ui.value.activeRunId,
-                    createdAt = Instant.now().toString(),
-                )
                 _ui.update { state ->
+                    val existingMsg = when {
+                        explicitMsgId != null -> state.messages.any { it.id == explicitMsgId }
+                        callId != null -> state.messages.any { it.role == "tool" && it.toolPayload?.callId == callId }
+                        else -> false
+                    }
+                    val nextMessages = if (existingMsg) {
+                        state.messages
+                    } else {
+                        val toolMsg = Message(
+                            id = explicitMsgId ?: tempId("tool"),
+                            role = "tool",
+                            toolName = toolName,
+                            toolPayload = ToolPayload(
+                                callId = callId,
+                                args = d["args"] ?: d["preview"],
+                                status = "running",
+                            ),
+                            status = "running",
+                            runId = state.activeRunId,
+                            createdAt = Instant.now().toString(),
+                        )
+                        state.messages + toolMsg
+                    }
                     val blocks = state.reasoning.toMutableList()
                     val last = blocks.lastOrNull()
-                    val newTool = ReasoningTool(name = toolName, callId = callId, args = rawArgs, status = "running")
-                    if (last != null && last.step == null) {
-                        blocks[blocks.lastIndex] = last.copy(tools = last.tools + newTool)
-                    } else {
-                        blocks.add(ReasoningBlock(step = null, tools = listOf(newTool)))
+                    val alreadyInTools = callId != null && (last?.tools?.any { it.callId == callId } == true)
+                    if (!alreadyInTools) {
+                        val newTool = ReasoningTool(name = toolName, callId = callId, args = rawArgs, status = "running")
+                        if (last != null && last.step == null) {
+                            blocks[blocks.lastIndex] = last.copy(tools = last.tools + newTool)
+                        } else {
+                            blocks.add(ReasoningBlock(step = null, tools = listOf(newTool)))
+                        }
                     }
-                    syncReasoningToState(state.copy(messages = state.messages + toolMsg), blocks)
+                    syncReasoningToState(state.copy(messages = nextMessages), blocks)
                 }
             }
             "tool.completed" -> {
@@ -1111,6 +1607,7 @@ class ChatViewModel(
 
     private fun finishRun(markFailedIfStreaming: Boolean, errMsg: String?) {
         pendingUserTargetId = null
+        lastEventId = null
         _ui.update { state ->
             val asstId = state.activeAssistantId
             val nextMsgs = if (markFailedIfStreaming && asstId != null) {
@@ -1120,6 +1617,11 @@ class ChatViewModel(
             } else state.messages
             state.copy(
                 streaming = false,
+                waitingFirstByte = false,
+                stopping = false,
+                reconnecting = false,
+                approvingChoice = null,
+                submittingClarify = false,
                 activeRunId = null,
                 pendingControl = null,
                 messages = nextMsgs,
@@ -1246,6 +1748,7 @@ class ChatViewModel(
                     sizeBytes = file.sizeBytes,
                     progress = 0,
                     status = UploadTaskStatus.SIGNING,
+                    localFile = file,
                 )
                 task to file
             }
@@ -1319,6 +1822,25 @@ class ChatViewModel(
         _ui.update { state -> state.copy(uploads = state.uploads.filterNot { it.localId == localId }) }
     }
 
+    fun retryUpload(localId: String) {
+        val task = _ui.value.uploads.firstOrNull { it.localId == localId } ?: return
+        val file = task.localFile ?: return
+        viewModelScope.launch {
+            val targetConvId = try {
+                ensureConversation()
+            } catch (t: Throwable) {
+                updateUploadTask(localId) {
+                    it.copy(status = UploadTaskStatus.ERROR, error = extractErrorMessage(t, "创建对话失败"))
+                }
+                return@launch
+            }
+            updateUploadTask(localId) { it.copy(status = UploadTaskStatus.SIGNING, progress = 0, error = null) }
+            val job = async { runUploadTask(targetConvId, localId, file) }
+            uploadJobs[localId] = job
+            job.await()
+        }
+    }
+
     fun detachFile(fileId: String) {
         _ui.update { state -> state.copy(attachedIds = state.attachedIds.filterNot { it == fileId }) }
     }
@@ -1370,17 +1892,25 @@ class ChatViewModel(
 
     fun deleteFile(fileId: String) {
         val convId = _ui.value.currentConvId ?: return
+        if (_ui.value.deletingFileId == fileId) return
+        _ui.update { it.copy(deletingFileId = fileId) }
         viewModelScope.launch {
             try {
                 container.network.api.deleteConversationFile(convId, fileId)
                 _ui.update { state ->
                     state.copy(
+                        deletingFileId = null,
                         files = state.files.filterNot { it.id == fileId },
                         attachedIds = state.attachedIds.filterNot { it == fileId },
                     )
                 }
             } catch (t: Throwable) {
-                _ui.update { it.copy(fileError = extractErrorMessage(t, "删除文件失败")) }
+                _ui.update {
+                    it.copy(
+                        deletingFileId = null,
+                        fileError = extractErrorMessage(t, "删除文件失败"),
+                    )
+                }
             }
         }
     }
@@ -1406,7 +1936,7 @@ class ChatViewModel(
     }
 
     fun openFilePreview(file: ConversationFile) {
-        val convId = file.conversationId ?: _ui.value.currentConvId ?: return
+        val convId = file.conversationId ?: _ui.value.currentConvId
         _ui.update { it.copy(previewTarget = PreviewTarget(file = file, loading = true)) }
         viewModelScope.launch {
             try {
@@ -1417,9 +1947,13 @@ class ChatViewModel(
                     }
                 } else {
                     val isTextLike = file.category == "code" ||
-                        file.ext in setOf(".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml", ".xml")
+                        file.ext.lowercase() in setOf(".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml", ".xml")
                     if (isTextLike) {
-                        val body = container.network.api.getPreviewContent(convId, file.id).string()
+                        val body = if (convId != null) {
+                            container.network.api.getPreviewContent(convId, file.id).string()
+                        } else {
+                            container.network.api.getLibraryPreviewContent(file.id).string()
+                        }
                         var text = body
                         var truncated = false
                         try {
@@ -1437,7 +1971,11 @@ class ChatViewModel(
                             it.copy(previewTarget = PreviewTarget(file = file, content = text, truncated = truncated, loading = false))
                         }
                     } else {
-                        val url = container.network.api.getDownloadUrl(convId, file.id, inline = false).url
+                        val url = if (convId != null) {
+                            container.network.api.getDownloadUrl(convId, file.id, inline = false).url
+                        } else {
+                            container.network.api.getLibraryDownloadUrl(file.id, inline = false).url
+                        }
                         _ui.update {
                             it.copy(previewTarget = PreviewTarget(file = file, previewUrl = url, loading = false))
                         }
@@ -1456,21 +1994,29 @@ class ChatViewModel(
     }
 
     suspend fun getDownloadUrl(file: ConversationFile): String? {
-        val convId = file.conversationId ?: _ui.value.currentConvId ?: return null
+        val convId = file.conversationId ?: _ui.value.currentConvId
         return try {
-            container.network.api.getDownloadUrl(convId, file.id, inline = false).url
+            if (convId != null) {
+                container.network.api.getDownloadUrl(convId, file.id, inline = false).url
+            } else {
+                container.network.api.getLibraryDownloadUrl(file.id, inline = false).url
+            }
         } catch (_: Throwable) {
             null
         }
     }
 
-    private suspend fun resolveFreshPreviewUrl(convId: String, file: ConversationFile): String? {
+    private suspend fun resolveFreshPreviewUrl(convId: String?, file: ConversationFile): String? {
         val existing = _ui.value.files.firstOrNull { it.id == file.id } ?: file
         val expMs = DateTimeUtils.parseInstantMs(existing.previewExpiresAt)
         if (!existing.previewUrl.isNullOrBlank() && (expMs == 0L || System.currentTimeMillis() < expMs - 30_000L)) {
             return existing.previewUrl
         }
-        val res = container.network.api.getDownloadUrl(convId, existing.id, inline = true)
+        val res = if (convId != null) {
+            container.network.api.getDownloadUrl(convId, existing.id, inline = true)
+        } else {
+            container.network.api.getLibraryDownloadUrl(existing.id, inline = true)
+        }
         upsertFile(existing.copy(previewUrl = res.url))
         return res.url
     }
@@ -1576,8 +2122,242 @@ class ChatViewModel(
     private fun JsonObject.bool(key: String): Boolean? = (this[key] as? JsonPrimitive)?.booleanOrNull
     private fun JsonObject.double(key: String): Double? = (this[key] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull()
 
+    // --- Assistant Profile Dialog ---
+    fun clearAssistantDialogFeedback() {
+        _ui.update { it.copy(assistantFeedback = null, assistantError = null) }
+    }
+
+    fun uploadAssistantAvatar(uri: Uri) {
+        viewModelScope.launch {
+            _ui.update { it.copy(assistantSaving = true, assistantFeedback = null, assistantError = null) }
+            try {
+                val dataUrl = AvatarEncoder.encodeToDataUrl(container.appContext.contentResolver, uri)
+                val updated = container.network.api.uploadAssistantAvatar(AvatarUploadRequest(dataUrl))
+                container.authManager.updateUser(updated)
+                _ui.update { it.copy(assistantSaving = false, assistantFeedback = "助手头像已更新") }
+            } catch (t: Throwable) {
+                _ui.update { it.copy(assistantSaving = false, assistantError = extractErrorMessage(t, "助手头像上传失败")) }
+            }
+        }
+    }
+
+    fun deleteAssistantAvatar() {
+        viewModelScope.launch {
+            _ui.update { it.copy(assistantSaving = true, assistantFeedback = null, assistantError = null) }
+            try {
+                val updated = container.network.api.deleteAssistantAvatar()
+                container.authManager.updateUser(updated)
+                _ui.update { it.copy(assistantSaving = false, assistantFeedback = "已恢复默认 Whitz 图标") }
+            } catch (t: Throwable) {
+                _ui.update { it.copy(assistantSaving = false, assistantError = extractErrorMessage(t, "恢复默认图标失败")) }
+            }
+        }
+    }
+
+    fun updateAssistantName(assistantName: String, onSuccess: () -> Unit = {}) {
+        viewModelScope.launch {
+            _ui.update { it.copy(assistantSaving = true, assistantFeedback = null, assistantError = null) }
+            try {
+                val nextName = assistantName.trim().ifEmpty { "Whitz" }
+                val updated = container.network.api.updateAssistantProfile(UpdateAssistantRequest(nextName))
+                container.authManager.updateUser(updated)
+                _ui.update { it.copy(assistantSaving = false) }
+                onSuccess()
+            } catch (t: Throwable) {
+                _ui.update { it.copy(assistantSaving = false, assistantError = extractErrorMessage(t, "保存失败")) }
+            }
+        }
+    }
+
+    // --- Per-User Multi-Device Realtime Sync (/events/stream) ---
+    fun startRealtimeSync() {
+        if (realtimeJob?.isActive == true) return
+        realtimeJob = viewModelScope.launch {
+            var backoffMs = 1000L
+            while (true) {
+                try {
+                    container.network.sseClient.streamGet("/events/stream", idleTimeoutMs = 55_000L)
+                        .collect { ev ->
+                            if (ev.event == "sync.connected") {
+                                backoffMs = 1000L
+                            } else {
+                                handleSyncEvent(ev.event, ev.data)
+                            }
+                        }
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    val apiErr = t as? ApiException
+                    if (apiErr != null && (apiErr.statusCode == 401 || apiErr.statusCode == 403)) {
+                        break
+                    }
+                }
+                delay(backoffMs)
+                backoffMs = (backoffMs * 2L).coerceAtMost(15_000L)
+            }
+        }
+    }
+
+    private fun handleSyncEvent(event: String, d: JsonObject) {
+        when (event) {
+            "conversation.run_updated" -> {
+                val cid = d.str("conversation_id") ?: return
+                val runId = d.str("active_run_id")
+                val runStatus = d.str("active_run_status")
+                val pendingCtrl = d["pending_control"] as? JsonObject
+                _ui.update { state ->
+                    state.copy(
+                        conversations = state.conversations.map { c ->
+                            if (c.id == cid) {
+                                c.copy(
+                                    activeRunId = runId,
+                                    activeRunStatus = runStatus,
+                                    pendingControl = pendingCtrl,
+                                )
+                            } else c
+                        }
+                    )
+                }
+                val cur = _ui.value
+                if (cur.currentConvId == cid) {
+                    if (!runId.isNullOrBlank() && runId != "pending" && !cur.streaming) {
+                        viewModelScope.launch {
+                            try {
+                                val detail = container.network.api.getConversation(cid)
+                                val latest = _ui.value
+                                if (latest.currentConvId == cid && !latest.streaming) {
+                                    loadFromConversation(detail)
+                                }
+                            } catch (_: Throwable) {
+                            }
+                        }
+                    } else if (runId.isNullOrBlank() && cur.streaming && !cur.activeRunId.isNullOrBlank()) {
+                        viewModelScope.launch {
+                            try {
+                                val detail = container.network.api.getConversation(cid)
+                                if (_ui.value.currentConvId == cid && detail.activeRunId.isNullOrBlank()) {
+                                    loadFromConversation(detail)
+                                }
+                            } catch (_: Throwable) {
+                            }
+                        }
+                    }
+                }
+            }
+            "control.resolved" -> {
+                val cid = d.str("conversation_id")
+                if (cid != null && cid == _ui.value.currentConvId) {
+                    clearPendingControlFromSync()
+                }
+            }
+            "conversation.updated" -> {
+                val cid = d.str("conversation_id")
+                val action = d.str("action") ?: ""
+                val title = d.str("title")
+                if (action == "deleted" && cid != null) {
+                    val wasCurrent = _ui.value.currentConvId == cid
+                    _ui.update { state ->
+                        state.copy(conversations = state.conversations.filterNot { it.id == cid })
+                    }
+                    if (wasCurrent) {
+                        val fallback = _ui.value.sideConversations.firstOrNull() ?: _ui.value.mainConversation
+                        if (fallback != null) openConversation(fallback.id) else openMainConversation()
+                    }
+                } else if (title != null && cid != null) {
+                    applyTitleUpdate(cid, title)
+                    val isPinned = d.bool("is_pinned")
+                    if (isPinned != null) {
+                        val pinnedAt = d.str("pinned_at")
+                        _ui.update { state ->
+                            val next = state.conversations.map { c ->
+                                if (c.id == cid) c.copy(isPinned = isPinned, pinnedAt = pinnedAt) else c
+                            }
+                            state.copy(conversations = ConversationSorter.sort(next))
+                        }
+                    }
+                } else {
+                    syncConversationsFromServer()
+                }
+            }
+            "library.updated" -> {
+                val fileId = d.str("file_id")
+                val action = d.str("action") ?: ""
+                val idxStatus = d.str("index_status")
+                val idxChunks = d.int("indexed_chunks")
+                if (action == "deleted" && fileId != null) {
+                    _ui.update { state ->
+                        state.copy(
+                            files = state.files.filterNot { it.id == fileId },
+                            attachedIds = state.attachedIds.filterNot { it == fileId },
+                        )
+                    }
+                } else if (action == "indexed" && fileId != null) {
+                    _ui.update { state ->
+                        state.copy(
+                            files = state.files.map { f ->
+                                if (f.id == fileId) {
+                                    f.copy(
+                                        indexStatus = idxStatus ?: "ready",
+                                        indexedChunks = idxChunks ?: f.indexedChunks,
+                                    )
+                                } else f
+                            }
+                        )
+                    }
+                }
+                library.handleRealtimeLibraryEvent(action, fileId, idxStatus, idxChunks)
+            }
+        }
+    }
+
+    private fun applyTitleUpdate(id: String, title: String) {
+        _ui.update { state ->
+            val target = state.conversations.firstOrNull { it.id == id }
+            if (target?.kind == "main") return@update state
+            state.copy(
+                conversations = state.conversations.map {
+                    if (it.id == id && it.kind != "main") it.copy(title = title) else it
+                },
+                currentConvTitle = if (state.currentConvId == id && state.currentConvKind != "main") {
+                    title
+                } else state.currentConvTitle,
+            )
+        }
+    }
+
+    private fun clearPendingControlFromSync() {
+        _ui.update { state ->
+            state.copy(
+                pendingControl = null,
+                approvingChoice = null,
+                submittingClarify = false,
+                messages = state.messages.map { m ->
+                    if (m.id == state.activeAssistantId && m.status == "waiting") {
+                        m.copy(status = "streaming")
+                    } else m
+                },
+            )
+        }
+    }
+
+    private fun hydratePendingControl(raw: JsonObject?): PendingControl? {
+        if (raw == null) return null
+        val rawKind = raw.str("kind")
+        val rawTool = raw.str("tool")
+        val kind = if (rawKind == "approval" || rawTool == "execute_code") "approval" else "clarify"
+        return PendingControl(
+            kind = kind,
+            requestId = raw.str("request_id") ?: raw.str("prompt_id"),
+            executionGeneration = raw.int("execution_generation"),
+            tool = rawTool,
+            preview = formatControlPreview(raw),
+        )
+    }
+
     override fun onCleared() {
         super.onCleared()
+        pendingPollJob?.cancel()
+        realtimeJob?.cancel()
         streamJob?.cancel()
         uploadJobs.values.forEach { it.cancel() }
     }

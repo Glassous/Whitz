@@ -1,13 +1,11 @@
 package com.glassous.whitz.feature.settings
 
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
-import android.util.Base64
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.glassous.whitz.AppContainer
-import com.glassous.whitz.core.model.ConversationFile
+import com.glassous.whitz.core.files.AvatarEncoder
+import com.glassous.whitz.core.files.LibraryController
 import com.glassous.whitz.core.model.CreditStatus
 import com.glassous.whitz.core.model.GithubSkillPreviewResponse
 import com.glassous.whitz.core.model.MemoryOverview
@@ -19,33 +17,31 @@ import com.glassous.whitz.core.network.AvatarUploadRequest
 import com.glassous.whitz.core.network.CreateSkillRequest
 import com.glassous.whitz.core.network.GithubInstallRequest
 import com.glassous.whitz.core.network.GithubPreviewRequest
-import com.glassous.whitz.core.network.LibraryFilePatchRequest
 import com.glassous.whitz.core.network.MemoryEntryRequest
 import com.glassous.whitz.core.network.MemorySettingsRequest
 import com.glassous.whitz.core.network.PendingActionRequest
 import com.glassous.whitz.core.network.ProfileContextRequest
 import com.glassous.whitz.core.network.RedeemRequest
 import com.glassous.whitz.core.network.SkillPatchRequest
+import com.glassous.whitz.core.network.UpdateAssistantRequest
 import com.glassous.whitz.core.network.UpdatePasswordRequest
 import com.glassous.whitz.core.network.UpdatePersonaRequest
 import com.glassous.whitz.core.network.UpdateProfileRequest
-import com.glassous.whitz.core.network.WhitzJson
 import com.glassous.whitz.core.network.extractErrorMessage
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import java.io.ByteArrayOutputStream
 
 data class SettingsUiState(
     val loading: Boolean = false,
     val message: String? = null,
     val error: String? = null,
+    // Assistant Profile modal
+    val assistantSaving: Boolean = false,
+    val assistantFeedback: String? = null,
+    val assistantError: String? = null,
     // Credits
     val credits: CreditStatus? = null,
     // Memory
@@ -54,8 +50,6 @@ data class SettingsUiState(
     val skills: List<SkillItem> = emptyList(),
     val pendingSkills: List<SkillPendingItem> = emptyList(),
     val githubPreview: GithubSkillPreviewResponse? = null,
-    // Library
-    val libraryFiles: List<ConversationFile> = emptyList(),
     // Sessions
     val sessions: List<UserSessionItem> = emptyList(),
 )
@@ -68,6 +62,9 @@ class SettingsViewModel(
 
     val user = container.authManager.user
     val themePreference = container.themePreference
+    val library = LibraryController(viewModelScope, container)
+
+    fun resolveAssetUrl(pathOrUrl: String?): String? = container.resolveAssetUrl(pathOrUrl)
 
     fun setTheme(pref: ThemePreference) {
         container.setThemePreference(pref)
@@ -75,6 +72,10 @@ class SettingsViewModel(
 
     fun clearFeedback() {
         _ui.update { it.copy(message = null, error = null) }
+    }
+
+    fun clearAssistantDialogFeedback() {
+        _ui.update { it.copy(assistantFeedback = null, assistantError = null) }
     }
 
     fun refreshAll() {
@@ -142,22 +143,7 @@ class SettingsViewModel(
         viewModelScope.launch {
             _ui.update { it.copy(loading = true, message = null, error = null) }
             try {
-                val dataUrl = withContext(Dispatchers.IO) {
-                    val stream = container.appContext.contentResolver.openInputStream(uri)
-                        ?: throw IllegalStateException("无法读取图片")
-                    val orig = stream.use { BitmapFactory.decodeStream(it) }
-                        ?: throw IllegalStateException("无效的图片格式")
-                    val maxDim = 512
-                    val scale = minOf(maxDim.toFloat() / orig.width, maxDim.toFloat() / orig.height, 1f)
-                    val w = (orig.width * scale).toInt().coerceAtLeast(1)
-                    val h = (orig.height * scale).toInt().coerceAtLeast(1)
-                    val scaled = if (w != orig.width || h != orig.height) {
-                        Bitmap.createScaledBitmap(orig, w, h, true)
-                    } else orig
-                    val out = ByteArrayOutputStream()
-                    scaled.compress(Bitmap.CompressFormat.JPEG, 88, out)
-                    "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-                }
+                val dataUrl = AvatarEncoder.encodeToDataUrl(container.appContext.contentResolver, uri)
                 val updated = container.network.api.uploadAvatar(AvatarUploadRequest(dataUrl))
                 container.authManager.updateUser(updated)
                 _ui.update { it.copy(loading = false, message = "头像已更新") }
@@ -176,6 +162,48 @@ class SettingsViewModel(
                 _ui.update { it.copy(loading = false, message = "已移除头像") }
             } catch (t: Throwable) {
                 _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "移除头像失败")) }
+            }
+        }
+    }
+
+    fun uploadAssistantAvatar(uri: Uri) {
+        viewModelScope.launch {
+            _ui.update { it.copy(assistantSaving = true, assistantFeedback = null, assistantError = null) }
+            try {
+                val dataUrl = AvatarEncoder.encodeToDataUrl(container.appContext.contentResolver, uri)
+                val updated = container.network.api.uploadAssistantAvatar(AvatarUploadRequest(dataUrl))
+                container.authManager.updateUser(updated)
+                _ui.update { it.copy(assistantSaving = false, assistantFeedback = "助手头像已更新") }
+            } catch (t: Throwable) {
+                _ui.update { it.copy(assistantSaving = false, assistantError = extractErrorMessage(t, "助手头像上传失败")) }
+            }
+        }
+    }
+
+    fun deleteAssistantAvatar() {
+        viewModelScope.launch {
+            _ui.update { it.copy(assistantSaving = true, assistantFeedback = null, assistantError = null) }
+            try {
+                val updated = container.network.api.deleteAssistantAvatar()
+                container.authManager.updateUser(updated)
+                _ui.update { it.copy(assistantSaving = false, assistantFeedback = "已恢复默认 Whitz 图标") }
+            } catch (t: Throwable) {
+                _ui.update { it.copy(assistantSaving = false, assistantError = extractErrorMessage(t, "恢复默认图标失败")) }
+            }
+        }
+    }
+
+    fun updateAssistantName(assistantName: String, onSuccess: () -> Unit = {}) {
+        viewModelScope.launch {
+            _ui.update { it.copy(assistantSaving = true, assistantFeedback = null, assistantError = null) }
+            try {
+                val nextName = assistantName.trim().ifEmpty { "Whitz" }
+                val updated = container.network.api.updateAssistantProfile(UpdateAssistantRequest(nextName))
+                container.authManager.updateUser(updated)
+                _ui.update { it.copy(assistantSaving = false) }
+                onSuccess()
+            } catch (t: Throwable) {
+                _ui.update { it.copy(assistantSaving = false, assistantError = extractErrorMessage(t, "保存失败")) }
             }
         }
     }
@@ -450,58 +478,6 @@ class SettingsViewModel(
                 onSuccess()
             } catch (t: Throwable) {
                 _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "安装技能失败")) }
-            }
-        }
-    }
-
-    // --- Library ---
-    fun loadLibrary(query: String = "", globalOnly: Boolean? = null) {
-        viewModelScope.launch {
-            _ui.update { it.copy(loading = true) }
-            try {
-                val res = container.network.api.getLibraryFiles(
-                    q = query.trim().ifBlank { null },
-                    isGlobal = globalOnly,
-                )
-                val arr = when (res) {
-                    is JsonArray -> res
-                    is JsonObject -> res["items"] as? JsonArray
-                    else -> null
-                }
-                val items = arr?.mapNotNull {
-                    try {
-                        WhitzJson.decodeFromJsonElement(ConversationFile.serializer(), it)
-                    } catch (_: Exception) {
-                        null
-                    }
-                } ?: emptyList()
-                _ui.update { it.copy(loading = false, libraryFiles = items) }
-            } catch (t: Throwable) {
-                _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "加载文件库失败")) }
-            }
-        }
-    }
-
-    fun toggleLibraryGlobal(fileId: String, isGlobal: Boolean) {
-        viewModelScope.launch {
-            try {
-                val updated = container.network.api.patchLibraryFile(fileId, LibraryFilePatchRequest(isGlobal))
-                _ui.update { state ->
-                    state.copy(libraryFiles = state.libraryFiles.map { if (it.id == fileId) updated else it })
-                }
-            } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "更新文件共享状态失败")) }
-            }
-        }
-    }
-
-    fun deleteLibraryFile(fileId: String) {
-        viewModelScope.launch {
-            try {
-                container.network.api.deleteLibraryFile(fileId)
-                _ui.update { state -> state.copy(libraryFiles = state.libraryFiles.filterNot { it.id == fileId }) }
-            } catch (t: Throwable) {
-                _ui.update { it.copy(error = extractErrorMessage(t, "删除文件失败")) }
             }
         }
     }

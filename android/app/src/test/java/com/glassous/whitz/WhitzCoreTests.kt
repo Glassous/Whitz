@@ -3,6 +3,7 @@ package com.glassous.whitz
 import com.glassous.whitz.core.files.FileValidator
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.ConversationDetail
+import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.CreditStatus
 import com.glassous.whitz.core.model.Message
 import com.glassous.whitz.core.model.Plan
@@ -10,7 +11,10 @@ import com.glassous.whitz.core.model.PlanItem
 import com.glassous.whitz.core.model.ReasoningBlock
 import com.glassous.whitz.core.model.ReasoningTool
 import com.glassous.whitz.core.model.ToolPayload
+import com.glassous.whitz.core.model.User
 import com.glassous.whitz.core.model.formatCredits
+import com.glassous.whitz.core.model.resolveServerAssetUrl
+import com.glassous.whitz.core.model.resolvedAssistantName
 import com.glassous.whitz.core.network.SseParser
 import com.glassous.whitz.core.network.WhitzJson
 import com.glassous.whitz.core.util.ConversationSorter
@@ -28,14 +32,16 @@ import org.junit.Test
 
 class WhitzCoreTests {
     @Test
-    fun sseParser_parsesEventAndMultilineData() {
+    fun sseParser_parsesEventIdAndMultilineData() {
         val block = """
+            id: 1732180001-0
             event: message.delta
             data: {"text":"hello"}
         """.trimIndent()
         val ev = SseParser.parseBlock(block)
         assertNotNull(ev)
-        assertEquals("message.delta", ev!!.event)
+        assertEquals("1732180001-0", ev!!.id)
+        assertEquals("message.delta", ev.event)
         assertEquals("hello", (ev.data["text"] as? JsonPrimitive)?.contentOrNull)
     }
 
@@ -56,18 +62,66 @@ class WhitzCoreTests {
     }
 
     @Test
-    fun conversationSorter_pinnedFirstThenMostRecent() {
-        val c1 = Conversation(id = "1", title = "old", isPinned = false, updatedAt = "2026-01-01T00:00:00Z")
-        val c2 = Conversation(id = "2", title = "new", isPinned = false, updatedAt = "2026-01-02T00:00:00Z")
+    fun conversationSorter_mainFirstThenPinnedThenMostRecent() {
+        val c1 = Conversation(id = "1", kind = "side", title = "old", isPinned = false, updatedAt = "2026-01-01T00:00:00Z")
+        val c2 = Conversation(id = "2", kind = "side", title = "new", isPinned = false, updatedAt = "2026-01-02T00:00:00Z")
         val c3 = Conversation(
             id = "3",
+            kind = "side",
             title = "pinned",
             isPinned = true,
             pinnedAt = "2026-01-01T00:00:00Z",
             updatedAt = "2025-12-31T00:00:00Z",
         )
-        val sorted = ConversationSorter.sort(listOf(c1, c2, c3))
-        assertEquals(listOf("3", "2", "1"), sorted.map { it.id })
+        val cMain = Conversation(
+            id = "main-1",
+            kind = "main",
+            title = "主要聊天",
+            isPinned = false,
+            updatedAt = "2025-01-01T00:00:00Z",
+        )
+        val sorted = ConversationSorter.sort(listOf(c1, c2, c3, cMain))
+        assertEquals(listOf("main-1", "3", "2", "1"), sorted.map { it.id })
+    }
+
+    @Test
+    fun models_decodeAssistantProfileKindAndIndexStatus() {
+        val userRaw = """
+            {
+              "id": "u-1",
+              "email": "a@b.com",
+              "display_name": "Alice",
+              "assistant_name": "Jarvis",
+              "assistant_avatar_url": "/api/users/u-1/assistant-avatar?v=123"
+            }
+        """.trimIndent()
+        val user = WhitzJson.decodeFromString(User.serializer(), userRaw)
+        assertEquals("Jarvis", user.resolvedAssistantName())
+        assertEquals(
+            "https://whitzapi.kamisato.top/api/users/u-1/assistant-avatar?v=123",
+            resolveServerAssetUrl("https://whitzapi.kamisato.top/api", user.assistantAvatarUrl),
+        )
+
+        val fileRaw = """
+            {
+              "id": "f-1",
+              "filename": "notes.pdf",
+              "status": "ready",
+              "index_status": "indexing",
+              "indexed_chunks": 4
+            }
+        """.trimIndent()
+        val file = WhitzJson.decodeFromString(ConversationFile.serializer(), fileRaw)
+        assertEquals("indexing", file.indexStatus)
+        assertEquals(4, file.indexedChunks)
+        assertEquals(true, file.isGlobal)
+    }
+
+    @Test
+    fun liveStepLabel_handlesStoppingReconnectingAndWaitingFirstByte() {
+        assertEquals("正在停止生成…", computeLiveStepLabel(null, "web_search", null, stopping = true))
+        assertEquals("网络重连中，正在恢复进度…", computeLiveStepLabel(null, "web_search", null, reconnecting = true))
+        assertEquals("正在连接助理…", computeLiveStepLabel(null, null, null, waitingFirstByte = true))
     }
 
     @Test

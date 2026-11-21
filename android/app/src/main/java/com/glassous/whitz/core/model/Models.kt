@@ -1,8 +1,10 @@
 package com.glassous.whitz.core.model
 
+import com.glassous.whitz.core.files.LocalPickedFile
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 
 @Serializable
 data class User(
@@ -10,6 +12,8 @@ data class User(
     val email: String,
     @SerialName("display_name") val displayName: String,
     @SerialName("avatar_url") val avatarUrl: String? = null,
+    @SerialName("assistant_name") val assistantName: String = "Whitz",
+    @SerialName("assistant_avatar_url") val assistantAvatarUrl: String? = null,
     val bio: String = "",
     val gender: String? = null,
     val birthday: String? = null,
@@ -101,10 +105,12 @@ data class Plan(
 @Serializable
 data class Conversation(
     val id: String,
-    val title: String = "新对话",
+    val kind: String = "side",
+    val title: String = "新旁聊",
     val plan: Plan? = null,
     @SerialName("active_run_id") val activeRunId: String? = null,
     @SerialName("active_run_status") val activeRunStatus: String? = null,
+    @SerialName("pending_control") val pendingControl: JsonObject? = null,
     @SerialName("is_pinned") val isPinned: Boolean = false,
     @SerialName("pinned_at") val pinnedAt: String? = null,
     @SerialName("created_at") val createdAt: String = "",
@@ -115,10 +121,12 @@ data class Conversation(
 @Serializable
 data class ConversationDetail(
     val id: String,
-    val title: String = "新对话",
+    val kind: String = "side",
+    val title: String = "新旁聊",
     val plan: Plan? = null,
     @SerialName("active_run_id") val activeRunId: String? = null,
     @SerialName("active_run_status") val activeRunStatus: String? = null,
+    @SerialName("pending_control") val pendingControl: JsonObject? = null,
     @SerialName("is_pinned") val isPinned: Boolean = false,
     @SerialName("pinned_at") val pinnedAt: String? = null,
     @SerialName("created_at") val createdAt: String = "",
@@ -130,6 +138,7 @@ data class ConversationDetail(
 @Serializable
 data class ConversationSearchHit(
     @SerialName("conversation_id") val conversationId: String,
+    @SerialName("conversation_kind") val conversationKind: String = "side",
     @SerialName("conversation_title") val conversationTitle: String = "",
     @SerialName("message_id") val messageId: String? = null,
     val role: String? = null,
@@ -194,8 +203,10 @@ data class ConversationFile(
     val category: String = "document",
     @SerialName("size_bytes") val sizeBytes: Long = 0,
     val status: String = "ready",
+    @SerialName("index_status") val indexStatus: String = "ready",
+    @SerialName("indexed_chunks") val indexedChunks: Int = 0,
     val source: String = "user",
-    @SerialName("is_global") val isGlobal: Boolean = false,
+    @SerialName("is_global") val isGlobal: Boolean = true,
     @SerialName("message_id") val messageId: String? = null,
     @SerialName("preview_url") val previewUrl: String? = null,
     @SerialName("thumb_url") val thumbUrl: String? = null,
@@ -207,6 +218,7 @@ data class ConversationFile(
 
 @Serializable
 data class ToolPayload(
+    @SerialName("call_id") val callId: String? = null,
     val args: JsonElement? = null,
     val result: JsonElement? = null,
     val duration: Double? = null,
@@ -445,4 +457,19 @@ data class UploadTask(
     val progress: Int = 0,
     val status: UploadTaskStatus = UploadTaskStatus.SIGNING,
     val error: String? = null,
+    val localFile: LocalPickedFile? = null,
 )
+
+fun User.resolvedAssistantName(): String = assistantName.trim().ifEmpty { "Whitz" }
+
+fun resolveServerAssetUrl(apiBaseUrl: String, pathOrUrl: String?): String? {
+    val raw = pathOrUrl?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    if (raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("data:")) {
+        return raw
+    }
+    return try {
+        java.net.URI(apiBaseUrl.trimEnd('/') + "/").resolve(raw).toString()
+    } catch (_: Exception) {
+        raw
+    }
+}

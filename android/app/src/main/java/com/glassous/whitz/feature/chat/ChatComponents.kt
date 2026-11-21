@@ -87,6 +87,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
 import com.glassous.whitz.core.files.FileValidator
+import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.ConversationSearchHit
 import com.glassous.whitz.core.model.MemoryPendingItem
@@ -97,6 +98,7 @@ import com.glassous.whitz.core.model.ReasoningBlock
 import com.glassous.whitz.core.model.ReasoningTool
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
+import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
 import com.glassous.whitz.ui.theme.WhitzTextField
@@ -106,6 +108,9 @@ import com.glassous.whitz.ui.theme.WhitzTextField
 fun MessageBubble(
     message: Message,
     streaming: Boolean,
+    hasActiveUploads: Boolean = false,
+    reconnecting: Boolean = false,
+    waitingFirstByte: Boolean = false,
     isActiveTurn: Boolean,
     isSelectedTurn: Boolean = false,
     liveLabel: String? = null,
@@ -162,7 +167,7 @@ fun MessageBubble(
                                         onEditSubmit(message.id, draft)
                                     },
                                     shapes = ButtonDefaults.shapesFor(36.dp),
-                                    enabled = draft.isNotBlank() && !streaming,
+                                    enabled = draft.isNotBlank() && !streaming && !hasActiveUploads,
                                     modifier = Modifier.height(36.dp),
                                     contentPadding = PaddingValues(horizontal = 14.dp),
                                 ) { Text("保存并重发", fontSize = 13.sp) }
@@ -344,7 +349,12 @@ fun MessageBubble(
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
                         WhitzLoadingIndicator(size = 16.dp)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(liveLabel ?: "正在思考...", fontSize = 13.5.sp, color = colors.fgMuted)
+                        val statusText = when {
+                            reconnecting -> "正在恢复实时输出…"
+                            waitingFirstByte -> "助理已接收请求，正在准备回复…"
+                            else -> liveLabel ?: "正在组织回答…"
+                        }
+                        Text(statusText, fontSize = 13.5.sp, color = colors.fgMuted)
                     }
                 } else if (message.status == "waiting") {
                     Text("等待你的确认...", fontSize = 13.5.sp, color = colors.warning)
@@ -402,7 +412,7 @@ fun MessageBubble(
                         )
                         Button(
                             onClick = { onRegenerate(message.id) },
-                            enabled = !streaming,
+                            enabled = !streaming && !hasActiveUploads,
                             shapes = ButtonDefaults.shapesFor(28.dp),
                             modifier = Modifier.height(28.dp),
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
@@ -433,6 +443,7 @@ fun MessageBubble(
                         if (!streaming) {
                             IconButton(
                                 onClick = { onRegenerate(message.id) },
+                                enabled = !hasActiveUploads,
                                 modifier = Modifier.size(30.dp),
                             ) {
                                 Icon(Icons.Default.Refresh, contentDescription = "重新生成", tint = colors.fgFaint, modifier = Modifier.size(15.dp))
@@ -449,6 +460,7 @@ fun MessageBubble(
 @Composable
 fun ApprovalCard(
     control: PendingControl,
+    submittingChoice: String? = null,
     onApprove: (String) -> Unit,
 ) {
     val colors = LocalWhitzColors.current
@@ -488,17 +500,19 @@ fun ApprovalCard(
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     onClick = { onApprove("deny") },
+                    enabled = submittingChoice == null,
                     shapes = ButtonDefaults.shapesFor(40.dp),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("拒绝")
+                    Text(if (submittingChoice == "deny") "拒绝中…" else "拒绝")
                 }
                 Button(
                     onClick = { onApprove("once") },
+                    enabled = submittingChoice == null,
                     shapes = ButtonDefaults.shapesFor(40.dp),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("允许一次")
+                    Text(if (submittingChoice == "once") "批准中…" else "允许一次")
                 }
             }
         }
@@ -509,6 +523,7 @@ fun ApprovalCard(
 @Composable
 fun ClarifyCard(
     control: PendingControl,
+    submitting: Boolean = false,
     onSubmit: (String) -> Unit,
 ) {
     val colors = LocalWhitzColors.current
@@ -530,6 +545,7 @@ fun ClarifyCard(
                 value = answer,
                 onValueChange = { answer = it },
                 placeholder = "输入你的回答...",
+                enabled = !submitting,
                 singleLine = false,
                 maxLines = 4,
                 modifier = Modifier.fillMaxWidth(),
@@ -538,10 +554,10 @@ fun ClarifyCard(
             Button(
                 onClick = { onSubmit(answer) },
                 shapes = ButtonDefaults.shapesFor(36.dp),
-                enabled = answer.isNotBlank(),
+                enabled = answer.isNotBlank() && !submitting,
                 modifier = Modifier.align(Alignment.End),
             ) {
-                Text("提交")
+                Text(if (submitting) "提交中…" else "提交")
             }
         }
     }
@@ -551,11 +567,16 @@ fun ClarifyCard(
 @Composable
 fun MemoryPendingCard(
     item: MemoryPendingItem,
+    busy: Boolean = false,
     onResolve: (id: String, action: String, content: String?) -> Unit,
 ) {
     val colors = LocalWhitzColors.current
     var editing by remember(item.id) { mutableStateOf(false) }
     var draft by remember(item.id, item.content) { mutableStateOf(item.content) }
+    var pendingAction by remember(item.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(busy) {
+        if (!busy) pendingAction = null
+    }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -579,6 +600,7 @@ fun MemoryPendingCard(
                 WhitzTextField(
                     value = draft,
                     onValueChange = { draft = it },
+                    enabled = !busy,
                     singleLine = false,
                     maxLines = 4,
                     modifier = Modifier.fillMaxWidth(),
@@ -588,16 +610,27 @@ fun MemoryPendingCard(
             }
             Spacer(modifier = Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { editing = !editing }) { Text(if (editing) "完成编辑" else "编辑") }
+                TextButton(
+                    onClick = { editing = !editing },
+                    enabled = !busy,
+                ) { Text(if (editing) "完成编辑" else "编辑") }
                 Spacer(modifier = Modifier.weight(1f))
                 OutlinedButton(
-                    onClick = { onResolve(item.id, "reject", null) },
+                    onClick = {
+                        pendingAction = "reject"
+                        onResolve(item.id, "reject", null)
+                    },
+                    enabled = !busy,
                     shapes = ButtonDefaults.shapesFor(36.dp),
-                ) { Text("拒绝") }
+                ) { Text(if (busy && pendingAction == "reject") "拒绝中…" else "拒绝") }
                 Button(
-                    onClick = { onResolve(item.id, "approve", if (draft != item.content) draft else null) },
+                    onClick = {
+                        pendingAction = "approve"
+                        onResolve(item.id, "approve", if (draft != item.content) draft else null)
+                    },
+                    enabled = !busy && (!editing || draft.isNotBlank()),
                     shapes = ButtonDefaults.shapesFor(36.dp),
-                ) { Text("保存") }
+                ) { Text(if (busy && pendingAction != "reject") "保存中…" else "保存") }
             }
         }
     }
@@ -607,9 +640,14 @@ fun MemoryPendingCard(
 @Composable
 fun SkillPendingCard(
     item: SkillPendingItem,
+    busy: Boolean = false,
     onResolve: (id: String, action: String, content: String?) -> Unit,
 ) {
     val colors = LocalWhitzColors.current
+    var pendingAction by remember(item.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(busy) {
+        if (!busy) pendingAction = null
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -640,13 +678,21 @@ fun SkillPendingCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Spacer(modifier = Modifier.weight(1f))
                 OutlinedButton(
-                    onClick = { onResolve(item.id, "reject", null) },
+                    onClick = {
+                        pendingAction = "reject"
+                        onResolve(item.id, "reject", null)
+                    },
+                    enabled = !busy,
                     shapes = ButtonDefaults.shapesFor(36.dp),
-                ) { Text("拒绝") }
+                ) { Text(if (busy && pendingAction == "reject") "拒绝中…" else "拒绝") }
                 Button(
-                    onClick = { onResolve(item.id, "approve", null) },
+                    onClick = {
+                        pendingAction = "approve"
+                        onResolve(item.id, "approve", null)
+                    },
+                    enabled = !busy,
                     shapes = ButtonDefaults.shapesFor(36.dp),
-                ) { Text("批准") }
+                ) { Text(if (busy && pendingAction != "reject") "处理中…" else "批准") }
             }
         }
     }
@@ -793,6 +839,7 @@ fun TaskStepsPane(
 @Composable
 fun TaskFilesPane(
     files: List<ConversationFile>,
+    deletingFileId: String? = null,
     onOpenFile: (ConversationFile) -> Unit,
     onDeleteFile: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -801,7 +848,12 @@ fun TaskFilesPane(
     val colors = LocalWhitzColors.current
     if (files.isEmpty()) {
         Box(modifier = modifier.padding(32.dp), contentAlignment = Alignment.Center) {
-            Text("当前对话暂无文件", color = colors.fgFaint, fontSize = 13.5.sp)
+            Text(
+                text = "当前旁聊暂无文件。\n所有已发送文件自动全局共享给主聊天和旁聊；如需管理全部文件，请前往「资料库」。",
+                fontSize = 13.sp,
+                lineHeight = 20.sp,
+                color = colors.fgFaint,
+            )
         }
     } else {
         LazyColumn(
@@ -827,13 +879,52 @@ fun TaskFilesPane(
                         Spacer(modifier = Modifier.width(10.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(f.filename, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${FileValidator.formatSize(f.sizeBytes)} · ${f.source}", fontSize = 12.sp, color = colors.fgFaint)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Text(
+                                    "${FileValidator.formatSize(f.sizeBytes)} · ${if (f.source == "assistant") "AI" else "上传"}",
+                                    fontSize = 12.sp,
+                                    color = colors.fgFaint,
+                                )
+                                if (f.indexStatus == "indexing") {
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(colors.canvas)
+                                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    ) {
+                                        WhitzLoadingIndicator(size = 9.dp)
+                                        Text("索引中", fontSize = 10.sp, color = colors.fgMuted)
+                                    }
+                                }
+                            }
                         }
-                        IconButton(onClick = { onDeleteFile(f.id) }, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.Default.Delete, contentDescription = "删除文件", tint = colors.danger, modifier = Modifier.size(17.dp))
+                        IconButton(
+                            onClick = { onDeleteFile(f.id) },
+                            enabled = deletingFileId != f.id,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            if (deletingFileId == f.id) {
+                                WhitzLoadingIndicator(size = 14.dp)
+                            } else {
+                                Icon(Icons.Default.Close, contentDescription = "从当前旁聊移除", tint = colors.fgFaint, modifier = Modifier.size(17.dp))
+                            }
                         }
                     }
                 }
+            }
+            item(key = "files-footer-hint") {
+                Text(
+                    text = "所有已发送文件自动全局共享给主聊天和旁聊；如需彻底删除，请前往侧栏「资料库」。",
+                    fontSize = 11.5.sp,
+                    lineHeight = 17.sp,
+                    color = colors.fgFaint,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                )
             }
         }
     }
@@ -1231,6 +1322,8 @@ private fun ToolCallRow(tool: ReasoningTool) {
 
 @Composable
 fun SearchDialog(
+    recentConversations: List<Conversation> = emptyList(),
+    assistantName: String = "Whitz",
     results: List<ConversationSearchHit>,
     searching: Boolean,
     onQueryChange: (String) -> Unit,
@@ -1243,7 +1336,7 @@ fun SearchDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = colors.canvas,
-        title = { Text("搜索对话", fontWeight = FontWeight.SemiBold, color = colors.fg) },
+        title = { Text("搜索聊天", fontWeight = FontWeight.SemiBold, color = colors.fg) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 WhitzTextField(
@@ -1261,11 +1354,64 @@ fun SearchDialog(
                     Box(modifier = Modifier.fillMaxWidth().padding(18.dp), contentAlignment = Alignment.Center) {
                         WhitzLoadingIndicator(size = 24.dp)
                     }
-                } else if (query.isNotBlank() && results.isEmpty()) {
-                    Text("没有找到匹配的对话", fontSize = 13.sp, color = colors.fgFaint, modifier = Modifier.padding(8.dp))
+                } else if (query.isBlank()) {
+                    if (recentConversations.isEmpty()) {
+                        Text("暂无最近聊天", fontSize = 13.sp, color = colors.fgFaint, modifier = Modifier.padding(8.dp))
+                    } else {
+                        Text("最近聊天", fontSize = 11.5.sp, fontWeight = FontWeight.Medium, color = colors.fgFaint, modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp))
+                        LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                            items(recentConversations.take(12), key = { it.id }) { c ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable {
+                                            onSelectConversation(c.id)
+                                            onDismiss()
+                                        }
+                                        .padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = if (c.kind == "main") assistantName else c.title,
+                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 14.sp,
+                                        color = colors.fg,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false),
+                                    )
+                                    if (c.kind == "main") {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(colors.surface)
+                                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                                        ) {
+                                            Text("主聊", fontSize = 10.sp, color = colors.fgMuted)
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    val time = DateTimeUtils.formatShort(c.lastMessageAt ?: c.updatedAt.ifBlank { c.createdAt })
+                                    if (time.isNotBlank()) {
+                                        Text(time, fontSize = 11.sp, color = colors.fgFaint)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (results.isEmpty()) {
+                    Text("没有找到匹配的聊天", fontSize = 13.sp, color = colors.fgFaint, modifier = Modifier.padding(8.dp))
                 } else {
                     LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
                         items(results) { hit ->
+                            val roleLabel = when {
+                                hit.matchIn == "title" -> "标题"
+                                hit.role == "user" -> "我"
+                                hit.role == "assistant" -> assistantName
+                                else -> "正文"
+                            }
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1276,7 +1422,29 @@ fun SearchDialog(
                                     }
                                     .padding(10.dp),
                             ) {
-                                Text(hit.conversationTitle.ifBlank { "无标题对话" }, fontWeight = FontWeight.Medium, fontSize = 14.sp, color = colors.fg)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = if (hit.conversationKind == "main") assistantName else hit.conversationTitle.ifBlank { "无标题聊天" },
+                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 14.sp,
+                                        color = colors.fg,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    if (hit.conversationKind == "main") {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(colors.surface)
+                                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                                        ) {
+                                            Text("主聊", fontSize = 10.sp, color = colors.fgMuted)
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(roleLabel, fontSize = 11.sp, color = colors.fgFaint)
+                                }
                                 if (hit.snippet.isNotBlank()) {
                                     Text(hit.snippet, fontSize = 12.sp, color = colors.fgMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 }
@@ -1360,7 +1528,7 @@ fun LibraryAttachDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = colors.canvas,
-        title = { Text("从文件库选择", fontWeight = FontWeight.SemiBold, color = colors.fg) },
+        title = { Text("从个人资料库引用文件", fontWeight = FontWeight.SemiBold, color = colors.fg) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 WhitzTextField(
@@ -1375,7 +1543,7 @@ fun LibraryAttachDialog(
                         WhitzLoadingIndicator(size = 24.dp)
                     }
                 } else if (items.isEmpty()) {
-                    Text("文件库暂无匹配文件", fontSize = 13.sp, color = colors.fgFaint, modifier = Modifier.padding(8.dp))
+                    Text("资料库暂无可用文件", fontSize = 13.sp, color = colors.fgFaint, modifier = Modifier.padding(8.dp))
                 } else {
                     LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
                         items(items, key = { it.id }) { f ->

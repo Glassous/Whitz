@@ -16,8 +16,10 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSource
+import java.util.concurrent.TimeUnit
 
 data class SseEvent(
+    val id: String? = null,
     val event: String,
     val data: JsonObject,
 )
@@ -25,12 +27,17 @@ data class SseEvent(
 object SseParser {
     fun parseBlock(block: String): SseEvent? {
         var eventType = ""
+        var eventId: String? = null
         val dataLines = mutableListOf<String>()
         for (rawLine in block.split('\n')) {
             val line = rawLine.trimEnd('\r')
             if (line.isBlank() || line.startsWith(':')) continue
             when {
                 line.startsWith("event:") -> eventType = line.substring(6).trim()
+                line.startsWith("id:") -> {
+                    val parsed = line.substring(3).trim()
+                    if (parsed.isNotEmpty()) eventId = parsed
+                }
                 line.startsWith("data:") -> dataLines.add(line.substring(5).trim())
             }
         }
@@ -44,7 +51,7 @@ object SseParser {
         }
         val typeFromData = (dataObj["type"] as? JsonPrimitive)?.contentOrNull
         val name = eventType.ifBlank { typeFromData ?: "message" }
-        return SseEvent(event = name, data = dataObj)
+        return SseEvent(id = eventId, event = name, data = dataObj)
     }
 }
 
@@ -56,21 +63,25 @@ class SseClient(
         path: String,
         bodyJson: String,
         extraHeaders: Map<String, String> = emptyMap(),
+        idleTimeoutMs: Long = 45_000L,
     ): Flow<SseEvent> = streamRequest(
         method = "POST",
         path = path,
         bodyJson = bodyJson,
         extraHeaders = extraHeaders,
+        idleTimeoutMs = idleTimeoutMs,
     )
 
     fun streamGet(
         path: String,
         extraHeaders: Map<String, String> = emptyMap(),
+        idleTimeoutMs: Long = 45_000L,
     ): Flow<SseEvent> = streamRequest(
         method = "GET",
         path = path,
         bodyJson = null,
         extraHeaders = extraHeaders,
+        idleTimeoutMs = idleTimeoutMs,
     )
 
     private fun streamRequest(
@@ -78,6 +89,7 @@ class SseClient(
         path: String,
         bodyJson: String?,
         extraHeaders: Map<String, String>,
+        idleTimeoutMs: Long,
     ): Flow<SseEvent> = flow {
         if (authManager.storage.isAccessTokenExpiringSoon()) {
             authManager.refreshOnce()
@@ -103,14 +115,20 @@ class SseClient(
             return builder.build()
         }
 
-        var call = client.newCall(buildRequest())
+        val callClient = if (idleTimeoutMs > 0L) {
+            client.newBuilder().readTimeout(idleTimeoutMs, TimeUnit.MILLISECONDS).build()
+        } else {
+            client
+        }
+
+        var call = callClient.newCall(buildRequest())
         var response = call.execute()
 
         if (response.code == 401) {
             response.close()
             val refreshed = authManager.refreshOnce()
             if (refreshed == RefreshResult.OK) {
-                call = client.newCall(buildRequest())
+                call = callClient.newCall(buildRequest())
                 response = call.execute()
             } else {
                 authManager.forceLogout(LogoutReason.EXPIRED)
