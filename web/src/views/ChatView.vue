@@ -18,7 +18,6 @@ import ClarifyCard from "../components/chat/ClarifyCard.vue";
 import MemoryPendingCard from "../components/chat/MemoryPendingCard.vue";
 import SkillPendingCard from "../components/chat/SkillPendingCard.vue";
 import SearchModal from "../components/chat/SearchModal.vue";
-import AssistantProfileModal from "../components/chat/AssistantProfileModal.vue";
 import LibraryPanel from "../components/settings/LibraryPanel.vue";
 
 const route = useRoute();
@@ -39,7 +38,6 @@ const routeConversationId = computed(() => (typeof route.params.id === "string" 
 const isNewSideDraft = computed(() => route.query.new === "1");
 
 const activeView = ref<"chat" | "library">("chat");
-const assistantModalOpen = ref(false);
 
 const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
 const assistantAvatarUrl = computed(() => auth.user?.assistant_avatar_url ?? null);
@@ -998,7 +996,6 @@ onBeforeUnmount(() => {
             :deleting-file-id="deletingFileId"
             :downloading-file-id="downloadingFileId"
             :attach-library-action="onAttachLibraryFiles"
-            @edit-assistant="assistantModalOpen = true"
             @upload="(files, dt) => onUploadFiles(files, dt, true)"
             @cancel-upload="filesStore.cancelUpload"
             @dismiss-upload="filesStore.dismissUpload"
@@ -1062,7 +1059,6 @@ onBeforeUnmount(() => {
               :deleting-file-id="deletingFileId"
               :downloading-file-id="downloadingFileId"
               :attach-library-action="onAttachLibraryFiles"
-              @edit-assistant="assistantModalOpen = true"
               @upload="(files, dt) => onUploadFiles(files, dt, true)"
               @cancel-upload="filesStore.cancelUpload"
               @dismiss-upload="filesStore.dismissUpload"
@@ -1082,10 +1078,6 @@ onBeforeUnmount(() => {
       :conversations="conversations.conversations"
       @close="searchOpen = false"
       @select="onSelectFromSearch"
-    />
-    <AssistantProfileModal
-      :open="assistantModalOpen"
-      @close="assistantModalOpen = false"
     />
   </div>
 </template>

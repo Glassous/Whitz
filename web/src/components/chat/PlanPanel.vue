@@ -19,11 +19,14 @@ import type {
   UploadTask,
 } from "../../types";
 import { useFilesStore } from "../../stores/files";
+import { useAuthStore } from "../../stores/auth";
+import { api } from "../../api/client";
 import BaseButton from "../ui/BaseButton.vue";
 import BaseModal from "../ui/BaseModal.vue";
 import Spinner from "../ui/Spinner.vue";
 import FilePreviewPane from "./FilePreviewPane.vue";
 import ReasoningEntry from "./ReasoningEntry.vue";
+import AvatarCropModal from "../settings/AvatarCropModal.vue";
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
@@ -52,7 +55,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:activeTab": [TaskPanelTab];
-  "edit-assistant": [];
   upload: [files: FileList, dataTransfer?: DataTransfer | null];
   "cancel-upload": [localId: string];
   "dismiss-upload": [localId: string];
@@ -75,6 +77,72 @@ watch(
 );
 
 const filesStore = useFilesStore();
+const auth = useAuthStore();
+
+// 头像 / 昵称快捷编辑（第一行头像、第二行昵称）
+const avatarPickerInput = ref<HTMLInputElement | null>(null);
+const avatarCropOpen = ref(false);
+const pendingAvatarFile = ref<File | null>(null);
+const headerError = ref<string | null>(null);
+const renaming = ref(false);
+const renameDraft = ref("");
+const renameSaving = ref(false);
+const renameInput = ref<HTMLInputElement | null>(null);
+
+function pickAssistantAvatar() {
+  headerError.value = null;
+  avatarPickerInput.value?.click();
+}
+
+function onAssistantAvatarChange(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0] ?? null;
+  input.value = "";
+  headerError.value = null;
+  if (!file) return;
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+    headerError.value = "请选择 PNG、JPEG 或 WebP 格式的图片";
+    return;
+  }
+  pendingAvatarFile.value = file;
+  avatarCropOpen.value = true;
+}
+
+function startRename() {
+  headerError.value = null;
+  renameDraft.value = resolvedAssistantName.value;
+  renaming.value = true;
+  void nextTick(() => {
+    renameInput.value?.focus();
+    renameInput.value?.select();
+  });
+}
+
+function cancelRename() {
+  renaming.value = false;
+  renameDraft.value = "";
+}
+
+async function submitRename() {
+  if (!renaming.value || renameSaving.value) return;
+  const next = renameDraft.value.trim() || "Whitz";
+  if (next === resolvedAssistantName.value) {
+    cancelRename();
+    return;
+  }
+  renameSaving.value = true;
+  headerError.value = null;
+  try {
+    await api.patch("/users/me/assistant", { assistant_name: next });
+    await auth.refreshUser();
+    renaming.value = false;
+    renameDraft.value = "";
+  } catch (e: any) {
+    headerError.value = typeof e?.detail?.detail === "string" ? e.detail.detail : (e?.message ?? "昵称修改失败");
+  } finally {
+    renameSaving.value = false;
+  }
+}
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const splitContainerRef = ref<HTMLElement | null>(null);
@@ -410,15 +478,25 @@ async function confirmLibraryAttach() {
     />
 
     <template v-else>
-      <!-- Main Chat Right-Side Header: Assistant Avatar & Nickname (clickable to customize) -->
-      <div v-if="isMainMode" class="shrink-0 px-4 pb-2.5 pt-3.5" :class="hideHeader ? 'pt-2' : 'lg:pr-14'">
-        <button
-          type="button"
-          class="focus-ring group flex w-full items-center gap-3 rounded-2xl bg-canvas/85 p-2.5 text-left transition-colors hover:bg-canvas dark:bg-surface/75 dark:hover:bg-surface"
-          title="点击自定义助手头像与昵称"
-          @click="emit('edit-assistant')"
-        >
-          <span class="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-full bg-surface ring-1 ring-line">
+      <!-- Main Chat Right-Side Header: 头像居中一行、昵称居中一行（分别点击编辑） -->
+      <div v-if="isMainMode" class="shrink-0 px-4 pb-4" :class="hideHeader ? 'pt-3' : 'pt-16'">
+        <input
+          ref="avatarPickerInput"
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          class="sr-only"
+          @change="onAssistantAvatarChange"
+        />
+
+        <div class="flex flex-col items-center">
+          <!-- 第一行：助手头像（点击更换） -->
+          <button
+            type="button"
+            class="focus-ring group relative flex h-[88px] w-[88px] shrink-0 items-center justify-center overflow-hidden rounded-full bg-surface ring-1 ring-line transition-shadow hover:ring-2 hover:ring-accent/60"
+            title="点击更换助手头像"
+            aria-label="更换助手头像"
+            @click="pickAssistantAvatar"
+          >
             <img
               v-if="assistantAvatarUrl && !assistantAvatarFailed"
               :src="assistantAvatarUrl"
@@ -426,18 +504,74 @@ async function confirmLibraryAttach() {
               class="h-full w-full object-cover"
               @error="assistantAvatarFailed = true"
             />
-            <span v-else class="brand-mark-tight h-[15px] w-[23px] text-fg" aria-hidden="true" />
-          </span>
-          <span class="min-w-0 flex-1">
-            <span class="block truncate text-[15px] font-semibold text-fg">{{ resolvedAssistantName }}</span>
-            <span class="mt-0.5 block text-[11.5px] text-fg-faint">专属主助手 · 点击自定义</span>
-          </span>
-          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-faint transition-colors group-hover:bg-hover group-hover:text-fg">
-            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+            <span v-else class="brand-mark-tight h-[28px] w-[44px] text-fg" aria-hidden="true" />
+            <span
+              class="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/45 text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100"
+              aria-hidden="true"
+            >
+              <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M3 9a2.5 2.5 0 012.5-2.5h1.2a2 2 0 001.72-.98l.44-.72A1.2 1.2 0 019.9 4.3h4.2a1.2 1.2 0 011.04.5l.44.72A2 2 0 0017.3 6.5h1.2A2.5 2.5 0 0121 9v7.5A2.5 2.5 0 0118.5 19h-13A2.5 2.5 0 013 16.5V9z"
+                />
+                <circle cx="12" cy="12.6" r="3.3" />
+              </svg>
+            </span>
+          </button>
+
+          <!-- 第二行：助手昵称（点击修改） -->
+          <form v-if="renaming" class="mt-2.5 flex items-center justify-center gap-1" @submit.prevent="submitRename">
+            <span class="h-6 w-6 shrink-0" aria-hidden="true" />
+            <input
+              ref="renameInput"
+              v-model="renameDraft"
+              type="text"
+              maxlength="80"
+              :disabled="renameSaving"
+              aria-label="助手昵称"
+              class="w-[156px] rounded-full border border-line bg-canvas px-3 py-1 text-center text-[15px] font-semibold text-fg outline-none transition-colors focus:border-accent disabled:opacity-60"
+              @blur="submitRename"
+              @keydown.esc.prevent="cancelRename"
+            />
+            <button
+              type="button"
+              class="focus-ring flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+              title="取消修改"
+              aria-label="取消修改昵称"
+              @mousedown.prevent
+              @click="cancelRename"
+            >
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </form>
+          <button
+            v-else
+            type="button"
+            class="focus-ring group relative mt-2.5 flex w-full items-center justify-center rounded-full px-8 py-1 text-[15px] font-semibold text-fg transition-colors hover:bg-hover"
+            title="点击修改助手昵称"
+            aria-label="修改助手昵称"
+            @click="startRename"
+          >
+            <span class="max-w-full truncate text-center">{{ resolvedAssistantName }}</span>
+            <svg
+              class="absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fg-faint opacity-0 transition-opacity group-hover:opacity-100"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.9"
+              aria-hidden="true"
+            >
               <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
             </svg>
-          </span>
-        </button>
+          </button>
+
+          <p v-if="headerError" role="alert" class="mt-1.5 max-w-full text-center text-[11.5px] leading-snug text-danger">
+            {{ headerError }}
+          </p>
+        </div>
       </div>
 
       <!-- Side Chat Desktop Header (hidden on mobile where drawer provides top header) -->
@@ -889,6 +1023,17 @@ async function confirmLibraryAttach() {
         </BaseButton>
       </template>
     </BaseModal>
+
+    <!-- Assistant Avatar Crop Modal -->
+    <AvatarCropModal
+      v-if="isMainMode"
+      :open="avatarCropOpen"
+      :file="pendingAvatarFile"
+      endpoint="/users/me/assistant/avatar"
+      title="裁切助手头像"
+      @close="avatarCropOpen = false; pendingAvatarFile = null"
+      @uploaded="headerError = null"
+    />
 
     <!-- Full Task Panel Drag Overlay -->
     <Transition
