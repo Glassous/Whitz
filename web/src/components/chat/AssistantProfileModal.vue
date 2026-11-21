@@ -72,6 +72,7 @@ function onAvatarUploaded() {
 }
 
 async function resetAvatar() {
+  if (resettingAvatar.value || saving.value) return;
   resettingAvatar.value = true;
   error.value = null;
   feedback.value = null;
@@ -87,6 +88,7 @@ async function resetAvatar() {
 }
 
 async function saveProfile() {
+  if (saving.value || resettingAvatar.value) return;
   saving.value = true;
   error.value = null;
   feedback.value = null;
@@ -102,10 +104,15 @@ async function saveProfile() {
     saving.value = false;
   }
 }
+
+function requestClose() {
+  if (saving.value || resettingAvatar.value) return;
+  emit("close");
+}
 </script>
 
 <template>
-  <BaseModal :open="open" title="自定义助手形象" width="28rem" @close="emit('close')">
+  <BaseModal :open="open" title="自定义助手形象" width="28rem" @close="requestClose">
     <input
       ref="fileInputRef"
       type="file"
@@ -166,8 +173,8 @@ async function saveProfile() {
     </div>
 
     <template #footer>
-      <BaseButton variant="soft" rounded="full" :disabled="saving" @click="emit('close')">取消</BaseButton>
-      <BaseButton rounded="full" :loading="saving" @click="saveProfile">保存</BaseButton>
+      <BaseButton variant="soft" rounded="full" :disabled="saving || resettingAvatar" @click="requestClose">取消</BaseButton>
+      <BaseButton rounded="full" :loading="saving" :disabled="resettingAvatar" @click="saveProfile">保存</BaseButton>
     </template>
   </BaseModal>
 

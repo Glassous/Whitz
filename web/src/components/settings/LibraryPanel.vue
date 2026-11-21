@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api } from "../../api/client";
 import { ACCEPT_ATTR, categoryLabel, formatFileSize } from "../../lib/fileTypes";
 import { useFilesStore } from "../../stores/files";
+import { useRealtimeStore } from "../../stores/realtime";
 import type { LibraryFileItem } from "../../types";
 import MarkdownRenderer from "../chat/MarkdownRenderer.vue";
 import BaseBadge from "../ui/BaseBadge.vue";
@@ -21,6 +22,7 @@ type SourceFilter = "all" | "user" | "assistant";
 const PAGE_SIZE = 24;
 
 const filesStore = useFilesStore();
+const realtime = useRealtimeStore();
 
 const files = ref<LibraryFileItem[]>([]);
 const totalCount = ref<number | null>(null);
@@ -38,7 +40,11 @@ const sourceFilter = ref<SourceFilter>("all");
 const brokenThumbs = ref<Record<string, boolean>>({});
 const downloadingId = ref<string | null>(null);
 const uploading = ref(false);
+const uploadProgressItems = ref<
+  { filename: string; progress: number; status: "signing" | "uploading" | "completing" | "done" | "failed"; error?: string }[]
+>([]);
 const uploadInputRef = ref<HTMLInputElement | null>(null);
+let loadSeq = 0;
 
 // Preview modal state
 const previewFile = ref<LibraryFileItem | null>(null);
@@ -122,6 +128,7 @@ const isPreviewHtml = computed(() => {
 });
 
 async function loadFiles() {
+  const seq = ++loadSeq;
   loading.value = true;
   error.value = null;
   try {
@@ -136,6 +143,8 @@ async function loadFiles() {
       | LibraryFileItem[]
       | { items: LibraryFileItem[]; total?: number; page?: number; page_size?: number }
     >(`/library/files?${params.toString()}`);
+
+    if (seq !== loadSeq) return;
 
     if (Array.isArray(res)) {
       files.value = res;
@@ -155,11 +164,21 @@ async function loadFiles() {
     }
     brokenThumbs.value = {};
   } catch (e: any) {
+    if (seq !== loadSeq) return;
     error.value = extractError(e, "加载个人资料库失败");
   } finally {
-    loading.value = false;
+    if (seq === loadSeq) loading.value = false;
   }
 }
+
+watch(
+  () => realtime.libraryVersion,
+  () => {
+    if (!uploading.value && !deleting.value) {
+      void loadFiles();
+    }
+  },
+);
 
 watch(searchInput, (val) => {
   if (searchTimer) window.clearTimeout(searchTimer);
@@ -211,8 +230,18 @@ async function onUploadInputChange(e: Event) {
   uploading.value = true;
   error.value = null;
   feedback.value = null;
+  uploadProgressItems.value = [];
   try {
-    const { uploaded, errors } = await filesStore.uploadToLibrary(selected);
+    const { uploaded, errors } = await filesStore.uploadToLibrary(selected, null, (item) => {
+      const idx = uploadProgressItems.value.findIndex((p) => p.filename === item.filename);
+      if (idx >= 0) {
+        const next = [...uploadProgressItems.value];
+        next[idx] = item;
+        uploadProgressItems.value = next;
+      } else {
+        uploadProgressItems.value = [...uploadProgressItems.value, item];
+      }
+    });
     if (errors.length) {
       error.value = errors.slice(0, 3).join("；");
     }
@@ -223,6 +252,7 @@ async function onUploadInputChange(e: Event) {
     }
   } finally {
     uploading.value = false;
+    uploadProgressItems.value = [];
     input.value = "";
   }
 }
@@ -327,13 +357,14 @@ function requestDeleteFile(file: LibraryFileItem) {
 
 async function confirmDeleteFile() {
   const target = deleteTarget.value;
-  if (!target) return;
+  if (!target || deleting.value) return;
   deleting.value = true;
   deleteError.value = null;
   feedback.value = null;
   try {
     await api.delete(`/library/files/${encodeURIComponent(target.id)}`);
     files.value = files.value.filter((f) => f.id !== target.id);
+    filesStore.removeLocalFile(target.id);
     if (totalCount.value !== null && totalCount.value > 0) {
       totalCount.value -= 1;
     }
@@ -390,7 +421,7 @@ onBeforeUnmount(() => {
             </svg>
             <span>上传文件</span>
           </BaseButton>
-          <BaseButton variant="soft" size="sm" rounded="full" :disabled="loading" @click="loadFiles">
+          <BaseButton variant="soft" size="sm" rounded="full" :loading="loading" @click="loadFiles">
             刷新
           </BaseButton>
         </div>
@@ -471,6 +502,40 @@ onBeforeUnmount(() => {
     </section>
 
     <FormError :message="error" />
+
+    <!-- Active Multi-File Library Upload Queue -->
+    <div v-if="uploadProgressItems.length" class="space-y-2 rounded-2xl bg-sidebar p-3.5 dark:bg-surface">
+      <div
+        v-for="item in uploadProgressItems"
+        :key="item.filename"
+        class="rounded-xl bg-canvas/85 px-3 py-2 text-[12.5px]"
+      >
+        <div class="flex items-center justify-between gap-2">
+          <span class="min-w-0 flex-1 truncate font-medium text-fg">{{ item.filename }}</span>
+          <span class="shrink-0 inline-flex items-center gap-1 tabular-nums text-[11.5px] text-fg-faint">
+            <Spinner v-if="item.status === 'signing' || item.status === 'completing'" :size="11" />
+            {{
+              item.status === "signing"
+                ? "签名中"
+                : item.status === "uploading"
+                  ? `${item.progress}%`
+                  : item.status === "completing"
+                    ? "校验索引中"
+                    : item.status === "done"
+                      ? "完成"
+                      : "失败"
+            }}
+          </span>
+        </div>
+        <progress
+          v-if="item.status !== 'failed' && item.status !== 'done'"
+          class="upload-progress mt-1.5 h-1 w-full"
+          :value="item.status === 'uploading' ? item.progress : undefined"
+          max="100"
+        />
+      </div>
+    </div>
+
     <div
       v-if="feedback"
       role="status"
@@ -542,6 +607,13 @@ onBeforeUnmount(() => {
               <BaseBadge :tone="file.source === 'assistant' ? 'brand' : 'gray'">
                 {{ file.source === "assistant" ? "AI 生成" : "用户上传" }}
               </BaseBadge>
+              <span
+                v-if="file.index_status === 'indexing'"
+                class="inline-flex items-center gap-1 rounded-full bg-surface px-2 py-0.5 text-[10.5px] font-medium text-fg-muted"
+              >
+                <Spinner :size="10" />
+                索引中
+              </span>
               <span class="text-[11.5px] tabular-nums text-fg-faint">{{ formatFileSize(file.size_bytes) }}</span>
               <span class="text-[11.5px] text-fg-faint">· {{ formatDate(file.created_at) }}</span>
             </div>
@@ -703,7 +775,7 @@ onBeforeUnmount(() => {
     <BaseModal
       :open="!!deleteTarget"
       title="删除文件"
-      @close="deleteTarget = null"
+      @close="!deleting && (deleteTarget = null)"
     >
       <div v-if="deleteTarget" class="space-y-3">
         <p class="text-[14px] leading-relaxed text-fg-muted">

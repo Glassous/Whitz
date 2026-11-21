@@ -280,12 +280,16 @@ async def call_tool(
                             ConversationFile.user_id == user.id,
                             ConversationFile.status == "ready",
                         )
-                        .order_by(ConversationFile.created_at.asc())
+                        .order_by(ConversationFile.created_at.desc())
+                        .limit(15)
                     )
                 )
                 .scalars()
                 .all()
             )
+        import asyncio
+
+        per_file_cap = min(max_download, 4 * 1024 * 1024) if not target_id else max_download
         matches: list[dict[str, Any]] = []
         for row in targets:
             if row.category == "image":
@@ -293,10 +297,12 @@ async def call_tool(
             try:
                 raw = await cos.get_object_bytes(
                     row.storage_key,
-                    max_bytes=max_download,
+                    max_bytes=per_file_cap,
                     settings=settings,
                 )
-                hits = file_parser.search_file_content(raw, ext=row.ext, query=query, max_hits=10)
+                hits = await asyncio.to_thread(
+                    file_parser.search_file_content, raw, ext=row.ext, query=query, max_hits=10
+                )
             except cos.CosError:
                 continue
             if hits:

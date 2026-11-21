@@ -19,14 +19,14 @@ class Settings(BaseSettings):
     auth_cookie_name: str = "whitz_refresh"
 
     redis_url: str = "redis://localhost:6379/0"
-    redis_max_connections: int = 20
-    redis_socket_timeout: float = 1.0
+    redis_max_connections: int = 64
+    redis_socket_timeout: float = 3.0
 
-    max_concurrent_runs: int = 2
-    max_concurrent_runs_per_user: int = 1
-    max_sse_streams: int = 6
-    max_sse_streams_per_user: int = 2
-    run_max_seconds: int = 900
+    max_concurrent_runs: int = 4
+    max_concurrent_runs_per_user: int = 2
+    max_sse_streams: int = 32
+    max_sse_streams_per_user: int = 8
+    run_max_seconds: int = 1200
     chat_rate_per_minute: int = 30
     tokens_per_credit: int = 5000
     membership_default_days: int = 30
@@ -53,7 +53,14 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_model: str = ""
     embedding_dimensions: int = 1536
+    embedding_batch_size: int = 10
+    embedding_cache_ttl_seconds: int = 86400
     embedding_timeout_seconds: float = 30.0
+
+    rerank_base_url: str = ""
+    rerank_api_key: str = ""
+    rerank_model: str = ""
+    rerank_top_n: int = 8
 
     search_api_key: str = ""
 

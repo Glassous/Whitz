@@ -197,20 +197,46 @@ def _prepare_llm_messages(
     return prepared
 
 
+def _extract_text(content: Any) -> str:
+    """Safely extract text from either string or multimodal list-of-blocks AIMessage content."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") in ("text", "output_text", None):
+                t = item.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+        return "".join(parts)
+    return ""
+
+
 def _merge_usage(acc: dict[str, int] | None, msg: AIMessage) -> dict[str, int]:
     merged = dict(acc or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+    step_prompt = 0
+    step_comp = 0
+    step_total = 0
     meta = getattr(msg, "usage_metadata", None) or {}
     if isinstance(meta, dict):
-        merged["prompt_tokens"] += int(meta.get("input_tokens") or meta.get("prompt_tokens") or 0)
-        merged["completion_tokens"] += int(meta.get("output_tokens") or meta.get("completion_tokens") or 0)
-        merged["total_tokens"] += int(meta.get("total_tokens") or 0)
-    resp_meta = getattr(msg, "response_metadata", None) or {}
-    if not merged["total_tokens"] and isinstance(resp_meta, dict):
-        tok = resp_meta.get("token_usage") or resp_meta.get("usage") or {}
-        if isinstance(tok, dict):
-            merged["prompt_tokens"] += int(tok.get("prompt_tokens") or 0)
-            merged["completion_tokens"] += int(tok.get("completion_tokens") or 0)
-            merged["total_tokens"] += int(tok.get("total_tokens") or 0)
+        step_prompt = int(meta.get("input_tokens") or meta.get("prompt_tokens") or 0)
+        step_comp = int(meta.get("output_tokens") or meta.get("completion_tokens") or 0)
+        step_total = int(meta.get("total_tokens") or 0)
+    if step_total == 0 and step_prompt == 0 and step_comp == 0:
+        resp_meta = getattr(msg, "response_metadata", None) or {}
+        if isinstance(resp_meta, dict):
+            tok = resp_meta.get("token_usage") or resp_meta.get("usage") or {}
+            if isinstance(tok, dict):
+                step_prompt = int(tok.get("prompt_tokens") or 0)
+                step_comp = int(tok.get("completion_tokens") or 0)
+                step_total = int(tok.get("total_tokens") or 0)
+    if step_total == 0 and (step_prompt or step_comp):
+        step_total = step_prompt + step_comp
+    merged["prompt_tokens"] += step_prompt
+    merged["completion_tokens"] += step_comp
+    merged["total_tokens"] += step_total
     return merged
 
 
@@ -365,7 +391,8 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
 
         return {
             "messages": [sys_msg],
-            "tool_call_count": int(state.get("tool_call_count") or 0),
+            "tool_call_count": 0,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             "memory_extracted": False,
             "thinking_enabled": thinking_enabled,
             "thinking_escalated": False,
@@ -410,25 +437,34 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             model=first_ep.model if first_ep else None,
         )
 
+        tool_count = int(state.get("tool_call_count") or 0)
+        max_iters = int(state.get("max_tool_iterations") or DEFAULT_MAX_TOOL_ITERATIONS)
+        tools_exhausted = tool_count >= max_iters
+        if tools_exhausted:
+            messages = [
+                *messages,
+                HumanMessage(content="已达到本轮最大工具调用次数，请不再调用工具，直接基于已有信息给出完整最终回答。"),
+            ]
+
         last_exc: Exception | None = None
         for ep in candidates:
             try:
                 llm = router.build_chat_model(ep, streaming=True, thinking_enabled=thinking_enabled)
-                bound = llm.bind_tools(all_tools) if all_tools else llm
+                bound = llm.bind_tools(all_tools) if (all_tools and not tools_exhausted) else llm
                 try:
                     response = await bound.ainvoke(messages, config=config)
                 except Exception as inner_exc:
                     if router.is_unsupported_thinking_param_error(inner_exc):
                         router.mark_thinking_param_unsupported(ep)
                         llm = router.build_chat_model(ep, streaming=True, include_thinking_params=False)
-                        bound = llm.bind_tools(all_tools) if all_tools else llm
+                        bound = llm.bind_tools(all_tools) if (all_tools and not tools_exhausted) else llm
                         response = await bound.ainvoke(messages, config=config)
                     else:
                         raise
 
                 total_usage = _merge_usage(state.get("usage"), response)
                 has_tool_calls = bool(getattr(response, "tool_calls", None))
-                final_text = response.content if isinstance(response.content, str) else ""
+                final_text = _extract_text(response.content)
 
                 # Self-heal if model returned empty text without tool calls after tool observations
                 if not has_tool_calls and not final_text.strip():
@@ -437,7 +473,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                     )
                     response = await llm.ainvoke([*messages, synthesis_nudge], config=config)
                     total_usage = _merge_usage(total_usage, response)
-                    final_text = response.content if isinstance(response.content, str) else ""
+                    final_text = _extract_text(response.content)
 
                 await router.record_success(ep)
                 return {
@@ -548,11 +584,11 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         out_msgs: list[ToolMessage] = []
         updated_plan = state.get("plan")
         escalate_thinking = False
-        for msg, plan_update, req_thinking, had_err in results:
+        for msg, plan_update, req_thinking, _had_err in results:
             out_msgs.append(msg)
             if plan_update is not None:
                 updated_plan = plan_update
-            if req_thinking or had_err:
+            if req_thinking:
                 escalate_thinking = True
 
         updates: dict[str, Any] = {
@@ -576,7 +612,9 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         _emit_node_running("hitl_gate")
         cfg = dict(config.get("configurable") or {})
         pending = _pending_tool_calls(list(state.get("messages") or []))
-        hitl_calls = [tc for tc in pending if tc.get("name") in HITL_TOOL_NAMES]
+        # Process strictly ONE pending HITL call per node invocation so multi-tool interrupts
+        # checkpoint cleanly and never replay an already-executed tool on subsequent resumes.
+        hitl_calls = [tc for tc in pending if tc.get("name") in HITL_TOOL_NAMES][:1]
         out_msgs: list[ToolMessage] = []
         executor = cfg.get("sandbox_executor") or DisabledSandboxExecutor()
         timeout_sec = int(get_settings().sandbox_timeout_seconds)
@@ -651,11 +689,9 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         _emit_node_running("subagent")
         pending = _pending_tool_calls(list(state.get("messages") or []))
         sub_calls = [tc for tc in pending if tc.get("name") in SUBAGENT_TOOL_NAMES]
-        out_msgs: list[ToolMessage] = []
-        outputs: list[dict[str, Any]] = []
         usage = dict(state.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
 
-        for tc in sub_calls:
+        async def _run_sub(tc: dict[str, Any]) -> tuple[ToolMessage, dict[str, Any], dict[str, Any]]:
             call_id = str(tc.get("id") or "delegate_subtask")
             args = dict(tc.get("args") or {})
             role = str(args.get("role") or "researcher").strip().lower()
@@ -663,7 +699,6 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                 role = "researcher"
             task = str(args.get("task") or "").strip()
             context = str(args.get("context") or "").strip()
-
             subgraph = coder_subgraph if role == "coder" else researcher_subgraph
             sub_res = await subgraph.ainvoke(
                 {"role": role, "task": task, "context": context, "messages": []},
@@ -671,17 +706,21 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             )
             result_text = str(sub_res.get("result") or "")
             sub_usage = sub_res.get("usage") or {}
+            msg = ToolMessage(
+                tool_call_id=call_id,
+                name="delegate_subtask",
+                content=json.dumps({"role": role, "result": result_text}, ensure_ascii=False),
+            )
+            return msg, {"role": role, "task": task, "result": result_text}, sub_usage
+
+        results = await asyncio.gather(*[_run_sub(tc) for tc in sub_calls])
+        out_msgs: list[ToolMessage] = []
+        outputs: list[dict[str, Any]] = []
+        for msg, out_obj, sub_usage in results:
+            out_msgs.append(msg)
+            outputs.append(out_obj)
             for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 usage[k] = usage.get(k, 0) + int(sub_usage.get(k) or 0)
-
-            outputs.append({"role": role, "task": task, "result": result_text})
-            out_msgs.append(
-                ToolMessage(
-                    tool_call_id=call_id,
-                    name="delegate_subtask",
-                    content=json.dumps({"role": role, "result": result_text}, ensure_ascii=False),
-                )
-            )
 
         return {
             "messages": out_msgs,
@@ -793,7 +832,11 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         _route_after_tools_or_subagent,
         {"agent": "agent", "hitl_gate": "hitl_gate", "subagent": "subagent"},
     )
-    graph.add_edge("hitl_gate", "agent")
+    graph.add_conditional_edges(
+        "hitl_gate",
+        _route_after_tools_or_subagent,
+        {"agent": "agent", "hitl_gate": "hitl_gate", "subagent": "subagent"},
+    )
     graph.add_edge("memory_extractor", END)
 
     return graph.compile(checkpointer=checkpointer, store=store)

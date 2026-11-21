@@ -132,8 +132,9 @@ def _build_specialist_subgraph(role: str):
         cfg = dict(config.get("configurable") or {})
         router: ModelRouter = cfg.get("model_router") or ModelRouter()
         tools = _select_subagent_tools(role, config)
-        messages = list(state.get("messages") or [])
-        if not messages:
+        orig_messages = list(state.get("messages") or [])
+        seed_added = not orig_messages
+        if seed_added:
             task_text = str(state.get("task") or "").strip()
             ctx_text = str(state.get("context") or "").strip()
             now_str = str(cfg.get("current_time_str") or "").strip()
@@ -142,16 +143,19 @@ def _build_specialist_subgraph(role: str):
             if ctx_text:
                 prompt += f"\n\n上下文：\n{ctx_text}"
             messages = [SystemMessage(content=sys_full), HumanMessage(content=prompt)]
+        else:
+            messages = orig_messages
 
         candidates = await router.select_candidates(
             cfg.get("requested_route", "auto"),
             messages,
             task_hint=task_hint,
         )
+        want_thinking = router.settings.llm_thinking_mode != "disabled"
         last_exc: Exception | None = None
         for ep in candidates:
             try:
-                llm = router.build_chat_model(ep, streaming=False, thinking_enabled=True)
+                llm = router.build_chat_model(ep, streaming=False, thinking_enabled=want_thinking)
                 bound = llm.bind_tools(tools) if tools else llm
                 try:
                     resp = await bound.ainvoke(messages, config=config)
@@ -165,7 +169,7 @@ def _build_specialist_subgraph(role: str):
                         raise
                 await router.record_success(ep)
                 return {
-                    "messages": [resp] if messages is state.get("messages") else [*messages, resp],
+                    "messages": [*messages, resp] if seed_added else [resp],
                     "iterations": int(state.get("iterations") or 0) + 1,
                     "usage": _merge_usage(state.get("usage"), resp),
                 }
@@ -174,7 +178,7 @@ def _build_specialist_subgraph(role: str):
                 await router.record_failure(ep)
         fallback_msg = AIMessage(content=f"子智能体调用模型失败: {last_exc}")
         return {
-            "messages": [fallback_msg] if messages is state.get("messages") else [*messages, fallback_msg],
+            "messages": [*messages, fallback_msg] if seed_added else [fallback_msg],
             "iterations": int(state.get("iterations") or 0) + 1,
         }
 

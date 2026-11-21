@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
@@ -53,6 +54,13 @@ def _normalize_todo_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
+def _is_global_ip(addr: str) -> bool:
+    ip = ipaddress.ip_address(addr)
+    return bool(ip.is_global) and not (
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
+    )
+
+
 def _is_public_url(raw_url: str) -> bool:
     try:
         parsed = urlsplit(raw_url.strip())
@@ -64,20 +72,27 @@ def _is_public_url(raw_url: str) -> bool:
     if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
         return False
     try:
-        ip = ipaddress.ip_address(host)
-        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved)
+        return _is_global_ip(host)
     except ValueError:
         pass
     try:
         infos = socket.getaddrinfo(host, None)
+        if not infos:
+            return False
         for info in infos:
-            addr = info[4][0]
-            ip = ipaddress.ip_address(addr)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            if not _is_global_ip(info[4][0]):
                 return False
     except OSError:
         return False
     return True
+
+
+async def _is_public_url_async(raw_url: str) -> bool:
+    return await asyncio.to_thread(_is_public_url, raw_url)
+
+
+def _escape_like(term: str) -> str:
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _strip_html(html: str) -> str:
@@ -270,7 +285,7 @@ async def web_extract(
 ) -> str:
     """抓取并提取指定公开网页的纯文本正文内容。"""
     cleaned = (url or "").strip()
-    if not _is_public_url(cleaned):
+    if not await _is_public_url_async(cleaned):
         return json.dumps({"error": "仅允许抓取合法的公网 HTTP/HTTPS 页面。", "url": cleaned}, ensure_ascii=False)
 
     settings = get_settings()
@@ -295,14 +310,23 @@ async def web_extract(
             logger.warning("Tavily web_extract failed (%s); falling back to HTTP fetch", exc)
 
     try:
+        max_bytes = 512 * 1024
+        chunks: list[bytes] = []
+        total = 0
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(15.0),
             follow_redirects=False,
             headers={"User-Agent": "WhitzAgent/1.0"},
         ) as client:
-            resp = await client.get(cleaned)
-            resp.raise_for_status()
-            text = _strip_html(resp.text)
+            async with client.stream("GET", cleaned) as resp:
+                resp.raise_for_status()
+                async for piece in resp.aiter_bytes(chunk_size=16384):
+                    chunks.append(piece)
+                    total += len(piece)
+                    if total >= max_bytes:
+                        break
+        raw_html = b"".join(chunks).decode("utf-8", errors="replace")
+        text = _strip_html(raw_html)
         return json.dumps({"url": cleaned, "content": text[:12000]}, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"url": cleaned, "error": f"网页抓取失败: {exc}"}, ensure_ascii=False)
@@ -433,33 +457,71 @@ async def search_chat_history(
     if norm_scope not in ("all", "side", "main"):
         norm_scope = "all"
     lim = max(1, min(int(limit or 8), 20))
-    user_uuid = uuid.UUID(user_id)
-    pattern = f"%{cleaned}%"
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        return json.dumps({"results": [], "error": "无效的 user_id"}, ensure_ascii=False)
+    pattern = f"%{_escape_like(cleaned)}%"
 
     results: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
+    emb_client = cfg.get("embedding_client")
+    q_vec_lit: str | None = None
+    if emb_client is not None and getattr(emb_client, "is_configured", False):
+        try:
+            q_vec = await emb_client.embed_query(cleaned)
+            if q_vec:
+                q_vec_lit = "[" + ",".join(f"{float(v):.8f}" for v in q_vec) + "]"
+        except Exception:
+            q_vec_lit = None
 
     try:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
-                # 1. Search side-chat digests when scope includes side chats
+                # 1. Search side-chat digests (semantic vector + FTS + ILIKE)
                 if norm_scope in ("all", "side"):
-                    await cur.execute(
-                        """
-                        SELECT d.conversation_id, d.title, d.summary, d.key_facts, d.last_message_at
-                        FROM conversation_digests d
-                        WHERE d.user_id = %s
-                          AND (
-                              d.title ILIKE %s
-                              OR d.summary ILIKE %s
-                              OR d.search_tsv @@ plainto_tsquery('simple', %s)
-                          )
-                        ORDER BY d.last_message_at DESC NULLS LAST, d.updated_at DESC
-                        LIMIT %s
-                        """,
-                        (user_uuid, pattern, pattern, cleaned, lim),
-                    )
-                    for row in await cur.fetchall():
+                    digest_rows: list[Any] = []
+                    if q_vec_lit:
+                        try:
+                            await cur.execute(
+                                """
+                                SELECT d.conversation_id, d.title, d.summary, d.key_facts, d.last_message_at
+                                FROM conversation_digests d
+                                WHERE d.user_id = %s
+                                  AND (
+                                      d.title ILIKE %s ESCAPE '\\'
+                                      OR d.summary ILIKE %s ESCAPE '\\'
+                                      OR d.search_tsv @@ plainto_tsquery('simple', %s)
+                                      OR (d.embedding IS NOT NULL AND (d.embedding <=> %s::vector) < 0.72)
+                                  )
+                                ORDER BY
+                                    CASE WHEN d.embedding IS NOT NULL THEN d.embedding <=> %s::vector ELSE 1.0 END ASC,
+                                    d.last_message_at DESC NULLS LAST
+                                LIMIT %s
+                                """,
+                                (user_uuid, pattern, pattern, cleaned, q_vec_lit, q_vec_lit, lim),
+                            )
+                            digest_rows = await cur.fetchall()
+                        except Exception:
+                            digest_rows = []
+                    if not digest_rows:
+                        await cur.execute(
+                            """
+                            SELECT d.conversation_id, d.title, d.summary, d.key_facts, d.last_message_at
+                            FROM conversation_digests d
+                            WHERE d.user_id = %s
+                              AND (
+                                  d.title ILIKE %s ESCAPE '\\'
+                                  OR d.summary ILIKE %s ESCAPE '\\'
+                                  OR d.search_tsv @@ plainto_tsquery('simple', %s)
+                              )
+                            ORDER BY d.last_message_at DESC NULLS LAST, d.updated_at DESC
+                            LIMIT %s
+                            """,
+                            (user_uuid, pattern, pattern, cleaned, lim),
+                        )
+                        digest_rows = await cur.fetchall()
+                    for row in digest_rows:
                         cid = str(row[0])
                         seen_keys.add(f"digest:{cid}")
                         results.append(
@@ -474,7 +536,59 @@ async def search_chat_history(
                             }
                         )
 
-                # 2. Search raw verbatim messages across side chats and/or main chat
+                # 2. Search episodic message_chunks (semantic vector + pg_trgm + FTS)
+                if len(results) < lim:
+                    chunk_kind_clause = "AND mc.conversation_kind = %s" if norm_scope in ("side", "main") else ""
+                    chunk_rows: list[Any] = []
+                    if q_vec_lit:
+                        c_params: list[Any] = [user_uuid, q_vec_lit, pattern, cleaned]
+                        if norm_scope in ("side", "main"):
+                            c_params.append(norm_scope)
+                        c_params.extend([q_vec_lit, lim])
+                        try:
+                            await cur.execute(
+                                f"""
+                                SELECT mc.id, mc.conversation_id, mc.conversation_kind,
+                                       COALESCE(c.title, '') AS title, mc.context_header, mc.content, mc.created_at
+                                FROM message_chunks mc
+                                INNER JOIN conversations c ON c.id = mc.conversation_id
+                                WHERE mc.user_id = %s
+                                  AND (
+                                      (mc.embedding IS NOT NULL AND (mc.embedding <=> %s::vector) < 0.72)
+                                      OR mc.content ILIKE %s ESCAPE '\\'
+                                      OR mc.search_tsv @@ plainto_tsquery('simple', %s)
+                                  )
+                                  {chunk_kind_clause}
+                                ORDER BY
+                                    CASE WHEN mc.embedding IS NOT NULL THEN mc.embedding <=> %s::vector ELSE 1.0 END ASC,
+                                    mc.created_at DESC
+                                LIMIT %s
+                                """,
+                                tuple(c_params),
+                            )
+                            chunk_rows = await cur.fetchall()
+                        except Exception:
+                            chunk_rows = []
+                    for row in chunk_rows:
+                        key = f"chunk:{row[0]}"
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        results.append(
+                            {
+                                "match_type": "episodic_turn",
+                                "conversation_id": str(row[1]),
+                                "kind": str(row[2] or "side"),
+                                "title": str(row[3] or ""),
+                                "context_header": str(row[4] or ""),
+                                "snippet": str(row[5] or "")[:450],
+                                "timestamp": row[6].isoformat() if row[6] is not None else None,
+                            }
+                        )
+                        if len(results) >= lim:
+                            break
+
+                # 3. Search raw verbatim messages across side chats and/or main chat
                 kind_clause = ""
                 params: list[Any] = [user_uuid, pattern]
                 if norm_scope in ("side", "main"):
@@ -488,7 +602,8 @@ async def search_chat_history(
                     INNER JOIN conversations c ON c.id = m.conversation_id
                     WHERE c.user_id = %s
                       AND m.role IN ('user', 'assistant')
-                      AND m.content ILIKE %s
+                      AND m.status NOT IN ('failed', 'cancelled')
+                      AND m.content ILIKE %s ESCAPE '\\'
                       {kind_clause}
                     ORDER BY m.created_at DESC
                     LIMIT %s

@@ -42,13 +42,23 @@ def test_fit_embedding_and_deterministic_fallback():
 
 
 @pytest.mark.asyncio
-async def test_embedding_client_unconfigured_uses_deterministic():
+async def test_embedding_client_unconfigured_returns_none_no_hash_pollution():
     settings = AgentSettings(embedding_base_url="", embedding_model="", llm_base_url="")
     client = EmbeddingClient(settings=settings)
     assert not client.is_configured
     vecs = await client.embed_texts(["hello", "world"])
-    assert len(vecs) == 2
-    assert len(vecs[0]) == 1536
+    assert vecs is None
+    assert await client.embed_query("hello") is None
+
+
+def test_rerank_client_protocol_detection():
+    from app.core.models import RerankClient
+
+    assert RerankClient._is_dashscope_native(
+        "https://llm-421ioelqkhtzi1ak.cn-beijing.maas.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+    )
+    assert not RerankClient._is_dashscope_native("https://api.siliconflow.cn/v1/rerank")
+    assert RerankClient._normalize_url("https://api.siliconflow.cn/v1") == "https://api.siliconflow.cn/v1/rerank"
 
 
 @pytest.mark.asyncio
@@ -99,26 +109,15 @@ async def test_autonomous_thinking_decision_and_param_styles(monkeypatch):
     )
     router = ModelRouter(settings=settings)
 
-    # Explicit overrides & trivial greetings
+    # Explicit overrides & trivial greetings (default route is preserved!)
     assert (await router.resolve_thinking_decision("reasoning", [HumanMessage(content="hi")]))[:2] == (True, "reasoning")
     assert (await router.resolve_thinking_decision("fast", [HumanMessage(content="复杂架构设计")]))[:2] == (False, "fast")
+    assert (await router.resolve_thinking_decision("default", [HumanMessage(content="复杂架构设计")]))[:2] == (False, "default")
     assert (await router.resolve_thinking_decision("auto", [HumanMessage(content="你好")]))[:2] == (False, "fast")
 
-    # AI probe autonomously decides True for complex queries and False for simple queries
-    class FakeProbeModel:
-        def __init__(self, reply: str) -> None:
-            self.reply = reply
-
-        async def ainvoke(self, msgs):
-            from langchain_core.messages import AIMessage
-
-            return AIMessage(content=self.reply)
-
-    monkeypatch.setattr(router, "build_chat_model", lambda *a, **kw: FakeProbeModel('{"thinking": true, "route": "reasoning"}'))
+    # Zero-latency heuristic routes complex analysis to reasoning and simple factual queries directly
     assert (await router.resolve_thinking_decision("auto", [HumanMessage(content="请对比三种分布式锁方案并给出死锁证明")]))[:2] == (True, "reasoning")
-
-    monkeypatch.setattr(router, "build_chat_model", lambda *a, **kw: FakeProbeModel('{"thinking": false, "route": "fast"}'))
-    assert (await router.resolve_thinking_decision("auto", [HumanMessage(content="Python 3.13 是哪天发布的？")]))[:2] == (False, "fast")
+    assert (await router.resolve_thinking_decision("auto", [HumanMessage(content="Python 3.13 是哪天发布的？")]))[:2] == (False, "default")
 
     # Restore build_chat_model and check vendor thinking param styles
     router2 = ModelRouter(settings=settings)

@@ -18,7 +18,7 @@ from app.api.schemas import (
 )
 from app.db.models import Conversation, ConversationFile, FileChunk, Message, User
 from app.db.session import get_db
-from app.services import audit, cross_chat_memory, titles
+from app.services import audit, cross_chat_memory, realtime_bus, titles
 from app.services.agent_client import AgentClient, AgentError
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -56,7 +56,7 @@ async def get_main_conversation(
     )
     conv = result.scalar_one()
     role_order = {"user": 0, "assistant": 1, "tool": 2}
-    conv.messages.sort(key=lambda m: (m.created_at, role_order.get(m.role, 3)))
+    conv.messages.sort(key=lambda m: (m.created_at, role_order.get(m.role, 3), str(m.id)))
     return conv
 
 
@@ -188,6 +188,11 @@ async def create_conversation(
         target_id=conv.id,
         request=request,
     )
+    await realtime_bus.publish_user_event(
+        user.id,
+        "conversation.updated",
+        {"action": "created", "conversation_id": str(conv.id), "title": conv.title, "kind": conv.kind},
+    )
     return conv
 
 
@@ -202,7 +207,7 @@ async def get_conversation(
     )
     conv = result.scalar_one()
     role_order = {"user": 0, "assistant": 1, "tool": 2}
-    conv.messages.sort(key=lambda m: (m.created_at, role_order.get(m.role, 3)))
+    conv.messages.sort(key=lambda m: (m.created_at, role_order.get(m.role, 3), str(m.id)))
     return conv
 
 
@@ -236,6 +241,17 @@ async def rename_conversation(
     if title_changed or pin_changed:
         await db.commit()
         await db.refresh(conv)
+        await realtime_bus.publish_user_event(
+            user.id,
+            "conversation.updated",
+            {
+                "action": "updated",
+                "conversation_id": str(conv.id),
+                "title": conv.title,
+                "is_pinned": conv.is_pinned,
+                "pinned_at": conv.pinned_at.isoformat() if conv.pinned_at else None,
+            },
+        )
 
     if title_changed:
         await audit.record(
@@ -310,6 +326,11 @@ async def delete_conversation(
 
     await db.delete(conv)
     await db.commit()
+    await realtime_bus.publish_user_event(
+        user.id,
+        "conversation.updated",
+        {"action": "deleted", "conversation_id": str(conv_id)},
+    )
     await audit.record(
         "conversation.delete",
         actor=user,

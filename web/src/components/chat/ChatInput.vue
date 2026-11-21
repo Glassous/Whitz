@@ -8,6 +8,8 @@ const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
 const props = defineProps<{
   streaming: boolean;
+  sending?: boolean;
+  stopping?: boolean;
   disabled?: boolean;
   uploading?: boolean;
   uploads?: UploadTask[];
@@ -21,6 +23,7 @@ const emit = defineEmits<{
   stop: [];
   upload: [files: FileList, dataTransfer?: DataTransfer | null];
   "cancel-upload": [localId: string];
+  "retry-upload": [localId: string];
   "dismiss-upload": [localId: string];
   "detach-file": [fileId: string];
   "update:selectedSkills": [skills: string[]];
@@ -29,6 +32,7 @@ const emit = defineEmits<{
 const NORMAL_MAX_HEIGHT = 160;
 
 const text = ref("");
+const queuedSend = ref(false);
 const area = ref<HTMLTextAreaElement | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const canExpand = ref(false);
@@ -47,7 +51,25 @@ const hasChips = computed(
     (props.selectedSkills?.length ?? 0) > 0,
 );
 const sendLockedByUpload = computed(() => !!props.uploading && !props.streaming);
-const canSubmit = computed(() => !!text.value.trim() && !props.streaming && !props.disabled && !props.uploading);
+const canSubmit = computed(() => !!text.value.trim() && !props.streaming && !props.sending && !props.disabled);
+
+// Auto-fire queued send the moment active file uploads finish!
+watch(
+  () => props.uploading,
+  (isUp) => {
+    if (!isUp && queuedSend.value) {
+      queuedSend.value = false;
+      const value = text.value.trim();
+      if (value && !props.streaming && !props.sending && !props.disabled) {
+        emit("send", value);
+        text.value = "";
+        expanded.value = false;
+        canExpand.value = false;
+        void nextTick(updateExpandState);
+      }
+    }
+  },
+);
 
 function fileThumbUrl(f: ConversationFile): string | null {
   if (failedThumbIds.value.has(f.id)) return null;
@@ -92,7 +114,12 @@ function toggleExpand() {
 
 function submit() {
   const value = text.value.trim();
-  if (!value || props.streaming || props.disabled || props.uploading) return;
+  if (!value || props.streaming || props.sending || props.disabled) return;
+  if (props.uploading) {
+    // Optimistic Queue-to-Send: respond immediately and auto-dispatch once uploads finish
+    queuedSend.value = true;
+    return;
+  }
   const pop = document.getElementById("chat-skill-picker") as (HTMLElement & { hidePopover?: () => void }) | null;
   pop?.hidePopover?.();
   emit("send", value);
@@ -246,7 +273,28 @@ onBeforeUnmount(() => {
               {{ categoryLabel(u.category, u.ext) }}
             </span>
             <span class="min-w-0 flex-1 truncate font-medium" :title="u.filename">{{ u.filename }}</span>
-            <span class="shrink-0 tabular-nums text-[11px] opacity-80">{{ uploadLabel(u) }}</span>
+            <span class="inline-flex shrink-0 items-center gap-1 tabular-nums text-[11px] opacity-80">
+              <svg
+                v-if="u.status === 'signing' || u.status === 'completing'"
+                class="h-3 w-3 animate-spin"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.4"
+              >
+                <circle cx="12" cy="12" r="9" class="opacity-25" />
+                <path stroke-linecap="round" d="M12 3a9 9 0 019 9" />
+              </svg>
+              {{ uploadLabel(u) }}
+            </span>
+            <button
+              v-if="u.status === 'error'"
+              type="button"
+              class="focus-ring shrink-0 rounded px-1 py-0.5 text-[11px] font-medium text-danger underline hover:bg-danger/10"
+              @click="emit('retry-upload', u.localId)"
+            >
+              重试
+            </button>
             <button
               type="button"
               class="focus-ring flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-fg-faint transition-colors hover:bg-hover hover:text-fg"
@@ -385,8 +433,13 @@ onBeforeUnmount(() => {
             </span>
           </button>
 
-          <span v-if="sendLockedByUpload" class="hidden text-[12px] text-fg-faint sm:inline">
-            上传中，完成后可发送…
+          <span v-if="queuedSend && sendLockedByUpload" class="inline-flex items-center gap-1.5 text-[12px] text-accent">
+            <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" aria-hidden="true" />
+            <span>等待上传完成自动发送…</span>
+            <button type="button" class="underline hover:text-fg" @click="queuedSend = false">取消</button>
+          </span>
+          <span v-else-if="sendLockedByUpload" class="hidden text-[12px] text-fg-faint sm:inline">
+            上传中，可点发送排队…
           </span>
         </div>
 
@@ -446,12 +499,25 @@ onBeforeUnmount(() => {
           <button
             v-if="streaming"
             type="button"
-            class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-canvas text-fg transition-colors hover:bg-hover"
-            aria-label="停止生成"
-            title="停止生成"
+            class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-canvas text-fg transition-colors hover:bg-hover disabled:cursor-wait disabled:opacity-75"
+            :disabled="stopping"
+            :aria-busy="stopping ? 'true' : undefined"
+            :aria-label="stopping ? '正在停止生成' : '停止生成'"
+            :title="stopping ? '正在停止…' : '停止生成'"
             @click="emit('stop')"
           >
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
+            <svg
+              v-if="stopping"
+              class="h-4 w-4 animate-spin text-fg-muted"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+            >
+              <circle cx="12" cy="12" r="9" class="opacity-25" />
+              <path stroke-linecap="round" d="M12 3a9 9 0 019 9" />
+            </svg>
+            <svg v-else class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
               <rect x="6" y="6" width="12" height="12" rx="2.5" />
             </svg>
           </button>
@@ -460,12 +526,13 @@ onBeforeUnmount(() => {
             type="button"
             class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary text-primary-fg transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:bg-hover disabled:text-fg-faint"
             :disabled="!canSubmit"
-            :aria-label="sendLockedByUpload ? '文件上传中，暂不可发送' : '发送'"
-            :title="sendLockedByUpload ? '文件上传中，请等待全部上传完成后发送' : '发送'"
+            :aria-busy="sending || (queuedSend && sendLockedByUpload) ? 'true' : undefined"
+            :aria-label="sending ? '正在发送' : queuedSend && sendLockedByUpload ? '等待上传完成后自动发送' : sendLockedByUpload ? '上传中，点击排队发送' : '发送'"
+            :title="sending ? '发送中…' : queuedSend && sendLockedByUpload ? '已排队，上传完成后自动发送' : sendLockedByUpload ? '文件上传中，点击可排队自动发送' : '发送'"
             @click="submit"
           >
             <svg
-              v-if="sendLockedByUpload"
+              v-if="sending || (queuedSend && sendLockedByUpload) || sendLockedByUpload"
               class="h-4 w-4 animate-spin"
               viewBox="0 0 24 24"
               fill="none"

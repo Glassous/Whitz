@@ -8,6 +8,13 @@ const props = defineProps<{
   busy?: boolean;
   error?: string | null;
 }>();
+const pendingAction = ref<"approve" | "reject" | null>(null);
+watch(
+  () => props.busy,
+  (isBusy) => {
+    if (!isBusy) pendingAction.value = null;
+  },
+);
 
 const emit = defineEmits<{
   resolve: [id: string, action: "approve" | "reject", content?: string];
@@ -102,13 +109,19 @@ function approve() {
         <div class="mt-3 flex flex-wrap items-center gap-2">
           <BaseButton
             size="sm"
-            :loading="busy"
-            :disabled="editing && !draftContent.trim()"
-            @click="approve"
+            :loading="busy && pendingAction !== 'reject'"
+            :disabled="busy || (editing && !draftContent.trim())"
+            @click="pendingAction = 'approve'; approve()"
           >
             {{ isDelete ? "确认删除" : "允许保存" }}
           </BaseButton>
-          <BaseButton size="sm" variant="secondary" :disabled="busy" @click="emit('resolve', item.id, 'reject')">
+          <BaseButton
+            size="sm"
+            variant="secondary"
+            :loading="busy && pendingAction === 'reject'"
+            :disabled="busy"
+            @click="pendingAction = 'reject'; emit('resolve', item.id, 'reject')"
+          >
             拒绝
           </BaseButton>
           <button

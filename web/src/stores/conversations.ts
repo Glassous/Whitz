@@ -79,18 +79,57 @@ export const useConversationsStore = defineStore("conversations", () => {
   }
 
   async function togglePin(id: string, isPinned: boolean): Promise<Conversation> {
-    const updated = await api.patch<Conversation>(`/conversations/${id}`, { is_pinned: isPinned });
     const idx = conversations.value.findIndex((c) => c.id === id);
+    const prevSnapshot = idx >= 0 ? { ...conversations.value[idx] } : null;
+    const prevCurrentPin =
+      current.value?.id === id
+        ? { is_pinned: current.value.is_pinned, pinned_at: current.value.pinned_at }
+        : null;
+
+    // Optimistic immediate UI update
     if (idx >= 0) {
       const next = [...conversations.value];
-      next[idx] = { ...next[idx], ...updated };
+      next[idx] = {
+        ...next[idx],
+        is_pinned: isPinned,
+        pinned_at: isPinned ? new Date().toISOString() : null,
+      };
       conversations.value = sortConversations(next);
     }
     if (current.value?.id === id) {
-      current.value.is_pinned = updated.is_pinned;
-      current.value.pinned_at = updated.pinned_at;
+      current.value.is_pinned = isPinned;
+      current.value.pinned_at = isPinned ? new Date().toISOString() : null;
     }
-    return updated;
+
+    try {
+      const updated = await api.patch<Conversation>(`/conversations/${id}`, { is_pinned: isPinned });
+      const latestIdx = conversations.value.findIndex((c) => c.id === id);
+      if (latestIdx >= 0) {
+        const next = [...conversations.value];
+        next[latestIdx] = { ...next[latestIdx], ...updated };
+        conversations.value = sortConversations(next);
+      }
+      if (current.value?.id === id) {
+        current.value.is_pinned = updated.is_pinned;
+        current.value.pinned_at = updated.pinned_at;
+      }
+      return updated;
+    } catch (e) {
+      // Roll back optimistic state on error
+      if (prevSnapshot) {
+        const curIdx = conversations.value.findIndex((c) => c.id === id);
+        if (curIdx >= 0) {
+          const next = [...conversations.value];
+          next[curIdx] = prevSnapshot;
+          conversations.value = sortConversations(next);
+        }
+      }
+      if (prevCurrentPin && current.value?.id === id) {
+        current.value.is_pinned = prevCurrentPin.is_pinned;
+        current.value.pinned_at = prevCurrentPin.pinned_at;
+      }
+      throw e;
+    }
   }
 
   function applyTitle(id: string, title: string) {

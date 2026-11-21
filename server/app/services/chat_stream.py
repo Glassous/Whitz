@@ -18,9 +18,11 @@ from app.db.session import SessionLocal
 from app.services import (
     cos,
     cross_chat_memory,
+    limits,
     membership,
     memory_service,
     profile_context,
+    run_supervisor,
     skills_service,
     telemetry,
     titles,
@@ -40,8 +42,11 @@ TERMINAL_STATUSES = {
 ROLE_ORDER = {"user": 0, "assistant": 1, "tool": 2}
 
 
-def sse(name: str, payload: dict) -> dict:
-    return {"event": name, "data": json.dumps(payload, ensure_ascii=False)}
+def sse(name: str, payload: dict, *, event_id: str | None = None) -> dict:
+    frame: dict[str, Any] = {"event": name, "data": json.dumps(payload, ensure_ascii=False)}
+    if event_id:
+        frame["id"] = str(event_id)
+    return frame
 
 
 def sort_messages(messages: list[Message]) -> list[Message]:
@@ -62,27 +67,34 @@ def _history_from_messages(messages: list[Message]) -> list[dict[str, str]]:
     return history
 
 
-async def _settle_usage(db: AsyncSession, user_id: uuid.UUID, assistant: Message) -> None:
-    """Record dashboard usage and deduct credits once per assistant message."""
-    tokens = usage.tokens_from_usage((assistant.tool_payload or {}).get("usage"))
-    if tokens > 0:
-        await usage.record_tokens(db, user_id, tokens)
-        await membership.settle(
-            db,
-            user_id,
-            tokens,
-            message_id=assistant.id,
-            conversation_id=assistant.conversation_id,
+async def _recent_conversation_history(
+    db: AsyncSession,
+    conv_id: uuid.UUID,
+    *,
+    limit: int = 24,
+) -> list[dict[str, str]]:
+    rows = list(
+        (
+            await db.execute(
+                select(Message)
+                .where(
+                    Message.conversation_id == conv_id,
+                    Message.role.in_(("user", "assistant")),
+                )
+                .order_by(Message.created_at.desc(), Message.id.desc())
+                .limit(limit)
+            )
         )
-    elif assistant.status == "completed":
-        logger.warning("run completed without token usage message=%s", assistant.id)
-    await telemetry.record_run_telemetry(
-        db,
-        user_id=user_id,
-        conversation_id=assistant.conversation_id,
-        assistant=assistant,
-        run_id=assistant.run_id,
+        .scalars()
+        .all()
     )
+    rows.reverse()
+    return _history_from_messages(sort_messages(rows))
+
+
+async def _settle_usage(db: AsyncSession, user_id: uuid.UUID, assistant: Message) -> None:
+    """Record dashboard usage and deduct credits strictly once per assistant message."""
+    await run_supervisor.settle_usage_once(db, user_id, assistant)
 
 
 def _normalize_item(item: dict) -> dict:
@@ -212,14 +224,10 @@ class ChatPipeline:
         if started_at is not None:
             self.started_at = started_at
         elif assistant.created_at is not None:
-            self.started_at = assistant.created_at.timestamp() - 5
+            self.started_at = assistant.created_at.timestamp()
         else:
-            self.started_at = 0.0
-        self.run_started_dt = (
-            datetime.fromtimestamp(self.started_at, tz=timezone.utc)
-            if self.started_at
-            else datetime.now(timezone.utc) - timedelta(seconds=5)
-        )
+            self.started_at = time.time()
+        self.run_started_dt = datetime.fromtimestamp(max(0.0, self.started_at - 2.0), tz=timezone.utc)
 
     @staticmethod
     def _tool_key(tool: str, args) -> str:
@@ -397,9 +405,10 @@ class ChatPipeline:
     @staticmethod
     def _unwrap_tool_result(text: str) -> str:
         text = text.strip()
-        text = text.removeprefix("<untrusted_tool_result")
-        if text.startswith(">"):
-            text = text.split(">", 1)[1]
+        if text.startswith("<untrusted_tool_result"):
+            end_tag = text.find(">")
+            if end_tag >= 0:
+                text = text[end_tag + 1 :]
         suffix = "</untrusted_tool_result>"
         if text.rstrip().endswith(suffix):
             text = text.rstrip()[: -len(suffix)]
@@ -421,6 +430,7 @@ class ChatPipeline:
     async def _clear_active(self) -> None:
         self.conv.active_run_id = None
         self.conv.active_run_status = None
+        self.conv.pending_control = None
         self.conv.last_message_at = datetime.now(timezone.utc)
 
     async def _control_ids(self, payload: dict) -> tuple[str | None, int | None]:
@@ -565,14 +575,15 @@ class ChatPipeline:
 
             block = self._reasoning_block()
             tools_list = block.setdefault("tools", [])
-            tools_list.append(
-                {
-                    "name": tool,
-                    "call_id": call_id,
-                    "args": self._clip(args),
-                    "status": "running",
-                }
-            )
+            if not (call_id and any(t.get("call_id") == call_id for t in tools_list)):
+                tools_list.append(
+                    {
+                        "name": tool,
+                        "call_id": call_id,
+                        "args": self._clip(args),
+                        "status": "running",
+                    }
+                )
 
             out_ev: dict[str, Any] = {
                 "tool": tool,
@@ -609,7 +620,7 @@ class ChatPipeline:
                     q.remove(row)
             else:
                 rows = self.pending_tools.get(tool) or []
-                row = rows.pop() if rows else None
+                row = rows.pop(0) if rows else None
 
             args_val = payload.get("args")
             if row is not None:
@@ -675,13 +686,9 @@ class ChatPipeline:
 
         elif name in ("approval.request", "clarify.request"):
             request_id, generation = await self._control_ids(payload)
-            self.assistant.status = "waiting"
-            self.conv.active_run_status = (
-                "waiting_for_approval" if name == "approval.request" else "waiting_for_clarify"
-            )
-            await self.db.commit()
             detail = payload.get("detail") if isinstance(payload.get("detail"), dict) else payload
             out_payload: dict[str, Any] = {
+                "kind": "approval" if name == "approval.request" else "clarify",
                 "request_id": request_id,
                 "execution_generation": generation,
                 "tool": payload.get("tool"),
@@ -696,7 +703,22 @@ class ChatPipeline:
                 desc = detail.get("reason") or detail.get("description")
                 if desc is not None:
                     out_payload["description"] = desc
+            self.assistant.status = "waiting"
+            self.conv.active_run_status = (
+                "waiting_for_approval" if name == "approval.request" else "waiting_for_clarify"
+            )
+            self.conv.pending_control = out_payload
+            await self.db.commit()
             yield sse(name, out_payload)
+
+        elif name in ("control.resolved", "run.resumed"):
+            self.conv.pending_control = None
+            if self.conv.active_run_id == self.run_id:
+                self.conv.active_run_status = "running"
+            if self.assistant.status == "waiting":
+                self.assistant.status = "streaming"
+            await self.db.commit()
+            yield sse(name, payload)
 
         elif name == "run.completed":
             self.terminal = True
@@ -800,26 +822,63 @@ class ChatPipeline:
         await self._clear_active()
         await self.db.commit()
 
+    async def _iter_agent_events(
+        self,
+        *,
+        last_event_id: str | None = None,
+    ) -> AsyncIterator[tuple[str, dict, str | None]]:
+        if hasattr(self.client, "stream_events_with_id"):
+            async for ev_name, payload, ev_id in self.client.stream_events_with_id(
+                self.run_id, last_event_id=last_event_id
+            ):
+                yield ev_name, payload, ev_id
+        else:
+            async for ev_name, payload in self.client.stream_events(self.run_id, last_event_id=last_event_id):
+                yield ev_name, payload, None
+
     async def pump(self, *, last_event_id: str | None = None) -> AsyncIterator[dict]:
         settings = get_settings()
         max_seconds = self.max_seconds or settings.run_max_seconds
         deadline = time.monotonic() + max_seconds
         timed_out = False
-        try:
-            async with asyncio.timeout(max(1.0, deadline - time.monotonic())):
-                async for name, payload in self.client.stream_events(self.run_id, last_event_id=last_event_id):
-                    async for ev in self.handle(name, payload):
-                        yield ev
-                    if self.terminal:
-                        break
-        except TimeoutError:
-            timed_out = True
-        except AgentError as exc:
-            if exc.status_code != 404:
-                # If the agent control plane is still reachable via status polling, reconcile instead of failing immediately.
+        cursor = last_event_id
+
+        # Retry transient SSE drops with Last-Event-ID up to 3 times before falling back to polling
+        for attempt in range(3):
+            if self.terminal or time.monotonic() >= deadline:
+                break
+            try:
+                async with asyncio.timeout(max(1.0, deadline - time.monotonic())):
+                    async for name, payload, ev_id in self._iter_agent_events(last_event_id=cursor):
+                        if ev_id:
+                            cursor = ev_id
+                        async for ev in self.handle(name, payload):
+                            if ev_id and "id" not in ev:
+                                ev["id"] = ev_id
+                            yield ev
+                        if self.terminal:
+                            break
+                break
+            except TimeoutError:
+                timed_out = True
+                break
+            except AgentError as exc:
+                if exc.status_code == 404:
+                    break
                 probe = await self._run_state()
                 if probe is None:
+                    if attempt < 2 and time.monotonic() < deadline:
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
                     raise
+                run_status, _ = probe
+                if run_status in TERMINAL_STATUSES:
+                    break
+                if attempt < 2 and time.monotonic() < deadline:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                break
+
         if self.terminal:
             return
         if timed_out:
@@ -1205,23 +1264,26 @@ async def _prepare_turn_context(
     }
 
 
-async def _run_pipeline_turn(
+async def _launch_supervised_turn(
     db: AsyncSession,
     client: AgentClient,
     conv: Conversation,
     user: User,
     assistant: Message,
+    user_msg_id: uuid.UUID | None,
     prompt_content: str,
     turn_ctx: dict[str, Any],
     *,
     conversation_history: list[dict[str, str]] | None = None,
     model_route: str = "auto",
     max_seconds: int | None = None,
-) -> AsyncIterator[dict]:
+    run_slot: str | None = None,
+    idempotency_key: str | None = None,
+) -> tuple[run_supervisor.SupervisedRun, asyncio.Queue[dict[str, Any] | None], str]:
     initial_mem_ids = {item["id"] for item in await memory_service.list_pending(db, user.id)}
     initial_skill_ids = {item["id"] for item in await skills_service.list_pending(db, user.id)}
 
-    run_started = time.time() - 2
+    run_started = time.time()
     run = await client.create_run(
         thread_id=conv.thread_id,
         user_id=str(user.id),
@@ -1244,38 +1306,32 @@ async def _run_pipeline_turn(
         timezone=turn_ctx.get("timezone") or getattr(user, "timezone", None) or "Asia/Shanghai",
         memory_enabled=bool(turn_ctx.get("memory_enabled")),
         memory_require_confirm=bool(turn_ctx.get("memory_require_confirm", True)),
-        idempotency_key=uuid.uuid4().hex,
+        idempotency_key=idempotency_key or uuid.uuid4().hex,
     )
     run_id = str(run.get("run_id") or run.get("id"))
     conv.active_run_id = run_id
     conv.active_run_status = "running"
+    conv.pending_control = None
     assistant.run_id = run_id
     await db.commit()
-    yield sse("run.started", {"run_id": run_id})
 
-    pipeline = ChatPipeline(
-        db,
-        client,
-        conv,
-        assistant,
-        run_id,
+    # Launch detached Single-Writer RunSupervisor (survives HTTP SSE disconnects completely!)
+    sup, q = run_supervisor.start_supervised_run(
+        run_id=run_id,
+        conv_id=conv.id,
+        user_id=user.id,
+        assistant_id=assistant.id,
+        user_msg_id=user_msg_id,
+        user_content=prompt_content,
+        client=client,
+        session_factory=SessionLocal,
         started_at=run_started,
         max_seconds=max_seconds,
+        run_slot=run_slot,
+        initial_mem_ids=initial_mem_ids,
+        initial_skill_ids=initial_skill_ids,
     )
-    await pipeline.prepare()
-    async for ev in pipeline.pump():
-        yield ev
-    if pipeline.terminal:
-        await _settle_usage(db, user.id, assistant)
-        if assistant.status == "completed":
-            if conv.kind == "side":
-                cross_chat_memory.schedule_side_chat_digest_refresh(conv.id, user.id)
-            elif conv.kind == "main":
-                cross_chat_memory.schedule_main_compaction_check(conv.id)
-        for ev in await _pending_events_since(db, user.id, initial_mem_ids, initial_skill_ids):
-            yield ev
-        async for ev in _auto_title_events(db, conv, assistant):
-            yield ev
+    return sup, q, run_id
 
 
 async def stream_chat(
@@ -1288,21 +1344,31 @@ async def stream_chat(
     skill_names: list[str] | None = None,
     model_route: str = "auto",
     max_seconds: int | None = None,
+    run_slot: str | None = None,
+    idempotency_key: str | None = None,
 ) -> AsyncIterator[dict]:
+    sup: run_supervisor.SupervisedRun | None = None
+    q: asyncio.Queue[dict[str, Any] | None] | None = None
+    run_slot_handed_off = False
+
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
         user = await db.get(User, user_id)
         if conv is None or user is None:
+            if run_slot:
+                await limits.release_run(user_id, run_slot)
             yield sse("error", {"code": "not_found"})
             return
         now = datetime.now(timezone.utc)
         claimed = await db.execute(
             update(Conversation)
             .where(Conversation.id == conv_id, Conversation.active_run_id.is_(None))
-            .values(active_run_id="pending", active_run_status="starting", last_message_at=now)
+            .values(active_run_id="pending", active_run_status="starting", pending_control=None, last_message_at=now)
         )
         await db.commit()
         if not claimed.rowcount:
+            if run_slot:
+                await limits.release_run(user_id, run_slot)
             yield sse("error", {"code": "run_in_progress", "detail": "当前会话有进行中的任务"})
             return
         await db.refresh(conv)
@@ -1313,6 +1379,8 @@ async def stream_chat(
                 conv.thread_id = str(uuid.uuid4())
                 await db.commit()
 
+            # Load recent verbatim history from PG before inserting this turn (clean per-run agent checkpoints)
+            history = await _recent_conversation_history(db, conv.id, limit=24)
             turn_ctx = await _prepare_turn_context(db, user, conv, file_ids, skill_names, query_text=content)
 
             user_msg = Message(
@@ -1340,35 +1408,54 @@ async def stream_chat(
                 {"user_message_id": str(user_msg.id), "assistant_message_id": str(assistant.id)},
             )
 
-            async for ev in _run_pipeline_turn(
+            sup, q, run_id = await _launch_supervised_turn(
                 db,
                 client,
                 conv,
                 user,
                 assistant,
+                user_msg.id,
                 content,
                 turn_ctx,
+                conversation_history=history or None,
                 model_route=model_route,
                 max_seconds=max_seconds,
-            ):
-                yield ev
+                run_slot=run_slot,
+                idempotency_key=idempotency_key,
+            )
+            run_slot_handed_off = True
+            yield sse("run.started", {"run_id": run_id})
         except AgentError as exc:
             if assistant is not None:
                 assistant.status = "failed"
             conv.active_run_id = None
             conv.active_run_status = None
+            conv.pending_control = None
             await db.commit()
+            if run_slot and not run_slot_handed_off:
+                await limits.release_run(user_id, run_slot)
+            await client.aclose()
             yield sse("error", {"code": "agent_error", "status": exc.status_code, "detail": exc.detail})
+            return
         except Exception as exc:
             logger.exception("chat stream failed")
             if assistant is not None:
                 assistant.status = "failed"
             conv.active_run_id = None
             conv.active_run_status = None
+            conv.pending_control = None
             await db.commit()
-            yield sse("error", {"code": "internal_error", "detail": str(exc)})
-        finally:
+            if run_slot and not run_slot_handed_off:
+                await limits.release_run(user_id, run_slot)
             await client.aclose()
+            yield sse("error", {"code": "internal_error", "detail": str(exc)})
+            return
+
+    # DB session is now CLOSED; stream strictly as a read-only subscriber so client disconnect
+    # never holds a DB connection or interrupts RunSupervisor!
+    if sup is not None and q is not None:
+        async for ev in run_supervisor.iter_subscriber_queue(sup, q):
+            yield ev
 
 
 async def stream_regenerate(
@@ -1379,21 +1466,32 @@ async def stream_regenerate(
     target_message_id: uuid.UUID,
     model_route: str = "auto",
     max_seconds: int | None = None,
+    run_slot: str | None = None,
+    idempotency_key: str | None = None,
 ) -> AsyncIterator[dict]:
+    sup: run_supervisor.SupervisedRun | None = None
+    q: asyncio.Queue[dict[str, Any] | None] | None = None
+    run_slot_handed_off = False
+    old_thread_id: str | None = None
+
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
         user = await db.get(User, user_id)
         if conv is None or user is None:
+            if run_slot:
+                await limits.release_run(user_id, run_slot)
             yield sse("error", {"code": "not_found"})
             return
         now = datetime.now(timezone.utc)
         claimed = await db.execute(
             update(Conversation)
             .where(Conversation.id == conv_id, Conversation.active_run_id.is_(None))
-            .values(active_run_id="pending", active_run_status="starting", last_message_at=now)
+            .values(active_run_id="pending", active_run_status="starting", pending_control=None, last_message_at=now)
         )
         await db.commit()
         if not claimed.rowcount:
+            if run_slot:
+                await limits.release_run(user_id, run_slot)
             yield sse("error", {"code": "run_in_progress", "detail": "当前会话有进行中的任务"})
             return
         await db.refresh(conv)
@@ -1409,6 +1507,9 @@ async def stream_regenerate(
                 conv.active_run_id = None
                 conv.active_run_status = None
                 await db.commit()
+                if run_slot:
+                    await limits.release_run(user_id, run_slot)
+                await client.aclose()
                 yield sse("error", {"code": "invalid_target", "detail": "未找到可重新生成的助手消息"})
                 return
 
@@ -1420,6 +1521,9 @@ async def stream_regenerate(
                 conv.active_run_id = None
                 conv.active_run_status = None
                 await db.commit()
+                if run_slot:
+                    await limits.release_run(user_id, run_slot)
+                await client.aclose()
                 yield sse("error", {"code": "invalid_target", "detail": "未找到对应的用户消息"})
                 return
 
@@ -1434,6 +1538,9 @@ async def stream_regenerate(
                         delete_ids.add(m.id)
             if delete_ids:
                 await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
+                if conv.summary_cursor_msg_id and conv.summary_cursor_msg_id in delete_ids:
+                    conv.rolling_summary = None
+                    conv.summary_cursor_msg_id = None
 
             prompt_payload = user_msg.tool_payload or {}
             file_ids: list[uuid.UUID] = []
@@ -1449,14 +1556,8 @@ async def stream_regenerate(
                 db, user, conv, file_ids, skill_names, query_text=user_msg.content
             )
 
-            # Rotate thread_id so discarded turns never pollute LangGraph checkpoint state.
             old_thread_id = conv.thread_id
             conv.thread_id = str(uuid.uuid4())
-            if old_thread_id:
-                try:
-                    await client.delete_thread(old_thread_id)
-                except AgentError:
-                    pass
 
             assistant_ts = max(datetime.now(timezone.utc), user_msg.created_at + timedelta(milliseconds=1))
             assistant = Message(
@@ -1470,6 +1571,14 @@ async def stream_regenerate(
             conv.plan = None
             conv.last_message_at = datetime.now(timezone.utc)
             await db.commit()
+
+            # Delete old checkpoint ONLY after DB commit succeeds
+            if old_thread_id:
+                try:
+                    await client.delete_thread(old_thread_id)
+                except AgentError:
+                    pass
+
             await usage.record_message(db, user_id)
             yield sse(
                 "message.created",
@@ -1480,36 +1589,52 @@ async def stream_regenerate(
                 },
             )
 
-            async for ev in _run_pipeline_turn(
+            sup, q, run_id = await _launch_supervised_turn(
                 db,
                 client,
                 conv,
                 user,
                 assistant,
+                user_msg.id,
                 user_msg.content,
                 turn_ctx,
                 conversation_history=history or None,
                 model_route=model_route,
                 max_seconds=max_seconds,
-            ):
-                yield ev
+                run_slot=run_slot,
+                idempotency_key=idempotency_key,
+            )
+            run_slot_handed_off = True
+            yield sse("run.started", {"run_id": run_id})
         except AgentError as exc:
             if assistant is not None:
                 assistant.status = "failed"
             conv.active_run_id = None
             conv.active_run_status = None
+            conv.pending_control = None
             await db.commit()
+            if run_slot and not run_slot_handed_off:
+                await limits.release_run(user_id, run_slot)
+            await client.aclose()
             yield sse("error", {"code": "agent_error", "status": exc.status_code, "detail": exc.detail})
+            return
         except Exception as exc:
             logger.exception("chat regenerate failed")
             if assistant is not None:
                 assistant.status = "failed"
             conv.active_run_id = None
             conv.active_run_status = None
+            conv.pending_control = None
             await db.commit()
-            yield sse("error", {"code": "internal_error", "detail": str(exc)})
-        finally:
+            if run_slot and not run_slot_handed_off:
+                await limits.release_run(user_id, run_slot)
             await client.aclose()
+            yield sse("error", {"code": "internal_error", "detail": str(exc)})
+            return
+
+    if sup is not None and q is not None:
+        async for ev in run_supervisor.iter_subscriber_queue(sup, q):
+            yield ev
 
 
 async def stream_edit(
@@ -1523,21 +1648,31 @@ async def stream_edit(
     skill_names: list[str] | None = None,
     model_route: str = "auto",
     max_seconds: int | None = None,
+    run_slot: str | None = None,
+    idempotency_key: str | None = None,
 ) -> AsyncIterator[dict]:
+    sup: run_supervisor.SupervisedRun | None = None
+    q: asyncio.Queue[dict[str, Any] | None] | None = None
+    run_slot_handed_off = False
+
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
         user = await db.get(User, user_id)
         if conv is None or user is None:
+            if run_slot:
+                await limits.release_run(user_id, run_slot)
             yield sse("error", {"code": "not_found"})
             return
         now = datetime.now(timezone.utc)
         claimed = await db.execute(
             update(Conversation)
             .where(Conversation.id == conv_id, Conversation.active_run_id.is_(None))
-            .values(active_run_id="pending", active_run_status="starting", last_message_at=now)
+            .values(active_run_id="pending", active_run_status="starting", pending_control=None, last_message_at=now)
         )
         await db.commit()
         if not claimed.rowcount:
+            if run_slot:
+                await limits.release_run(user_id, run_slot)
             yield sse("error", {"code": "run_in_progress", "detail": "当前会话有进行中的任务"})
             return
         await db.refresh(conv)
@@ -1553,6 +1688,9 @@ async def stream_edit(
                 conv.active_run_id = None
                 conv.active_run_status = None
                 await db.commit()
+                if run_slot:
+                    await limits.release_run(user_id, run_slot)
+                await client.aclose()
                 yield sse("error", {"code": "invalid_target", "detail": "未找到可编辑的用户消息"})
                 return
 
@@ -1560,16 +1698,14 @@ async def stream_edit(
             delete_ids = {m.id for m in ordered[target_idx:]}
             if delete_ids:
                 await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
+                if conv.summary_cursor_msg_id and conv.summary_cursor_msg_id in delete_ids:
+                    conv.rolling_summary = None
+                    conv.summary_cursor_msg_id = None
 
             turn_ctx = await _prepare_turn_context(db, user, conv, file_ids, skill_names, query_text=content)
 
             old_thread_id = conv.thread_id
             conv.thread_id = str(uuid.uuid4())
-            if old_thread_id:
-                try:
-                    await client.delete_thread(old_thread_id)
-                except AgentError:
-                    pass
 
             user_msg = Message(
                 conversation_id=conv.id,
@@ -1590,6 +1726,13 @@ async def stream_edit(
             conv.plan = None
             conv.last_message_at = datetime.now(timezone.utc)
             await db.commit()
+
+            if old_thread_id:
+                try:
+                    await client.delete_thread(old_thread_id)
+                except AgentError:
+                    pass
+
             await usage.record_message(db, user_id)
             yield sse(
                 "message.created",
@@ -1600,36 +1743,52 @@ async def stream_edit(
                 },
             )
 
-            async for ev in _run_pipeline_turn(
+            sup, q, run_id = await _launch_supervised_turn(
                 db,
                 client,
                 conv,
                 user,
                 assistant,
+                user_msg.id,
                 content,
                 turn_ctx,
                 conversation_history=history or None,
                 model_route=model_route,
                 max_seconds=max_seconds,
-            ):
-                yield ev
+                run_slot=run_slot,
+                idempotency_key=idempotency_key,
+            )
+            run_slot_handed_off = True
+            yield sse("run.started", {"run_id": run_id})
         except AgentError as exc:
             if assistant is not None:
                 assistant.status = "failed"
             conv.active_run_id = None
             conv.active_run_status = None
+            conv.pending_control = None
             await db.commit()
+            if run_slot and not run_slot_handed_off:
+                await limits.release_run(user_id, run_slot)
+            await client.aclose()
             yield sse("error", {"code": "agent_error", "status": exc.status_code, "detail": exc.detail})
+            return
         except Exception as exc:
             logger.exception("chat edit failed")
             if assistant is not None:
                 assistant.status = "failed"
             conv.active_run_id = None
             conv.active_run_status = None
+            conv.pending_control = None
             await db.commit()
-            yield sse("error", {"code": "internal_error", "detail": str(exc)})
-        finally:
+            if run_slot and not run_slot_handed_off:
+                await limits.release_run(user_id, run_slot)
             await client.aclose()
+            yield sse("error", {"code": "internal_error", "detail": str(exc)})
+            return
+
+    if sup is not None and q is not None:
+        async for ev in run_supervisor.iter_subscriber_queue(sup, q):
+            yield ev
 
 
 async def stream_reconnect(
@@ -1641,6 +1800,19 @@ async def stream_reconnect(
     last_event_id: str | None = None,
     max_seconds: int | None = None,
 ) -> AsyncIterator[dict]:
+    """Strictly READ-ONLY multi-device / refresh reconnect stream.
+
+    1. Never mutates DB or double-bills credits (Single-Writer RunSupervisor owns persistence).
+    2. Emits an atomic ``run.snapshot`` so refreshing tabs or Device B never duplicate partial tokens,
+       reasoning blocks, or tool calls.
+    """
+    assistant_id_str = ""
+    assistant_status = ""
+    assistant_content = ""
+    assistant_payload: dict[str, Any] = {}
+    conv_plan: dict[str, Any] | None = None
+    conv_pending_control: dict[str, Any] | None = None
+
     async with SessionLocal() as db:
         conv = await db.get(Conversation, conv_id)
         if conv is None:
@@ -1657,26 +1829,74 @@ async def stream_reconnect(
         if assistant is None:
             yield sse("error", {"code": "run_not_found", "detail": "未找到对应的运行记录"})
             return
-        client = AgentClient(namespace, api_key)
-        try:
-            yield sse("run.reconnected", {"run_id": run_id, "assistant_message_id": str(assistant.id)})
-            pipeline = ChatPipeline(db, client, conv, assistant, run_id, max_seconds=max_seconds)
-            pipeline.buffer = [assistant.content or ""]
-            await pipeline.prepare()
-            async for ev in pipeline.pump(last_event_id=last_event_id):
-                yield ev
-            if pipeline.terminal:
-                await _settle_usage(db, conv.user_id, assistant)
-                since_dt = assistant.created_at - timedelta(seconds=2) if assistant.created_at else None
-                for ev in await _pending_events_since(db, conv.user_id, since_dt=since_dt):
-                    yield ev
-                async for ev in _auto_title_events(db, conv, assistant):
-                    yield ev
-        except AgentError as exc:
-            assistant.status = "failed"
-            conv.active_run_id = None
-            conv.active_run_status = None
-            await db.commit()
-            yield sse("error", {"code": "agent_error", "status": exc.status_code, "detail": exc.detail})
-        finally:
-            await client.aclose()
+        assistant_id_str = str(assistant.id)
+        assistant_status = str(assistant.status or "")
+        assistant_content = assistant.content or ""
+        assistant_payload = dict(assistant.tool_payload or {})
+        conv_plan = conv.plan
+        conv_pending_control = conv.pending_control
+
+    yield sse("run.reconnected", {"run_id": run_id, "assistant_message_id": assistant_id_str})
+
+    # Fast path A: active RunSupervisor in this process -> atomic snapshot + live queue fan-out
+    sup = run_supervisor.get_supervisor(run_id)
+    if sup is not None:
+        q = sup.add_subscriber(replay_seed=False)
+        yield sup.build_snapshot_event()
+        async for ev in run_supervisor.iter_subscriber_queue(sup, q):
+            yield ev
+        return
+
+    # Fast path B: run already finished in DB -> emit snapshot + terminal event immediately
+    if assistant_status in ("completed", "failed", "cancelled"):
+        term_ev = TERMINAL_STATUSES.get(assistant_status, "run.completed")
+        yield sse(
+            "run.snapshot",
+            {
+                "run_id": run_id,
+                "conversation_id": str(conv_id),
+                "assistant_message_id": assistant_id_str,
+                "status": assistant_status,
+                "output": assistant_content,
+                "reasoning": assistant_payload.get("reasoning") or [],
+                "plan": conv_plan or assistant_payload.get("plan"),
+                "artifacts": assistant_payload.get("artifacts") or [],
+                "pending_control": None,
+                "last_event_id": "0-0",
+            },
+        )
+        yield sse(
+            term_ev,
+            {
+                "output": assistant_content,
+                "usage": assistant_payload.get("usage"),
+                "plan": conv_plan or assistant_payload.get("plan"),
+                "reasoning": assistant_payload.get("reasoning"),
+                "artifacts": assistant_payload.get("artifacts"),
+            },
+        )
+        return
+
+    # Path C: Run is alive on agent-worker (e.g., handled by another server worker) ->
+    # read-only passthrough with snapshot from agent-api (no DB writes!)
+    client = AgentClient(namespace, api_key)
+    try:
+        include_snap = not bool(last_event_id)
+        async for ev_name, payload, ev_id in client.stream_events_with_id(
+            run_id,
+            last_event_id=last_event_id,
+            include_snapshot=include_snap,
+        ):
+            if ev_name == "run.snapshot":
+                payload = dict(payload)
+                payload.setdefault("assistant_message_id", assistant_id_str)
+                if not payload.get("pending_control") and isinstance(payload.get("pending_controls"), list):
+                    ctls = payload["pending_controls"]
+                    payload["pending_control"] = ctls[0] if ctls else conv_pending_control
+            yield sse(ev_name, payload, event_id=ev_id)
+            if ev_name in TERMINAL_EVENTS:
+                return
+    except AgentError as exc:
+        yield sse("error", {"code": "agent_error", "status": exc.status_code, "detail": exc.detail})
+    finally:
+        await client.aclose()

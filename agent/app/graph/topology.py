@@ -55,9 +55,13 @@ GRAPH_EDGES: list[dict[str, Any]] = [
     {"source": "agent", "target": "subagent", "conditional": True, "label": "delegate"},
     {"source": "agent", "target": "memory_extractor", "conditional": True, "label": "memory_enabled"},
     {"source": "agent", "target": "__end__", "conditional": True, "label": "finish"},
-    {"source": "tools", "target": "agent", "conditional": False, "label": "observe"},
-    {"source": "hitl_gate", "target": "agent", "conditional": False, "label": "resume"},
-    {"source": "subagent", "target": "agent", "conditional": False, "label": "report"},
+    {"source": "tools", "target": "agent", "conditional": True, "label": "observe"},
+    {"source": "tools", "target": "subagent", "conditional": True, "label": "pending_subagent"},
+    {"source": "tools", "target": "hitl_gate", "conditional": True, "label": "pending_hitl"},
+    {"source": "subagent", "target": "agent", "conditional": True, "label": "report"},
+    {"source": "subagent", "target": "hitl_gate", "conditional": True, "label": "pending_hitl"},
+    {"source": "hitl_gate", "target": "agent", "conditional": True, "label": "resume"},
+    {"source": "hitl_gate", "target": "hitl_gate", "conditional": True, "label": "next_hitl"},
     {"source": "memory_extractor", "target": "__end__", "conditional": False, "label": "done"},
 ]
 
@@ -65,14 +69,14 @@ SUBGRAPHS: list[dict[str, Any]] = [
     {
         "id": "researcher",
         "label": "Researcher 子图",
-        "nodes": ["planner", "worker", "tools", "synthesizer"],
-        "description": "多跳 Hybrid RAG、记忆检索与 Web 检索综合研究",
+        "nodes": ["worker", "tools", "synthesizer"],
+        "description": "多跳 Hybrid RAG（HNSW + pg_trgm + FTS + RRF + MMR + Rerank）、记忆与 Web 检索综合研究",
     },
     {
         "id": "coder",
         "label": "Coder 子图",
-        "nodes": ["planner", "worker", "tools", "synthesizer"],
-        "description": "文件读写、数据分析与沙箱代码执行（受 HITL 审批门保护）",
+        "nodes": ["worker", "tools", "synthesizer"],
+        "description": "工作区文件读写、数据分析与代码产出（代码执行由主图 HITL 审批门保护）",
     },
 ]
 

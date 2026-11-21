@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import type { SkillPendingItem } from "../../types";
 import BaseButton from "../ui/BaseButton.vue";
 
@@ -8,6 +8,13 @@ const props = defineProps<{
   busy?: boolean;
   error?: string | null;
 }>();
+const pendingAction = ref<"approve" | "reject" | null>(null);
+watch(
+  () => props.busy,
+  (isBusy) => {
+    if (!isBusy) pendingAction.value = null;
+  },
+);
 
 const emit = defineEmits<{
   resolve: [id: string, action: "approve" | "reject"];
@@ -89,10 +96,21 @@ const sourceLabel = computed(() => {
         <p v-if="error" class="mt-2 text-[12px] text-danger">{{ error }}</p>
 
         <div class="mt-3 flex gap-2">
-          <BaseButton size="sm" :loading="busy" @click="emit('resolve', item.id, 'approve')">
+          <BaseButton
+            size="sm"
+            :loading="busy && pendingAction !== 'reject'"
+            :disabled="busy"
+            @click="pendingAction = 'approve'; emit('resolve', item.id, 'approve')"
+          >
             {{ isDelete ? "确认删除" : "确认安装" }}
           </BaseButton>
-          <BaseButton size="sm" variant="secondary" :disabled="busy" @click="emit('resolve', item.id, 'reject')">
+          <BaseButton
+            size="sm"
+            variant="secondary"
+            :loading="busy && pendingAction === 'reject'"
+            :disabled="busy"
+            @click="pendingAction = 'reject'; emit('resolve', item.id, 'reject')"
+          >
             拒绝
           </BaseButton>
         </div>

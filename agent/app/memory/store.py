@@ -19,11 +19,18 @@ USER_CHAR_LIMIT = 1375
 
 
 def memory_namespace(agent_namespace: str) -> tuple[str, str, str]:
-    return ("users", agent_namespace, "memories")
+    ns = (agent_namespace or "").strip()
+    if not ns:
+        raise ValueError("agent_namespace must be non-empty")
+    return ("users", ns, "memories")
 
 
 def _vector_literal(vec: list[float]) -> str:
     return "[" + ",".join(f"{v:.8f}" for v in vec) + "]"
+
+
+def _escape_like(term: str) -> str:
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _deterministic_key(target: str, content: str) -> str:
@@ -39,26 +46,34 @@ def _sanitize_entry(raw: str) -> str:
 
 
 class WhitzEmbeddings(Embeddings):
-    """LangChain Embeddings adapter backed by EmbeddingClient for AsyncPostgresStore."""
+    """LangChain Embeddings adapter backed by EmbeddingClient."""
 
     def __init__(self, client: EmbeddingClient | None = None) -> None:
         self.client = client or EmbeddingClient()
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return asyncio.run(self.client.embed_texts(texts))
+        vecs = asyncio.run(self.client.embed_texts(texts))
+        return vecs or []
 
     def embed_query(self, text: str) -> list[float]:
-        return asyncio.run(self.client.embed_query(text))
+        vec = asyncio.run(self.client.embed_query(text))
+        return vec or []
 
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
-        return await self.client.embed_texts(texts)
+        vecs = await self.client.embed_texts(texts)
+        return vecs or []
 
     async def aembed_query(self, text: str) -> list[float]:
-        return await self.client.embed_query(text)
+        vec = await self.client.embed_query(text)
+        return vec or []
 
 
 class MemoryManager:
-    """Manages semantic recall via LangGraph AsyncPostgresStore and PG memory tables."""
+    """Single-source-of-truth long-term memory manager backed by PostgreSQL ``memory_entries``.
+
+    Eliminates split-brain ghost memories between ``AsyncPostgresStore`` and ``memory_entries``.
+    Supports optional ``store`` injection only as a fallback for isolated unit tests.
+    """
 
     def __init__(
         self,
@@ -86,8 +101,27 @@ class MemoryManager:
         results: list[dict[str, Any]] = []
         seen_contents: set[str] = set()
 
-        # 1. Semantic recall from LangGraph AsyncPostgresStore
-        if self.store is not None:
+        # 1. Primary source of truth: PostgreSQL memory_entries (synced with Settings UI edits/deletes)
+        if self.pool is not None:
+            try:
+                pg_rows = await self._search_pg_entries(
+                    user_id=user_id,
+                    query=cleaned_query,
+                    limit=limit,
+                )
+                for row in pg_rows:
+                    content = str(row.get("content") or "").strip()
+                    if not content or content in seen_contents:
+                        continue
+                    seen_contents.add(content)
+                    results.append(row)
+                    if len(results) >= limit:
+                        break
+            except Exception as exc:
+                logger.warning("PG memory_entries query failed: %s", exc)
+
+        # 2. Optional test-store fallback only when explicitly injected & namespace is valid
+        if self.store is not None and not results and (agent_namespace or "").strip():
             ns = memory_namespace(agent_namespace)
             try:
                 if cleaned_query:
@@ -110,26 +144,7 @@ class MemoryManager:
                         }
                     )
             except Exception as exc:
-                logger.warning("AsyncPostgresStore search failed: %s", exc)
-
-        # 2. Fallback / merge with PG memory_entries table (covers manual edits from Settings UI)
-        if self.pool is not None and len(results) < limit:
-            try:
-                pg_rows = await self._search_pg_entries(
-                    user_id=user_id,
-                    query=cleaned_query,
-                    limit=limit,
-                )
-                for row in pg_rows:
-                    content = str(row.get("content") or "").strip()
-                    if not content or content in seen_contents:
-                        continue
-                    seen_contents.add(content)
-                    results.append(row)
-                    if len(results) >= limit:
-                        break
-            except Exception as exc:
-                logger.warning("PG memory_entries query failed: %s", exc)
+                logger.warning("Fallback store search failed: %s", exc)
 
         return results[:limit]
 
@@ -142,41 +157,76 @@ class MemoryManager:
     ) -> list[dict[str, Any]]:
         if self.pool is None:
             return []
-        user_uuid = uuid.UUID(str(user_id))
+        try:
+            user_uuid = uuid.UUID(str(user_id))
+        except ValueError:
+            return []
+
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
                 if query:
-                    q_vec = await self.embedding_client.embed_query(query)
-                    vec_lit = _vector_literal(q_vec)
-                    try:
-                        await cur.execute(
-                            """
-                            SELECT id, target, content, source,
-                                   CASE WHEN embedding IS NOT NULL
-                                        THEN 1.0 - (embedding <=> %s::vector)
-                                        ELSE NULL END AS score
-                            FROM memory_entries
-                            WHERE user_id = %s
-                            ORDER BY
-                                CASE WHEN content ILIKE %s THEN 0 ELSE 1 END,
-                                embedding <=> %s::vector NULLS LAST,
-                                updated_at DESC
-                            LIMIT %s
-                            """,
-                            (vec_lit, user_uuid, f"%{query}%", vec_lit, limit),
-                        )
-                    except Exception:
-                        await conn.rollback()
-                        await cur.execute(
-                            """
-                            SELECT id, target, content, source, NULL AS score
-                            FROM memory_entries
-                            WHERE user_id = %s AND content ILIKE %s
-                            ORDER BY updated_at DESC
-                            LIMIT %s
-                            """,
-                            (user_uuid, f"%{query}%", limit),
-                        )
+                    q_vec = await self.embedding_client.embed_query(query) if self.embedding_client.is_configured else None
+                    like_pat = f"%{_escape_like(query)}%"
+                    if q_vec:
+                        vec_lit = _vector_literal(q_vec)
+                        try:
+                            try:
+                                await cur.execute("SET hnsw.iterative_scan = relaxed_order")
+                            except Exception:
+                                pass
+                            await cur.execute(
+                                """
+                                SELECT id, target, content, source,
+                                       CASE WHEN embedding IS NOT NULL
+                                            THEN 1.0 - (embedding <=> %s::vector)
+                                            ELSE NULL END AS score
+                                FROM memory_entries
+                                WHERE user_id = %s
+                                  AND (
+                                      content ILIKE %s ESCAPE '\\'
+                                      OR (embedding IS NOT NULL AND (embedding <=> %s::vector) < 0.72)
+                                  )
+                                ORDER BY
+                                    CASE WHEN content ILIKE %s ESCAPE '\\' THEN 0 ELSE 1 END,
+                                    embedding <=> %s::vector NULLS LAST,
+                                    updated_at DESC
+                                LIMIT %s
+                                """,
+                                (vec_lit, user_uuid, like_pat, vec_lit, like_pat, vec_lit, limit),
+                            )
+                            rows = await cur.fetchall()
+                        except Exception:
+                            rows = []
+                    else:
+                        rows = []
+
+                    if not rows:
+                        # pg_trgm CJK similarity fallback -> escaped ILIKE fallback
+                        try:
+                            await cur.execute(
+                                """
+                                SELECT id, target, content, source, word_similarity(%s, content) AS score
+                                FROM memory_entries
+                                WHERE user_id = %s
+                                  AND (content ILIKE %s ESCAPE '\\' OR word_similarity(%s, content) >= 0.16)
+                                ORDER BY word_similarity(%s, content) DESC, updated_at DESC
+                                LIMIT %s
+                                """,
+                                (query, user_uuid, like_pat, query, query, limit),
+                            )
+                            rows = await cur.fetchall()
+                        except Exception:
+                            await cur.execute(
+                                """
+                                SELECT id, target, content, source, NULL AS score
+                                FROM memory_entries
+                                WHERE user_id = %s AND content ILIKE %s ESCAPE '\\'
+                                ORDER BY updated_at DESC
+                                LIMIT %s
+                                """,
+                                (user_uuid, like_pat, limit),
+                            )
+                            rows = await cur.fetchall()
                 else:
                     await cur.execute(
                         """
@@ -188,7 +238,8 @@ class MemoryManager:
                         """,
                         (user_uuid, limit),
                     )
-                rows = await cur.fetchall()
+                    rows = await cur.fetchall()
+
         return [
             {
                 "id": str(r[0]),
@@ -228,6 +279,10 @@ class MemoryManager:
         if norm_action != "remove" and not cleaned_content:
             return {"status": "rejected", "message": "记忆内容不能为空。"}
 
+        char_cap = USER_CHAR_LIMIT if norm_target == "user" else MEMORY_CHAR_LIMIT
+        if len(cleaned_content) > char_cap:
+            cleaned_content = cleaned_content[:char_cap].rstrip()
+
         if memory_require_confirm:
             proposal_id = await self._stage_pending_proposal(
                 user_id=user_id,
@@ -246,7 +301,6 @@ class MemoryManager:
                 "message": "已提交记忆提案，等待用户在界面中确认后生效。",
             }
 
-        # Direct write when memory_require_confirm is False
         entry_id = await self._commit_direct(
             user_id=user_id,
             agent_namespace=agent_namespace,
@@ -300,7 +354,6 @@ class MemoryManager:
                         now,
                     ),
                 )
-            await conn.commit()
         return proposal_id
 
     async def _commit_direct(
@@ -315,7 +368,7 @@ class MemoryManager:
     ) -> str:
         key = _deterministic_key(target, content or old_content or "")
         now = datetime.now(timezone.utc)
-        if self.store is not None:
+        if self.store is not None and (agent_namespace or "").strip():
             ns = memory_namespace(agent_namespace)
             try:
                 if action == "remove":
@@ -335,45 +388,63 @@ class MemoryManager:
                         },
                     )
             except Exception as exc:
-                logger.warning("AsyncPostgresStore direct write failed: %s", exc)
+                logger.warning("Fallback store direct write failed: %s", exc)
 
         entry_id = str(uuid.uuid4())
         if self.pool is not None:
             user_uuid = uuid.UUID(str(user_id))
+            vec = (
+                await self.embedding_client.embed_query(content)
+                if action != "remove" and self.embedding_client.is_configured
+                else None
+            )
             async with self.pool.connection() as conn:
-                async with conn.cursor() as cur:
+                async def _apply(cur: Any) -> None:
                     if action == "remove":
                         target_text = old_content or content
                         await cur.execute(
                             "DELETE FROM memory_entries WHERE user_id = %s AND target = %s AND content = %s",
                             (user_uuid, target, target_text),
                         )
-                    else:
-                        if action == "replace" and old_content:
-                            await cur.execute(
-                                "DELETE FROM memory_entries WHERE user_id = %s AND target = %s AND content = %s",
-                                (user_uuid, target, old_content),
-                            )
-                        vec = await self.embedding_client.embed_query(content)
+                        return
+                    if action == "replace" and old_content:
+                        await cur.execute(
+                            "DELETE FROM memory_entries WHERE user_id = %s AND target = %s AND content = %s",
+                            (user_uuid, target, old_content),
+                        )
+                    # Deduplicate identical content before inserting
+                    await cur.execute(
+                        "SELECT id FROM memory_entries WHERE user_id = %s AND target = %s AND content = %s LIMIT 1",
+                        (user_uuid, target, content),
+                    )
+                    if await cur.fetchone():
+                        return
+                    if vec:
                         vec_lit = _vector_literal(vec)
-                        try:
-                            await cur.execute(
-                                """
-                                INSERT INTO memory_entries
-                                    (id, user_id, target, content, source, embedding, created_at, updated_at)
-                                VALUES (%s, %s, %s, %s, 'agent', %s::vector, %s, %s)
-                                """,
-                                (uuid.UUID(entry_id), user_uuid, target, content, vec_lit, now, now),
-                            )
-                        except Exception:
-                            await conn.rollback()
-                            await cur.execute(
-                                """
-                                INSERT INTO memory_entries
-                                    (id, user_id, target, content, source, created_at, updated_at)
-                                VALUES (%s, %s, %s, %s, 'agent', %s, %s)
-                                """,
-                                (uuid.UUID(entry_id), user_uuid, target, content, now, now),
-                            )
-                await conn.commit()
+                        await cur.execute(
+                            """
+                            INSERT INTO memory_entries
+                                (id, user_id, target, content, source, embedding, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s, 'agent', %s::vector, %s, %s)
+                            """,
+                            (uuid.UUID(entry_id), user_uuid, target, content, vec_lit, now, now),
+                        )
+                    else:
+                        await cur.execute(
+                            """
+                            INSERT INTO memory_entries
+                                (id, user_id, target, content, source, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s, 'agent', %s, %s)
+                            """,
+                            (uuid.UUID(entry_id), user_uuid, target, content, now, now),
+                        )
+
+                # Use explicit transaction when psycopg connection supports it (safe even with autocommit=True)
+                if hasattr(conn, "transaction"):
+                    async with conn.transaction():
+                        async with conn.cursor() as cur:
+                            await _apply(cur)
+                else:
+                    async with conn.cursor() as cur:
+                        await _apply(cur)
         return entry_id

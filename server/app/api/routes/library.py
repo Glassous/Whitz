@@ -221,10 +221,28 @@ async def complete_library_upload(
     record.error_message = None
     record.expires_cleanup_at = None
     record.etag = (body.etag if body and body.etag else None) or meta.get("etag")
+    is_large_async = (
+        settings.app_env == "production"
+        and record.category != "image"
+        and int(record.size_bytes or 0) > 256 * 1024
+    )
+    record.index_status = "indexing" if is_large_async else "ready"
     await db.commit()
     await db.refresh(record)
 
-    await file_chunks.index_file_chunks_safe(db, record)
+    if is_large_async:
+        file_chunks.schedule_file_indexing(record.id, user.id)
+    else:
+        await file_chunks.index_file_chunks_safe(db, record)
+        await db.refresh(record)
+
+    from app.services import realtime_bus
+
+    await realtime_bus.publish_user_event(
+        user.id,
+        "library.updated",
+        {"action": "added", "file_id": str(record.id), "index_status": record.index_status},
+    )
 
     await audit.record(
         "library.file_complete",
@@ -304,6 +322,13 @@ async def delete_library_file(
     await db.commit()
     if storage_key:
         background_tasks.add_task(cos.delete_object, storage_key)
+    from app.services import realtime_bus
+
+    await realtime_bus.publish_user_event(
+        user.id,
+        "library.updated",
+        {"action": "deleted", "file_id": str(file_id)},
+    )
     await audit.record(
         "library.file_delete",
         actor=user,

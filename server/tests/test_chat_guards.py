@@ -51,7 +51,13 @@ async def test_ticket_rejects_wrong_nonce():
     assert exc.value.status_code == 403
 
 
-async def test_run_slots_limit_per_user_and_release():
+async def test_run_slots_limit_per_user_and_release(monkeypatch):
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "max_concurrent_runs", 2)
+    monkeypatch.setattr(settings, "max_concurrent_runs_per_user", 1)
+
     user_a = uuid.uuid4()
     user_b = uuid.uuid4()
     user_c = uuid.uuid4()

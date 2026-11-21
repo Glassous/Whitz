@@ -50,11 +50,25 @@ class _PgVectorType(UserDefinedType):
         return f"VECTOR({self.dim})"
 
 
+class _PgVectorTextParam(TypeDecorator):
+    """Encode list[float] as pgvector text literal '[...]' for asyncpg text parameters."""
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        return "[" + ",".join(f"{float(x):.8f}" for x in value) + "]"
+
+
 class SafeVector(TypeDecorator):
     """Compile to VECTOR(dim) when pgvector is available, or JSONB fallback on plain Postgres."""
 
     impl = JSONB
-    cache_ok = True
+    cache_ok = False
 
     def __init__(self, dim: int = 1536) -> None:
         super().__init__()
@@ -68,6 +82,8 @@ class SafeVector(TypeDecorator):
     def process_bind_param(self, value: Any, dialect: Any) -> Any:
         if value is None:
             return None
+        if isinstance(value, str):
+            return value
         vec = [float(x) for x in value]
         if dialect.name == "postgresql" and is_pgvector_enabled():
             return "[" + ",".join(f"{x:.8f}" for x in vec) + "]"
@@ -90,7 +106,7 @@ class SafeVector(TypeDecorator):
 
     def bind_expression(self, bindvalue: Any) -> Any:
         if is_pgvector_enabled():
-            return cast(type_coerce(bindvalue, Text), _PgVectorType(self.dim))
+            return cast(type_coerce(bindvalue, _PgVectorTextParam()), _PgVectorType(self.dim))
         return bindvalue
 
     def column_expression(self, col: Any) -> Any:
@@ -304,6 +320,7 @@ class Conversation(Base):
     plan: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     active_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     active_run_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    pending_control: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     rolling_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary_cursor_msg_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     summary_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -373,6 +390,8 @@ class ConversationFile(Base):
     storage_key: Mapped[str] = mapped_column(String(512), unique=True)
     etag: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="pending", server_default="pending")
+    index_status: Mapped[str] = mapped_column(String(24), default="ready", server_default="ready")
+    indexed_chunks: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     source: Mapped[str] = mapped_column(String(24), default="user", server_default="user")
     is_global: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
     message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
@@ -388,6 +407,10 @@ class ConversationFile(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_conv_created", "conversation_id", "created_at"),
+        Index("ix_messages_conv_run", "conversation_id", "run_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id: Mapped[uuid.UUID] = mapped_column(
@@ -501,7 +524,33 @@ class FileChunk(Base):
     is_global: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
     chunk_index: Mapped[int] = mapped_column(Integer)
     locator: Mapped[str] = mapped_column(String(160), default="", server_default="")
+    context_header: Mapped[str] = mapped_column(Text, default="", server_default="")
     content: Mapped[str] = mapped_column(Text)
+    search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MessageChunk(Base):
+    """Episodic turn-level semantic chunk for hybrid vector/trgm/FTS recall across all chats."""
+
+    __tablename__ = "message_chunks"
+    __table_args__ = (
+        Index("ix_message_chunks_user_conv", "user_id", "conversation_id", "created_at"),
+        Index("ix_message_chunks_search_tsv", "search_tsv", postgresql_using="gin"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    conversation_kind: Mapped[str] = mapped_column(String(16), default="side", server_default="side")
+    start_msg_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    end_msg_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    context_header: Mapped[str] = mapped_column(Text, default="", server_default="")
+    content: Mapped[str] = mapped_column(Text)
+    token_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

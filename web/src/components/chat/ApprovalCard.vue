@@ -2,7 +2,10 @@
 import type { PendingControl } from "../../types";
 import BaseButton from "../ui/BaseButton.vue";
 
-defineProps<{ control: PendingControl }>();
+defineProps<{
+  control: PendingControl;
+  submittingChoice?: "once" | "deny" | null;
+}>();
 const emit = defineEmits<{ decide: ["once" | "deny"] }>();
 </script>
 
@@ -24,8 +27,23 @@ const emit = defineEmits<{ decide: ["once" | "deny"] }>();
           class="mt-3 max-h-40 overflow-auto rounded-lg bg-surface p-2.5 font-mono text-[12px] leading-relaxed text-fg-muted"
         >{{ control.preview }}</pre>
         <div class="mt-3 flex gap-2">
-          <BaseButton size="sm" @click="emit('decide', 'once')">允许一次</BaseButton>
-          <BaseButton size="sm" variant="secondary" @click="emit('decide', 'deny')">拒绝</BaseButton>
+          <BaseButton
+            size="sm"
+            :loading="submittingChoice === 'once'"
+            :disabled="!!submittingChoice"
+            @click="emit('decide', 'once')"
+          >
+            {{ submittingChoice === "once" ? "批准中…" : "允许一次" }}
+          </BaseButton>
+          <BaseButton
+            size="sm"
+            variant="secondary"
+            :loading="submittingChoice === 'deny'"
+            :disabled="!!submittingChoice"
+            @click="emit('decide', 'deny')"
+          >
+            {{ submittingChoice === "deny" ? "拒绝中…" : "拒绝" }}
+          </BaseButton>
         </div>
       </div>
     </div>

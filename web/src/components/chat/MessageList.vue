@@ -3,7 +3,11 @@ import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, wa
 import type { ConversationFile, Message } from "../../types";
 import MessageBubble from "./MessageBubble.vue";
 
-const props = defineProps<{ messages: Message[]; focusMessageId?: string | null }>();
+const props = defineProps<{
+  messages: Message[];
+  focusMessageId?: string | null;
+  downloadingFileId?: string | null;
+}>();
 const emit = defineEmits<{
   steps: [id: string];
   "focus-handled": [];
@@ -187,6 +191,7 @@ onBeforeUnmount(() => {
       >
         <MessageBubble
           :message="m"
+          :downloading-file-id="downloadingFileId"
           @steps="emit('steps', m.id)"
           @regenerate="emit('regenerate', $event)"
           @edit="(id, content) => emit('edit', id, content)"

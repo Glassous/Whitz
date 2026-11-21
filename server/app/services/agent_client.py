@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
 from app.core.config import get_settings
-from app.services.sse import iter_sse
+from app.services.sse import iter_sse_with_id
 
 
 class AgentError(Exception):
@@ -16,8 +17,35 @@ class AgentError(Exception):
         super().__init__(f"Agent {status_code}: {detail}")
 
 
+# Shared process-level connection pools keyed by base URL so AgentClient instances reuse sockets.
+_SHARED_CLIENTS: dict[str, httpx.AsyncClient] = {}
+
+
+def _get_shared_client(base_url: str) -> httpx.AsyncClient:
+    client = _SHARED_CLIENTS.get(base_url)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=httpx.Timeout(30.0, connect=8.0),
+            limits=httpx.Limits(max_connections=128, max_keepalive_connections=32, keepalive_expiry=45.0),
+            trust_env=False,
+        )
+        _SHARED_CLIENTS[base_url] = client
+    return client
+
+
+async def aclose_shared_agent_clients() -> None:
+    for client in list(_SHARED_CLIENTS.values()):
+        if not client.is_closed:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+    _SHARED_CLIENTS.clear()
+
+
 class AgentClient:
-    """Async HTTP + SSE client for the standalone LangGraph agent service."""
+    """Async HTTP + SSE client for the standalone LangGraph agent service (pooled + retrying)."""
 
     def __init__(
         self,
@@ -32,42 +60,69 @@ class AgentClient:
         self.api_key = api_key or ""
         self.base = (base_url or settings.agent_base_url).rstrip("/")
         token = (internal_token if internal_token is not None else settings.agent_internal_token).strip()
-        headers: dict[str, str] = {}
+        self._headers: dict[str, str] = {}
         if token:
-            headers["X-Agent-Token"] = token
+            self._headers["X-Agent-Token"] = token
         if self.namespace:
-            headers["X-Whitz-Namespace"] = self.namespace
-        self._client = httpx.AsyncClient(
-            base_url=self.base,
-            headers=headers,
-            timeout=httpx.Timeout(60.0),
-            trust_env=False,
-        )
+            self._headers["X-Whitz-Namespace"] = self.namespace
+        self._client = _get_shared_client(self.base)
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        # Shared pool is closed centrally on server shutdown via aclose_shared_agent_clients().
+        return None
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        try:
-            resp = await self._client.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            raise AgentError(503, "agent_unreachable") from exc
-        if resp.status_code >= 400:
+    def _merge_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        if not extra:
+            return dict(self._headers)
+        merged = dict(self._headers)
+        merged.update(extra)
+        return merged
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        retry_transient: bool = False,
+        headers: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        req_headers = self._merge_headers(headers)
+        attempts = 3 if retry_transient else 1
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
             try:
-                detail = resp.json()
-            except Exception:
-                detail = resp.text
-            raise AgentError(resp.status_code, detail)
-        return resp
+                resp = await self._client.request(method, path, headers=req_headers, **kwargs)
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(0.25 * (2**attempt))
+                    continue
+                raise AgentError(503, "agent_unreachable") from exc
+            if resp.status_code in (502, 503, 504) and attempt + 1 < attempts:
+                await asyncio.sleep(0.25 * (2**attempt))
+                continue
+            if resp.status_code >= 400:
+                try:
+                    detail = resp.json()
+                except Exception:
+                    detail = resp.text
+                raise AgentError(resp.status_code, detail)
+            return resp
+        raise AgentError(503, "agent_unreachable") from last_exc
 
     async def health_info(self) -> dict[str, Any]:
         try:
-            resp = await self._client.get("/health")
+            resp = await self._client.get(
+                "/health",
+                headers=self._headers,
+                timeout=httpx.Timeout(5.0, connect=3.0),
+            )
             if resp.status_code != 200:
                 return {"ready": False, "status": "unhealthy"}
             data = resp.json()
             if isinstance(data, dict):
-                return {"ready": True, **data}
+                return {"ready": bool(data.get("ok", True)), **data}
             return {"ready": True, "status": "ok"}
         except Exception:
             return {"ready": False, "status": "unreachable"}
@@ -77,7 +132,7 @@ class AgentClient:
         return bool(info.get("ready"))
 
     async def topology(self) -> dict[str, Any]:
-        return (await self._request("GET", "/v1/graph/topology")).json()
+        return (await self._request("GET", "/v1/graph/topology", retry_transient=True)).json()
 
     async def create_run(
         self,
@@ -140,11 +195,17 @@ class AgentClient:
         headers: dict[str, str] = {}
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
-        resp = await self._request("POST", "/v1/runs", json=payload, headers=headers)
+        resp = await self._request(
+            "POST",
+            "/v1/runs",
+            json=payload,
+            headers=headers,
+            retry_transient=bool(idempotency_key),
+        )
         return resp.json()
 
     async def get_run(self, run_id: str) -> dict[str, Any]:
-        return (await self._request("GET", f"/v1/runs/{run_id}")).json()
+        return (await self._request("GET", f"/v1/runs/{run_id}", retry_transient=True)).json()
 
     async def resume_run(
         self,
@@ -170,21 +231,23 @@ class AgentClient:
     async def cancel_run(self, run_id: str) -> dict[str, Any]:
         return (await self._request("POST", f"/v1/runs/{run_id}/cancel")).json()
 
-    async def stream_events(
+    async def stream_events_with_id(
         self,
         run_id: str,
         *,
         last_event_id: str | None = None,
-    ) -> AsyncIterator[tuple[str, dict]]:
-        headers: dict[str, str] = {}
-        if last_event_id:
-            headers["Last-Event-ID"] = last_event_id
+        include_snapshot: bool = False,
+    ) -> AsyncIterator[tuple[str, dict, str | None]]:
+        headers = self._merge_headers({"Last-Event-ID": last_event_id} if last_event_id else None)
+        params = {"include_snapshot": "true"} if include_snapshot else None
         try:
+            # Agent-API sends SSE keepalive pings every 10s; a 45s read timeout catches half-open drops cleanly.
             async with self._client.stream(
                 "GET",
                 f"/v1/runs/{run_id}/events",
                 headers=headers,
-                timeout=httpx.Timeout(30.0, read=None),
+                params=params,
+                timeout=httpx.Timeout(connect=10.0, read=45.0, write=15.0, pool=15.0),
             ) as resp:
                 if resp.status_code >= 400:
                     await resp.aread()
@@ -193,16 +256,30 @@ class AgentClient:
                     except Exception:
                         detail = resp.text
                     raise AgentError(resp.status_code, detail)
-                async for event in iter_sse(resp):
-                    yield event
+                async for ev_name, payload, ev_id in iter_sse_with_id(resp):
+                    yield ev_name, payload, ev_id
         except httpx.HTTPError as exc:
             raise AgentError(503, "agent_unreachable") from exc
+
+    async def stream_events(
+        self,
+        run_id: str,
+        *,
+        last_event_id: str | None = None,
+        include_snapshot: bool = False,
+    ) -> AsyncIterator[tuple[str, dict]]:
+        async for ev_name, payload, _ev_id in self.stream_events_with_id(
+            run_id,
+            last_event_id=last_event_id,
+            include_snapshot=include_snapshot,
+        ):
+            yield ev_name, payload
 
     async def delete_thread(self, thread_id: str) -> None:
         if not thread_id:
             return
         try:
-            resp = await self._client.delete(f"/v1/threads/{thread_id}")
+            resp = await self._client.delete(f"/v1/threads/{thread_id}", headers=self._headers)
             if resp.status_code >= 400 and resp.status_code != 404:
                 try:
                     detail = resp.json()

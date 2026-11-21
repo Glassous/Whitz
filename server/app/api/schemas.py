@@ -237,6 +237,7 @@ class ConversationOut(BaseModel):
     plan: dict | None
     active_run_id: str | None
     active_run_status: str | None
+    pending_control: dict | None = None
     created_at: datetime
     updated_at: datetime
     last_message_at: datetime | None
@@ -312,6 +313,8 @@ class ConversationFileOut(BaseModel):
     category: str
     size_bytes: int
     status: str
+    index_status: str = "ready"
+    indexed_chunks: int = 0
     source: str = "user"
     is_global: bool = True
     message_id: uuid.UUID | None = None

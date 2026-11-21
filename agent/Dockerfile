@@ -14,7 +14,12 @@ RUN uv pip install --system -r pyproject.toml
 COPY app ./app
 COPY evals ./evals
 COPY entrypoint.sh ./
-RUN chmod +x entrypoint.sh
+RUN chmod +x entrypoint.sh \
+    && groupadd -g 1000 whitz \
+    && useradd -u 1000 -g 1000 -m -s /bin/sh whitz \
+    && chown -R 1000:1000 /app
+
+USER 1000:1000
 
 EXPOSE 8642
 

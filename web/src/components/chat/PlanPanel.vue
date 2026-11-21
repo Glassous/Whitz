@@ -45,6 +45,9 @@ const props = defineProps<{
   hideHeader?: boolean;
   previewTarget?: PreviewTarget | null;
   resizing?: boolean;
+  deletingFileId?: string | null;
+  downloadingFileId?: string | null;
+  attachLibraryAction?: (fileIds: string[]) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -53,6 +56,7 @@ const emit = defineEmits<{
   upload: [files: FileList, dataTransfer?: DataTransfer | null];
   "cancel-upload": [localId: string];
   "dismiss-upload": [localId: string];
+  "retry-upload": [localId: string];
   "delete-file": [fileId: string];
   "download-file": [file: ConversationFile];
   "preview-file": [file: ConversationFile];
@@ -121,9 +125,6 @@ const dragValid = ref(true);
 const dragReason = ref("");
 const isDragging = computed(() => dragDepth.value > 0);
 
-const deletingId = ref<string | null>(null);
-const downloadingId = ref<string | null>(null);
-
 function openFilePicker() {
   if (props.uploadDisabled) return;
   fileInput.value?.click();
@@ -186,19 +187,13 @@ function onDrop(e: DragEvent) {
 }
 
 function onDeleteClick(fileId: string) {
-  deletingId.value = fileId;
+  if (props.deletingFileId === fileId) return;
   emit("delete-file", fileId);
-  window.setTimeout(() => {
-    if (deletingId.value === fileId) deletingId.value = null;
-  }, 800);
 }
 
 function onDownloadClick(file: ConversationFile) {
-  downloadingId.value = file.id;
+  if (props.downloadingFileId === file.id) return;
   emit("download-file", file);
-  window.setTimeout(() => {
-    if (downloadingId.value === file.id) downloadingId.value = null;
-  }, 800);
 }
 
 const items = computed<PlanItem[]>(() => props.plan?.items ?? []);
@@ -366,13 +361,24 @@ function toggleLibrarySelect(id: string) {
   selectedLibraryIds.value = next;
 }
 
-function confirmLibraryAttach() {
+async function confirmLibraryAttach() {
+  if (libraryAttaching.value) return;
   const ids = [...selectedLibraryIds.value];
   if (!ids.length) return;
   libraryAttaching.value = true;
-  emit("attach-library", ids);
-  libraryOpen.value = false;
-  libraryAttaching.value = false;
+  libraryError.value = null;
+  try {
+    if (props.attachLibraryAction) {
+      await props.attachLibraryAction(ids);
+    } else {
+      emit("attach-library", ids);
+    }
+    libraryOpen.value = false;
+  } catch (e: any) {
+    libraryError.value = e?.detail?.detail ?? e?.message ?? "引用资料库文件失败";
+  } finally {
+    libraryAttaching.value = false;
+  }
 }
 </script>
 
@@ -561,11 +567,22 @@ function confirmLibraryAttach() {
             </div>
           </section>
 
-          <div v-if="runningTool && streaming" class="mt-1 rounded-lg bg-surface px-3 py-2 text-[12.5px] text-fg-muted">
-            正在调用 <span class="font-medium text-fg">{{ runningTool }}</span>
+          <div v-if="runningTool && streaming" class="mt-1 flex items-center gap-2 rounded-lg bg-surface px-3 py-2 text-[12.5px] text-fg-muted">
+            <Spinner :size="13" class="shrink-0 text-accent" />
+            <span class="truncate">正在调用 <span class="font-medium text-fg">{{ runningTool }}</span></span>
           </div>
 
-          <div v-if="!hasContent && !currentStep" class="flex min-h-full items-center justify-center px-4 text-center">
+          <div
+            v-if="streaming && !hasContent && !currentStep && !runningTool"
+            class="flex min-h-full flex-col items-center justify-center gap-2.5 px-4 text-center"
+          >
+            <Spinner :size="18" class="text-accent" />
+            <p class="text-[13px] leading-relaxed text-fg-muted">
+              正在连接助理并分析任务…
+            </p>
+          </div>
+
+          <div v-else-if="!hasContent && !currentStep" class="flex min-h-full items-center justify-center px-4 text-center">
             <p class="text-[13px] leading-relaxed text-fg-faint">
               暂无运行详情。<br />助理处理多步骤任务或读取文件时，这里会按步骤显示思考与工具调用。
             </p>
@@ -652,9 +669,19 @@ function confirmLibraryAttach() {
                   {{ categoryLabel(u.category, u.ext) }}
                 </span>
                 <span class="min-w-0 flex-1 truncate font-medium" :title="u.filename">{{ u.filename }}</span>
-                <span class="shrink-0 tabular-nums text-[11.5px] text-fg-faint">
+                <span class="shrink-0 inline-flex items-center gap-1 tabular-nums text-[11.5px] text-fg-faint">
+                  <Spinner v-if="u.status === 'signing' || u.status === 'completing'" :size="11" />
                   {{ u.status === "signing" ? "签名中" : u.status === "uploading" ? `${u.progress}%` : u.status === "completing" ? "校验中" : "失败" }}
                 </span>
+                <button
+                  v-if="u.status === 'error'"
+                  type="button"
+                  class="focus-ring shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-danger transition-colors hover:bg-danger/15"
+                  aria-label="重试上传"
+                  @click="emit('retry-upload', u.localId)"
+                >
+                  重试
+                </button>
                 <button
                   type="button"
                   class="focus-ring flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-fg-faint transition-colors hover:bg-hover hover:text-fg"
@@ -714,6 +741,13 @@ function confirmLibraryAttach() {
                   >
                     AI
                   </span>
+                  <span
+                    v-if="f.index_status === 'indexing'"
+                    class="inline-flex items-center gap-1 rounded bg-surface px-1.5 py-0.2 text-[10px] text-fg-muted"
+                  >
+                    <Spinner :size="9" />
+                    索引中
+                  </span>
                 </div>
               </div>
               <div class="flex shrink-0 items-center gap-0.5" @click.stop>
@@ -731,25 +765,27 @@ function confirmLibraryAttach() {
                 </button>
                 <button
                   type="button"
-                  class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-hover hover:text-fg"
+                  class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-60"
                   aria-label="下载文件"
                   title="通过临时签名直链下载"
-                  :disabled="downloadingId === f.id"
+                  :disabled="props.downloadingFileId === f.id"
                   @click="onDownloadClick(f)"
                 >
-                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <Spinner v-if="props.downloadingFileId === f.id" :size="13" />
+                  <svg v-else class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
                   </svg>
                 </button>
                 <button
                   type="button"
-                  class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-danger-weak hover:text-danger"
+                  class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-danger-weak hover:text-danger disabled:cursor-not-allowed disabled:opacity-60"
                   aria-label="从当前旁聊工作区移除"
                   title="仅从当前旁聊工作区移除（文件仍保留在资料库中，彻底删除请前往资料库）"
-                  :disabled="deletingId === f.id"
+                  :disabled="props.deletingFileId === f.id"
                   @click="onDeleteClick(f.id)"
                 >
-                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <Spinner v-if="props.deletingFileId === f.id" :size="13" />
+                  <svg v-else class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M18 6L6 18" />
                   </svg>
                 </button>
@@ -787,7 +823,7 @@ function confirmLibraryAttach() {
     </template>
 
     <!-- Library Quick Attach Modal -->
-    <BaseModal :open="libraryOpen" title="从个人资料库引用文件" width="36rem" @close="libraryOpen = false">
+    <BaseModal :open="libraryOpen" title="从个人资料库引用文件" width="36rem" @close="!libraryAttaching && (libraryOpen = false)">
       <div class="space-y-3">
         <div class="flex flex-wrap items-center gap-2">
           <input
@@ -842,7 +878,7 @@ function confirmLibraryAttach() {
         </div>
       </div>
       <template #footer>
-        <BaseButton variant="soft" rounded="full" @click="libraryOpen = false">取消</BaseButton>
+        <BaseButton variant="soft" rounded="full" :disabled="libraryAttaching" @click="libraryOpen = false">取消</BaseButton>
         <BaseButton
           rounded="full"
           :loading="libraryAttaching"

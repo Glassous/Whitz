@@ -3,6 +3,7 @@ import secrets
 import time
 
 from app.core.config import get_settings
+from app.core.metrics import ACTIVE_SSE_STREAMS
 from app.core.redis import get_redis
 
 logger = logging.getLogger("whitz.limits")
@@ -14,8 +15,7 @@ SSE_SLOT_TTL = 3600
 async def _incr_counter(key: str, ttl: int) -> int:
     r = get_redis()
     value = await r.incr(key)
-    if value == 1:
-        await r.expire(key, ttl)
+    await r.expire(key, ttl)
     return value
 
 
@@ -104,10 +104,12 @@ async def allow_chat(user_id, per_minute: int | None = None) -> bool:
 
 
 async def wrap_stream(inner, user_id, *, run_slot: str | None = None, sse_slot: str | None = None):
+    ACTIVE_SSE_STREAMS.inc()
     try:
         async for event in inner:
             yield event
     finally:
+        ACTIVE_SSE_STREAMS.dec()
         if run_slot:
             await release_run(user_id, run_slot)
         if sse_slot:

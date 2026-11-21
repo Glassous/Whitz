@@ -197,7 +197,7 @@ async def test_mcp_files_auth_and_tools(client, register, db, monkeypatch):
     )
     global_files = json.loads(listed_global.json()["result"]["content"][0]["text"])["files"]
     assert len(global_files) == 2
-    assert {f["scope"] for f in global_files} == {"conversation", "global"}
+    assert {f["scope"] for f in global_files} == {"conversation", "library"}
 
     # write_workspace_file creates assistant artifact in COS + DB
     written_objects: dict[str, bytes] = {}

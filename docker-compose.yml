@@ -6,7 +6,7 @@ services:
     command:
       - postgres
       - -c
-      - max_connections=30
+      - max_connections=60
       - -c
       - shared_buffers=128MB
       - -c
@@ -66,7 +66,7 @@ services:
       - --auto-aof-rewrite-min-size
       - 32mb
       - --maxmemory
-      - 96mb
+      - 256mb
       - --maxmemory-policy
       - noeviction
       - --save
@@ -78,7 +78,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
-    mem_limit: 128m
+    mem_limit: 320m
     pids_limit: 64
     security_opt:
       - no-new-privileges:true
@@ -90,7 +90,6 @@ services:
     build: ./agent
     container_name: whitz-agent-api
     restart: unless-stopped
-    command: ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8642"]
     environment: &agent-env
       APP_ENV: ${APP_ENV:-production}
       AGENT_ROLE: api
@@ -120,17 +119,21 @@ services:
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-10}
+      EMBEDDING_CACHE_TTL_SECONDS: ${EMBEDDING_CACHE_TTL_SECONDS:-86400}
+      RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+      RERANK_API_KEY: ${RERANK_API_KEY:-}
+      RERANK_MODEL: ${RERANK_MODEL:-}
+      RERANK_TOP_N: ${RERANK_TOP_N:-8}
       SANDBOX_MODE: ${SANDBOX_MODE:-disabled}
       E2B_API_KEY: ${E2B_API_KEY:-}
       SEARCH_API_KEY: ${SEARCH_API_KEY:-}
-      RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-900}
+      RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-1200}
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-whitz}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-}
       PYTHONDONTWRITEBYTECODE: "1"
-    volumes:
-      - app_data:/app-data
     expose:
       - "8642"
     depends_on:
@@ -144,8 +147,10 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
-    mem_limit: 256m
-    memswap_limit: 256m
+    cap_drop:
+      - ALL
+    mem_limit: 384m
+    memswap_limit: 384m
     pids_limit: 128
     security_opt:
       - no-new-privileges:true
@@ -157,19 +162,24 @@ services:
     build: ./agent
     container_name: whitz-agent-worker
     restart: unless-stopped
-    command: ["arq", "app.worker.WorkerSettings"]
     environment:
       <<: *agent-env
       AGENT_ROLE: worker
-    volumes:
-      - app_data:/app-data
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    mem_limit: 768m
-    memswap_limit: 1024m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, time, redis; r = redis.Redis.from_url(os.environ['REDIS_URL'], decode_responses=True); v = r.get('agent:worker:heartbeat'); assert v and (time.time() - float(v)) < 45"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    cap_drop:
+      - ALL
+    mem_limit: 1024m
+    memswap_limit: 1280m
     pids_limit: 256
     security_opt:
       - no-new-privileges:true
@@ -211,6 +221,12 @@ services:
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-10}
+      EMBEDDING_CACHE_TTL_SECONDS: ${EMBEDDING_CACHE_TTL_SECONDS:-86400}
+      RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+      RERANK_API_KEY: ${RERANK_API_KEY:-}
+      RERANK_MODEL: ${RERANK_MODEL:-}
+      RERANK_TOP_N: ${RERANK_TOP_N:-8}
       AGENT_BASE_URL: http://agent-api:8642
       AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN}
       APP_DATA_DIR: ${APP_DATA_DIR:-/app-data}
@@ -228,11 +244,11 @@ services:
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       SEARCH_API_KEY: ${SEARCH_API_KEY:-}
-      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-2}
-      MAX_CONCURRENT_RUNS_PER_USER: ${MAX_CONCURRENT_RUNS_PER_USER:-1}
-      MAX_SSE_STREAMS: ${MAX_SSE_STREAMS:-6}
-      MAX_SSE_STREAMS_PER_USER: ${MAX_SSE_STREAMS_PER_USER:-2}
-      RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-900}
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-4}
+      MAX_CONCURRENT_RUNS_PER_USER: ${MAX_CONCURRENT_RUNS_PER_USER:-2}
+      MAX_SSE_STREAMS: ${MAX_SSE_STREAMS:-32}
+      MAX_SSE_STREAMS_PER_USER: ${MAX_SSE_STREAMS_PER_USER:-8}
+      RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-1200}
       CHAT_RATE_PER_MINUTE: ${CHAT_RATE_PER_MINUTE:-30}
       TOKENS_PER_CREDIT: ${TOKENS_PER_CREDIT:-5000}
       MEMBERSHIP_DEFAULT_DAYS: ${MEMBERSHIP_DEFAULT_DAYS:-30}
@@ -289,7 +305,7 @@ services:
       redis:
         condition: service_healthy
       agent-api:
-        condition: service_started
+        condition: service_healthy
     read_only: true
     tmpfs:
       - /tmp

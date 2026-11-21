@@ -240,15 +240,8 @@ export const useFilesStore = defineStore("files", () => {
       error.value = `超出单对话 ${MAX_FILES_PER_CONVERSATION} 个文件上限，仅保留前 ${remainingSlots} 个文件`;
     }
 
-    let targetConvId: string;
-    try {
-      targetConvId = await ensureConversation();
-      convId.value = targetConvId;
-    } catch (e: any) {
-      error.value = errorText(e, "无法创建对话以保存文件");
-      return false;
-    }
-
+    // Immediately push optimistic upload chips BEFORE awaiting ensureConversation() so
+    // the Send button locks & displays upload progress instantly even on a brand-new draft!
     const createdTasks: { taskId: string; file: File }[] = [];
     for (const file of queue) {
       const taskId = `up-${Date.now()}-${uploadSeq++}`;
@@ -275,6 +268,18 @@ export const useFilesStore = defineStore("files", () => {
       createdTasks.push({ taskId, file });
     }
 
+    let targetConvId: string;
+    try {
+      targetConvId = await ensureConversation();
+      convId.value = targetConvId;
+    } catch (e: any) {
+      error.value = errorText(e, "无法创建对话以保存文件");
+      for (const t of createdTasks) {
+        updateTask(t.taskId, { status: "error", error: "创建对话失败" });
+      }
+      return false;
+    }
+
     // 限制并发直传数（最多 3 个并发）
     const concurrency = 3;
     let idx = 0;
@@ -286,6 +291,36 @@ export const useFilesStore = defineStore("files", () => {
       }
     });
     await Promise.all(workers);
+    return true;
+  }
+
+  function updateTask(localId: string, patch: Partial<UploadTask>) {
+    const idx = uploads.value.findIndex((u) => u.localId === localId);
+    if (idx < 0) return;
+    const next = [...uploads.value];
+    next[idx] = { ...next[idx], ...patch };
+    uploads.value = next;
+  }
+
+  async function retryUpload(
+    localId: string,
+    ensureConversation?: () => Promise<string>,
+  ): Promise<boolean> {
+    const task = uploads.value.find((u) => u.localId === localId);
+    if (!task || !task.file) return false;
+    let targetConvId = convId.value;
+    if (!targetConvId && ensureConversation) {
+      try {
+        targetConvId = await ensureConversation();
+        convId.value = targetConvId;
+      } catch (e: any) {
+        updateTask(localId, { status: "error", error: errorText(e, "创建对话失败") });
+        return false;
+      }
+    }
+    if (!targetConvId) return false;
+    updateTask(localId, { status: "signing", progress: 0, error: undefined });
+    await runUploadTask(targetConvId, localId, task.file);
     return true;
   }
 
@@ -331,8 +366,24 @@ export const useFilesStore = defineStore("files", () => {
   async function removeFile(fileId: string) {
     if (!convId.value) return;
     await api.delete(`/conversations/${convId.value}/files/${fileId}`);
+    removeLocalFile(fileId);
+  }
+
+  function removeLocalFile(fileId: string) {
     files.value = files.value.filter((f) => f.id !== fileId);
     attachedIds.value = attachedIds.value.filter((id) => id !== fileId);
+  }
+
+  function patchLocalIndexStatus(fileId: string, indexStatus: string, indexedChunks?: number) {
+    const idx = files.value.findIndex((f) => f.id === fileId);
+    if (idx < 0) return;
+    const next = [...files.value];
+    next[idx] = {
+      ...next[idx],
+      index_status: indexStatus,
+      ...(typeof indexedChunks === "number" ? { indexed_chunks: indexedChunks } : {}),
+    };
+    files.value = next;
   }
 
   async function getDownloadUrl(fileId: string, inline = false, targetConvId?: string): Promise<string | null> {
@@ -472,30 +523,45 @@ export const useFilesStore = defineStore("files", () => {
   async function uploadToLibrary(
     inputFiles: FileList | File[],
     dataTransfer?: DataTransfer | null,
+    onProgress?: (item: { filename: string; progress: number; status: "signing" | "uploading" | "completing" | "done" | "failed"; error?: string }) => void,
   ): Promise<{ uploaded: LibraryFileItem[]; errors: string[] }> {
     const { accepted, rejected } = validateSelectedFiles(inputFiles, dataTransfer);
     const errors: string[] = rejected.map((r) => `${r.filename}（${r.reason}）`);
     const uploaded: LibraryFileItem[] = [];
-    for (const file of accepted) {
-      try {
-        const presign = await api.post<PresignResponse>("/library/files/presign", {
-          filename: file.name,
-          mime_type: file.type || "",
-          size_bytes: file.size,
-        });
-        const { etag } = await putToCos(
-          presign.upload_url,
-          presign.headers,
-          file,
-          () => {},
-          () => {},
-        );
-        const completed = await api.post<LibraryFileItem>(`/library/files/${presign.file_id}/complete`, { etag });
-        uploaded.push(completed);
-      } catch (e: any) {
-        errors.push(`${file.name}：${errorText(e, "上传失败")}`);
+    const concurrency = 3;
+    let idx = 0;
+
+    const workers = Array.from({ length: Math.min(concurrency, accepted.length) }, async () => {
+      while (idx < accepted.length) {
+        const file = accepted[idx++];
+        if (!file) break;
+        try {
+          onProgress?.({ filename: file.name, progress: 0, status: "signing" });
+          const presign = await api.post<PresignResponse>("/library/files/presign", {
+            filename: file.name,
+            mime_type: file.type || "",
+            size_bytes: file.size,
+          });
+          onProgress?.({ filename: file.name, progress: 1, status: "uploading" });
+          const { etag } = await putToCos(
+            presign.upload_url,
+            presign.headers,
+            file,
+            (pct) => onProgress?.({ filename: file.name, progress: pct, status: "uploading" }),
+            () => {},
+          );
+          onProgress?.({ filename: file.name, progress: 100, status: "completing" });
+          const completed = await api.post<LibraryFileItem>(`/library/files/${presign.file_id}/complete`, { etag });
+          uploaded.push(completed);
+          onProgress?.({ filename: file.name, progress: 100, status: "done" });
+        } catch (e: any) {
+          const msg = errorText(e, "上传失败");
+          errors.push(`${file.name}：${msg}`);
+          onProgress?.({ filename: file.name, progress: 0, status: "failed", error: msg });
+        }
       }
-    }
+    });
+    await Promise.all(workers);
     return { uploaded, errors };
   }
 
@@ -542,12 +608,15 @@ export const useFilesStore = defineStore("files", () => {
     reset,
     load,
     enqueueFiles,
+    retryUpload,
     cancelUpload,
     dismissUpload,
     detachFile,
     consumeAttachedIds,
     upsertFile,
     removeFile,
+    removeLocalFile,
+    patchLocalIndexStatus,
     getDownloadUrl,
     ensureFreshUrl,
     refreshFileUrls,

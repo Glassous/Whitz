@@ -5,10 +5,11 @@ import { useChatStore } from "../../stores/chat";
 import { useFilesStore } from "../../stores/files";
 import { categoryLabel, formatFileSize } from "../../lib/fileTypes";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
+import Spinner from "../ui/Spinner.vue";
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
-const props = defineProps<{ message: Message }>();
+const props = defineProps<{ message: Message; downloadingFileId?: string | null }>();
 const emit = defineEmits<{
   steps: [];
   regenerate: [assistantMessageId: string];
@@ -72,7 +73,7 @@ function cancelEdit() {
 
 function submitEdit() {
   const trimmed = editText.value.trim();
-  if (!trimmed || chat.streaming) return;
+  if (!trimmed || chat.streaming || filesStore.hasActiveUploads) return;
   editing.value = false;
   emit("edit", props.message.id, trimmed);
 }
@@ -98,11 +99,14 @@ const isFailureOrCancelled = computed(
 );
 
 const liveLabel = computed(() => {
+  if (chat.stopping) return "正在停止生成…";
+  if (chat.reconnecting) return "网络重连中，正在恢复进度…";
   if (chat.currentStep) {
     const step = chat.currentStep;
     return step.title ? `步骤 ${step.index}/${step.total} · ${step.title}` : `步骤 ${step.index}/${step.total}`;
   }
   if (chat.runningTool) return `正在使用 ${chat.runningTool}`;
+  if (chat.waitingFirstByte) return "正在连接助理…";
   const items = chat.plan?.items ?? [];
   if (items.length && items.every((item) => item.status === "completed")) return "正在生成回答…";
   return "正在思考…";
@@ -278,7 +282,7 @@ const resolvedArtifacts = computed(() =>
           <button
             type="button"
             class="focus-ring rounded-full bg-primary px-3.5 py-1.5 text-[12.5px] font-medium text-primary-fg transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="!editText.trim() || chat.streaming"
+            :disabled="!editText.trim() || chat.streaming || filesStore.hasActiveUploads"
             @click="submitEdit"
           >
             保存并重发
@@ -374,6 +378,7 @@ const resolvedArtifacts = computed(() =>
       :aria-pressed="isCurrent"
       @click="emit('steps')"
     >
+      <Spinner v-if="isLive" :size="13" class="shrink-0 text-accent" />
       <span class="truncate">{{ isLive ? liveLabel : "步骤查看" }}</span>
       <span v-if="!isLive && stepsCount" class="shrink-0 tabular-nums opacity-80">· {{ stepsCount }}</span>
       <svg class="h-3.5 w-3.5 shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -381,7 +386,21 @@ const resolvedArtifacts = computed(() =>
       </svg>
     </button>
 
-    <MarkdownRenderer :content="message.content" @preview-html="emit('preview-html', $event)" />
+    <div
+      v-if="isLive && !message.content.trim()"
+      class="flex items-center gap-2 py-2 text-[13.5px] text-fg-faint"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="inline-flex items-center gap-1" aria-hidden="true">
+        <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent/80" />
+        <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent/60 [animation-delay:150ms]" />
+        <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent/40 [animation-delay:300ms]" />
+      </span>
+      <span>{{ chat.reconnecting ? "正在恢复实时输出…" : chat.waitingFirstByte ? "助理已接收请求，正在准备回复…" : "正在组织回答…" }}</span>
+    </div>
+
+    <MarkdownRenderer v-else :content="message.content" @preview-html="emit('preview-html', $event)" />
 
     <!-- AI Generated Workspace Artifact Cards -->
     <div v-if="resolvedArtifacts.length" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -431,12 +450,14 @@ const resolvedArtifacts = computed(() =>
           </button>
           <button
             type="button"
-            class="focus-ring flex h-8 w-8 items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+            class="focus-ring flex h-8 w-8 items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-60"
+            :disabled="downloadingFileId === file.id"
             aria-label="下载文件"
             title="下载"
             @click="emit('download-file', file)"
           >
-            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+            <Spinner v-if="downloadingFileId === file.id" :size="15" />
+            <svg v-else class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
             </svg>
           </button>
@@ -452,7 +473,7 @@ const resolvedArtifacts = computed(() =>
       <button
         type="button"
         class="focus-ring inline-flex items-center gap-1.5 rounded-full bg-primary px-3 py-1 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-        :disabled="chat.streaming"
+        :disabled="chat.streaming || filesStore.hasActiveUploads"
         @click="emit('regenerate', message.id)"
       >
         <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -510,7 +531,7 @@ const resolvedArtifacts = computed(() =>
       <button
         type="button"
         class="focus-ring inline-flex h-7.5 items-center gap-1 rounded-lg px-2 text-[12px] font-medium text-fg-faint transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-45"
-        :disabled="chat.streaming"
+        :disabled="chat.streaming || filesStore.hasActiveUploads"
         aria-label="重新生成"
         title="重新生成"
         @click="emit('regenerate', message.id)"

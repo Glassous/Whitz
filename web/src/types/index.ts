@@ -99,6 +99,7 @@ export interface Conversation {
   plan: Plan | null;
   active_run_id: string | null;
   active_run_status: string | null;
+  pending_control?: Record<string, any> | null;
   is_pinned: boolean;
   pinned_at: string | null;
   created_at: string;
@@ -150,6 +151,8 @@ export interface ConversationFile {
   category: FileCategory | string;
   size_bytes: number;
   status: "pending" | "ready" | "failed" | string;
+  index_status?: "pending" | "indexing" | "ready" | "partial" | "failed" | string;
+  indexed_chunks?: number;
   source: "user" | "assistant" | string;
   is_global: boolean;
   message_id?: string | null;
@@ -218,6 +221,7 @@ export type PreviewTarget =
     };
 
 export interface ToolPayload {
+  call_id?: string | null;
   args?: unknown;
   result?: unknown;
   duration?: number;

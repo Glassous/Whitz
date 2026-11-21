@@ -402,11 +402,32 @@ def render_skill_markdown(
     return f"---\n{dumped}\n---\n\n{text}\n"
 
 
+_BUILTIN_SCAN_CACHE: dict[tuple[str, float, str, str], tuple[float, list[dict[str, Any]]]] = {}
+
+
 def _scan_builtin_skills(disabled_set: set[str]) -> list[dict[str, Any]]:
-    """Scan built-in skills on disk under BUILTIN_SKILLS_DIR / APP_DATA_DIR / resources."""
+    """Scan built-in skills on disk with short mtime-keyed cache to avoid per-turn event-loop disk walks."""
+    import time as _time
+
     global_root = _global_skills_dir()
     if not global_root.is_dir():
         return []
+
+    settings = get_settings()
+    try:
+        dir_mtime = global_root.stat().st_mtime
+    except OSError:
+        dir_mtime = 0.0
+    cache_key = (
+        str(global_root),
+        dir_mtime,
+        settings.skills_builtin_allowlist or "",
+        settings.skills_builtin_denylist or "",
+    )
+    now_mono = _time.monotonic()
+    cached = _BUILTIN_SCAN_CACHE.get(cache_key)
+    if cached and (now_mono - cached[0]) < 60.0:
+        return [{**item, "enabled": item["name"] not in disabled_set} for item in cached[1]]
 
     items: list[dict[str, Any]] = []
     for dirpath, dirnames, filenames in os.walk(global_root, followlinks=False):
@@ -460,6 +481,9 @@ def _scan_builtin_skills(disabled_set: set[str]) -> list[dict[str, Any]]:
                 "unavailable_reason": unavailable_reason,
             }
         )
+    if len(_BUILTIN_SCAN_CACHE) > 32:
+        _BUILTIN_SCAN_CACHE.clear()
+    _BUILTIN_SCAN_CACHE[cache_key] = (now_mono, items)
     return items
 
 

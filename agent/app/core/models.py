@@ -42,6 +42,50 @@ class WhitzChatOpenAI(ChatOpenAI):
 VALID_ROUTES = ("auto", "default", "fast", "reasoning", "vision")
 _TRIVIAL_GREETINGS = frozenset({"hi", "hello", "hey", "你好", "您好", "在吗", "谢谢", "感谢", "ok", "好的", "嗯"})
 _UNSUPPORTED_THINKING_MODELS: set[tuple[str, str]] = set()
+_COMPLEX_REASONING_RE = re.compile(
+    r"(架构|设计方案|深入分析|对比分析|源码|排障|调试|为什么.*失败|推导|证明|算法|复杂度|"
+    r"重构|性能优化|数据库设计|sql|系统设计|权衡|trade[- ]?off|benchmark|debug|refactor|"
+    r"architecture|step[- ]by[- ]step|数学|方程|微积分|概率)",
+    re.IGNORECASE,
+)
+
+# Shared process-level async HTTP clients (reused across LLM / Embedding / Rerank calls)
+_SHARED_API_CLIENT: httpx.AsyncClient | None = None
+_SHARED_LLM_CLIENT: httpx.AsyncClient | None = None
+
+
+def _get_shared_api_client() -> httpx.AsyncClient:
+    global _SHARED_API_CLIENT
+    if _SHARED_API_CLIENT is None or _SHARED_API_CLIENT.is_closed:
+        _SHARED_API_CLIENT = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_connections=64, max_keepalive_connections=20, keepalive_expiry=30.0),
+            trust_env=False,
+        )
+    return _SHARED_API_CLIENT
+
+
+def _get_shared_llm_client(timeout_seconds: float = 120.0) -> httpx.AsyncClient:
+    global _SHARED_LLM_CLIENT
+    if _SHARED_LLM_CLIENT is None or _SHARED_LLM_CLIENT.is_closed:
+        _SHARED_LLM_CLIENT = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout_seconds, connect=15.0),
+            limits=httpx.Limits(max_connections=64, max_keepalive_connections=24, keepalive_expiry=45.0),
+            trust_env=False,
+        )
+    return _SHARED_LLM_CLIENT
+
+
+async def aclose_shared_http_clients() -> None:
+    global _SHARED_API_CLIENT, _SHARED_LLM_CLIENT
+    for client in (_SHARED_API_CLIENT, _SHARED_LLM_CLIENT):
+        if client is not None and not client.is_closed:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+    _SHARED_API_CLIENT = None
+    _SHARED_LLM_CLIENT = None
 
 
 @dataclass(frozen=True)
@@ -99,19 +143,29 @@ def _normalize_embeddings_url(base_url: str) -> str:
     return f"{cleaned}/v1/embeddings"
 
 
-class EmbeddingClient:
-    """OpenAI-compatible /v1/embeddings client returning 1536-dim L2 vectors with deterministic fallback."""
+def _embedding_cache_key(model: str, dim: int, text: str) -> str:
+    digest = hashlib.sha256(f"{model}|{dim}|{text}".encode("utf-8")).hexdigest()[:32]
+    return f"emb:cache:{digest}"
 
-    def __init__(self, settings: AgentSettings | None = None) -> None:
+
+class EmbeddingClient:
+    """OpenAI-compatible /v1/embeddings client with micro-batching, retry, Redis cache, and lossless L2 zero-padding.
+
+    Never fabricates hash vectors when unconfigured or on failure — returns ``None`` so pgvector
+    stays strictly single-space and retrievers degrade cleanly to ``pg_trgm`` + FTS.
+    """
+
+    def __init__(self, settings: AgentSettings | None = None, redis_client: Any = None) -> None:
         self.settings = settings or get_settings()
+        self.redis = redis_client
 
     @property
     def base_url(self) -> str:
-        return (self.settings.embedding_base_url or self.settings.llm_base_url or "").strip()
+        return (self.settings.embedding_base_url or "").strip()
 
     @property
     def api_key(self) -> str:
-        return (self.settings.embedding_api_key or self.settings.llm_api_key or "").strip()
+        return (self.settings.embedding_api_key or "").strip()
 
     @property
     def model(self) -> str:
@@ -122,46 +176,218 @@ class EmbeddingClient:
         return max(1, int(self.settings.embedding_dimensions or 1536))
 
     @property
+    def batch_size(self) -> int:
+        return max(1, min(int(self.settings.embedding_batch_size or 10), 64))
+
+    @property
     def is_configured(self) -> bool:
         return bool(self.base_url and self.model)
 
-    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
-        items = [str(t or "") for t in texts]
+    async def _post_batch(
+        self,
+        url: str,
+        headers: dict[str, str],
+        batch: list[str],
+        dim: int,
+    ) -> list[list[float]] | None:
+        """Send a single batch with exponential backoff retry and automatic batch-size halving on 400."""
+        client = _get_shared_api_client()
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = await client.post(
+                    url,
+                    headers=headers,
+                    json={"model": self.model, "input": batch},
+                    timeout=httpx.Timeout(self.settings.embedding_timeout_seconds, connect=10.0),
+                )
+                if resp.status_code == 400 and len(batch) > 1 and "batch" in resp.text.lower():
+                    mid = len(batch) // 2
+                    left = await self._post_batch(url, headers, batch[:mid], dim)
+                    right = await self._post_batch(url, headers, batch[mid:], dim)
+                    if left is None or right is None:
+                        return None
+                    return left + right
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    raise httpx.HTTPStatusError("transient", request=resp.request, response=resp)
+                resp.raise_for_status()
+                payload = resp.json()
+                data = payload.get("data") or []
+                ordered = sorted(data, key=lambda row: int(row.get("index", 0)))
+                if len(ordered) != len(batch):
+                    raise ValueError(f"unexpected embedding count {len(ordered)} != {len(batch)}")
+                return [fit_embedding(row["embedding"], dim=dim) for row in ordered]
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    await asyncio.sleep(0.4 * (2**attempt))
+        logger.warning("Remote embedding batch failed after retries (%s)", last_exc)
+        return None
+
+    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]] | None:
+        items = [str(t or "").strip() for t in texts]
         if not items:
             return []
-        dim = self.dimensions
         if not self.is_configured:
-            return [deterministic_embedding(t, dim=dim) for t in items]
+            return None
 
-        url = _normalize_embeddings_url(self.base_url)
+        dim = self.dimensions
+        results: list[list[float] | None] = [None] * len(items)
+        missing_indices: list[int] = []
+        cache_keys: list[str] = [_embedding_cache_key(self.model, dim, t) for t in items]
+
+        # 1. Check Redis embedding cache
+        if self.redis is not None:
+            try:
+                cached_vals = await self.redis.mget(cache_keys)
+                for idx, raw in enumerate(cached_vals or []):
+                    if raw:
+                        vec = json.loads(raw)
+                        if isinstance(vec, list) and len(vec) == dim:
+                            results[idx] = vec
+                            continue
+                    missing_indices.append(idx)
+            except Exception:
+                missing_indices = list(range(len(items)))
+        else:
+            missing_indices = list(range(len(items)))
+
+        # 2. Fetch uncached texts in micro-batches
+        if missing_indices:
+            url = _normalize_embeddings_url(self.base_url)
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+
+            bs = self.batch_size
+            ttl = max(60, int(self.settings.embedding_cache_ttl_seconds or 86400))
+            for start in range(0, len(missing_indices), bs):
+                sub_idxs = missing_indices[start : start + bs]
+                sub_texts = [items[i] or " " for i in sub_idxs]
+                vecs = await self._post_batch(url, headers, sub_texts, dim)
+                if vecs is None:
+                    return None
+                pipe = self.redis.pipeline(transaction=False) if self.redis is not None else None
+                for i, vec in zip(sub_idxs, vecs):
+                    results[i] = vec
+                    if pipe is not None:
+                        pipe.set(cache_keys[i], json.dumps(vec, separators=(",", ":")), ex=ttl)
+                if pipe is not None:
+                    try:
+                        await pipe.execute()
+                    except Exception:
+                        pass
+
+        if any(v is None for v in results):
+            return None
+        return [v for v in results if v is not None]
+
+    async def embed_query(self, text: str) -> list[float] | None:
+        vectors = await self.embed_texts([text])
+        if not vectors:
+            return None
+        return vectors[0]
+
+
+class RerankClient:
+    """Dual-protocol Stage-2 Reranker client supporting DashScope/Maas native & OpenAI/Jina/SiliconFlow APIs."""
+
+    def __init__(self, settings: AgentSettings | None = None, redis_client: Any = None) -> None:
+        self.settings = settings or get_settings()
+        self.redis = redis_client
+
+    @property
+    def base_url(self) -> str:
+        return (self.settings.rerank_base_url or "").strip()
+
+    @property
+    def api_key(self) -> str:
+        return (self.settings.rerank_api_key or "").strip()
+
+    @property
+    def model(self) -> str:
+        return (self.settings.rerank_model or "").strip()
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.base_url and self.model)
+
+    @staticmethod
+    def _is_dashscope_native(url: str) -> bool:
+        low = url.lower()
+        return "/services/rerank/" in low or ("aliyuncs.com" in low and "/compatible-mode/" not in low)
+
+    @staticmethod
+    def _normalize_url(base_url: str) -> str:
+        cleaned = base_url.strip().rstrip("/")
+        if "/rerank" in cleaned.lower():
+            return cleaned
+        if cleaned.endswith("/v1"):
+            return f"{cleaned}/rerank"
+        return f"{cleaned}/v1/rerank"
+
+    async def rerank(
+        self,
+        query: str,
+        documents: Sequence[str],
+        *,
+        top_n: int | None = None,
+    ) -> list[tuple[int, float]] | None:
+        """Return ordered ``[(doc_index, relevance_score), ...]`` or ``None`` if disabled/failed."""
+        docs = [str(d or "")[:2000] for d in documents]
+        if not self.is_configured or not query.strip() or not docs:
+            return None
+
+        limit = max(1, min(int(top_n or self.settings.rerank_top_n or 8), len(docs)))
+        url = self._normalize_url(self.base_url)
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(self.settings.embedding_timeout_seconds),
-                trust_env=False,
-            ) as client:
-                resp = await client.post(
-                    url,
-                    headers=headers,
-                    json={"model": self.model, "input": items},
-                )
-                resp.raise_for_status()
-                payload = resp.json()
-            data = payload.get("data") or []
-            ordered = sorted(data, key=lambda row: int(row.get("index", 0)))
-            if len(ordered) != len(items):
-                raise ValueError(f"unexpected embedding count {len(ordered)} != {len(items)}")
-            return [fit_embedding(row["embedding"], dim=dim) for row in ordered]
-        except Exception as exc:
-            logger.warning("Remote embedding call failed (%s); falling back to deterministic embedding", exc)
-            return [deterministic_embedding(t, dim=dim) for t in items]
+        is_ds = self._is_dashscope_native(url)
+        if is_ds:
+            body: dict[str, Any] = {
+                "model": self.model,
+                "input": {"query": query.strip()[:1000], "documents": docs},
+                "parameters": {"top_n": limit, "return_documents": False},
+            }
+        else:
+            body = {
+                "model": self.model,
+                "query": query.strip()[:1000],
+                "documents": docs,
+                "top_n": limit,
+                "return_documents": False,
+            }
 
-    async def embed_query(self, text: str) -> list[float]:
-        vectors = await self.embed_texts([text])
-        return vectors[0] if vectors else deterministic_embedding(text, dim=self.dimensions)
+        client = _get_shared_api_client()
+        try:
+            resp = await client.post(
+                url,
+                headers=headers,
+                json=body,
+                timeout=httpx.Timeout(self.settings.rerank_timeout_seconds, connect=8.0),
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            raw_results = (
+                (payload.get("output") or {}).get("results")
+                if is_ds and isinstance(payload.get("output"), dict)
+                else payload.get("results")
+            ) or []
+            scored: list[tuple[int, float]] = []
+            for item in raw_results:
+                if not isinstance(item, dict):
+                    continue
+                idx = int(item.get("index", -1))
+                score = float(item.get("relevance_score", item.get("score", 0.0)))
+                if 0 <= idx < len(docs):
+                    scored.append((idx, score))
+            scored.sort(key=lambda pair: pair[1], reverse=True)
+            return scored[:limit] if scored else None
+        except Exception as exc:
+            logger.warning("Rerank API call failed (%s); falling back to RRF+MMR ordering", exc)
+            return None
 
 
 class ModelRouter:
@@ -322,6 +548,8 @@ class ModelRouter:
             return False, "fast", "explicit_fast_route"
         if req == "vision":
             return False, "vision", "explicit_vision_route"
+        if req == "default":
+            return False, "default", "explicit_default_route"
         if mode_cfg == "enabled":
             return True, ("reasoning" if self.settings.llm_reasoning_model.strip() else "default"), "global_enabled"
         if mode_cfg == "disabled":
@@ -340,51 +568,13 @@ class ModelRouter:
         if low in _TRIVIAL_GREETINGS or (len(low) <= 8 and "?" not in low and "？" not in low):
             return False, ("fast" if self.settings.llm_fast_model.strip() else "default"), "trivial_query"
 
-        # Let the AI autonomously decide whether deep thinking is warranted.
-        probe_ep = self.endpoint_for("fast" if self.settings.llm_fast_model.strip() else "default")
-        if (
-            self.settings.llm_adaptive_probe_enabled
-            and probe_ep.base_url
-            and probe_ep.model
-            and not probe_ep.base_url.startswith("http://llm.test")
-        ):
-            try:
-                probe_llm = self.build_chat_model(
-                    probe_ep,
-                    temperature=0.0,
-                    max_tokens=48,
-                    streaming=False,
-                    thinking_enabled=False,
-                )
-                gate_prompt = (
-                    "你是 Whitz 推理策略门控器。请判断下面用户请求是否需要开启深度思考（Thinking）模式。\n"
-                    "- 开启（true）：需要多步逻辑推导、代码编写/排障、数学计算、架构设计、复杂长文档对比、多角度调研或疑难分析。\n"
-                    "- 关闭（false）：常规事实查询、简短问答、日常对话、简单翻译/润色或直接工具检索即可解决的问题。\n"
-                    '只输出单行 JSON：{"thinking": true或false, "route": "reasoning"|"default"|"fast"}'
-                )
-                resp = await asyncio.wait_for(
-                    probe_llm.ainvoke(
-                        [SystemMessage(content=gate_prompt), HumanMessage(content=user_text[:800])]
-                    ),
-                    timeout=6.0,
-                )
-                raw = resp.content if isinstance(resp.content, str) else ""
-                start = raw.find("{")
-                end = raw.rfind("}")
-                if start >= 0 and end > start:
-                    parsed = json.loads(raw[start : end + 1])
-                    want_thinking = bool(parsed.get("thinking"))
-                    suggested = str(parsed.get("route") or "").strip().lower()
-                    if want_thinking:
-                        route = "reasoning" if self.settings.llm_reasoning_model.strip() else "default"
-                        return True, route, "ai_probe_thinking"
-                    if suggested == "fast" and self.settings.llm_fast_model.strip():
-                        return False, "fast", "ai_probe_fast"
-                    return False, "default", "ai_probe_direct"
-            except Exception as exc:
-                logger.debug("Adaptive thinking probe skipped (%s)", exc)
+        # Zero-latency deterministic complexity heuristic (eliminates 6s TTFT probe overhead;
+        # the agent can still escalate mid-turn via `request_deep_thinking`).
+        if len(user_text) >= 180 or "```" in user_text or _COMPLEX_REASONING_RE.search(user_text):
+            route = "reasoning" if self.settings.llm_reasoning_model.strip() else "default"
+            return True, route, "heuristic_complex_thinking"
 
-        return False, "default", "fallback_direct"
+        return False, "default", "heuristic_direct"
 
     def fallback_chain(self, route: str) -> list[ModelEndpoint]:
         order_map = {
@@ -468,6 +658,7 @@ class ModelRouter:
             "timeout": self.settings.llm_timeout_seconds,
             "max_retries": 1,
             "stream_usage": True,
+            "http_async_client": _get_shared_llm_client(self.settings.llm_timeout_seconds),
         }
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens

@@ -16,8 +16,8 @@ class AgentSettings(BaseSettings):
 
     database_url: str = "postgresql://whitz:whitz_dev_password@localhost:5432/whitz"
     redis_url: str = "redis://localhost:6379/0"
-    redis_max_connections: int = 20
-    redis_socket_timeout: float = 2.0
+    redis_max_connections: int = 64
+    redis_socket_timeout: float = 5.0
 
     internal_mcp_base_url: str = "http://server:8000"
 
@@ -51,7 +51,16 @@ class AgentSettings(BaseSettings):
     embedding_api_key: str = ""
     embedding_model: str = ""
     embedding_dimensions: int = 1536
+    embedding_batch_size: int = 10
+    embedding_cache_ttl_seconds: int = 86400
     embedding_timeout_seconds: float = 30.0
+
+    # Optional Stage-2 Reranker (DashScope native & OpenAI/Jina/SiliconFlow compatible)
+    rerank_base_url: str = ""
+    rerank_api_key: str = ""
+    rerank_model: str = ""
+    rerank_top_n: int = 8
+    rerank_timeout_seconds: float = 15.0
 
     # Circuit breaker
     model_cb_failure_threshold: int = 3
@@ -67,10 +76,11 @@ class AgentSettings(BaseSettings):
     search_api_key: str = ""
 
     # Run limits & worker settings
-    run_max_seconds: int = 900
+    run_max_seconds: int = 1200
     worker_max_jobs: int = 8
-    event_stream_ttl_seconds: int = 3600
+    event_stream_ttl_seconds: int = 86400
     run_state_ttl_seconds: int = 86400
+    stream_max_len: int = 10000
 
     # Context window & cost guardrails
     main_max_prompt_tokens: int = 24000
@@ -97,9 +107,11 @@ class AgentSettings(BaseSettings):
 
     @property
     def embedding_configured(self) -> bool:
-        return bool(self.embedding_base_url.strip() or self.llm_base_url.strip()) and bool(
-            self.embedding_model.strip()
-        )
+        return bool(self.embedding_base_url.strip()) and bool(self.embedding_model.strip())
+
+    @property
+    def rerank_configured(self) -> bool:
+        return bool(self.rerank_base_url.strip()) and bool(self.rerank_model.strip())
 
     def configure_langsmith(self) -> None:
         if self.langsmith_tracing and self.langsmith_api_key.strip():

@@ -3,14 +3,17 @@ import { ref } from "vue";
 import type { PendingControl } from "../../types";
 import BaseButton from "../ui/BaseButton.vue";
 
-defineProps<{ control: PendingControl }>();
+const props = defineProps<{
+  control: PendingControl;
+  submitting?: boolean;
+}>();
 const emit = defineEmits<{ submit: [string] }>();
 const answer = ref("");
 
 function send() {
-  if (!answer.value.trim()) return;
-  emit("submit", answer.value.trim());
-  answer.value = "";
+  const cleaned = answer.value.trim();
+  if (!cleaned || props.submitting) return;
+  emit("submit", cleaned);
 }
 </script>
 
@@ -28,10 +31,13 @@ function send() {
         <form class="mt-3 flex items-center gap-2" @submit.prevent="send">
           <input
             v-model="answer"
+            :disabled="submitting"
             placeholder="输入你的回答…"
-            class="focus-ring h-9 flex-1 rounded-xl bg-canvas px-3 text-[13px] text-fg placeholder:text-fg-faint"
+            class="focus-ring h-9 flex-1 rounded-xl bg-canvas px-3 text-[13px] text-fg placeholder:text-fg-faint disabled:opacity-60"
           />
-          <BaseButton type="submit" size="sm" :disabled="!answer.trim()">提交</BaseButton>
+          <BaseButton type="submit" size="sm" :loading="submitting" :disabled="!answer.trim() || submitting">
+            {{ submitting ? "提交中…" : "提交" }}
+          </BaseButton>
         </form>
       </div>
     </div>

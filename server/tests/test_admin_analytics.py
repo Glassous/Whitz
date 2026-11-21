@@ -683,7 +683,8 @@ async def test_admin_user_detail_ledger_sessions_and_revoke(admin, register, cli
     assert detail["profile_context_enabled"] is True
     assert detail["memory_enabled"] is True
     assert detail["memory_require_confirm"] is False
-    assert detail["conversation_count"] == 1
+    # Auto-created Main Chat on registration + 1 seeded side conversation = 2
+    assert detail["conversation_count"] == 2
     assert detail["message_count"] == 2
     assert detail["file_count"] == 1
     assert detail["total_tokens"] == 25000

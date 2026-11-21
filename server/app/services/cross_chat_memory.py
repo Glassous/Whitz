@@ -13,10 +13,11 @@ import httpx
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.core.config import get_settings
 from app.core.redis import get_redis
-from app.db.models import Conversation, ConversationDigest, Message, User, is_pgvector_enabled
+from app.db.models import Conversation, ConversationDigest, Message, MessageChunk, User, is_pgvector_enabled
 from app.db.session import SessionLocal, detect_pgvector
 from app.services import embeddings
 
@@ -224,15 +225,18 @@ def _parse_digest_json(raw: str | None) -> tuple[str, list[str], list[str]] | No
 async def refresh_side_chat_digest(
     db: AsyncSession,
     conv_id: uuid.UUID,
-    user_id: uuid.UUID,
+    user_id: uuid.UUID | None = None,
     *,
     force: bool = False,
     use_llm: bool = True,
 ) -> ConversationDigest | None:
     """Incrementally build or update a side chat's digest with cost guardrails."""
     conv = await db.get(Conversation, conv_id)
-    if conv is None or conv.user_id != user_id or conv.kind != "side":
+    if conv is None or conv.kind != "side":
         return None
+    if user_id is not None and conv.user_id != user_id:
+        return None
+    user_id = conv.user_id
 
     rows = list(
         (
@@ -548,18 +552,15 @@ async def _recall_relevant_digests(
         return []
 
     await detect_pgvector(db)
-    all_digests = list(
-        (
-            await db.execute(
-                select(ConversationDigest)
-                .where(ConversationDigest.user_id == user_id)
-                .order_by(ConversationDigest.last_message_at.desc().nullslast(), ConversationDigest.updated_at.desc())
-                .limit(200)
-            )
-        )
-        .scalars()
-        .all()
+    digest_stmt = (
+        select(ConversationDigest)
+        .where(ConversationDigest.user_id == user_id)
+        .order_by(ConversationDigest.last_message_at.desc().nullslast(), ConversationDigest.updated_at.desc())
+        .limit(200)
     )
+    if is_pgvector_enabled():
+        digest_stmt = digest_stmt.options(defer(ConversationDigest.embedding))
+    all_digests = list((await db.execute(digest_stmt)).scalars().all())
     if not all_digests:
         return []
 
@@ -569,19 +570,20 @@ async def _recall_relevant_digests(
 
     # 1. FTS leg
     try:
-        fts_rows = (
-            await db.execute(
-                select(ConversationDigest.conversation_id)
-                .where(
-                    ConversationDigest.user_id == user_id,
-                    ConversationDigest.search_tsv.op("@@")(func.plainto_tsquery("simple", cleaned)),
+        async with db.begin_nested():
+            fts_rows = (
+                await db.execute(
+                    select(ConversationDigest.conversation_id)
+                    .where(
+                        ConversationDigest.user_id == user_id,
+                        ConversationDigest.search_tsv.op("@@")(func.plainto_tsquery("simple", cleaned)),
+                    )
+                    .order_by(
+                        desc(func.ts_rank_cd(ConversationDigest.search_tsv, func.plainto_tsquery("simple", cleaned)))
+                    )
+                    .limit(limit * 3)
                 )
-                .order_by(
-                    desc(func.ts_rank_cd(ConversationDigest.search_tsv, func.plainto_tsquery("simple", cleaned)))
-                )
-                .limit(limit * 3)
-            )
-        ).scalars().all()
+            ).scalars().all()
         for rank, cid in enumerate(fts_rows, 1):
             scores[cid] = scores.get(cid, 0.0) + 1.0 / (rrf_k + rank)
     except Exception:
@@ -604,7 +606,7 @@ async def _recall_relevant_digests(
     for rank, (_, cid) in enumerate(lexical_hits[: limit * 3], 1):
         scores[cid] = scores.get(cid, 0.0) + 1.0 / (rrf_k + rank)
 
-    # 3. Vector leg (pgvector or in-process cosine fallback)
+    # 3. Vector leg (pgvector HNSW with iterative_scan or in-process cosine fallback)
     if embeddings.is_embedding_configured():
         q_vecs = await embeddings.embed_texts([cleaned[:1000]])
         q_vec = q_vecs[0] if q_vecs else None
@@ -612,19 +614,28 @@ async def _recall_relevant_digests(
             if is_pgvector_enabled():
                 try:
                     vec_lit = "[" + ",".join(f"{x:.8f}" for x in q_vec) + "]"
-                    res = await db.execute(
-                        text(
-                            """
-                            SELECT conversation_id
-                            FROM conversation_digests
-                            WHERE user_id = :uid AND embedding IS NOT NULL
-                            ORDER BY embedding <=> CAST(:qvec AS vector) ASC
-                            LIMIT :lim
-                            """
-                        ),
-                        {"uid": user_id, "qvec": vec_lit, "lim": limit * 3},
-                    )
-                    for rank, (cid,) in enumerate(res.fetchall(), 1):
+                    try:
+                        async with db.begin_nested():
+                            await db.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+                    except Exception:
+                        pass
+                    async with db.begin_nested():
+                        res = await db.execute(
+                            text(
+                                """
+                                SELECT conversation_id
+                                FROM conversation_digests
+                                WHERE user_id = :uid
+                                  AND embedding IS NOT NULL
+                                  AND (embedding <=> CAST(:qvec AS vector)) < 0.78
+                                ORDER BY embedding <=> CAST(:qvec AS vector) ASC
+                                LIMIT :lim
+                                """
+                            ),
+                            {"uid": user_id, "qvec": vec_lit, "lim": limit * 3},
+                        )
+                        rows = res.fetchall()
+                    for rank, (cid,) in enumerate(rows, 1):
                         scores[cid] = scores.get(cid, 0.0) + 1.2 / (rrf_k + rank)
                 except Exception:
                     pass
@@ -654,6 +665,238 @@ async def _recall_relevant_digests(
     return [by_id[cid] for cid in ranked_ids if cid in by_id]
 
 
+def schedule_backfill_missing_digests(user_id: uuid.UUID, limit: int = 12) -> None:
+    """Non-blocking background backfill for migrated side chats without digests."""
+
+    async def _runner() -> None:
+        try:
+            async with SessionLocal() as db:
+                await backfill_missing_digests_lightweight(db, user_id, limit=limit)
+        except Exception as exc:
+            logger.debug("Background digest backfill skipped for user=%s: %s", user_id, exc)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(_runner())
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+async def index_turn_chunk(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    conversation_kind: str,
+    conversation_title: str,
+    user_msg_id: uuid.UUID | None,
+    assistant_msg_id: uuid.UUID | None,
+    user_content: str,
+    assistant_content: str,
+) -> MessageChunk | None:
+    """Vectorize & index a completed Q&A turn into ``message_chunks`` for episodic semantic recall."""
+    u_txt = _clip(user_content, 600)
+    a_txt = _clip(assistant_content, 1000)
+    if not u_txt and not a_txt:
+        return None
+
+    await detect_pgvector(db)
+    dt_label = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    kind_label = "主聊" if conversation_kind == "main" else "旁聊"
+    header = f"[{kind_label}: {conversation_title or '未命名'} | {dt_label}]"
+    body = f"用户：{u_txt}\n助手：{a_txt}".strip()
+    embed_text = f"{header}\n{body}"
+
+    vec: list[float] | None = None
+    if embeddings.is_embedding_configured():
+        vecs = await embeddings.embed_texts([embed_text[:1800]])
+        vec = vecs[0] if vecs else None
+
+    chunk = MessageChunk(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        conversation_kind="main" if conversation_kind == "main" else "side",
+        start_msg_id=user_msg_id,
+        end_msg_id=assistant_msg_id,
+        context_header=header,
+        content=body,
+        token_count=estimate_tokens(body),
+        search_tsv=func.to_tsvector("simple", embed_text),
+        embedding=vec,
+    )
+    db.add(chunk)
+    await db.commit()
+    return chunk
+
+
+def schedule_turn_chunk_indexing(
+    *,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    conversation_kind: str,
+    conversation_title: str,
+    user_msg_id: uuid.UUID | None,
+    assistant_msg_id: uuid.UUID | None,
+    user_content: str,
+    assistant_content: str,
+) -> None:
+    """Schedule non-blocking episodic turn vectorization after a run completes."""
+
+    async def _runner() -> None:
+        try:
+            async with SessionLocal() as db:
+                await index_turn_chunk(
+                    db,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    conversation_kind=conversation_kind,
+                    conversation_title=conversation_title,
+                    user_msg_id=user_msg_id,
+                    assistant_msg_id=assistant_msg_id,
+                    user_content=user_content,
+                    assistant_content=assistant_content,
+                )
+        except Exception as exc:
+            logger.debug("Background turn chunk indexing skipped for conv=%s: %s", conversation_id, exc)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(_runner())
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+async def _recall_relevant_message_chunks(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    query_text: str,
+    *,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """Hybrid pgvector + pg_trgm + FTS recall over episodic ``message_chunks``."""
+    cleaned = (query_text or "").strip()
+    if not cleaned:
+        return []
+    await detect_pgvector(db)
+
+    scores: dict[uuid.UUID, float] = {}
+    records: dict[uuid.UUID, dict[str, Any]] = {}
+    rrf_k = 60
+
+    # 1. Vector HNSW leg
+    if embeddings.is_embedding_configured() and is_pgvector_enabled():
+        q_vecs = await embeddings.embed_texts([cleaned[:1000]])
+        q_vec = q_vecs[0] if q_vecs else None
+        if q_vec:
+            vec_lit = "[" + ",".join(f"{x:.8f}" for x in q_vec) + "]"
+            try:
+                try:
+                    async with db.begin_nested():
+                        await db.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+                except Exception:
+                    pass
+                async with db.begin_nested():
+                    res = await db.execute(
+                        text(
+                            """
+                            SELECT id, conversation_id, conversation_kind, context_header, content
+                            FROM message_chunks
+                            WHERE user_id = :uid
+                              AND embedding IS NOT NULL
+                              AND (embedding <=> CAST(:qvec AS vector)) < 0.72
+                            ORDER BY embedding <=> CAST(:qvec AS vector) ASC
+                            LIMIT :lim
+                            """
+                        ),
+                        {"uid": user_id, "qvec": vec_lit, "lim": limit * 3},
+                    )
+                    vec_rows = res.fetchall()
+                for rank, row in enumerate(vec_rows, 1):
+                    cid = row[0]
+                    scores[cid] = scores.get(cid, 0.0) + 1.25 / (rrf_k + rank)
+                    records.setdefault(
+                        cid,
+                        {
+                            "conversation_id": str(row[1]),
+                            "kind": str(row[2] or "side"),
+                            "context_header": str(row[3] or ""),
+                            "content": str(row[4] or ""),
+                        },
+                    )
+            except Exception:
+                pass
+
+    # 2. pg_trgm CJK leg
+    if len(cleaned) >= 2:
+        try:
+            async with db.begin_nested():
+                res = await db.execute(
+                    text(
+                        """
+                        SELECT id, conversation_id, conversation_kind, context_header, content
+                        FROM message_chunks
+                        WHERE user_id = :uid AND word_similarity(:q, content) >= 0.18
+                        ORDER BY word_similarity(:q, content) DESC, created_at DESC
+                        LIMIT :lim
+                        """
+                    ),
+                    {"uid": user_id, "q": cleaned, "lim": limit * 3},
+                )
+                trgm_rows = res.fetchall()
+            for rank, row in enumerate(trgm_rows, 1):
+                cid = row[0]
+                scores[cid] = scores.get(cid, 0.0) + 1.0 / (rrf_k + rank)
+                records.setdefault(
+                    cid,
+                    {
+                        "conversation_id": str(row[1]),
+                        "kind": str(row[2] or "side"),
+                        "context_header": str(row[3] or ""),
+                        "content": str(row[4] or ""),
+                    },
+                )
+        except Exception:
+            pass
+
+    # 3. FTS leg
+    try:
+        async with db.begin_nested():
+            res = await db.execute(
+                text(
+                    """
+                    SELECT id, conversation_id, conversation_kind, context_header, content
+                    FROM message_chunks
+                    WHERE user_id = :uid AND search_tsv @@ plainto_tsquery('simple', :q)
+                    ORDER BY ts_rank_cd(search_tsv, plainto_tsquery('simple', :q)) DESC
+                    LIMIT :lim
+                    """
+                ),
+                {"uid": user_id, "q": cleaned, "lim": limit * 3},
+            )
+            fts_rows = res.fetchall()
+        for rank, row in enumerate(fts_rows, 1):
+            cid = row[0]
+            scores[cid] = scores.get(cid, 0.0) + 0.9 / (rrf_k + rank)
+            records.setdefault(
+                cid,
+                {
+                    "conversation_id": str(row[1]),
+                    "kind": str(row[2] or "side"),
+                    "context_header": str(row[3] or ""),
+                    "content": str(row[4] or ""),
+                },
+            )
+    except Exception:
+        pass
+
+    ranked = sorted(scores.keys(), key=lambda cid: scores[cid], reverse=True)[:limit]
+    return [records[cid] for cid in ranked]
+
+
 async def build_main_chat_memory_context(
     db: AsyncSession,
     user: User,
@@ -663,22 +906,22 @@ async def build_main_chat_memory_context(
     max_recent_dir: int = DIRECTORY_MAX_ITEMS,
     max_recalled: int = RECALLED_MAX_ITEMS,
 ) -> dict[str, str]:
-    """Assemble bounded rolling summary + cross-side-chat memory context for Main Chat."""
-    await backfill_missing_digests_lightweight(db, user.id, limit=12)
+    """Assemble bounded rolling summary + cross-side-chat & episodic turn memory context for Main Chat."""
+    # Trigger lightweight digest backfill asynchronously so it never stalls Main Chat TTFT
+    schedule_backfill_missing_digests(user.id, limit=12)
 
-    recent_digests = list(
-        (
-            await db.execute(
-                select(ConversationDigest)
-                .where(ConversationDigest.user_id == user.id)
-                .order_by(ConversationDigest.last_message_at.desc().nullslast(), ConversationDigest.updated_at.desc())
-                .limit(max_recent_dir)
-            )
-        )
-        .scalars()
-        .all()
+    await detect_pgvector(db)
+    recent_stmt = (
+        select(ConversationDigest)
+        .where(ConversationDigest.user_id == user.id)
+        .order_by(ConversationDigest.last_message_at.desc().nullslast(), ConversationDigest.updated_at.desc())
+        .limit(max_recent_dir)
     )
+    if is_pgvector_enabled():
+        recent_stmt = recent_stmt.options(defer(ConversationDigest.embedding))
+    recent_digests = list((await db.execute(recent_stmt)).scalars().all())
     recalled = await _recall_relevant_digests(db, user.id, query_text, limit=max_recalled)
+    episodic = await _recall_relevant_message_chunks(db, user.id, query_text, limit=3)
 
     sections: list[str] = []
 
@@ -709,6 +952,17 @@ async def build_main_chat_memory_context(
             rec_lines.append(block)
             used += len(block)
         sections.append("\n".join(rec_lines))
+
+    if episodic:
+        ep_lines = ["历史对话轮次语义片段召回："]
+        used = 0
+        for ep in episodic:
+            entry = f"- {ep['context_header']} (conv_id=`{ep['conversation_id']}`): {_clip(ep['content'], 320)}"
+            if used + len(entry) > 1200:
+                break
+            ep_lines.append(entry)
+            used += len(entry)
+        sections.append("\n".join(ep_lines))
 
     rolling_summary = (conv.rolling_summary or "").strip()
     if len(rolling_summary) > ROLLING_SUMMARY_MAX_CHARS:

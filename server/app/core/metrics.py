@@ -49,7 +49,7 @@ def _route_label(request: Request) -> str:
     path = getattr(route, "path", None)
     if isinstance(path, str) and path:
         return path
-    return request.url.path
+    return "__unmatched__"
 
 
 async def metrics_middleware(request: Request, call_next: Callable):

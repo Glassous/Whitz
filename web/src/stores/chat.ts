@@ -34,6 +34,11 @@ export const useChatStore = defineStore("chat", () => {
   const convId = ref<string | null>(null);
   const messages = ref<Message[]>([]);
   const streaming = ref(false);
+  const waitingFirstByte = ref(false);
+  const stopping = ref(false);
+  const reconnecting = ref(false);
+  const approvingChoice = ref<"once" | "deny" | null>(null);
+  const submittingClarify = ref(false);
   const activeAssistantId = ref<string | null>(null);
   const activeRunId = ref<string | null>(null);
   const plan = ref<Plan | null>(null);
@@ -45,6 +50,8 @@ export const useChatStore = defineStore("chat", () => {
   const selectedTurnId = ref<string | null>(null);
   let controller: AbortController | null = null;
   let pendingUserTargetId: string | null = null;
+  let lastEventId: string | null = null;
+  let pendingPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   const currentStep = computed(() => {
     const items = plan.value?.items ?? [];
@@ -82,9 +89,12 @@ export const useChatStore = defineStore("chat", () => {
               .filter((t: any) => t && typeof t.name === "string")
               .map((t: any) => ({
                 name: t.name,
+                call_id: t.call_id != null ? String(t.call_id) : null,
                 args: typeof t.args === "string" ? t.args : undefined,
                 result: typeof t.result === "string" ? t.result : undefined,
                 status: typeof t.status === "string" ? t.status : undefined,
+                duration_ms: typeof t.duration_ms === "number" ? t.duration_ms : null,
+                error: typeof t.error === "string" ? t.error : null,
               }))
           : [],
       }));
@@ -165,7 +175,63 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
+  const ACTIVE_STATUS_SET = new Set([
+    "starting",
+    "queued",
+    "running",
+    "waiting",
+    "waiting_for_approval",
+    "waiting_for_clarify",
+  ]);
+
+  function clearPendingPoll() {
+    if (pendingPollTimer) {
+      clearTimeout(pendingPollTimer);
+      pendingPollTimer = null;
+    }
+  }
+
+  function hydratePendingControl(raw: any) {
+    if (!raw || typeof raw !== "object") {
+      pendingControl.value = null;
+      return;
+    }
+    const kind = raw.kind === "approval" || raw.tool === "execute_code" ? "approval" : "clarify";
+    pendingControl.value = {
+      kind,
+      request_id: raw.request_id ?? raw.prompt_id ?? null,
+      execution_generation: raw.execution_generation ?? null,
+      tool: raw.tool,
+      preview: formatControlPreview(raw),
+    };
+  }
+
+  function pollPendingRun(targetConvId: string, attemptsLeft = 8) {
+    clearPendingPoll();
+    if (attemptsLeft <= 0 || convId.value !== targetConvId) return;
+    pendingPollTimer = setTimeout(async () => {
+      pendingPollTimer = null;
+      if (convId.value !== targetConvId) return;
+      try {
+        const detail = await useConversationsStore().open(targetConvId);
+        if (convId.value !== targetConvId) return;
+        if (detail.active_run_id && detail.active_run_id !== "pending") {
+          loadFromConversation(detail);
+        } else if (detail.active_run_id === "pending") {
+          pollPendingRun(targetConvId, attemptsLeft - 1);
+        } else {
+          loadFromConversation(detail);
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 600);
+  }
+
   function loadFromConversation(detail: ConversationDetail) {
+    clearPendingPoll();
+    controller?.abort();
+    controller = null;
     convId.value = detail.id;
     messages.value = detail.messages.map((m) => ({ ...m }));
     plan.value = detail.plan;
@@ -176,27 +242,44 @@ export const useChatStore = defineStore("chat", () => {
     const lastAssistant = detail.messages.findLast((m) => m.role === "assistant");
     selectedTurnId.value = lastAssistant?.id ?? null;
     activeRunId.value = detail.active_run_id;
-    pendingControl.value = null;
+    lastEventId = null;
+    hydratePendingControl(detail.pending_control);
     pendingMemory.value = [];
     pendingSkills.value = [];
     pendingUserTargetId = null;
     error.value = null;
     streaming.value = false;
-    activeAssistantId.value = null;
-    if (detail.active_run_id && detail.active_run_status && detail.active_run_status !== "completed") {
+    waitingFirstByte.value = false;
+    stopping.value = false;
+    reconnecting.value = false;
+    approvingChoice.value = null;
+    submittingClarify.value = false;
+    activeAssistantId.value = lastAssistant?.id ?? null;
+    if (detail.active_run_id === "pending") {
+      streaming.value = true;
+      waitingFirstByte.value = true;
+      pollPendingRun(detail.id);
+    } else if (detail.active_run_id && detail.active_run_status && ACTIVE_STATUS_SET.has(detail.active_run_status)) {
       void reconnect(detail.active_run_id);
     }
     void loadConversationPending(detail.id);
   }
 
   function reset() {
+    clearPendingPoll();
     controller?.abort();
     controller = null;
     convId.value = null;
     messages.value = [];
     streaming.value = false;
+    waitingFirstByte.value = false;
+    stopping.value = false;
+    reconnecting.value = false;
+    approvingChoice.value = null;
+    submittingClarify.value = false;
     activeAssistantId.value = null;
     activeRunId.value = null;
+    lastEventId = null;
     plan.value = null;
     reasoning.value = [];
     selectedTurnId.value = null;
@@ -205,6 +288,14 @@ export const useChatStore = defineStore("chat", () => {
     pendingSkills.value = [];
     pendingUserTargetId = null;
     error.value = null;
+  }
+
+  function clearPendingControlFromSync() {
+    pendingControl.value = null;
+    approvingChoice.value = null;
+    submittingClarify.value = false;
+    const a = assistant();
+    if (a && a.status === "waiting") a.status = "streaming";
   }
 
   function reasoningBlock(step: number | null, title: string): ReasoningBlock {
@@ -306,6 +397,12 @@ export const useChatStore = defineStore("chat", () => {
 
   function handleEvent(ev: SSEEvent) {
     const d = ev.data as Record<string, any>;
+    if (ev.id && ev.id !== "0-0") {
+      lastEventId = ev.id;
+    }
+    if (ev.event !== "run.started" && ev.event !== "message.created" && ev.event !== "run.reconnected") {
+      waitingFirstByte.value = false;
+    }
     switch (ev.event) {
       case "message.created": {
         const userMsg = messages.value.find(
@@ -325,7 +422,8 @@ export const useChatStore = defineStore("chat", () => {
       case "run.started":
         activeRunId.value = d.run_id ?? null;
         break;
-      case "title.updated": {
+      case "title.updated":
+      case "conversation.title_updated": {
         const id = typeof d.conversation_id === "string" ? d.conversation_id : convId.value;
         const title = typeof d.title === "string" ? d.title.trim() : "";
         if (id && title) useConversationsStore().applyTitle(id, title);
@@ -336,7 +434,60 @@ export const useChatStore = defineStore("chat", () => {
         if (d.assistant_message_id) selectedTurnId.value = d.assistant_message_id;
         activeRunId.value = d.run_id ?? activeRunId.value;
         streaming.value = true;
+        reconnecting.value = false;
         break;
+      case "run.snapshot": {
+        // Atomic state reconciliation for refresh / tab-switch / multi-device join — ZERO duplication!
+        if (d.assistant_message_id) {
+          activeAssistantId.value = d.assistant_message_id;
+          selectedTurnId.value = d.assistant_message_id;
+        }
+        if (d.run_id) activeRunId.value = d.run_id;
+        if (typeof d.last_event_id === "string" && d.last_event_id !== "0-0") {
+          lastEventId = d.last_event_id;
+        }
+        const a = assistant();
+        if (a) {
+          if (typeof d.output === "string") a.content = d.output;
+          if (typeof d.status === "string") {
+            a.status =
+              d.status === "waiting_for_approval" || d.status === "waiting_for_clarify"
+                ? "waiting"
+                : d.status === "running" || d.status === "queued"
+                  ? "streaming"
+                  : (d.status as any);
+          }
+        }
+        if (Array.isArray(d.reasoning)) {
+          reasoning.value = normalizeReasoning(d.reasoning);
+        }
+        if (d.plan && typeof d.plan === "object") {
+          plan.value = d.plan;
+        }
+        if (Array.isArray(d.artifacts)) {
+          for (const art of d.artifacts) {
+            if (art && typeof art === "object" && art.id && art.filename) {
+              appendArtifactToAssistant(art as WorkspaceArtifactMeta);
+            }
+          }
+        }
+        if (d.pending_control) {
+          hydratePendingControl(d.pending_control);
+        } else if (Array.isArray(d.pending_controls) && d.pending_controls.length) {
+          hydratePendingControl(d.pending_controls[0]);
+        } else {
+          pendingControl.value = null;
+        }
+        syncTurnToMessage();
+        reconnecting.value = false;
+        waitingFirstByte.value = false;
+        break;
+      }
+      case "control.resolved":
+      case "run.resumed": {
+        clearPendingControlFromSync();
+        break;
+      }
       case "reasoning.delta": {
         const step = typeof d.step === "number" ? d.step : null;
         const block = reasoningBlock(step, typeof d.title === "string" ? d.title : "");
@@ -386,24 +537,34 @@ export const useChatStore = defineStore("chat", () => {
         break;
       case "tool.started": {
         const rawArgs = stringifyToolVal(d.args ?? d.preview);
-        messages.value.push({
-          id: d.message_id ?? tempId("tool"),
-          role: "tool",
-          content: "",
-          tool_name: d.tool ?? "tool",
-          tool_payload: { args: rawArgs || d.preview, status: "running" },
-          status: "running",
-          run_id: activeRunId.value,
-          created_at: new Date().toISOString(),
-        });
+        const existingMsg = d.message_id
+          ? findMessage(d.message_id)
+          : d.call_id
+            ? messages.value.find((m) => m.role === "tool" && m.tool_payload?.call_id === d.call_id)
+            : undefined;
+        if (!existingMsg) {
+          messages.value.push({
+            id: d.message_id ?? tempId("tool"),
+            role: "tool",
+            content: "",
+            tool_name: d.tool ?? "tool",
+            tool_payload: { args: rawArgs || d.preview, call_id: d.call_id ?? null, status: "running" },
+            status: "running",
+            run_id: activeRunId.value,
+            created_at: new Date().toISOString(),
+          });
+        }
         const blk = reasoningBlock(null, "");
         const toolsList = (blk.tools ??= []);
-        toolsList.push({
-          name: d.tool ?? "tool",
-          call_id: d.call_id ?? null,
-          args: rawArgs,
-          status: "running",
-        });
+        const alreadyInTools = d.call_id && toolsList.some((t) => t.call_id === d.call_id);
+        if (!alreadyInTools) {
+          toolsList.push({
+            name: d.tool ?? "tool",
+            call_id: d.call_id ?? null,
+            args: rawArgs,
+            status: "running",
+          });
+        }
         syncTurnToMessage();
         break;
       }
@@ -539,32 +700,120 @@ export const useChatStore = defineStore("chat", () => {
 
   function finishRun() {
     streaming.value = false;
+    waitingFirstByte.value = false;
+    stopping.value = false;
+    reconnecting.value = false;
+    approvingChoice.value = null;
+    submittingClarify.value = false;
     activeRunId.value = null;
     pendingControl.value = null;
     pendingUserTargetId = null;
+    lastEventId = null;
   }
 
-  async function consume(gen: AsyncGenerator<SSEEvent>) {
-    let aborted = false;
+  async function consume(
+    gen: AsyncGenerator<SSEEvent>,
+    targetConvId: string,
+    myController: AbortController,
+  ): Promise<"done" | "aborted" | "dropped"> {
     try {
       for await (const ev of gen) {
+        if (convId.value !== targetConvId || myController.signal.aborted) {
+          return "aborted";
+        }
         handleEvent(ev);
       }
+      if (convId.value !== targetConvId || myController.signal.aborted) return "aborted";
+      return streaming.value ? "dropped" : "done";
     } catch (e: any) {
-      if (e?.name === "AbortError") {
-        aborted = true;
-        return;
+      if (e?.name === "AbortError" || convId.value !== targetConvId || myController.signal.aborted) {
+        return "aborted";
       }
-      error.value = apiErrorMessage(e, "连接中断");
-      const a = assistant();
-      if (a && a.status === "streaming") a.status = "failed";
-      streaming.value = false;
-    } finally {
-      if (!aborted && streaming.value) {
+      // Fatal HTTP 4xx errors (credits exhausted, rate limited, conflict, etc.) should not auto-retry
+      if (typeof e?.status === "number" && e.status >= 400 && e.status < 500 && e.status !== 408) {
+        error.value = apiErrorMessage(e, "请求失败");
         const a = assistant();
         if (a && a.status === "streaming") a.status = "failed";
-        if (!error.value) error.value = "连接已结束，未收到完成事件";
         finishRun();
+        return "done";
+      }
+      return "dropped";
+    }
+  }
+
+  async function autoReconnectLoop(targetConvId: string, runId: string) {
+    const delays = [1000, 2000, 4000, 8000, 12000];
+    reconnecting.value = true;
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (convId.value !== targetConvId || !streaming.value) {
+        reconnecting.value = false;
+        return;
+      }
+      await new Promise((r) => setTimeout(r, delays[attempt]));
+      if (convId.value !== targetConvId || !streaming.value) {
+        reconnecting.value = false;
+        return;
+      }
+      const myController = new AbortController();
+      controller = myController;
+      try {
+        const headers = await chatTicketHeaders(targetConvId, "reconnect");
+        if (lastEventId) headers["Last-Event-ID"] = lastEventId;
+        const outcome = await consume(
+          streamSSEGet(`/conversations/${targetConvId}/runs/${runId}/events`, myController.signal, headers),
+          targetConvId,
+          myController,
+        );
+        if (outcome === "done" || outcome === "aborted") {
+          reconnecting.value = false;
+          return;
+        }
+      } catch (e: any) {
+        if (e?.name === "AbortError" || convId.value !== targetConvId) {
+          reconnecting.value = false;
+          return;
+        }
+        // If run already finished on server while we were offline, reload conversation cleanly!
+        if (e?.status === 404) {
+          try {
+            const detail = await useConversationsStore().open(targetConvId);
+            if (convId.value === targetConvId) loadFromConversation(detail);
+          } catch {
+            /* ignore */
+          }
+          reconnecting.value = false;
+          return;
+        }
+      }
+    }
+    if (convId.value === targetConvId && streaming.value) {
+      reconnecting.value = false;
+      error.value = "网络连接中断，请检查网络或刷新页面同步最新状态";
+      const a = assistant();
+      if (a && a.status === "streaming") a.status = "failed";
+      finishRun();
+    }
+  }
+
+  async function recoverIfNeeded() {
+    const cid = convId.value;
+    if (!cid) return;
+    if (streaming.value && activeRunId.value && activeRunId.value !== "pending" && !controller) {
+      void reconnect(activeRunId.value);
+      return;
+    }
+    if (!streaming.value) {
+      try {
+        const detail = await useConversationsStore().open(cid);
+        if (convId.value === cid) {
+          const hasNewMsgs = detail.messages.length !== messages.value.length;
+          const hasLiveRun = Boolean(detail.active_run_id && detail.active_run_status && ACTIVE_STATUS_SET.has(detail.active_run_status));
+          if (hasNewMsgs || hasLiveRun) {
+            loadFromConversation(detail);
+          }
+        }
+      } catch {
+        /* ignore */
       }
     }
   }
@@ -608,17 +857,47 @@ export const useChatStore = defineStore("chat", () => {
     body: Record<string, unknown>,
     fallbackError: string,
   ) {
-    if (!convId.value) return;
+    const targetConvId = convId.value;
+    if (!targetConvId) return;
     streaming.value = true;
-    controller = new AbortController();
+    waitingFirstByte.value = true;
+    lastEventId = null;
+    const myController = new AbortController();
+    controller = myController;
     try {
-      const headers = await chatTicketHeaders(convId.value, "send");
-      await consume(streamSSE(path, body, controller.signal, headers));
+      const headers = await chatTicketHeaders(targetConvId, "send");
+      headers["Idempotency-Key"] =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      if (convId.value !== targetConvId || myController.signal.aborted) return;
+      const outcome = await consume(
+        streamSSE(path, body, myController.signal, headers),
+        targetConvId,
+        myController,
+      );
+      if (outcome === "dropped" && convId.value === targetConvId && streaming.value) {
+        if (activeRunId.value && activeRunId.value !== "pending") {
+          await autoReconnectLoop(targetConvId, activeRunId.value);
+        } else {
+          // Run may have been created right as connection dropped -> reload & auto-attach
+          try {
+            const detail = await useConversationsStore().open(targetConvId);
+            if (convId.value === targetConvId) loadFromConversation(detail);
+          } catch {
+            error.value = "连接中断，请刷新查看最新状态";
+            finishRun();
+          }
+        }
+      }
     } catch (e: any) {
+      if (convId.value !== targetConvId || myController.signal.aborted) return;
       error.value = apiErrorMessage(e, fallbackError);
       const a = assistant();
       if (a && a.status === "streaming") a.status = "failed";
       finishRun();
+    } finally {
+      if (controller === myController) controller = null;
     }
   }
 
@@ -752,38 +1031,74 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   async function reconnect(runId: string) {
-    if (!convId.value) return;
+    const targetConvId = convId.value;
+    if (!targetConvId || !runId || runId === "pending") return;
+    controller?.abort();
     streaming.value = true;
-    controller = new AbortController();
+    reconnecting.value = true;
+    const myController = new AbortController();
+    controller = myController;
     try {
-      const headers = await chatTicketHeaders(convId.value, "reconnect");
-      await consume(
-        streamSSEGet(`/conversations/${convId.value}/runs/${runId}/events`, controller.signal, headers),
+      const headers = await chatTicketHeaders(targetConvId, "reconnect");
+      if (lastEventId) headers["Last-Event-ID"] = lastEventId;
+      if (convId.value !== targetConvId || myController.signal.aborted) return;
+      const outcome = await consume(
+        streamSSEGet(`/conversations/${targetConvId}/runs/${runId}/events`, myController.signal, headers),
+        targetConvId,
+        myController,
       );
+      if (outcome === "dropped" && convId.value === targetConvId && streaming.value) {
+        await autoReconnectLoop(targetConvId, runId);
+      }
     } catch (e: any) {
-      error.value = apiErrorMessage(e, "连接中断");
-      streaming.value = false;
-      finishRun();
+      if (convId.value !== targetConvId || myController.signal.aborted) return;
+      if (e?.status === 404) {
+        try {
+          const detail = await useConversationsStore().open(targetConvId);
+          if (convId.value === targetConvId) loadFromConversation(detail);
+        } catch {
+          finishRun();
+        }
+        return;
+      }
+      await autoReconnectLoop(targetConvId, runId);
+    } finally {
+      reconnecting.value = false;
+      if (controller === myController) controller = null;
     }
   }
 
   async function stop() {
-    if (!convId.value) return;
+    const targetConvId = convId.value;
+    if (!targetConvId || stopping.value) return;
+    stopping.value = true;
     try {
-      const headers = await chatTicketHeaders(convId.value, "stop");
-      await api.post(`/conversations/${convId.value}/stop`, {}, { headers });
+      const headers = await chatTicketHeaders(targetConvId, "stop");
+      await api.post(`/conversations/${targetConvId}/stop`, {}, { headers });
+      // Optimistically finalize local state in case SSE stream is slow/unresponsive
+      setTimeout(() => {
+        if (convId.value === targetConvId && stopping.value && streaming.value) {
+          controller?.abort();
+          const a = assistant();
+          if (a && (a.status === "streaming" || a.status === "waiting")) a.status = "cancelled";
+          finishRun();
+        }
+      }, 2500);
     } catch (e: any) {
+      stopping.value = false;
       error.value = apiErrorMessage(e, "停止失败");
     }
   }
 
-  async function approve(choice: "once" | "deny") {
-    if (!convId.value || !pendingControl.value) return;
+  async function approve(choice: "once" | "deny"): Promise<boolean> {
+    const targetConvId = convId.value;
+    if (!targetConvId || !pendingControl.value || approvingChoice.value) return false;
     const c = pendingControl.value;
+    approvingChoice.value = choice;
     try {
-      const headers = await chatTicketHeaders(convId.value, "approval");
+      const headers = await chatTicketHeaders(targetConvId, "approval");
       await api.post(
-        `/conversations/${convId.value}/approval`,
+        `/conversations/${targetConvId}/approval`,
         {
           request_id: c.request_id,
           execution_generation: c.execution_generation,
@@ -794,18 +1109,24 @@ export const useChatStore = defineStore("chat", () => {
       pendingControl.value = null;
       const a = assistant();
       if (a) a.status = "streaming";
+      return true;
     } catch (e: any) {
       error.value = apiErrorMessage(e, "审批提交失败");
+      return false;
+    } finally {
+      approvingChoice.value = null;
     }
   }
 
-  async function clarify(answer: string) {
-    if (!convId.value || !pendingControl.value) return;
+  async function clarify(answer: string): Promise<boolean> {
+    const targetConvId = convId.value;
+    if (!targetConvId || !pendingControl.value || submittingClarify.value) return false;
     const c = pendingControl.value;
+    submittingClarify.value = true;
     try {
-      const headers = await chatTicketHeaders(convId.value, "clarify");
+      const headers = await chatTicketHeaders(targetConvId, "clarify");
       await api.post(
-        `/conversations/${convId.value}/clarify`,
+        `/conversations/${targetConvId}/clarify`,
         {
           request_id: c.request_id,
           execution_generation: c.execution_generation,
@@ -816,22 +1137,29 @@ export const useChatStore = defineStore("chat", () => {
       pendingControl.value = null;
       const a = assistant();
       if (a) a.status = "streaming";
+      return true;
     } catch (e: any) {
       error.value = apiErrorMessage(e, "提交失败");
+      return false;
+    } finally {
+      submittingClarify.value = false;
     }
   }
 
   function abort() {
+    clearPendingPoll();
     controller?.abort();
     controller = null;
   }
 
   return {
-    convId, messages, streaming, activeAssistantId, activeRunId, plan, reasoning, currentStep, runningTool,
+    convId, messages, streaming, waitingFirstByte, stopping, reconnecting, approvingChoice, submittingClarify,
+    activeAssistantId, activeRunId, plan, reasoning, currentStep, runningTool,
     selectedTurnId, selectedTurn, assistantTurns, viewPlan, viewReasoning, viewStreaming, viewCurrentStep,
     viewRunningTool, selectTurn,
     pendingControl, pendingMemory, pendingSkills, error,
-    loadFromConversation, reset, send, regenerate, editAndResend, reconnect, stop, approve, clarify, abort,
+    loadFromConversation, reset, send, regenerate, editAndResend, reconnect, recoverIfNeeded,
+    stop, approve, clarify, abort, clearPendingControlFromSync,
     resolvePendingMemory, resolvePendingSkill,
   };
 });

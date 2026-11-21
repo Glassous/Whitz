@@ -131,20 +131,38 @@ class DockerSandboxExecutor:
             try:
                 status = container.wait(timeout=timeout_seconds)
                 exit_code = int(status.get("StatusCode", 1))
-            except Exception:
-                timed_out = True
-                exit_code = 124
-                try:
-                    container.kill()
-                except DockerException:
-                    pass
+            except Exception as wait_exc:
+                err_name = type(wait_exc).__name__.lower()
+                if "timeout" in err_name or "timed out" in str(wait_exc).lower():
+                    timed_out = True
+                    exit_code = 124
+                    try:
+                        container.kill()
+                    except DockerException:
+                        pass
+                else:
+                    raise
 
-            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
-            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+            def _read_bounded_logs(*, stdout_flag: bool, stderr_flag: bool) -> str:
+                max_bytes = MAX_OUTPUT_CHARS * 4
+                raw = container.logs(stdout=stdout_flag, stderr=stderr_flag, stream=True)
+                if isinstance(raw, (bytes, bytearray)):
+                    return bytes(raw[:max_bytes]).decode("utf-8", errors="replace")[:MAX_OUTPUT_CHARS]
+                buf = bytearray()
+                for chunk in raw:
+                    if isinstance(chunk, bytes):
+                        need = max_bytes - len(buf)
+                        if need <= 0:
+                            break
+                        buf.extend(chunk[:need])
+                return buf.decode("utf-8", errors="replace")[:MAX_OUTPUT_CHARS]
+
+            stdout = _read_bounded_logs(stdout_flag=True, stderr_flag=False)
+            stderr = _read_bounded_logs(stdout_flag=False, stderr_flag=True)
             return SandboxResult(
                 exit_code=exit_code,
-                stdout=stdout[:MAX_OUTPUT_CHARS],
-                stderr=stderr[:MAX_OUTPUT_CHARS],
+                stdout=stdout,
+                stderr=stderr,
                 timed_out=timed_out,
                 language=language,
                 mode="docker",
@@ -238,10 +256,13 @@ class E2BSandboxExecutor:
                         error=str(err) if err else None,
                     )
                 finally:
-                    await client.delete(
-                        f"{self.base_url}/sandboxes/{sandbox_id}",
-                        headers={"X-API-Key": self.api_key},
-                    )
+                    try:
+                        await client.delete(
+                            f"{self.base_url}/sandboxes/{sandbox_id}",
+                            headers={"X-API-Key": self.api_key},
+                        )
+                    except Exception as cleanup_exc:
+                        logger.debug("E2B sandbox cleanup failed for %s: %s", sandbox_id, cleanup_exc)
         except Exception as exc:
             logger.warning("E2B sandbox execution failed: %s", exc)
             return SandboxResult(

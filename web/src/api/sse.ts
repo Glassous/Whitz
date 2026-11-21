@@ -2,18 +2,23 @@ import { getHost } from "../host";
 import { ApiError, getAccessToken, handleUnauthorized, isAccessTokenExpiringSoon, tryRefresh } from "./client";
 
 export interface SSEEvent {
+  id?: string | null;
   event: string;
   data: Record<string, unknown>;
 }
 
 function parseBlock(block: string): SSEEvent | null {
   let eventType = "";
+  let eventId: string | null = null;
   const dataLines: string[] = [];
   for (const rawLine of block.split("\n")) {
     const line = rawLine.replace(/\r$/, "");
     if (!line || line.startsWith(":")) continue;
     if (line.startsWith("event:")) {
       eventType = line.slice(6).trim();
+    } else if (line.startsWith("id:")) {
+      const parsedId = line.slice(3).trim();
+      if (parsedId) eventId = parsedId;
     } else if (line.startsWith("data:")) {
       dataLines.push(line.slice(5).trim());
     }
@@ -27,16 +32,50 @@ function parseBlock(block: string): SSEEvent | null {
     data = { raw: dataStr };
   }
   const name = eventType || (typeof data.type === "string" ? data.type : "message");
-  return { event: name, data };
+  return { id: eventId, event: name, data };
 }
 
-async function* readSSE(stream: ReadableStream<Uint8Array>): AsyncGenerator<SSEEvent> {
+async function readWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleTimeoutMs: number,
+  signal?: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (idleTimeoutMs <= 0) return reader.read();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const err = new Error("SSE stream idle timeout");
+          err.name = "SSEIdleTimeoutError";
+          reject(err);
+        }, idleTimeoutMs);
+        signal?.addEventListener(
+          "abort",
+          () => {
+            if (timer) clearTimeout(timer);
+          },
+          { once: true },
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function* readSSE(
+  stream: ReadableStream<Uint8Array>,
+  idleTimeoutMs = 45_000,
+  signal?: AbortSignal,
+): AsyncGenerator<SSEEvent> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithTimeout(reader, idleTimeoutMs, signal);
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       for (;;) {
@@ -53,6 +92,11 @@ async function* readSSE(stream: ReadableStream<Uint8Array>): AsyncGenerator<SSEE
       if (ev) yield ev;
     }
   } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      /* ignore */
+    }
     reader.releaseLock();
   }
 }
@@ -62,6 +106,7 @@ export async function* streamSSE(
   body: unknown,
   signal?: AbortSignal,
   extraHeaders: Record<string, string> = {},
+  idleTimeoutMs = 45_000,
 ): AsyncGenerator<SSEEvent> {
   if (isAccessTokenExpiringSoon()) {
     await tryRefresh();
@@ -108,13 +153,14 @@ export async function* streamSSE(
     throw new ApiError(resp.status, detail);
   }
 
-  yield* readSSE(resp.body);
+  yield* readSSE(resp.body, idleTimeoutMs, signal);
 }
 
 export async function* streamSSEGet(
   path: string,
   signal?: AbortSignal,
   extraHeaders: Record<string, string> = {},
+  idleTimeoutMs = 45_000,
 ): AsyncGenerator<SSEEvent> {
   if (isAccessTokenExpiringSoon()) {
     await tryRefresh();
@@ -143,7 +189,13 @@ export async function* streamSSEGet(
     }
   }
   if (!resp.ok || !resp.body) {
-    throw new ApiError(resp.status, resp.statusText);
+    let detail: unknown = resp.statusText;
+    try {
+      detail = await resp.json();
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(resp.status, detail);
   }
-  yield* readSSE(resp.body);
+  yield* readSSE(resp.body, idleTimeoutMs, signal);
 }

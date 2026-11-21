@@ -18,10 +18,28 @@ from app.api.schemas import (
 )
 from app.db.models import Conversation, Message, User
 from app.db.session import get_db
-from app.services import audit, chat_stream, chat_tickets, limits, membership
+from app.services import audit, chat_stream, chat_tickets, limits, membership, realtime_bus
 from app.services.agent_client import AgentClient, AgentError
 
 router = APIRouter(prefix="/api/conversations", tags=["chat"])
+events_router = APIRouter(prefix="/api/events", tags=["events"])
+
+
+@events_router.get("/stream")
+async def user_events_stream(
+    request: Request,
+    user: User = Depends(get_current_user),
+):
+    """Lightweight per-user real-time sync SSE stream for multi-device/multi-tab state convergence."""
+
+    async def _gen():
+        yield chat_stream.sse("sync.connected", {"user_id": str(user.id)})
+        async for ev_name, payload in realtime_bus.subscribe_user_events(user.id):
+            if await request.is_disconnected():
+                return
+            yield chat_stream.sse(ev_name, payload)
+
+    return EventSourceResponse(_gen(), ping=15)
 
 
 def _reset_hint(status_info: dict) -> str:
@@ -149,6 +167,7 @@ async def send_message(
             "model_route": body.model_route,
         },
     )
+    idemp = request.headers.get("idempotency-key") or request.headers.get("x-idempotency-key")
     inner = chat_stream.stream_chat(
         conv.id,
         user.id,
@@ -159,9 +178,12 @@ async def send_message(
         skill_names=body.skill_names,
         model_route=body.model_route,
         max_seconds=plan.run_max_seconds,
+        run_slot=run_slot,
+        idempotency_key=idemp,
     )
+    # run_slot is owned and released by detached RunSupervisor; SSE only owns sse_slot!
     return EventSourceResponse(
-        limits.wrap_stream(inner, user.id, run_slot=run_slot, sse_slot=sse_slot), ping=10
+        limits.wrap_stream(inner, user.id, sse_slot=sse_slot), ping=10
     )
 
 
@@ -196,6 +218,7 @@ async def regenerate_message(
         audit_action="chat.regenerate",
         audit_metadata={"target_message_id": str(message_id), "model_route": route},
     )
+    idemp = request.headers.get("idempotency-key") or request.headers.get("x-idempotency-key")
     inner = chat_stream.stream_regenerate(
         conv.id,
         user.id,
@@ -204,9 +227,11 @@ async def regenerate_message(
         message_id,
         model_route=route,
         max_seconds=plan.run_max_seconds,
+        run_slot=run_slot,
+        idempotency_key=idemp,
     )
     return EventSourceResponse(
-        limits.wrap_stream(inner, user.id, run_slot=run_slot, sse_slot=sse_slot), ping=10
+        limits.wrap_stream(inner, user.id, sse_slot=sse_slot), ping=10
     )
 
 
@@ -239,6 +264,7 @@ async def edit_and_resend_message(
             "model_route": body.model_route,
         },
     )
+    idemp = request.headers.get("idempotency-key") or request.headers.get("x-idempotency-key")
     inner = chat_stream.stream_edit(
         conv.id,
         user.id,
@@ -250,9 +276,11 @@ async def edit_and_resend_message(
         skill_names=body.skill_names,
         model_route=body.model_route,
         max_seconds=plan.run_max_seconds,
+        run_slot=run_slot,
+        idempotency_key=idemp,
     )
     return EventSourceResponse(
-        limits.wrap_stream(inner, user.id, run_slot=run_slot, sse_slot=sse_slot), ping=10
+        limits.wrap_stream(inner, user.id, sse_slot=sse_slot), ping=10
     )
 
 
@@ -293,13 +321,17 @@ async def stop_run(
     if not conv.active_run_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "没有进行中的任务")
     run_id = conv.active_run_id
-    client = await _client_for(user)
-    try:
-        result = await client.cancel_run(run_id)
-    except AgentError as exc:
-        raise HTTPException(exc.status_code, exc.detail)
-    finally:
-        await client.aclose()
+    result: dict = {"id": run_id, "run_id": run_id, "status": "cancelled"}
+    if run_id != "pending":
+        client = await _client_for(user)
+        try:
+            result = await client.cancel_run(run_id)
+        except AgentError as exc:
+            # Never brick a conversation when the agent run already expired (404)
+            if exc.status_code != 404:
+                raise HTTPException(exc.status_code, exc.detail)
+        finally:
+            await client.aclose()
     row = await db.execute(
         select(Message).where(
             Message.conversation_id == conv.id,
@@ -312,7 +344,19 @@ async def stop_run(
         assistant.status = "cancelled"
     conv.active_run_id = None
     conv.active_run_status = None
+    conv.pending_control = None
     await db.commit()
+    await realtime_bus.publish_user_event(
+        user.id,
+        "conversation.run_updated",
+        {
+            "conversation_id": str(conv.id),
+            "active_run_id": None,
+            "active_run_status": None,
+            "last_status": "cancelled",
+            "pending_control": None,
+        },
+    )
     await audit.record(
         "chat.stop",
         actor=user,
@@ -330,14 +374,16 @@ async def approval(
     request: Request,
     conv: Conversation = Depends(get_owned_conversation),
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     await chat_tickets.require(request, user.id, conv.id, "approval")
     if not conv.active_run_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "没有进行中的任务")
+    run_id = conv.active_run_id
     client = await _client_for(user)
     try:
         result = await client.resume_run(
-            conv.active_run_id,
+            run_id,
             kind="approval",
             request_id=body.request_id,
             execution_generation=body.execution_generation,
@@ -347,6 +393,35 @@ async def approval(
         raise HTTPException(exc.status_code, exc.detail)
     finally:
         await client.aclose()
+    conv.pending_control = None
+    conv.active_run_status = "running"
+    assistant = (
+        await db.execute(
+            select(Message).where(
+                Message.conversation_id == conv.id,
+                Message.run_id == run_id,
+                Message.role == "assistant",
+            )
+        )
+    ).scalars().first()
+    if assistant is not None and assistant.status == "waiting":
+        assistant.status = "streaming"
+    await db.commit()
+    await realtime_bus.publish_user_event(
+        user.id,
+        "control.resolved",
+        {"conversation_id": str(conv.id), "run_id": run_id, "kind": "approval"},
+    )
+    await realtime_bus.publish_user_event(
+        user.id,
+        "conversation.run_updated",
+        {
+            "conversation_id": str(conv.id),
+            "active_run_id": run_id,
+            "active_run_status": "running",
+            "pending_control": None,
+        },
+    )
     await audit.record(
         "chat.approval",
         actor=user,
@@ -364,14 +439,16 @@ async def clarify(
     request: Request,
     conv: Conversation = Depends(get_owned_conversation),
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     await chat_tickets.require(request, user.id, conv.id, "clarify")
     if not conv.active_run_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "没有进行中的任务")
+    run_id = conv.active_run_id
     client = await _client_for(user)
     try:
         result = await client.resume_run(
-            conv.active_run_id,
+            run_id,
             kind="clarify",
             request_id=body.request_id,
             execution_generation=body.execution_generation,
@@ -381,5 +458,34 @@ async def clarify(
         raise HTTPException(exc.status_code, exc.detail)
     finally:
         await client.aclose()
+    conv.pending_control = None
+    conv.active_run_status = "running"
+    assistant = (
+        await db.execute(
+            select(Message).where(
+                Message.conversation_id == conv.id,
+                Message.run_id == run_id,
+                Message.role == "assistant",
+            )
+        )
+    ).scalars().first()
+    if assistant is not None and assistant.status == "waiting":
+        assistant.status = "streaming"
+    await db.commit()
+    await realtime_bus.publish_user_event(
+        user.id,
+        "control.resolved",
+        {"conversation_id": str(conv.id), "run_id": run_id, "kind": "clarify"},
+    )
+    await realtime_bus.publish_user_event(
+        user.id,
+        "conversation.run_updated",
+        {
+            "conversation_id": str(conv.id),
+            "active_run_id": run_id,
+            "active_run_status": "running",
+            "pending_control": None,
+        },
+    )
     await audit.record("chat.clarify", actor=user, target_type="conversation", target_id=conv.id, request=request)
     return result

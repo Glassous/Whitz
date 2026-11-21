@@ -6,6 +6,7 @@ import { useChatStore } from "../stores/chat";
 import { useAuthStore } from "../stores/auth";
 import { useCreditsStore } from "../stores/credits";
 import { useFilesStore } from "../stores/files";
+import { useRealtimeStore } from "../stores/realtime";
 import { api } from "../api/client";
 import type { AgentStatus, ConversationFile, PreviewTarget, TaskPanelTab } from "../types";
 import ConversationSidebar from "../components/chat/ConversationSidebar.vue";
@@ -27,6 +28,12 @@ const chat = useChatStore();
 const auth = useAuthStore();
 const credits = useCreditsStore();
 const filesStore = useFilesStore();
+const realtime = useRealtimeStore();
+
+const sendingMessage = ref(false);
+const deletingFileId = ref<string | null>(null);
+const downloadingFileId = ref<string | null>(null);
+let openSeq = 0;
 
 const routeConversationId = computed(() => (typeof route.params.id === "string" && route.params.id ? route.params.id : null));
 const isNewSideDraft = computed(() => route.query.new === "1");
@@ -218,8 +225,10 @@ async function loadAgent() {
 }
 
 async function openConversation(id: string): Promise<boolean> {
+  const seq = ++openSeq;
   try {
     const detail = await conversations.open(id);
+    if (seq !== openSeq) return false;
     chat.loadFromConversation(detail);
     if (detail.kind !== "main") {
       void filesStore.load(id);
@@ -229,6 +238,7 @@ async function openConversation(id: string): Promise<boolean> {
     }
     return true;
   } catch {
+    if (seq !== openSeq) return false;
     conversations.clearCurrent();
     chat.reset();
     filesStore.reset();
@@ -381,6 +391,11 @@ async function onUploadFiles(fileList: FileList, dataTransfer?: DataTransfer | n
   }
 }
 
+function onRetryUpload(localId: string) {
+  if (!agent.value?.ready) return;
+  void filesStore.retryUpload(localId, ensureConversationId);
+}
+
 async function onAttachLibraryFiles(fileIds: string[]) {
   if (!agent.value?.ready || !fileIds.length) return;
   try {
@@ -388,10 +403,13 @@ async function onAttachLibraryFiles(fileIds: string[]) {
     await filesStore.attachLibraryFiles(fileIds, cid, true);
   } catch (e: any) {
     filesStore.error = e?.detail?.detail ?? e?.message ?? "引用资料库文件失败";
+    throw e;
   }
 }
 
 async function onDeleteFile(fileId: string) {
+  if (deletingFileId.value === fileId) return;
+  deletingFileId.value = fileId;
   try {
     await filesStore.removeFile(fileId);
     if (previewTarget.value?.kind === "file" && previewTarget.value.file.id === fileId) {
@@ -399,10 +417,14 @@ async function onDeleteFile(fileId: string) {
     }
   } catch (e: any) {
     filesStore.error = e?.detail?.detail ?? e?.message ?? "删除文件失败";
+  } finally {
+    if (deletingFileId.value === fileId) deletingFileId.value = null;
   }
 }
 
 async function onDownloadFile(file: ConversationFile) {
+  if (downloadingFileId.value === file.id) return;
+  downloadingFileId.value = file.id;
   try {
     const url = await filesStore.getDownloadUrl(file.id, false, file.conversation_id ?? undefined);
     if (url) {
@@ -410,6 +432,8 @@ async function onDownloadFile(file: ConversationFile) {
     }
   } catch (e: any) {
     filesStore.error = e?.detail?.detail ?? e?.message ?? "获取下载链接失败";
+  } finally {
+    if (downloadingFileId.value === file.id) downloadingFileId.value = null;
   }
 }
 
@@ -440,7 +464,8 @@ function closeMobileDrawer() {
 }
 
 async function onSend(content: string) {
-  if (chat.streaming || filesStore.hasActiveUploads) return;
+  if (sendingMessage.value || chat.streaming || filesStore.hasActiveUploads) return;
+  sendingMessage.value = true;
   try {
     await ensureConversationId();
     const attached = filesStore.attachedFiles;
@@ -448,10 +473,14 @@ async function onSend(content: string) {
     const skillNames = [...selectedSkills.value];
     selectedSkills.value = [];
     planTab.value = "steps";
-    await chat.send(content, attached, skillNames);
+    const sendPromise = chat.send(content, attached, skillNames);
+    sendingMessage.value = false;
+    await sendPromise;
     await conversations.fetchList();
   } catch (e: any) {
     chat.error = e?.detail?.detail ?? e?.message ?? "无法开始对话，请稍后重试";
+  } finally {
+    sendingMessage.value = false;
   }
 }
 
@@ -602,14 +631,27 @@ watch([routeConversationId, isNewSideDraft], async ([nextId, draft]) => {
   }
 });
 
+function onOnlineRecovery() {
+  void chat.recoverIfNeeded();
+}
+
+function onVisibilityRecovery() {
+  if (typeof document !== "undefined" && document.visibilityState === "visible") {
+    void chat.recoverIfNeeded();
+  }
+}
+
 onMounted(async () => {
   window.addEventListener("keydown", onGlobalKeydown);
   window.addEventListener("resize", onWindowResize);
+  window.addEventListener("online", onOnlineRecovery);
+  document.addEventListener("visibilitychange", onVisibilityRecovery);
   if (typeof window !== "undefined") {
     mediaQuery = window.matchMedia("(min-width: 768px)");
     isDesktop.value = mediaQuery.matches;
     mediaQuery.addEventListener("change", onMediaChange);
   }
+  realtime.start();
   void loadAgent();
   void credits.fetch();
   await conversations.fetchList();
@@ -631,8 +673,11 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onGlobalKeydown);
   window.removeEventListener("resize", onWindowResize);
+  window.removeEventListener("online", onOnlineRecovery);
+  document.removeEventListener("visibilitychange", onVisibilityRecovery);
   mediaQuery?.removeEventListener("change", onMediaChange);
   if (pollTimer) window.clearTimeout(pollTimer);
+  realtime.stop();
   chat.abort();
 });
 </script>
@@ -663,6 +708,8 @@ onBeforeUnmount(() => {
       :loading="conversations.loading"
       :open="sidebarOpen"
       :collapsed="sidebarCollapsed"
+      :rename-action="onRename"
+      :delete-action="onDelete"
       @select="onSelect"
       @select-main="openMainConversation"
       @create-side="createSideConversation"
@@ -752,6 +799,7 @@ onBeforeUnmount(() => {
             :key="chat.convId ?? 'draft'"
             :messages="chat.messages"
             :focus-message-id="focusMessageId"
+            :downloading-file-id="downloadingFileId"
             @steps="onViewSteps"
             @focus-handled="focusMessageId = null"
             @regenerate="onRegenerate"
@@ -802,11 +850,13 @@ onBeforeUnmount(() => {
               <ApprovalCard
                 v-if="chat.pendingControl?.kind === 'approval'"
                 :control="chat.pendingControl"
+                :submitting-choice="chat.approvingChoice"
                 @decide="chat.approve"
               />
               <ClarifyCard
                 v-else-if="chat.pendingControl?.kind === 'clarify'"
                 :control="chat.pendingControl"
+                :submitting="chat.submittingClarify"
                 @submit="chat.clarify"
               />
             </Transition>
@@ -875,6 +925,8 @@ onBeforeUnmount(() => {
             <ChatInput
               v-model:selected-skills="selectedSkills"
               :streaming="chat.streaming"
+              :sending="sendingMessage || chat.waitingFirstByte"
+              :stopping="chat.stopping"
               :disabled="!agent?.ready"
               :uploading="filesStore.hasActiveUploads"
               :uploads="filesStore.uploads"
@@ -885,6 +937,7 @@ onBeforeUnmount(() => {
               @upload="(files, dt) => onUploadFiles(files, dt, false)"
               @cancel-upload="filesStore.cancelUpload"
               @dismiss-upload="filesStore.dismissUpload"
+              @retry-upload="onRetryUpload"
               @detach-file="filesStore.detachFile"
             />
           </div>
@@ -942,10 +995,14 @@ onBeforeUnmount(() => {
             :upload-disabled="!agent?.ready"
             :preview-target="previewTarget"
             :resizing="isResizingPanel"
+            :deleting-file-id="deletingFileId"
+            :downloading-file-id="downloadingFileId"
+            :attach-library-action="onAttachLibraryFiles"
             @edit-assistant="assistantModalOpen = true"
             @upload="(files, dt) => onUploadFiles(files, dt, true)"
             @cancel-upload="filesStore.cancelUpload"
             @dismiss-upload="filesStore.dismissUpload"
+            @retry-upload="onRetryUpload"
             @delete-file="onDeleteFile"
             @download-file="onDownloadFile"
             @preview-file="onPreviewFile"
@@ -1002,10 +1059,14 @@ onBeforeUnmount(() => {
               :files-loading="filesStore.loading"
               :upload-disabled="!agent?.ready"
               :preview-target="previewTarget"
+              :deleting-file-id="deletingFileId"
+              :downloading-file-id="downloadingFileId"
+              :attach-library-action="onAttachLibraryFiles"
               @edit-assistant="assistantModalOpen = true"
               @upload="(files, dt) => onUploadFiles(files, dt, true)"
               @cancel-upload="filesStore.cancelUpload"
               @dismiss-upload="filesStore.dismissUpload"
+              @retry-upload="onRetryUpload"
               @delete-file="onDeleteFile"
               @download-file="onDownloadFile"
               @preview-file="onPreviewFile"

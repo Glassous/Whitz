@@ -21,6 +21,8 @@ const props = defineProps<{
   loading?: boolean;
   open?: boolean;
   collapsed?: boolean;
+  renameAction?: (id: string, title: string) => Promise<void>;
+  deleteAction?: (id: string) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -257,8 +259,11 @@ const renameTarget = ref<Conversation | null>(null);
 const renameText = ref("");
 const renameError = ref<string | null>(null);
 const renameGenerating = ref(false);
+const renameSaving = ref(false);
 let titleController: AbortController | null = null;
 const deleteTarget = ref<Conversation | null>(null);
+const deleteSaving = ref(false);
+const deleteError = ref<string | null>(null);
 const openMenuId = ref<string | null>(null);
 
 const sortedSides = computed(() => sortConversations(props.sideConversations));
@@ -370,6 +375,7 @@ function openRename(c: Conversation) {
 }
 
 function closeRename() {
+  if (renameSaving.value) return;
   stopTitleGeneration();
   renameTarget.value = null;
   renameText.value = "";
@@ -411,21 +417,60 @@ async function generateRenameTitle() {
   }
 }
 
-function confirmRename() {
-  if (renameGenerating.value) return;
-  if (renameTarget.value && renameText.value.trim()) {
-    emit("rename", renameTarget.value.id, renameText.value.trim());
+async function confirmRename() {
+  if (renameGenerating.value || renameSaving.value) return;
+  const target = renameTarget.value;
+  const trimmed = renameText.value.trim();
+  if (!target || !trimmed) {
+    closeRename();
+    return;
   }
+  if (props.renameAction) {
+    renameSaving.value = true;
+    renameError.value = null;
+    try {
+      await props.renameAction(target.id, trimmed);
+      renameSaving.value = false;
+      closeRename();
+    } catch (e: any) {
+      renameError.value = e?.detail?.detail ?? e?.message ?? "重命名失败，请重试";
+      renameSaving.value = false;
+    }
+    return;
+  }
+  emit("rename", target.id, trimmed);
   closeRename();
 }
 
 function askDelete(c: Conversation) {
   openMenuId.value = null;
+  deleteError.value = null;
   deleteTarget.value = c;
 }
 
-function confirmDelete() {
-  if (deleteTarget.value) emit("delete", deleteTarget.value.id);
+function closeDelete() {
+  if (deleteSaving.value) return;
+  deleteTarget.value = null;
+  deleteError.value = null;
+}
+
+async function confirmDelete() {
+  if (deleteSaving.value || !deleteTarget.value) return;
+  const target = deleteTarget.value;
+  if (props.deleteAction) {
+    deleteSaving.value = true;
+    deleteError.value = null;
+    try {
+      await props.deleteAction(target.id);
+      deleteSaving.value = false;
+      deleteTarget.value = null;
+    } catch (e: any) {
+      deleteError.value = e?.detail?.detail ?? e?.message ?? "删除失败，请重试";
+      deleteSaving.value = false;
+    }
+    return;
+  }
+  emit("delete", target.id);
   deleteTarget.value = null;
 }
 
@@ -1027,19 +1072,22 @@ const isMainActive = computed(
         </template>
       </BaseInput>
       <template #footer>
-        <BaseButton variant="soft" rounded="full" @click="closeRename">取消</BaseButton>
-        <BaseButton rounded="full" :disabled="renameGenerating" @click="confirmRename">保存</BaseButton>
+        <BaseButton variant="soft" rounded="full" :disabled="renameSaving" @click="closeRename">取消</BaseButton>
+        <BaseButton rounded="full" :loading="renameSaving" :disabled="renameGenerating || !renameText.trim()" @click="confirmRename">保存</BaseButton>
       </template>
     </BaseModal>
 
     <!-- Delete Side Chat Modal -->
-    <BaseModal :open="!!deleteTarget" title="删除旁聊" @close="deleteTarget = null">
-      <p class="text-[14.5px] leading-relaxed text-fg-muted">
-        确定删除旁聊「<span class="font-medium text-fg">{{ deleteTarget?.title }}</span>」吗？此操作不可撤销；该旁聊中上传的文件仍会保留在资料库中。
-      </p>
+    <BaseModal :open="!!deleteTarget" title="删除旁聊" @close="closeDelete">
+      <div class="space-y-3">
+        <p class="text-[14.5px] leading-relaxed text-fg-muted">
+          确定删除旁聊「<span class="font-medium text-fg">{{ deleteTarget?.title }}</span>」吗？此操作不可撤销；该旁聊中上传的文件仍会保留在资料库中。
+        </p>
+        <p v-if="deleteError" role="alert" class="text-[12.5px] text-danger">{{ deleteError }}</p>
+      </div>
       <template #footer>
-        <BaseButton variant="soft" rounded="full" @click="deleteTarget = null">取消</BaseButton>
-        <BaseButton variant="danger" rounded="full" @click="confirmDelete">删除</BaseButton>
+        <BaseButton variant="soft" rounded="full" :disabled="deleteSaving" @click="closeDelete">取消</BaseButton>
+        <BaseButton variant="danger" rounded="full" :loading="deleteSaving" @click="confirmDelete">删除</BaseButton>
       </template>
     </BaseModal>
   </aside>

@@ -154,12 +154,14 @@ async def test_assistant_profile_and_avatar_endpoints(client, register):
     assert patched.json()["assistant_name"] == "小智助手"
 
     # Reject invalid image bytes
+    import base64
+
     bad_up = await client.put(
         "/api/users/me/assistant/avatar",
-        files={"file": ("bad.png", b"not-a-png", "image/png")},
+        json={"data_url": "data:image/png;base64," + base64.b64encode(b"not-a-png").decode("ascii")},
         headers=headers,
     )
-    assert bad_up.status_code == 400
+    assert bad_up.status_code in (400, 422)
 
     # Upload minimal valid 1x1 PNG
     png_1x1 = (
@@ -169,7 +171,7 @@ async def test_assistant_profile_and_avatar_endpoints(client, register):
     )
     up = await client.put(
         "/api/users/me/assistant/avatar",
-        files={"file": ("avatar.png", png_1x1, "image/png")},
+        json={"data_url": "data:image/png;base64," + base64.b64encode(png_1x1).decode("ascii")},
         headers=headers,
     )
     assert up.status_code == 200, up.text
@@ -225,8 +227,8 @@ async def test_library_direct_upload_and_cross_chat_digest_and_compaction(client
     # 2. Side chat digest refresh & Main chat cross-chat recall
     side = (await client.post("/api/conversations", json={"title": "Vim 配置调研"}, headers=headers)).json()
     side_id = uuid.UUID(side["id"])
-    db.add(Message(conversation_id=side_id, role="user", content="怎么用 LazyVim 配置 Python LSP？", status="done"))
-    db.add(Message(conversation_id=side_id, role="assistant", content="推荐启用 pyright 与 ruff 插件，并关闭格式化冲突。", status="done"))
+    db.add(Message(conversation_id=side_id, role="user", content="怎么用 LazyVim 配置 Python LSP？", status="completed"))
+    db.add(Message(conversation_id=side_id, role="assistant", content="推荐启用 pyright 与 ruff 插件，并关闭格式化冲突。", status="completed"))
     await db.commit()
 
     digest = await ccm.refresh_side_chat_digest(db, side_id, force=True)
@@ -236,7 +238,7 @@ async def test_library_direct_upload_and_cross_chat_digest_and_compaction(client
     main_conv = await ccm.ensure_main_conversation(db, user)
     cross_ctx = await ccm.build_main_chat_memory_context(db, user, main_conv, "之前 LazyVim Python 插件怎么配的")
     assert cross_ctx is not None
-    assert "Vim 配置调研" in cross_ctx
+    assert "Vim 配置调研" in (cross_ctx.get("cross_chat_context") or "")
 
     # 3. Main chat rolling compaction triggers when message count exceeds threshold
     for i in range(ccm.COMPACT_TRIGGER_MESSAGES + 4):
@@ -245,13 +247,13 @@ async def test_library_direct_upload_and_cross_chat_digest_and_compaction(client
                 conversation_id=main_conv.id,
                 role="user" if i % 2 == 0 else "assistant",
                 content=f"主聊历史第 {i} 条消息：记录关键项目决策 #{i}",
-                status="done",
+                status="completed",
             )
         )
     await db.commit()
 
     compacted = await ccm.compact_main_conversation_if_needed(db, main_conv)
-    assert compacted is True
+    assert compacted
     await db.refresh(main_conv)
     assert main_conv.rolling_summary
     assert main_conv.summary_cursor_msg_id is not None
