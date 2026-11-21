@@ -19,6 +19,7 @@ from app.graph.builder import _extract_text, build_agent_graph
 from app.graph.topology import GRAPH_NODES
 from app.memory.store import MemoryManager
 from app.rag.hybrid_retriever import HybridRetriever
+from app.tools import parse_tool_error
 from app.tools.mcp_client import load_whitz_mcp_tools
 from app.tools.sandbox import get_sandbox_executor
 
@@ -227,16 +228,7 @@ def _clip_str(value: Any, limit: int) -> Any:
 
 
 def _parse_tool_error(content: Any, status: str | None) -> str | None:
-    if status == "error":
-        return str(content or "tool error")
-    if isinstance(content, str):
-        try:
-            obj = json.loads(content)
-            if isinstance(obj, dict) and obj.get("error"):
-                return str(obj["error"])
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return None
+    return parse_tool_error(content, status)
 
 
 def _build_initial_messages(payload: dict[str, Any]) -> list[Any]:
@@ -546,6 +538,22 @@ async def _stream_graph(
                         model=selected_model,
                         force=True,
                     )
+                elif ev_type == "tool.started":
+                    payload = {k: v for k, v in chunk.items() if k != "type"}
+                    tool_events.append(payload)
+                    await emitter.emit("tool.started", payload)
+                elif ev_type == "tool.completed":
+                    payload = {k: v for k, v in chunk.items() if k != "type"}
+                    cid = payload.get("call_id")
+                    updated = False
+                    for idx, te in enumerate(tool_events):
+                        if cid and te.get("call_id") == cid:
+                            tool_events[idx] = payload
+                            updated = True
+                            break
+                    if not updated:
+                        tool_events.append(payload)
+                    await emitter.emit("tool.completed", payload)
                 elif ev_type:
                     payload = {k: v for k, v in chunk.items() if k != "type"}
                     await emitter.emit(ev_type, payload)

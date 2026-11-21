@@ -12,9 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.redis import get_redis
-from app.db.models import Conversation, OpsAlertEvent, OpsAlertRule, RunTelemetry, User
+from app.db.models import Conversation, Message, OpsAlertEvent, OpsAlertRule, RunTelemetry, ScheduledTask, ScheduledTaskRun, User
 from app.db.session import detect_pgvector
 from app.services.agent_client import AgentClient
+from app.services.dashboard_telemetry import (
+    _parse_json_obj,
+    classify_http_request_outcome,
+    classify_web_search_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +37,9 @@ SUPPORTED_METRICS: dict[str, dict[str, str]] = {
     "arq_queue_depth": {"label": "ARQ 队列积压数", "unit": "jobs"},
     "active_stuck_runs": {"label": "超时卡死任务数", "unit": "runs"},
     "agent_down": {"label": "Agent 服务不可达 (1=故障)", "unit": "bool"},
+    "scheduled_task_failure_rate_pct": {"label": "定时任务失败率 (%)", "unit": "%"},
+    "web_search_error_rate_pct": {"label": "联网搜索失败率 (%)", "unit": "%"},
+    "http_request_error_rate_pct": {"label": "HTTP/Curl 请求失败率 (%)", "unit": "%"},
 }
 
 
@@ -397,6 +405,23 @@ async def collect_ops_inspection(db: AsyncSession, admin: User | None) -> dict[s
     )
     slo_data = await compute_slo_and_anomalies(db)
 
+    since_24h = now - timedelta(hours=24)
+    sched_active = int(
+        await db.scalar(
+            select(func.count(ScheduledTask.id)).where(
+                ScheduledTask.enabled.is_(True),
+                ScheduledTask.status == "active",
+            )
+        )
+        or 0
+    )
+    sched_error_tasks = int(
+        await db.scalar(select(func.count(ScheduledTask.id)).where(ScheduledTask.status == "error")) or 0
+    )
+    sched_runs_24h = await _scheduled_runs_stats_since(db, since_24h)
+    search_24h = await _tool_stats_since(db, "web_search", since_24h)
+    http_24h = await _tool_stats_since(db, "http_request", since_24h)
+
     return {
         "postgres": pg_info,
         "redis": redis_info,
@@ -411,11 +436,73 @@ async def collect_ops_inspection(db: AsyncSession, admin: User | None) -> dict[s
             "p95_latency_15m_ms": p95_latency_15m,
             "firing_alerts": firing_alerts,
         },
+        "automation": {
+            "scheduled_active_tasks": sched_active,
+            "scheduled_error_tasks": sched_error_tasks,
+            "scheduled_runs_24h": sched_runs_24h["total"],
+            "scheduled_success_rate_24h_pct": sched_runs_24h["success_rate_pct"],
+            "web_search_calls_24h": search_24h["total"],
+            "web_search_success_rate_24h_pct": search_24h["success_rate_pct"],
+            "http_request_calls_24h": http_24h["total"],
+            "http_request_success_rate_24h_pct": http_24h["success_rate_pct"],
+        },
         "slo": slo_data["slo"],
         "anomalies": slo_data["anomalies"],
         "supported_metrics": SUPPORTED_METRICS,
         "generated_at": now.isoformat(),
     }
+
+
+async def _scheduled_runs_stats_since(db: AsyncSession, since: datetime) -> dict[str, Any]:
+    row = (
+        await db.execute(
+            select(
+                func.count(ScheduledTaskRun.id),
+                func.coalesce(func.sum(case((ScheduledTaskRun.status == "completed", 1), else_=0)), 0),
+                func.coalesce(func.sum(case((ScheduledTaskRun.status == "failed", 1), else_=0)), 0),
+            ).where(ScheduledTaskRun.started_at >= since)
+        )
+    ).one()
+    total = int(row[0] or 0)
+    completed = int(row[1] or 0)
+    failed = int(row[2] or 0)
+    resolved = completed + failed
+    err_rate = round((failed / resolved) * 100, 2) if resolved > 0 else 0.0
+    succ_rate = round((completed / resolved) * 100, 2) if resolved > 0 else None
+    return {"total": total, "completed": completed, "failed": failed, "error_rate_pct": err_rate, "success_rate_pct": succ_rate}
+
+
+async def _tool_stats_since(db: AsyncSession, tool_name: str, since: datetime) -> dict[str, Any]:
+    rows = (
+        await db.execute(
+            select(Message.status, Message.tool_payload).where(
+                Message.role == "tool",
+                Message.tool_name == tool_name,
+                Message.created_at >= since,
+            )
+        )
+    ).all()
+    total = 0
+    succeeded = 0
+    failed = 0
+    for msg_status, payload_raw in rows:
+        payload = payload_raw if isinstance(payload_raw, dict) else {}
+        result = _parse_json_obj(payload.get("result"))
+        if tool_name == "http_request":
+            is_running, ok, _, _ = classify_http_request_outcome(msg_status, payload, result)
+        else:
+            is_running, ok, _, _, _ = classify_web_search_outcome(msg_status, payload, result)
+        if is_running:
+            continue
+        total += 1
+        if ok:
+            succeeded += 1
+        else:
+            failed += 1
+    resolved = succeeded + failed
+    err_rate = round((failed / resolved) * 100, 2) if resolved > 0 else 0.0
+    succ_rate = round((succeeded / resolved) * 100, 2) if resolved > 0 else None
+    return {"total": total, "succeeded": succeeded, "failed": failed, "error_rate_pct": err_rate, "success_rate_pct": succ_rate}
 
 
 def _compare(operator: str, current: float, threshold: float) -> bool:
@@ -478,6 +565,15 @@ async def compute_metric_value(
             )
             or 0
         )
+
+    if metric_key == "scheduled_task_failure_rate_pct":
+        return float((await _scheduled_runs_stats_since(db, since))["error_rate_pct"])
+
+    if metric_key == "web_search_error_rate_pct":
+        return float((await _tool_stats_since(db, "web_search", since))["error_rate_pct"])
+
+    if metric_key == "http_request_error_rate_pct":
+        return float((await _tool_stats_since(db, "http_request", since))["error_rate_pct"])
 
     if inspection is None:
         inspection = await collect_ops_inspection(db, None)

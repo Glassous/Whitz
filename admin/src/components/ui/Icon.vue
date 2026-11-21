@@ -19,7 +19,10 @@ type IconName =
   | "device"
   | "stop"
   | "chart"
-  | "plus";
+  | "plus"
+  | "clock"
+  | "globe"
+  | "terminal";
 
 const props = withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 18 });
 
@@ -42,6 +45,9 @@ const paths: Record<IconName, string> = {
   stop: "M12 22a10 10 0 100-20 10 10 0 000 20zM9 9h6v6H9z",
   chart: "M3 3v18h18M7 14l4-4 3 3 5-6",
   plus: "M12 5v14M5 12h14",
+  clock: "M12 22a10 10 0 100-20 10 10 0 000 20zM12 6v6l4 2",
+  globe: "M12 22a10 10 0 100-20 10 10 0 000 20zM2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z",
+  terminal: "M4 17l6-6-6-6M12 19h8",
 };
 
 const d = computed(() => paths[props.name]);

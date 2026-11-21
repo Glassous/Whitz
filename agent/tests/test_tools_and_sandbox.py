@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from app.core.config import AgentSettings
+from app.tools import parse_tool_error
 from app.tools.builtin_tools import (
     get_builtin_tools,
     http_request,
@@ -18,6 +19,7 @@ from app.tools.builtin_tools import (
     skill_view,
     todo_list,
     web_extract,
+    web_search,
 )
 from app.tools.sandbox import (
     DisabledSandboxExecutor,
@@ -272,3 +274,37 @@ async def test_http_request_curl_completeness_and_ssrf():
         )
         assert redir_res["ok"] is False
         assert "error" in redir_res
+
+
+@pytest.mark.asyncio
+async def test_web_search_fallback_metadata_and_parse_tool_error():
+    # parse_tool_error handles http_request 4xx/5xx, denied execute_code, non-zero exit_code, and wrapped output
+    assert parse_tool_error(json.dumps({"ok": False, "status_code": 404, "reason_phrase": "Not Found"}), None) == "HTTP 404 Not Found"
+    assert parse_tool_error(json.dumps({"ok": True, "status_code": 200}), None) is None
+    assert parse_tool_error(json.dumps({"status": "denied", "message": "用户拒绝了代码执行审批。"}), None) == "用户拒绝了代码执行审批。"
+    assert parse_tool_error(json.dumps({"exit_code": 2, "stderr": "curl: (6) Could not resolve host"}), None) == "curl: (6) Could not resolve host"
+    assert parse_tool_error("<untrusted_tool_result>{\"provider\":\"none\",\"error\":\"timeout\"}</untrusted_tool_result>", None) == "timeout"
+
+    def handler_fallback(request: httpx.Request) -> httpx.Response:
+        if "tavily.com" in str(request.url):
+            return httpx.Response(503, json={"detail": "upstream busy"})
+        if "duckduckgo.com" in str(request.url):
+            return httpx.Response(200, json={"AbstractText": "Whitz docs", "Heading": "Whitz", "AbstractURL": "https://whitz.test"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler_fallback)
+    real_async_client = httpx.AsyncClient
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    with (
+        patch("app.tools.builtin_tools.get_settings", return_value=AgentSettings(search_api_key="tvly-test")),
+        patch("app.tools.builtin_tools.httpx.AsyncClient", side_effect=client_factory),
+    ):
+        res = json.loads(await web_search.ainvoke({"query": "Whitz", "max_results": 3}))
+        assert res["ok"] is True
+        assert res["provider"] == "duckduckgo"
+        assert res["fallback_from"] == "tavily"
+        assert res["result_count"] == 1

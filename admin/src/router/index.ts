@@ -18,6 +18,7 @@ const router = createRouter({
         { path: "", name: "overview", component: () => import("../views/OverviewView.vue") },
         { path: "ops", name: "ops", component: () => import("../views/OpsDashboardView.vue") },
         { path: "quant", name: "quant", component: () => import("../views/QuantDashboardView.vue") },
+        { path: "automation", name: "automation", component: () => import("../views/AutomationDashboardView.vue") },
         { path: "users", name: "users", component: () => import("../views/UsersView.vue") },
         {
           path: "invite-codes",

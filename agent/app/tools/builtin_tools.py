@@ -217,6 +217,8 @@ async def web_search(
     settings = get_settings()
     limit = max(1, min(int(max_results or 5), 10))
     api_key = (settings.search_api_key or "").strip()
+    fallback_from: str | None = None
+    fallback_reason: str | None = None
 
     if api_key:
         try:
@@ -241,10 +243,18 @@ async def web_search(
                 for r in (data.get("results") or [])[:limit]
             ]
             return json.dumps(
-                {"provider": "tavily", "answer": data.get("answer"), "results": results},
+                {
+                    "ok": True,
+                    "provider": "tavily",
+                    "result_count": len(results),
+                    "answer": data.get("answer"),
+                    "results": results,
+                },
                 ensure_ascii=False,
             )
         except Exception as exc:
+            fallback_from = "tavily"
+            fallback_reason = str(exc)[:200]
             logger.warning("Tavily web_search failed (%s); falling back", exc)
 
     # Free fallback via DuckDuckGo Instant Answer API
@@ -276,9 +286,28 @@ async def web_search(
                 )
             if len(results) >= limit:
                 break
-        return json.dumps({"provider": "duckduckgo", "results": results}, ensure_ascii=False)
+        payload: dict[str, Any] = {
+            "ok": True,
+            "provider": "duckduckgo",
+            "result_count": len(results),
+            "results": results,
+        }
+        if fallback_from:
+            payload["fallback_from"] = fallback_from
+            payload["fallback_reason"] = fallback_reason
+        return json.dumps(payload, ensure_ascii=False)
     except Exception as exc:
-        return json.dumps({"provider": "none", "results": [], "error": str(exc)}, ensure_ascii=False)
+        err_payload: dict[str, Any] = {
+            "ok": False,
+            "provider": "none",
+            "result_count": 0,
+            "results": [],
+            "error": str(exc),
+        }
+        if fallback_from:
+            err_payload["fallback_from"] = fallback_from
+            err_payload["fallback_reason"] = fallback_reason
+        return json.dumps(err_payload, ensure_ascii=False)
 
 
 @tool
@@ -289,10 +318,14 @@ async def web_extract(
     """抓取并提取指定公开网页的纯文本正文内容。"""
     cleaned = (url or "").strip()
     if not await _is_public_url_async(cleaned):
-        return json.dumps({"error": "仅允许抓取合法的公网 HTTP/HTTPS 页面。", "url": cleaned}, ensure_ascii=False)
+        return json.dumps(
+            {"ok": False, "provider": "none", "error": "仅允许抓取合法的公网 HTTP/HTTPS 页面。", "url": cleaned},
+            ensure_ascii=False,
+        )
 
     settings = get_settings()
     api_key = (settings.search_api_key or "").strip()
+    fallback_from: str | None = None
     if api_key:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
@@ -306,22 +339,25 @@ async def web_extract(
             if results:
                 content = str(results[0].get("raw_content") or results[0].get("content") or "")
                 return json.dumps(
-                    {"url": cleaned, "content": content[:12000]},
+                    {"ok": True, "provider": "tavily", "url": cleaned, "content": content[:12000]},
                     ensure_ascii=False,
                 )
         except Exception as exc:
+            fallback_from = "tavily"
             logger.warning("Tavily web_extract failed (%s); falling back to HTTP fetch", exc)
 
     try:
         max_bytes = 512 * 1024
         chunks: list[bytes] = []
         total = 0
+        status_code = 200
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(15.0),
             follow_redirects=False,
             headers={"User-Agent": "WhitzAgent/1.0"},
         ) as client:
             async with client.stream("GET", cleaned) as resp:
+                status_code = resp.status_code
                 resp.raise_for_status()
                 async for piece in resp.aiter_bytes(chunk_size=16384):
                     chunks.append(piece)
@@ -330,9 +366,26 @@ async def web_extract(
                         break
         raw_html = b"".join(chunks).decode("utf-8", errors="replace")
         text = _strip_html(raw_html)
-        return json.dumps({"url": cleaned, "content": text[:12000]}, ensure_ascii=False)
+        out_payload: dict[str, Any] = {
+            "ok": True,
+            "provider": "http",
+            "status_code": status_code,
+            "url": cleaned,
+            "content": text[:12000],
+        }
+        if fallback_from:
+            out_payload["fallback_from"] = fallback_from
+        return json.dumps(out_payload, ensure_ascii=False)
     except Exception as exc:
-        return json.dumps({"url": cleaned, "error": f"网页抓取失败: {exc}"}, ensure_ascii=False)
+        err_out: dict[str, Any] = {
+            "ok": False,
+            "provider": "http",
+            "url": cleaned,
+            "error": f"网页抓取失败: {exc}",
+        }
+        if fallback_from:
+            err_out["fallback_from"] = fallback_from
+        return json.dumps(err_out, ensure_ascii=False)
 
 
 _ALLOWED_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})

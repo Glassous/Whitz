@@ -267,6 +267,72 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!-- 24h 定时任务 / Curl / 联网搜索健康摘要 -->
+    <div v-if="inspection?.automation" class="grid gap-3 sm:grid-cols-3">
+      <router-link
+        :to="{ name: 'automation' }"
+        class="rounded-2xl border border-line bg-surface p-4 transition-colors hover:border-line-strong"
+      >
+        <div class="flex items-center justify-between">
+          <span class="text-[12px] text-fg-muted">24h 定时任务成功率</span>
+          <Icon name="clock" :size="14" class="text-fg-faint" />
+        </div>
+        <p class="mt-1 text-lg font-semibold text-fg">
+          {{
+            inspection.automation.scheduled_success_rate_24h_pct !== null
+              ? `${inspection.automation.scheduled_success_rate_24h_pct}%`
+              : "—"
+          }}
+        </p>
+        <p class="mt-0.5 text-[11px] text-fg-faint">
+          24h 执行 {{ inspection.automation.scheduled_runs_24h }} 次 · 活跃 {{ inspection.automation.scheduled_active_tasks }}
+          <span v-if="inspection.automation.scheduled_error_tasks > 0" class="text-danger">
+            · 异常 {{ inspection.automation.scheduled_error_tasks }}
+          </span>
+        </p>
+      </router-link>
+
+      <router-link
+        :to="{ name: 'automation' }"
+        class="rounded-2xl border border-line bg-surface p-4 transition-colors hover:border-line-strong"
+      >
+        <div class="flex items-center justify-between">
+          <span class="text-[12px] text-fg-muted">24h Curl / HTTP 成功率</span>
+          <Icon name="terminal" :size="14" class="text-fg-faint" />
+        </div>
+        <p class="mt-1 text-lg font-semibold text-fg">
+          {{
+            inspection.automation.http_request_success_rate_24h_pct !== null
+              ? `${inspection.automation.http_request_success_rate_24h_pct}%`
+              : "—"
+          }}
+        </p>
+        <p class="mt-0.5 text-[11px] text-fg-faint">
+          24h 请求 {{ inspection.automation.http_request_calls_24h }} 次 · 点击查看详情
+        </p>
+      </router-link>
+
+      <router-link
+        :to="{ name: 'automation' }"
+        class="rounded-2xl border border-line bg-surface p-4 transition-colors hover:border-line-strong"
+      >
+        <div class="flex items-center justify-between">
+          <span class="text-[12px] text-fg-muted">24h 联网搜索成功率</span>
+          <Icon name="globe" :size="14" class="text-fg-faint" />
+        </div>
+        <p class="mt-1 text-lg font-semibold text-fg">
+          {{
+            inspection.automation.web_search_success_rate_24h_pct !== null
+              ? `${inspection.automation.web_search_success_rate_24h_pct}%`
+              : "—"
+          }}
+        </p>
+        <p class="mt-0.5 text-[11px] text-fg-faint">
+          24h 搜索 {{ inspection.automation.web_search_calls_24h }} 次 · 点击查看详情
+        </p>
+      </router-link>
+    </div>
+
     <!-- SLO 错误预算与 Z-Score 异常检测 -->
     <div v-if="inspection?.slo" class="grid gap-4 lg:grid-cols-2">
       <div class="rounded-2xl border border-line bg-surface p-5">

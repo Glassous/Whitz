@@ -10,6 +10,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.routes import (
     admin,
+    admin_dashboards,
     admin_membership,
     admin_ops,
     admin_quant,
@@ -103,6 +104,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(users.router)
     app.include_router(admin.router)
+    app.include_router(admin_dashboards.router)
     app.include_router(admin_membership.router)
     app.include_router(admin_ops.router)
     app.include_router(admin_quant.router)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -12,6 +13,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.core.models import ModelRouter
 from app.graph.state import SubagentState
+from app.tools import parse_tool_error
 from app.tools.builtin_tools import (
     http_request,
     memory_search,
@@ -67,6 +69,22 @@ def _select_subagent_tools(role: str, config: RunnableConfig) -> list[BaseTool]:
     return base
 
 
+def _emit_subagent_tool_event(payload: dict[str, Any]) -> None:
+    try:
+        from langgraph.config import get_stream_writer
+
+        writer = get_stream_writer()
+        writer(payload)
+    except Exception:
+        pass
+
+
+def _clip_tool_str(value: Any, limit: int) -> Any:
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit] + "\n... [truncated]"
+    return value
+
+
 async def _invoke_single_tool(
     tc: dict[str, Any],
     tool_map: dict[str, BaseTool],
@@ -85,21 +103,67 @@ async def _invoke_single_tool(
         args.setdefault("conversation_id", conv_id)
     tool_obj = tool_map.get(name)
     if tool_obj is None:
+        err_json = json.dumps({"error": f"子智能体无权调用工具: {name}"}, ensure_ascii=False)
         return ToolMessage(
             tool_call_id=call_id,
             name=name,
-            content=json.dumps({"error": f"子智能体无权调用工具: {name}"}, ensure_ascii=False),
+            content=err_json,
             status="error",
         )
+
+    _emit_subagent_tool_event(
+        {
+            "type": "tool.started",
+            "tool": name,
+            "preview": args,
+            "args": args,
+            "call_id": call_id,
+            "status": "running",
+        }
+    )
+    started = time.monotonic()
     try:
         res = await tool_obj.ainvoke(args, config=config)
         text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+        dur_ms = round((time.monotonic() - started) * 1000.0, 1)
+        err = parse_tool_error(text, None)
+        _emit_subagent_tool_event(
+            {
+                "type": "tool.completed",
+                "tool": name,
+                "preview": _clip_tool_str(text, 8000),
+                "args": args,
+                "result": _clip_tool_str(text, 24000),
+                "error": err,
+                "duration": dur_ms,
+                "duration_ms": dur_ms,
+                "call_id": call_id,
+                "status": "failed" if err else "completed",
+            }
+        )
         return ToolMessage(tool_call_id=call_id, name=name, content=text)
     except Exception as exc:
+        dur_ms = round((time.monotonic() - started) * 1000.0, 1)
+        err_msg = str(exc)
+        err_json = json.dumps({"error": err_msg}, ensure_ascii=False)
+        _emit_subagent_tool_event(
+            {
+                "type": "tool.completed",
+                "tool": name,
+                "preview": err_json,
+                "args": args,
+                "result": err_json,
+                "error": err_msg,
+                "duration": dur_ms,
+                "duration_ms": dur_ms,
+                "call_id": call_id,
+                "status": "failed",
+            }
+        )
         return ToolMessage(
             tool_call_id=call_id,
             name=name,
-            content=json.dumps({"error": str(exc)}, ensure_ascii=False),
+            content=err_json,
             status="error",
         )
 

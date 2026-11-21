@@ -386,6 +386,16 @@ export interface OpsInspection {
     p95_latency_15m_ms: number;
     firing_alerts: number;
   };
+  automation?: {
+    scheduled_active_tasks: number;
+    scheduled_error_tasks: number;
+    scheduled_runs_24h: number;
+    scheduled_success_rate_24h_pct: number | null;
+    web_search_calls_24h: number;
+    web_search_success_rate_24h_pct: number | null;
+    http_request_calls_24h: number;
+    http_request_success_rate_24h_pct: number | null;
+  };
   slo?: OpsSlo;
   anomalies?: OpsAnomaly[];
   supported_metrics: Record<string, { label: string; unit: string }>;
@@ -644,4 +654,268 @@ export interface QuantEvalsResponse {
   items: EvalRunItem[];
   latest: EvalRunItem | null;
   pass_rate_delta_pct: number | null;
+}
+
+export interface SchedulesDashboard {
+  window_days: number;
+  tasks_summary: {
+    total: number;
+    enabled: number;
+    active: number;
+    paused: number;
+    error: number;
+    completed: number;
+    pending_proposals: number;
+    by_schedule_type: Array<{ type: string; count: number }>;
+    by_target_mode: Array<{ mode: string; count: number }>;
+  };
+  runs_summary: {
+    total: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    skipped: number;
+    in_progress: number;
+    success_rate_pct: number | null;
+    avg_duration_ms: number | null;
+    p95_duration_ms: number | null;
+    avg_dispatch_delay_ms: number | null;
+    on_time_rate_pct: number | null;
+    total_tokens: number;
+  };
+  by_trigger: Array<{
+    trigger_type: string;
+    total: number;
+    completed: number;
+    failed: number;
+    success_rate_pct: number | null;
+  }>;
+  daily: Array<{
+    day: string;
+    total: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    skipped: number;
+    tokens: number;
+    success_rate_pct: number | null;
+  }>;
+  top_tasks: Array<{
+    task_id: string;
+    name: string;
+    user_email: string;
+    schedule_type: string;
+    schedule_description: string;
+    target_mode: string;
+    enabled: boolean;
+    status: string;
+    consecutive_failures: number;
+    runs: number;
+    completed: number;
+    failed: number;
+    success_rate_pct: number | null;
+    avg_duration_ms: number | null;
+    tokens_used: number;
+    last_run_at: string | null;
+    last_run_status: string | null;
+    last_error: string | null;
+  }>;
+  recent_failures: Array<{
+    id: string;
+    task_id: string;
+    task_name: string;
+    user_email: string;
+    trigger_type: string;
+    status: string;
+    error: string;
+    started_at: string | null;
+    finished_at: string | null;
+    duration_ms: number | null;
+  }>;
+  generated_at: string;
+}
+
+export interface HttpToolsDashboard {
+  window_days: number;
+  http_request: {
+    summary: {
+      total: number;
+      succeeded: number;
+      failed: number;
+      in_progress: number;
+      success_rate_pct: number | null;
+      avg_duration_ms: number | null;
+      p95_duration_ms: number | null;
+      total_bytes_read: number;
+      http_2xx: number;
+      http_3xx: number;
+      http_4xx: number;
+      http_5xx: number;
+      network_errors: number;
+    };
+    by_method: Array<{
+      method: string;
+      total: number;
+      succeeded: number;
+      failed: number;
+      success_rate_pct: number | null;
+      avg_duration_ms: number | null;
+    }>;
+    by_status_bucket: Array<{ bucket: string; count: number }>;
+    top_hosts: Array<{
+      host: string;
+      total: number;
+      succeeded: number;
+      failed: number;
+      success_rate_pct: number | null;
+      avg_duration_ms: number | null;
+    }>;
+    daily: Array<{
+      day: string;
+      total: number;
+      succeeded: number;
+      failed: number;
+      success_rate_pct: number | null;
+      avg_duration_ms: number | null;
+    }>;
+    recent_failures: Array<{
+      id: string;
+      created_at: string;
+      user_email: string;
+      method: string;
+      url: string;
+      host: string;
+      status_code: number | null;
+      error: string;
+      duration_ms: number | null;
+    }>;
+  };
+  web_extract: {
+    summary: {
+      total: number;
+      succeeded: number;
+      failed: number;
+      success_rate_pct: number | null;
+      avg_duration_ms: number | null;
+      fallback_count: number;
+    };
+    by_provider: Array<{
+      provider: string;
+      total: number;
+      succeeded: number;
+      failed: number;
+      success_rate_pct: number | null;
+      avg_duration_ms: number | null;
+    }>;
+    daily: Array<{
+      day: string;
+      total: number;
+      succeeded: number;
+      failed: number;
+      success_rate_pct: number | null;
+    }>;
+  };
+  execute_code: {
+    summary: {
+      total: number;
+      succeeded: number;
+      failed: number;
+      denied: number;
+      success_rate_pct: number | null;
+      avg_duration_ms: number | null;
+      curl_command_count: number;
+    };
+    by_language: Array<{
+      language: string;
+      total: number;
+      succeeded: number;
+      failed: number;
+      denied: number;
+      success_rate_pct: number | null;
+      avg_duration_ms: number | null;
+    }>;
+    daily: Array<{
+      day: string;
+      total: number;
+      succeeded: number;
+      failed: number;
+      denied: number;
+      success_rate_pct: number | null;
+    }>;
+    recent_failures: Array<{
+      id: string;
+      created_at: string;
+      user_email: string;
+      language: string;
+      status: string;
+      exit_code: number | null;
+      error: string;
+      duration_ms: number | null;
+    }>;
+  };
+  generated_at: string;
+}
+
+export interface WebSearchDashboard {
+  window_days: number;
+  summary: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    in_progress: number;
+    success_rate_pct: number | null;
+    with_results: number;
+    empty_results: number;
+    hit_rate_pct: number | null;
+    fallback_count: number;
+    avg_results_per_search: number;
+    avg_duration_ms: number | null;
+    p95_duration_ms: number | null;
+  };
+  by_provider: Array<{
+    provider: string;
+    total: number;
+    succeeded: number;
+    failed: number;
+    with_results: number;
+    empty_results: number;
+    fallback_count: number;
+    success_rate_pct: number | null;
+    avg_duration_ms: number | null;
+  }>;
+  daily: Array<{
+    day: string;
+    total: number;
+    succeeded: number;
+    failed: number;
+    fallback_count: number;
+    with_results: number;
+    success_rate_pct: number | null;
+    avg_duration_ms: number | null;
+  }>;
+  recent_searches: Array<{
+    id: string;
+    created_at: string;
+    user_email: string;
+    query: string;
+    provider: string;
+    fallback_from: string | null;
+    result_count: number;
+    status: string;
+    error: string | null;
+    duration_ms: number | null;
+  }>;
+  recent_failures: Array<{
+    id: string;
+    created_at: string;
+    user_email: string;
+    query: string;
+    provider: string;
+    fallback_from: string | null;
+    result_count: number;
+    status: string;
+    error: string | null;
+    duration_ms: number | null;
+  }>;
+  generated_at: string;
 }

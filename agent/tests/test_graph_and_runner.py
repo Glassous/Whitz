@@ -377,3 +377,72 @@ async def test_main_chat_prompt_ordering_token_budget_and_cross_chat_tools():
     read_out = await main_tools["read_conversation_history"].ainvoke({"conversation_id": cid}, config=cfg)
     assert "怎么配置 LazyVim" in read_out
     assert any("WHERE id = %s AND user_id = %s" in sql and params[1] == uuid.UUID(uid) for sql, params in pool.queries)
+
+
+@pytest.mark.asyncio
+async def test_subgraph_emits_tool_events_to_runner_stream(monkeypatch):
+    import app.graph.subgraphs as sg
+
+    redis = FakeRedis()
+    checkpointer = InMemorySaver()
+    scripted = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_sub_ws",
+                        "name": "delegate_subtask",
+                        "args": {"role": "researcher", "task": "搜索最新状态"},
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_ws_inner",
+                        "name": "web_search",
+                        "args": {"query": "whitz status"},
+                    }
+                ],
+            ),
+            AIMessage(content="子智能体检索完成。"),
+            AIMessage(content="主智能体已整合结果。"),
+        ]
+    )
+    fake_router = FakeRouter(scripted)
+    monkeypatch.setattr(runner, "ModelRouter", lambda *a, **kw: fake_router)
+    monkeypatch.setattr(sg, "ModelRouter", lambda *a, **kw: fake_router)
+
+    class FakeSearchTool:
+        name = "web_search"
+        description = "search"
+
+        async def ainvoke(self, args, config=None):
+            return json.dumps({"ok": True, "provider": "tavily", "result_count": 1, "results": [{"title": "OK"}]})
+
+    monkeypatch.setattr(sg, "_select_subagent_tools", lambda role, config: [FakeSearchTool()])
+
+    run_id = uuid.uuid4().hex
+    meta = await runner.execute_run(
+        run_id,
+        {
+            "thread_id": "thread-sub-tool",
+            "conversation_id": str(uuid.uuid4()),
+            "user_id": str(uuid.uuid4()),
+            "input": "研究一下状态",
+            "memory_enabled": False,
+        },
+        redis=redis,
+        checkpointer=checkpointer,
+        settings=AgentSettings(internal_mcp_base_url=""),
+    )
+    assert meta["status"] == "completed"
+    completed_tools = [
+        json.loads(fields["data"])["tool"]
+        for _, fields in redis.streams[runner.events_key(run_id)]
+        if fields["event"] == "tool.completed"
+    ]
+    assert "web_search" in completed_tools
+    assert "delegate_subtask" in completed_tools
