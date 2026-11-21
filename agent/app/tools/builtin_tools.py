@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import socket
+import time
 import uuid
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -56,6 +57,8 @@ def _normalize_todo_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _is_global_ip(addr: str) -> bool:
     ip = ipaddress.ip_address(addr)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return _is_global_ip(str(ip.ipv4_mapped))
     return bool(ip.is_global) and not (
         ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
     )
@@ -330,6 +333,161 @@ async def web_extract(
         return json.dumps({"url": cleaned, "content": text[:12000]}, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"url": cleaned, "error": f"网页抓取失败: {exc}"}, ensure_ascii=False)
+
+
+_ALLOWED_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+_MAX_HTTP_RESPONSE_BYTES = 512 * 1024
+_MAX_HTTP_BODY_CHARS = 12000
+
+
+class _SSRFBlockedError(ValueError):
+    """Raised when a request or redirect target resolves to a non-public URL."""
+
+
+async def _ssrf_request_hook(request: httpx.Request) -> None:
+    target_url = str(request.url)
+    if not await _is_public_url_async(target_url):
+        raise _SSRFBlockedError(f"仅允许请求合法的公网 HTTP/HTTPS 地址: {target_url}")
+
+
+@tool
+async def http_request(
+    url: str,
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] = "GET",
+    headers: dict[str, str] | None = None,
+    params: dict[str, str | int | float | bool] | None = None,
+    json_body: dict[str, Any] | list[Any] | None = None,
+    form_data: dict[str, str | int | float | bool] | None = None,
+    body: str | None = None,
+    cookies: dict[str, str] | None = None,
+    basic_auth: str | None = None,
+    follow_redirects: bool = True,
+    verify_ssl: bool = True,
+    timeout_seconds: float = 15.0,
+) -> str:
+    """发送无终端 HTTP/HTTPS 请求（等效 curl 能力），支持自定义 Method、Headers、Query、JSON/表单/文本 Body、Cookie、Basic Auth、重定向与超时控制。
+
+    仅允许访问公网 HTTP/HTTPS 地址（自动拦截内网/回环/元数据地址及重定向 SSRF）。
+    """
+    cleaned_url = (url or "").strip()
+    if not await _is_public_url_async(cleaned_url):
+        return json.dumps(
+            {"ok": False, "url": cleaned_url, "error": "仅允许请求合法的公网 HTTP/HTTPS 地址。"},
+            ensure_ascii=False,
+        )
+
+    normalized_method = (method or "GET").strip().upper()
+    if normalized_method not in _ALLOWED_HTTP_METHODS:
+        return json.dumps(
+            {"ok": False, "url": cleaned_url, "error": f"不支持的 HTTP 方法: {normalized_method}"},
+            ensure_ascii=False,
+        )
+
+    payload_count = sum(1 for item in (json_body, form_data, body) if item is not None)
+    if payload_count > 1:
+        return json.dumps(
+            {
+                "ok": False,
+                "url": cleaned_url,
+                "error": "json_body、form_data 与 body 不能同时传入，请仅保留一种请求体格式。",
+            },
+            ensure_ascii=False,
+        )
+
+    req_headers: dict[str, str] = {}
+    if isinstance(headers, dict):
+        for k, v in headers.items():
+            key = str(k).strip()
+            if key:
+                req_headers[key] = str(v)
+    if not any(k.lower() == "user-agent" for k in req_headers):
+        req_headers["User-Agent"] = "WhitzAgent/1.0"
+
+    req_auth: tuple[str, str] | None = None
+    if basic_auth is not None:
+        raw_auth = str(basic_auth)
+        if ":" not in raw_auth:
+            return json.dumps(
+                {"ok": False, "url": cleaned_url, "error": "basic_auth 格式应为 'username:password'。"},
+                ensure_ascii=False,
+            )
+        user_part, pass_part = raw_auth.split(":", 1)
+        req_auth = (user_part, pass_part)
+
+    clamped_timeout = max(1.0, min(float(timeout_seconds or 15.0), 60.0))
+    started = time.monotonic()
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(clamped_timeout),
+            follow_redirects=bool(follow_redirects),
+            max_redirects=5,
+            verify=bool(verify_ssl),
+            event_hooks={"request": [_ssrf_request_hook]},
+        ) as client:
+            request_kwargs: dict[str, Any] = {
+                "headers": req_headers,
+                "params": params,
+                "cookies": cookies,
+                "auth": req_auth,
+            }
+            if json_body is not None:
+                request_kwargs["json"] = json_body
+            elif form_data is not None:
+                request_kwargs["data"] = {str(k): str(v) for k, v in form_data.items()}
+            elif body is not None:
+                request_kwargs["content"] = body.encode("utf-8")
+
+            async with client.stream(normalized_method, cleaned_url, **request_kwargs) as resp:
+                chunks: list[bytes] = []
+                total_bytes = 0
+                truncated_bytes = False
+                if normalized_method != "HEAD":
+                    async for piece in resp.aiter_bytes(chunk_size=16384):
+                        remaining = _MAX_HTTP_RESPONSE_BYTES - total_bytes
+                        if remaining <= 0:
+                            truncated_bytes = True
+                            break
+                        if len(piece) > remaining:
+                            chunks.append(piece[:remaining])
+                            total_bytes += remaining
+                            truncated_bytes = True
+                            break
+                        chunks.append(piece)
+                        total_bytes += len(piece)
+
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                raw_text = b"".join(chunks).decode("utf-8", errors="replace") if chunks else ""
+                truncated_text = len(raw_text) > _MAX_HTTP_BODY_CHARS
+                return json.dumps(
+                    {
+                        "ok": 200 <= resp.status_code < 400,
+                        "status_code": resp.status_code,
+                        "reason_phrase": resp.reason_phrase,
+                        "http_version": resp.http_version,
+                        "url": str(resp.url),
+                        "redirect_count": len(resp.history),
+                        "elapsed_ms": elapsed_ms,
+                        "headers": dict(resp.headers),
+                        "cookies": dict(resp.cookies),
+                        "bytes_read": total_bytes,
+                        "truncated": bool(truncated_bytes or truncated_text),
+                        "body": raw_text[:_MAX_HTTP_BODY_CHARS],
+                    },
+                    ensure_ascii=False,
+                )
+    except _SSRFBlockedError as exc:
+        return json.dumps({"ok": False, "url": cleaned_url, "error": str(exc)}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps(
+            {
+                "ok": False,
+                "url": cleaned_url,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "error": f"HTTP 请求失败: {exc}",
+            },
+            ensure_ascii=False,
+        )
 
 
 @tool
@@ -769,6 +927,7 @@ def get_builtin_tools(
         todo_list,
         web_search,
         web_extract,
+        http_request,
         skill_view,
         request_deep_thinking,
     ]

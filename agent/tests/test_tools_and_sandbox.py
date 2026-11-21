@@ -4,10 +4,13 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from app.core.config import AgentSettings
 from app.tools.builtin_tools import (
+    get_builtin_tools,
+    http_request,
     memory_propose,
     memory_search,
     rag_search_workspace,
@@ -165,3 +168,107 @@ async def test_react_to_user_message_positive_only():
             {"reaction": "dislike"},
             config={"configurable": {"ai_reactions_enabled": True}},
         )
+
+
+@pytest.mark.asyncio
+async def test_http_request_curl_completeness_and_ssrf():
+    tool_names = {t.name for t in get_builtin_tools()}
+    assert "http_request" in tool_names
+
+    # SSRF blocks loopback, IPv4-mapped IPv6, metadata IP, and non-HTTP schemes
+    for bad_url in (
+        "http://127.0.0.1:8000/secret",
+        "http://[::ffff:127.0.0.1]/secret",
+        "http://169.254.169.254/latest/meta-data/",
+        "file:///etc/passwd",
+    ):
+        res = json.loads(await http_request.ainvoke({"url": bad_url}))
+        assert res["ok"] is False
+        assert "error" in res
+
+    # Parameter validation
+    conflict = json.loads(
+        await http_request.ainvoke(
+            {"url": "https://8.8.8.8/test", "method": "POST", "json_body": {"a": 1}, "body": "raw"}
+        )
+    )
+    assert conflict["ok"] is False
+    assert "json_body" in conflict["error"]
+
+    bad_auth = json.loads(
+        await http_request.ainvoke({"url": "https://8.8.8.8/test", "basic_auth": "onlyuser"})
+    )
+    assert bad_auth["ok"] is False
+    assert "basic_auth" in bad_auth["error"]
+
+    # Full curl-like POST JSON + headers + params + cookies + basic_auth via MockTransport
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path == "/redirect-internal":
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1:8000/admin"})
+        if request.method == "HEAD":
+            return httpx.Response(204, headers={"X-Head": "1"})
+        return httpx.Response(
+            201,
+            headers={"X-Custom-Resp": "ok", "Set-Cookie": "sid=abc123; Path=/"},
+            json={"received": json.loads(request.content.decode("utf-8")) if request.content else None},
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    async def fake_is_public(raw_url: str) -> bool:
+        return raw_url.startswith("https://api.example.com")
+
+    with (
+        patch("app.tools.builtin_tools._is_public_url_async", side_effect=fake_is_public),
+        patch("app.tools.builtin_tools.httpx.AsyncClient", side_effect=client_factory),
+    ):
+        post_res = json.loads(
+            await http_request.ainvoke(
+                {
+                    "url": "https://api.example.com/v1/items",
+                    "method": "POST",
+                    "headers": {"X-Trace": "t-1", "User-Agent": "CustomCurl/1.0"},
+                    "params": {"dry_run": "true"},
+                    "json_body": {"name": "whitz"},
+                    "cookies": {"session": "xyz"},
+                    "basic_auth": "alice:secret",
+                }
+            )
+        )
+        assert post_res["ok"] is True
+        assert post_res["status_code"] == 201
+        assert post_res["headers"]["x-custom-resp"] == "ok"
+        assert post_res["cookies"]["sid"] == "abc123"
+        assert json.loads(post_res["body"]) == {"received": {"name": "whitz"}}
+        req = captured[0]
+        assert req.method == "POST"
+        assert req.url.params["dry_run"] == "true"
+        assert req.headers["user-agent"] == "CustomCurl/1.0"
+        assert req.headers["x-trace"] == "t-1"
+        assert req.headers["authorization"].startswith("Basic ")
+        assert "session=xyz" in req.headers["cookie"]
+
+        # HEAD request returns empty body
+        head_res = json.loads(
+            await http_request.ainvoke({"url": "https://api.example.com/ping", "method": "HEAD"})
+        )
+        assert head_res["ok"] is True
+        assert head_res["status_code"] == 204
+        assert head_res["body"] == ""
+
+        # Redirect to internal IP must be blocked by _ssrf_request_hook
+        redir_res = json.loads(
+            await http_request.ainvoke(
+                {"url": "https://api.example.com/redirect-internal", "follow_redirects": True}
+            )
+        )
+        assert redir_res["ok"] is False
+        assert "error" in redir_res

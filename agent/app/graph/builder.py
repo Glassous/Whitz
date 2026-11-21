@@ -116,6 +116,7 @@ def _base_agent_prompt(assistant_name: str = "Whitz", *, is_main_chat: bool = Fa
         "   - 需要个性化背景时调用 `memory_search`，当用户表达长期偏好或重要项目背景且开启记忆功能时调用 `memory_propose`；"
         f"{extra_main}\n"
         "   - 需要实时外部资料时使用 `web_search`，摘要不足时再调用 `web_extract` 精读关键页面；\n"
+        "   - 需要调用公开 HTTP/REST API、发送自定义 Method/Headers/Query/JSON/表单请求或查看响应状态码与响应头（等效 curl 能力）时，直接调用 `http_request`；\n"
         "   - 复杂多步骤任务使用 `todo_list` 维护进度计划，或通过 `delegate_subtask` 委派给 `researcher` / `coder` 子智能体；\n"
         "   - 需要精确计算或验证代码时调用 `execute_code`（系统会自动暂停等待用户审批）；遇到关键歧义时调用 `clarify` 向用户追问；\n"
         "   - 若技能摘要与当前任务相关，调用 `skill_view` 按需加载完整技能指南后再执行；\n"

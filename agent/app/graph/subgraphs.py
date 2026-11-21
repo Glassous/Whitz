@@ -13,6 +13,7 @@ from langgraph.graph import END, START, StateGraph
 from app.core.models import ModelRouter
 from app.graph.state import SubagentState
 from app.tools.builtin_tools import (
+    http_request,
     memory_search,
     rag_search_workspace,
     skill_view,
@@ -55,6 +56,7 @@ def _select_subagent_tools(role: str, config: RunnableConfig) -> list[BaseTool]:
         rag_search_workspace,
         web_search,
         web_extract,
+        http_request,
         skill_view,
     ]
     if role != "coder":
