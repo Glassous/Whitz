@@ -305,4 +305,59 @@ class WhitzCoreTests {
         assertEquals("resolved", fb.status)
         assertEquals("感谢反馈", fb.adminNote)
     }
+
+    @Test
+    fun models_decodeScheduleOverviewAndPendingProposal() {
+        val raw = """
+            {
+              "tasks": [
+                {
+                  "id": "t-1",
+                  "conversation_id": "c-1",
+                  "target_mode": "dedicated",
+                  "name": "每日 AI 早报",
+                  "prompt": "汇总最新 AI 动态",
+                  "schedule_type": "daily",
+                  "schedule_config": {"hour": 9, "minute": 0},
+                  "schedule_description": "每天 09:00",
+                  "timezone": "Asia/Shanghai",
+                  "model_route": "auto",
+                  "skill_names": ["deep-research"],
+                  "enabled": true,
+                  "status": "active",
+                  "next_run_at": "2026-11-22T01:00:00Z",
+                  "run_count": 3,
+                  "consecutive_failures": 0,
+                  "source": "manual",
+                  "created_at": "2026-11-21T00:00:00Z",
+                  "updated_at": "2026-11-21T00:00:00Z"
+                }
+              ],
+              "pending": [
+                {
+                  "id": "p-1",
+                  "action": "create",
+                  "payload": {"name": "周报提醒", "prompt": "整理本周进展"},
+                  "schedule_description": "每周五 18:00",
+                  "reason": "用户口头要求",
+                  "status": "pending"
+                }
+              ],
+              "quota": {
+                "tier": "plus",
+                "max_active_tasks": 10,
+                "active_count": 1,
+                "min_interval_minutes": 15
+              }
+            }
+        """.trimIndent()
+        val overview = WhitzJson.decodeFromString(com.glassous.whitz.core.model.ScheduleOverview.serializer(), raw)
+        assertEquals(1, overview.tasks.size)
+        assertEquals("每日 AI 早报", overview.tasks.first().name)
+        assertEquals("每天 09:00", overview.tasks.first().scheduleDescription)
+        assertEquals(1, overview.pending.size)
+        assertEquals("每周五 18:00", overview.pending.first().scheduleDescription)
+        assertEquals(10, overview.quota.maxActiveTasks)
+        assertEquals(15, overview.quota.minIntervalMinutes)
+    }
 }

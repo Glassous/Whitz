@@ -75,6 +75,7 @@ import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Stop
@@ -199,6 +200,7 @@ fun ChatScreen(
     vm: ChatViewModel,
     onOpenSettings: () -> Unit,
     onOpenLibrary: () -> Unit,
+    onOpenSchedules: () -> Unit,
     onOpenTaskDetails: (Int) -> Unit,
 ) {
     val ui by vm.ui.collectAsState()
@@ -477,6 +479,7 @@ fun ChatScreen(
                             onSelectMain = { vm.openMainConversation() },
                             onCreateSide = { vm.createSideConversation() },
                             onOpenLibrary = onOpenLibrary,
+                            onOpenSchedules = onOpenSchedules,
                             onOpenSearch = { showSearch = true },
                             onRefreshConversations = { vm.refreshConversations() },
                             onSelectConv = { vm.openConversation(it) },
@@ -951,6 +954,14 @@ fun ChatScreen(
                                     item = sk,
                                     busy = sk.id in ui.resolvingSkillIds,
                                     onResolve = { id, act, c -> vm.resolvePendingSkill(id, act, c) },
+                                )
+                            }
+
+                            ui.pendingSchedules.forEach { sched ->
+                                SchedulePendingCard(
+                                    item = sched,
+                                    busy = sched.id in ui.resolvingScheduleIds,
+                                    onResolve = { id, act -> vm.resolvePendingSchedule(id, act) },
                                 )
                             }
 
@@ -1547,6 +1558,10 @@ fun ChatScreen(
                                 scope.launch { drawerState.close() }
                                 onOpenLibrary()
                             },
+                            onOpenSchedules = {
+                                scope.launch { drawerState.close() }
+                                onOpenSchedules()
+                            },
                             onOpenSearch = { showSearch = true },
                             onRefreshConversations = { vm.refreshConversations() },
                             onSelectConv = {
@@ -1680,6 +1695,7 @@ private fun SidebarContent(
     onSelectMain: () -> Unit,
     onCreateSide: () -> Unit,
     onOpenLibrary: () -> Unit,
+    onOpenSchedules: () -> Unit,
     onOpenSearch: () -> Unit,
     onRefreshConversations: () -> Unit,
     onSelectConv: (String) -> Unit,
@@ -1777,6 +1793,22 @@ private fun SidebarContent(
                 if (!collapsed) {
                     Spacer(modifier = Modifier.width(12.dp))
                     Text("资料库", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onOpenSchedules)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Schedule, contentDescription = "定时任务", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
+                if (!collapsed) {
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("定时任务", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
                 }
             }
         }

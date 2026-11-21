@@ -232,6 +232,7 @@ data class ToolPayload(
     val attachments: List<FileAttachmentMeta>? = null,
     val skills: List<String>? = null,
     val artifacts: List<WorkspaceArtifactMeta>? = null,
+    @SerialName("scheduled_task") val scheduledTask: JsonElement? = null,
 )
 
 @Serializable
@@ -413,6 +414,94 @@ data class GithubSkillPreviewResponse(
     @SerialName("repo_url") val repoUrl: String = "",
     val ref: String? = null,
     val path: String? = null,
+)
+
+@Serializable
+data class ScheduledTaskRun(
+    val id: String,
+    @SerialName("task_id") val taskId: String,
+    @SerialName("conversation_id") val conversationId: String? = null,
+    @SerialName("assistant_message_id") val assistantMessageId: String? = null,
+    @SerialName("run_id") val runId: String? = null,
+    @SerialName("trigger_type") val triggerType: String = "scheduled",
+    val status: String = "queued",
+    @SerialName("scheduled_for") val scheduledFor: String? = null,
+    @SerialName("started_at") val startedAt: String = "",
+    @SerialName("finished_at") val finishedAt: String? = null,
+    val summary: String? = null,
+    val error: String? = null,
+    @SerialName("tokens_used") val tokensUsed: Int = 0,
+)
+
+@Serializable
+data class ScheduledTask(
+    val id: String,
+    @SerialName("conversation_id") val conversationId: String? = null,
+    @SerialName("target_mode") val targetMode: String = "dedicated",
+    val name: String,
+    val prompt: String,
+    @SerialName("schedule_type") val scheduleType: String = "daily",
+    @SerialName("schedule_config") val scheduleConfig: JsonObject = JsonObject(emptyMap()),
+    @SerialName("schedule_description") val scheduleDescription: String = "",
+    val timezone: String = "Asia/Shanghai",
+    @SerialName("model_route") val modelRoute: String = "auto",
+    @SerialName("skill_names") val skillNames: List<String> = emptyList(),
+    val enabled: Boolean = true,
+    val status: String = "active",
+    @SerialName("next_run_at") val nextRunAt: String? = null,
+    @SerialName("last_run_at") val lastRunAt: String? = null,
+    @SerialName("last_run_status") val lastRunStatus: String? = null,
+    @SerialName("last_error") val lastError: String? = null,
+    @SerialName("run_count") val runCount: Int = 0,
+    @SerialName("consecutive_failures") val consecutiveFailures: Int = 0,
+    @SerialName("max_runs") val maxRuns: Int? = null,
+    val source: String = "manual",
+    @SerialName("created_at") val createdAt: String = "",
+    @SerialName("updated_at") val updatedAt: String = "",
+    val runs: List<ScheduledTaskRun> = emptyList(),
+)
+
+@Serializable
+data class ScheduledTaskPendingItem(
+    val id: String,
+    @SerialName("target_task_id") val targetTaskId: String? = null,
+    @SerialName("conversation_id") val conversationId: String? = null,
+    val action: String = "create",
+    val payload: JsonObject = JsonObject(emptyMap()),
+    @SerialName("schedule_description") val scheduleDescription: String = "",
+    val reason: String? = null,
+    val status: String? = "pending",
+    @SerialName("created_at") val createdAt: String? = null,
+)
+
+@Serializable
+data class ScheduleQuota(
+    val tier: String = "free",
+    @SerialName("max_active_tasks") val maxActiveTasks: Int = 3,
+    @SerialName("active_count") val activeCount: Int = 0,
+    @SerialName("min_interval_minutes") val minIntervalMinutes: Int = 60,
+)
+
+@Serializable
+data class ScheduleOverview(
+    val tasks: List<ScheduledTask> = emptyList(),
+    val pending: List<ScheduledTaskPendingItem> = emptyList(),
+    val quota: ScheduleQuota = ScheduleQuota(),
+)
+
+@Serializable
+data class SchedulePreviewResponse(
+    val valid: Boolean = false,
+    @SerialName("schedule_description") val scheduleDescription: String = "",
+    @SerialName("next_runs") val nextRuns: List<String> = emptyList(),
+    val error: String? = null,
+)
+
+@Serializable
+data class SchedulePendingResolveResponse(
+    val status: String = "approved",
+    @SerialName("proposal_id") val proposalId: String? = null,
+    val task: ScheduledTask? = null,
 )
 
 fun formatCredits(value: Double): String {

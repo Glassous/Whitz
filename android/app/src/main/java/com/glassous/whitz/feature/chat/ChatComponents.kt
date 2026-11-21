@@ -109,12 +109,15 @@ import com.glassous.whitz.core.model.PendingControl
 import com.glassous.whitz.core.model.Plan
 import com.glassous.whitz.core.model.ReasoningBlock
 import com.glassous.whitz.core.model.ReasoningTool
+import com.glassous.whitz.core.model.ScheduledTaskPendingItem
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
 import com.glassous.whitz.ui.theme.WhitzTextField
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 internal data class ReactionOption(val key: String, val emoji: String, val label: String)
 
@@ -889,6 +892,101 @@ fun SkillPendingCard(
                     enabled = !busy,
                     shapes = ButtonDefaults.shapesFor(36.dp),
                 ) { Text(if (busy && pendingAction != "reject") "处理中…" else "批准") }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun SchedulePendingCard(
+    item: ScheduledTaskPendingItem,
+    busy: Boolean = false,
+    onResolve: (id: String, action: String) -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    var pendingAction by remember(item.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(busy) {
+        if (!busy) pendingAction = null
+    }
+    val actionTitle = when (item.action) {
+        "update" -> "修改定时任务"
+        "pause" -> "暂停定时任务"
+        "resume" -> "恢复定时任务"
+        "delete" -> "删除定时任务"
+        else -> "新建定时任务"
+    }
+    val taskName = (item.payload["name"] as? JsonPrimitive)?.contentOrNull ?: "未命名定时任务"
+    val taskPrompt = (item.payload["prompt"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = colors.surface,
+        border = BorderStroke(1.dp, colors.lineStrong),
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = "$actionTitle：$taskName",
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.fg,
+                    modifier = Modifier.weight(1f),
+                )
+                if (item.scheduleDescription.isNotBlank()) {
+                    Text(
+                        text = item.scheduleDescription,
+                        fontSize = 11.5.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            if (taskPrompt.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = taskPrompt,
+                    fontSize = 12.5.sp,
+                    color = colors.fgMuted,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (!item.reason.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "说明：${item.reason}",
+                    fontSize = 11.5.sp,
+                    color = colors.fgFaint,
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Spacer(modifier = Modifier.weight(1f))
+                OutlinedButton(
+                    onClick = {
+                        pendingAction = "reject"
+                        onResolve(item.id, "reject")
+                    },
+                    enabled = !busy,
+                    shapes = ButtonDefaults.shapesFor(36.dp),
+                ) { Text(if (busy && pendingAction == "reject") "拒绝中…" else "拒绝") }
+                Button(
+                    onClick = {
+                        pendingAction = "approve"
+                        onResolve(item.id, "approve")
+                    },
+                    enabled = !busy,
+                    shapes = ButtonDefaults.shapesFor(36.dp),
+                ) {
+                    Text(
+                        if (busy && pendingAction != "reject") "处理中…"
+                        else if (item.action == "delete") "确认删除" else "确认生效"
+                    )
+                }
             }
         }
     }

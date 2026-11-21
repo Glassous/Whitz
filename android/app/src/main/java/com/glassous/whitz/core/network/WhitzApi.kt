@@ -13,6 +13,12 @@ import com.glassous.whitz.core.model.GithubSkillPreviewResponse
 import com.glassous.whitz.core.model.MemoryOverview
 import com.glassous.whitz.core.model.MessageReaction
 import com.glassous.whitz.core.model.PresignResponse
+import com.glassous.whitz.core.model.ScheduleOverview
+import com.glassous.whitz.core.model.SchedulePendingResolveResponse
+import com.glassous.whitz.core.model.SchedulePreviewResponse
+import com.glassous.whitz.core.model.ScheduledTask
+import com.glassous.whitz.core.model.ScheduledTaskPendingItem
+import com.glassous.whitz.core.model.ScheduledTaskRun
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.model.TicketResponse
@@ -22,6 +28,7 @@ import com.glassous.whitz.core.model.UserSessionItem
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
@@ -207,6 +214,45 @@ data class MessageReactionCreateRequest(
     @SerialName("reason_code") val reasonCode: String? = null,
     val comment: String? = null,
 )
+
+@Serializable
+data class SchedulePreviewRequest(
+    @SerialName("schedule_type") val scheduleType: String,
+    @SerialName("schedule_config") val scheduleConfig: JsonObject,
+    val timezone: String? = null,
+    val count: Int = 5,
+)
+
+@Serializable
+data class ScheduledTaskCreateRequest(
+    val name: String,
+    val prompt: String,
+    @SerialName("schedule_type") val scheduleType: String,
+    @SerialName("schedule_config") val scheduleConfig: JsonObject,
+    val timezone: String? = null,
+    @SerialName("target_mode") val targetMode: String = "dedicated",
+    @SerialName("conversation_id") val conversationId: String? = null,
+    @SerialName("model_route") val modelRoute: String = "auto",
+    @SerialName("skill_names") val skillNames: List<String> = emptyList(),
+    val enabled: Boolean = true,
+)
+
+@Serializable
+data class ScheduledTaskUpdateRequest(
+    val name: String? = null,
+    val prompt: String? = null,
+    @SerialName("schedule_type") val scheduleType: String? = null,
+    @SerialName("schedule_config") val scheduleConfig: JsonObject? = null,
+    val timezone: String? = null,
+    @SerialName("target_mode") val targetMode: String? = null,
+    @SerialName("conversation_id") val conversationId: String? = null,
+    @SerialName("model_route") val modelRoute: String? = null,
+    @SerialName("skill_names") val skillNames: List<String>? = null,
+    val enabled: Boolean? = null,
+)
+
+@Serializable
+data class SchedulePendingResolveRequest(val action: String)
 
 interface WhitzApi {
     // --- Auth ---
@@ -470,4 +516,41 @@ interface WhitzApi {
 
     @DELETE("library/files/{id}")
     suspend fun deleteLibraryFile(@Path("id") id: String): Response<Unit>
+
+    // --- Scheduled Tasks ---
+    @GET("schedules")
+    suspend fun getSchedules(): ScheduleOverview
+
+    @POST("schedules/preview")
+    suspend fun previewSchedule(@Body body: SchedulePreviewRequest): SchedulePreviewResponse
+
+    @GET("schedules/pending")
+    suspend fun getPendingSchedules(): List<ScheduledTaskPendingItem>
+
+    @POST("schedules/pending/{id}")
+    suspend fun resolveSchedulePending(
+        @Path("id") id: String,
+        @Body body: SchedulePendingResolveRequest,
+    ): SchedulePendingResolveResponse
+
+    @POST("schedules")
+    suspend fun createSchedule(@Body body: ScheduledTaskCreateRequest): ScheduledTask
+
+    @GET("schedules/{id}")
+    suspend fun getScheduleDetail(
+        @Path("id") id: String,
+        @Query("runs_limit") runsLimit: Int = 20,
+    ): ScheduledTask
+
+    @PATCH("schedules/{id}")
+    suspend fun updateSchedule(
+        @Path("id") id: String,
+        @Body body: ScheduledTaskUpdateRequest,
+    ): ScheduledTask
+
+    @DELETE("schedules/{id}")
+    suspend fun deleteSchedule(@Path("id") id: String): Response<Unit>
+
+    @POST("schedules/{id}/run-now")
+    suspend fun runScheduleNow(@Path("id") id: String): ScheduledTaskRun
 }

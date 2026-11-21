@@ -24,6 +24,7 @@ import com.glassous.whitz.core.model.Plan
 import com.glassous.whitz.core.model.PlanItem
 import com.glassous.whitz.core.model.ReasoningBlock
 import com.glassous.whitz.core.model.ReasoningTool
+import com.glassous.whitz.core.model.ScheduledTaskPendingItem
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.model.ToolPayload
@@ -41,8 +42,10 @@ import com.glassous.whitz.core.network.MessageReactionCreateRequest
 import com.glassous.whitz.core.network.PatchConversationRequest
 import com.glassous.whitz.core.network.PendingActionRequest
 import com.glassous.whitz.core.network.PresignRequest
+import com.glassous.whitz.core.network.SchedulePendingResolveRequest
 import com.glassous.whitz.core.network.SseEvent
 import com.glassous.whitz.core.network.TicketRequest
+import com.glassous.whitz.feature.schedules.ScheduleController
 import com.glassous.whitz.core.network.UpdateAssistantRequest
 import com.glassous.whitz.core.network.WhitzJson
 import com.glassous.whitz.core.network.extractErrorMessage
@@ -105,6 +108,7 @@ data class ChatUiState(
     val submittingClarify: Boolean = false,
     val resolvingMemoryIds: Set<String> = emptySet(),
     val resolvingSkillIds: Set<String> = emptySet(),
+    val resolvingScheduleIds: Set<String> = emptySet(),
     val activeAssistantId: String? = null,
     val activeRunId: String? = null,
     val selectedTurnId: String? = null,
@@ -113,6 +117,7 @@ data class ChatUiState(
     val pendingControl: PendingControl? = null,
     val pendingMemory: List<MemoryPendingItem> = emptyList(),
     val pendingSkills: List<SkillPendingItem> = emptyList(),
+    val pendingSchedules: List<ScheduledTaskPendingItem> = emptyList(),
     val error: String? = null,
     val agentStatus: AgentStatus? = null,
     val credits: CreditStatus? = null,
@@ -152,6 +157,7 @@ class ChatViewModel(
     val user = container.authManager.user
     val authReady = container.authManager.ready
     val library = LibraryController(viewModelScope, container)
+    val schedules = ScheduleController(viewModelScope, container)
 
     fun resolveAssetUrl(pathOrUrl: String?): String? = container.resolveAssetUrl(pathOrUrl)
 
@@ -368,6 +374,7 @@ class ChatViewModel(
                 pendingControl = null,
                 pendingMemory = emptyList(),
                 pendingSkills = emptyList(),
+                pendingSchedules = emptyList(),
                 error = null,
                 files = emptyList(),
                 uploads = emptyList(),
@@ -489,6 +496,7 @@ class ChatViewModel(
                 pendingControl = hydratedControl,
                 pendingMemory = emptyList(),
                 pendingSkills = emptyList(),
+                pendingSchedules = emptyList(),
                 error = null,
                 streaming = false,
                 sendingMessage = false,
@@ -558,6 +566,18 @@ class ChatViewModel(
                             (it.status ?: "pending") == "pending"
                     }
                     _ui.update { it.copy(pendingSkills = filtered) }
+                }
+            } catch (_: Throwable) {
+                /* ignore */
+            }
+            try {
+                val scheds = container.network.api.getPendingSchedules()
+                if (_ui.value.currentConvId == targetConvId) {
+                    val filtered = scheds.filter {
+                        (it.conversationId == null || it.conversationId == targetConvId) &&
+                            (it.status ?: "pending") == "pending"
+                    }
+                    _ui.update { it.copy(pendingSchedules = filtered) }
                 }
             } catch (_: Throwable) {
                 /* ignore */
@@ -1199,6 +1219,30 @@ class ChatViewModel(
         }
     }
 
+    fun resolvePendingSchedule(id: String, action: String) {
+        if (id in _ui.value.resolvingScheduleIds) return
+        _ui.update { it.copy(resolvingScheduleIds = it.resolvingScheduleIds + id) }
+        viewModelScope.launch {
+            try {
+                container.network.api.resolveSchedulePending(id, SchedulePendingResolveRequest(action))
+                _ui.update { state ->
+                    state.copy(
+                        pendingSchedules = state.pendingSchedules.filterNot { it.id == id },
+                        resolvingScheduleIds = state.resolvingScheduleIds - id,
+                    )
+                }
+                schedules.loadAll(silent = true)
+            } catch (t: Throwable) {
+                _ui.update {
+                    it.copy(
+                        resolvingScheduleIds = it.resolvingScheduleIds - id,
+                        error = extractErrorMessage(t, "处理定时任务提案失败"),
+                    )
+                }
+            }
+        }
+    }
+
     // --- SSE Event Dispatcher ---
     private fun handleSseEvent(ev: SseEvent) {
         val d = ev.data
@@ -1611,6 +1655,17 @@ class ChatViewModel(
                     _ui.update { state ->
                         val merged = mergeById(state.pendingSkills, items) { it.id }
                         state.copy(pendingSkills = merged)
+                    }
+                }
+            }
+            "schedules.pending", "schedule.pending" -> {
+                val items = extractPendingList<ScheduledTaskPendingItem>(d, "schedules") {
+                    WhitzJson.decodeFromJsonElement(ScheduledTaskPendingItem.serializer(), it)
+                }
+                if (items.isNotEmpty()) {
+                    _ui.update { state ->
+                        val merged = mergeById(state.pendingSchedules, items) { it.id }
+                        state.copy(pendingSchedules = merged)
                     }
                 }
             }
@@ -2404,6 +2459,18 @@ class ChatViewModel(
                     }
                 }
                 library.handleRealtimeLibraryEvent(action, fileId, idxStatus, idxChunks)
+            }
+            "schedule.updated", "schedule.run_updated", "schedule.pending_updated" -> {
+                schedules.handleRealtimeEvent(event, d)
+                if (event == "schedule.pending_updated") {
+                    val action = d.str("action")
+                    val proposalId = d.str("proposal_id")
+                    if ((action == "approved" || action == "rejected") && proposalId != null) {
+                        _ui.update { state ->
+                            state.copy(pendingSchedules = state.pendingSchedules.filterNot { it.id == proposalId })
+                        }
+                    }
+                }
             }
         }
     }

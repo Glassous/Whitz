@@ -36,6 +36,8 @@ import com.glassous.whitz.feature.chat.ChatScreen
 import com.glassous.whitz.feature.chat.ChatViewModel
 import com.glassous.whitz.feature.chat.LibraryScreen
 import com.glassous.whitz.feature.chat.TaskDetailScreen
+import com.glassous.whitz.feature.schedules.ScheduleEditorScreen
+import com.glassous.whitz.feature.schedules.SchedulesScreen
 import com.glassous.whitz.feature.settings.AddMemoryScreen
 import com.glassous.whitz.feature.settings.AssistantSettingsScreen
 import com.glassous.whitz.feature.settings.CreateSkillScreen
@@ -172,6 +174,7 @@ private fun WhitzRoot(container: AppContainer) {
                 vm = chatVm,
                 onOpenSettings = { navController.navigate(SettingsRoutes.GRAPH) },
                 onOpenLibrary = { navController.navigate("library") },
+                onOpenSchedules = { navController.navigate("schedules") },
                 onOpenTaskDetails = { tab -> navController.navigate("task_details?tab=$tab") },
             )
         }
@@ -183,6 +186,53 @@ private fun WhitzRoot(container: AppContainer) {
                 val chatVm: ChatViewModel = viewModel(chatEntry, factory = factory)
                 LibraryScreen(
                     vm = chatVm,
+                    onBack = { navController.popBackStack() },
+                )
+            }
+        }
+        composable("schedules") { backStackEntry ->
+            val chatEntry = remember(backStackEntry) {
+                runCatching { navController.getBackStackEntry("chat") }.getOrNull()
+            }
+            if (chatEntry != null) {
+                val chatVm: ChatViewModel = viewModel(chatEntry, factory = factory)
+                SchedulesScreen(
+                    vm = chatVm,
+                    onOpenEditor = { taskId ->
+                        if (taskId.isNullOrBlank()) {
+                            navController.navigate("schedule_editor")
+                        } else {
+                            navController.navigate("schedule_editor?taskId=$taskId")
+                        }
+                    },
+                    onOpenConversation = { convId ->
+                        chatVm.openConversation(convId)
+                        navController.popBackStack("chat", inclusive = false)
+                    },
+                    onBack = { navController.popBackStack() },
+                )
+            }
+        }
+        composable(
+            route = "schedule_editor?taskId={taskId}",
+            arguments = listOf(
+                navArgument("taskId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            val taskId = backStackEntry.arguments?.getString("taskId")
+            val chatEntry = remember(backStackEntry) {
+                runCatching { navController.getBackStackEntry("chat") }.getOrNull()
+            }
+            if (chatEntry != null) {
+                val chatVm: ChatViewModel = viewModel(chatEntry, factory = factory)
+                ScheduleEditorScreen(
+                    vm = chatVm,
+                    taskId = taskId,
+                    onSaved = { navController.popBackStack() },
                     onBack = { navController.popBackStack() },
                 )
             }
