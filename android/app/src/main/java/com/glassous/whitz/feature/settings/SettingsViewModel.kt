@@ -168,42 +168,45 @@ class SettingsViewModel(
 
     fun uploadAssistantAvatar(uri: Uri) {
         viewModelScope.launch {
-            _ui.update { it.copy(assistantSaving = true, assistantFeedback = null, assistantError = null) }
+            _ui.update { it.copy(loading = true, assistantSaving = true, message = null, error = null, assistantFeedback = null, assistantError = null) }
             try {
                 val dataUrl = AvatarEncoder.encodeToDataUrl(container.appContext.contentResolver, uri)
                 val updated = container.network.api.uploadAssistantAvatar(AvatarUploadRequest(dataUrl))
                 container.authManager.updateUser(updated)
-                _ui.update { it.copy(assistantSaving = false, assistantFeedback = "助手头像已更新") }
+                _ui.update { it.copy(loading = false, assistantSaving = false, message = "助手头像已更新", assistantFeedback = "助手头像已更新") }
             } catch (t: Throwable) {
-                _ui.update { it.copy(assistantSaving = false, assistantError = extractErrorMessage(t, "助手头像上传失败")) }
+                val err = extractErrorMessage(t, "助手头像上传失败")
+                _ui.update { it.copy(loading = false, assistantSaving = false, error = err, assistantError = err) }
             }
         }
     }
 
     fun deleteAssistantAvatar() {
         viewModelScope.launch {
-            _ui.update { it.copy(assistantSaving = true, assistantFeedback = null, assistantError = null) }
+            _ui.update { it.copy(loading = true, assistantSaving = true, message = null, error = null, assistantFeedback = null, assistantError = null) }
             try {
                 val updated = container.network.api.deleteAssistantAvatar()
                 container.authManager.updateUser(updated)
-                _ui.update { it.copy(assistantSaving = false, assistantFeedback = "已恢复默认 Whitz 图标") }
+                _ui.update { it.copy(loading = false, assistantSaving = false, message = "已恢复默认 Whitz 图标", assistantFeedback = "已恢复默认 Whitz 图标") }
             } catch (t: Throwable) {
-                _ui.update { it.copy(assistantSaving = false, assistantError = extractErrorMessage(t, "恢复默认图标失败")) }
+                val err = extractErrorMessage(t, "恢复默认图标失败")
+                _ui.update { it.copy(loading = false, assistantSaving = false, error = err, assistantError = err) }
             }
         }
     }
 
     fun updateAssistantName(assistantName: String, onSuccess: () -> Unit = {}) {
         viewModelScope.launch {
-            _ui.update { it.copy(assistantSaving = true, assistantFeedback = null, assistantError = null) }
+            _ui.update { it.copy(loading = true, assistantSaving = true, message = null, error = null, assistantFeedback = null, assistantError = null) }
             try {
                 val nextName = assistantName.trim().ifEmpty { "Whitz" }
                 val updated = container.network.api.updateAssistantProfile(UpdateAssistantRequest(nextName))
                 container.authManager.updateUser(updated)
-                _ui.update { it.copy(assistantSaving = false) }
+                _ui.update { it.copy(loading = false, assistantSaving = false, message = "助手信息已保存") }
                 onSuccess()
             } catch (t: Throwable) {
-                _ui.update { it.copy(assistantSaving = false, assistantError = extractErrorMessage(t, "保存失败")) }
+                val err = extractErrorMessage(t, "保存失败")
+                _ui.update { it.copy(loading = false, assistantSaving = false, error = err, assistantError = err) }
             }
         }
     }

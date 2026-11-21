@@ -72,10 +72,6 @@ import kotlinx.serialization.json.longOrNull
 import java.time.Instant
 import java.util.UUID
 
-enum class ChatMainView {
-    CHAT, LIBRARY
-}
-
 data class PreviewTarget(
     val file: ConversationFile,
     val previewUrl: String? = null,
@@ -86,7 +82,6 @@ data class PreviewTarget(
 )
 
 data class ChatUiState(
-    val activeView: ChatMainView = ChatMainView.CHAT,
     val conversations: List<Conversation> = emptyList(),
     val conversationsLoading: Boolean = false,
     val conversationsRefreshing: Boolean = false,
@@ -257,15 +252,6 @@ class ChatViewModel(
         }
     }
 
-    fun switchView(view: ChatMainView) {
-        _ui.update { it.copy(activeView = view) }
-        if (view == ChatMainView.LIBRARY) {
-            library.loadFiles()
-        } else if (_ui.value.currentConvId == null && !_ui.value.isNewSideDraft) {
-            openMainConversation()
-        }
-    }
-
     fun startNewConversation() {
         createSideConversation()
     }
@@ -279,7 +265,6 @@ class ChatViewModel(
         lastEventId = null
         _ui.update {
             it.copy(
-                activeView = ChatMainView.CHAT,
                 isNewSideDraft = true,
                 currentConvId = null,
                 currentConvKind = "side",
@@ -313,8 +298,7 @@ class ChatViewModel(
     fun openMainConversation() {
         val state = _ui.value
         val knownMainId = state.mainConversation?.id
-        if (state.activeView == ChatMainView.CHAT &&
-            knownMainId != null &&
+        if (knownMainId != null &&
             state.currentConvId == knownMainId &&
             state.currentConvKind == "main"
         ) {
@@ -327,7 +311,6 @@ class ChatViewModel(
         streamJob = null
         _ui.update {
             it.copy(
-                activeView = ChatMainView.CHAT,
                 isNewSideDraft = false,
                 previewTarget = null,
                 selectedSkillNames = emptyList(),
@@ -352,10 +335,7 @@ class ChatViewModel(
 
     fun openConversation(convId: String) {
         val state = _ui.value
-        if (state.activeView == ChatMainView.CHAT &&
-            state.currentConvId == convId &&
-            state.messages.isNotEmpty()
-        ) {
+        if (state.currentConvId == convId && state.messages.isNotEmpty()) {
             return
         }
         val mySeq = ++openSeq
@@ -365,7 +345,6 @@ class ChatViewModel(
         streamJob = null
         _ui.update {
             it.copy(
-                activeView = ChatMainView.CHAT,
                 isNewSideDraft = false,
                 previewTarget = null,
             )

@@ -55,7 +55,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.Delete
@@ -75,7 +74,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearWavyProgressIndicator
@@ -112,7 +110,6 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -168,6 +165,7 @@ private fun currentGreeting(): String {
 fun ChatScreen(
     vm: ChatViewModel,
     onOpenSettings: () -> Unit,
+    onOpenLibrary: () -> Unit,
     onOpenTaskDetails: (Int) -> Unit,
 ) {
     val ui by vm.ui.collectAsState()
@@ -316,10 +314,10 @@ fun ChatScreen(
         )
     }
 
-    // Top of the newest message must clear the floating header (status bar + 66dp button row),
-    // otherwise the first line of that message is hidden behind the frosted buttons.
+    // Top of the newest message must clear the floating header (status bar + button/avatar row),
+    // otherwise the first line of that message is hidden behind the floating header.
     val revealTopOffsetPx = with(density) {
-        (WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 68.dp).roundToPx()
+        (WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + if (ui.isMainChat) 86.dp else 68.dp).roundToPx()
     }
     val conversationScrollKey = ui.currentConvId ?: "local-new"
     var revealedConversationKey by rememberSaveable { mutableStateOf<String?>(null) }
@@ -366,9 +364,6 @@ fun ChatScreen(
     BackHandler(enabled = drawerState.isOpen) {
         scope.launch { drawerState.close() }
     }
-    BackHandler(enabled = ui.activeView == ChatMainView.LIBRARY && !drawerState.isOpen) {
-        vm.switchView(ChatMainView.CHAT)
-    }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize().background(colors.canvas)) {
         val isExpandedScreen = maxWidth >= 840.dp
@@ -407,7 +402,7 @@ fun ChatScreen(
                             onCloseDrawer = {},
                             onSelectMain = { vm.openMainConversation() },
                             onCreateSide = { vm.createSideConversation() },
-                            onSwitchView = { vm.switchView(it) },
+                            onOpenLibrary = onOpenLibrary,
                             onOpenSearch = { showSearch = true },
                             onRefreshConversations = { vm.refreshConversations() },
                             onSelectConv = { vm.openConversation(it) },
@@ -419,60 +414,6 @@ fun ChatScreen(
                     }
                 }
 
-                // Center Area: Embedded Library View OR Chat Workspace
-                if (ui.activeView == ChatMainView.LIBRARY) {
-                    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-                    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .background(colors.canvas),
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = statusTop + 10.dp, start = 10.dp, end = 16.dp, bottom = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            WhitzGlassCircleButton(
-                                hazeState = headerHazeState,
-                                showBorder = true,
-                                onClick = {
-                                    if (isExpandedScreen) {
-                                        desktopSidebarCollapsed = !desktopSidebarCollapsed
-                                    } else {
-                                        scope.launch { drawerState.open() }
-                                    }
-                                },
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_sidebar_toggle),
-                                    contentDescription = "切换侧栏",
-                                    tint = colors.fgMuted,
-                                    modifier = Modifier.size(23.dp),
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = "资料库",
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = colors.fg,
-                            )
-                        }
-                        Box(
-                            modifier = Modifier.weight(1f).fillMaxWidth(),
-                            contentAlignment = Alignment.TopCenter,
-                        ) {
-                            LibraryPane(
-                                controller = vm.library,
-                                bottomPadding = navBottom + 24.dp,
-                                modifier = Modifier.widthIn(max = 900.dp).fillMaxSize(),
-                            )
-                        }
-                    }
-                } else {
                 // Center Chat Area (100% edge-to-edge)
                 Box(
                     modifier = Modifier
@@ -486,7 +427,7 @@ fun ChatScreen(
                     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
                     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
                     val composerOverlayDp = with(density) { bottomOverlayHeightPx.toDp() }
-                    val listTopPadding = statusTop + 68.dp
+                    val listTopPadding = statusTop + if (ui.isMainChat) 86.dp else 68.dp
                     val listBottomPadding = (if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottom) + 16.dp
 
                     // 1. Messages or Empty State (also the blur source for the floating header)
@@ -587,30 +528,31 @@ fun ChatScreen(
                         }
                     }
 
-                    // 2a. Status bar scrim only (same look as the bottom scrim); the header row itself
-                    //     stays fully transparent.
-                    if (statusTop > 0.dp) {
+                    // 2a. Top gradient scrim
+                    if (statusTop > 0.dp || ui.isMainChat) {
                         WhitzProgressiveBlurTop(
                             modifier = Modifier
                                 .align(Alignment.TopCenter)
                                 .fillMaxWidth()
-                                .height(statusTop + 12.dp),
+                                .height(statusTop + if (ui.isMainChat) 78.dp else 12.dp),
                             maxAlpha = 0.85f,
                         )
                     }
 
-                    // 2b. Floating Header: no title, frosted circular buttons only
-                    Row(
+                    // 2b. Floating Header:
+                    // - Main Chat: left sidebar button + centered Assistant Avatar & Nickname (tapping opens task panel), right toggle hidden
+                    // - Side Chat: left sidebar button + right task panel toggle (unchanged)
+                    Box(
                         modifier = Modifier
                             .align(Alignment.TopCenter)
                             .fillMaxWidth()
                             .statusBarsPadding()
                             .padding(horizontal = 10.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
                     ) {
                         WhitzGlassCircleButton(
                             hazeState = headerHazeState,
                             showBorder = visibleMessages.isNotEmpty(),
+                            modifier = Modifier.align(Alignment.TopStart),
                             onClick = {
                                 if (isExpandedScreen) {
                                     desktopSidebarCollapsed = !desktopSidebarCollapsed
@@ -627,35 +569,76 @@ fun ChatScreen(
                             )
                         }
 
-                        Spacer(modifier = Modifier.weight(1f))
-
-                        AnimatedVisibility(
-                            visible = visibleMessages.isNotEmpty(),
-                            enter = fadeIn(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()),
-                            exit = fadeOut(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()),
-                        ) {
-                            Box {
-                                WhitzGlassCircleButton(
-                                    hazeState = headerHazeState,
-                                    showBorder = visibleMessages.isNotEmpty(),
-                                    onClick = { onOpenTaskDetails(0) },
+                        if (ui.isMainChat) {
+                            val mainAvatarUrl = vm.resolveAssetUrl(user?.assistantAvatarUrl)
+                            Column(
+                                modifier = Modifier
+                                    .align(Alignment.TopCenter)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .clickable { onOpenTaskDetails(0) }
+                                    .padding(horizontal = 12.dp, vertical = 2.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(colors.surface)
+                                        .border(0.5.dp, colors.line, CircleShape),
+                                    contentAlignment = Alignment.Center,
                                 ) {
-                                    Icon(
-                                        painter = painterResource(R.drawable.ic_task_panel),
-                                        contentDescription = if (ui.isMainChat) "助手与步骤" else "步骤与文件",
-                                        tint = colors.fgMuted,
-                                        modifier = Modifier.size(22.dp),
-                                    )
+                                    if (!mainAvatarUrl.isNullOrBlank()) {
+                                        AsyncImage(
+                                            model = mainAvatarUrl,
+                                            contentDescription = assistantName,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize(),
+                                        )
+                                    } else {
+                                        WhitzLogoMark(modifier = Modifier.size(18.dp))
+                                    }
                                 }
-                                if (!ui.isMainChat && ui.files.isNotEmpty()) {
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.TopEnd)
-                                            .padding(top = 6.dp, end = 6.dp)
-                                            .size(7.dp)
-                                            .clip(CircleShape)
-                                            .background(colors.fg),
-                                    )
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = assistantName,
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = colors.fg,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 180.dp),
+                                )
+                            }
+                        } else {
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = visibleMessages.isNotEmpty(),
+                                enter = fadeIn(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()),
+                                exit = fadeOut(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()),
+                                modifier = Modifier.align(Alignment.TopEnd),
+                            ) {
+                                Box {
+                                    WhitzGlassCircleButton(
+                                        hazeState = headerHazeState,
+                                        showBorder = visibleMessages.isNotEmpty(),
+                                        onClick = { onOpenTaskDetails(0) },
+                                    ) {
+                                        Icon(
+                                            painter = painterResource(R.drawable.ic_task_panel),
+                                            contentDescription = "步骤与文件",
+                                            tint = colors.fgMuted,
+                                            modifier = Modifier.size(22.dp),
+                                        )
+                                    }
+                                    if (ui.files.isNotEmpty()) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .padding(top = 6.dp, end = 6.dp)
+                                                .size(7.dp)
+                                                .clip(CircleShape)
+                                                .background(colors.fg),
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1147,32 +1130,29 @@ fun ChatScreen(
                             .padding(bottom = 90.dp),
                     )
                 }
-                }
             }
 
-                if (ui.activeView == ChatMainView.CHAT) {
-                    ComposerPlusMenuOverlay(
-                        visible = plusMenuExpanded,
-                        anchorBounds = { plusAnchorBounds },
-                        selectedSkillCount = ui.selectedSkillNames.size,
-                        showAttachMenu = showAttachMenu,
-                        onDismiss = dismissPlusMenu,
-                        onOpenAttachMenu = { showAttachMenu = true },
-                        onDismissAttachMenu = { showAttachMenu = false },
-                        onUploadLocalFile = {
-                            dismissPlusMenu()
-                            filePickerLauncher.launch(arrayOf("*/*"))
-                        },
-                        onPickFromLibrary = {
-                            dismissPlusMenu()
-                            showLibraryPicker = true
-                        },
-                        onOpenSkillPicker = {
-                            dismissPlusMenu()
-                            showSkillPicker = true
-                        },
-                    )
-                }
+                ComposerPlusMenuOverlay(
+                    visible = plusMenuExpanded,
+                    anchorBounds = { plusAnchorBounds },
+                    selectedSkillCount = ui.selectedSkillNames.size,
+                    showAttachMenu = showAttachMenu,
+                    onDismiss = dismissPlusMenu,
+                    onOpenAttachMenu = { showAttachMenu = true },
+                    onDismissAttachMenu = { showAttachMenu = false },
+                    onUploadLocalFile = {
+                        dismissPlusMenu()
+                        filePickerLauncher.launch(arrayOf("*/*"))
+                    },
+                    onPickFromLibrary = {
+                        dismissPlusMenu()
+                        showLibraryPicker = true
+                    },
+                    onOpenSkillPicker = {
+                        dismissPlusMenu()
+                        showSkillPicker = true
+                    },
+                )
             }
         }
 
@@ -1203,9 +1183,9 @@ fun ChatScreen(
                                 vm.createSideConversation()
                                 scope.launch { drawerState.close() }
                             },
-                            onSwitchView = { view ->
-                                vm.switchView(view)
+                            onOpenLibrary = {
                                 scope.launch { drawerState.close() }
+                                onOpenLibrary()
                             },
                             onOpenSearch = { showSearch = true },
                             onRefreshConversations = { vm.refreshConversations() },
@@ -1339,7 +1319,7 @@ private fun SidebarContent(
     onCloseDrawer: () -> Unit,
     onSelectMain: () -> Unit,
     onCreateSide: () -> Unit,
-    onSwitchView: (ChatMainView) -> Unit,
+    onOpenLibrary: () -> Unit,
     onOpenSearch: () -> Unit,
     onRefreshConversations: () -> Unit,
     onSelectConv: (String) -> Unit,
@@ -1354,9 +1334,7 @@ private fun SidebarContent(
     val assistantAvatarUrl = resolveAssetUrl(user?.assistantAvatarUrl)
     val userAvatarUrl = resolveAssetUrl(user?.avatarUrl)
     val mainConv = ui.mainConversation
-    val isMainSelected = ui.activeView == ChatMainView.CHAT &&
-        mainConv != null &&
-        ui.currentConvId == mainConv.id
+    val isMainSelected = mainConv != null && ui.currentConvId == mainConv.id
 
     Column(
         modifier = Modifier
@@ -1396,6 +1374,43 @@ private fun SidebarContent(
                 }
             }
         }
+
+        // Top Action Rows: Row 1 = Search, Row 2 = Library (above Main Chat)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onOpenSearch)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Search, contentDescription = "搜索", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
+                if (!collapsed) {
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("搜索", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onOpenLibrary)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.FolderOpen, contentDescription = "资料库", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
+                if (!collapsed) {
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("资料库", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         if (collapsed) {
             Spacer(modifier = Modifier.weight(1f))
@@ -1550,7 +1565,7 @@ private fun SidebarContent(
                                 items(pinned, key = { it.id }) { conv ->
                                     ConversationRow(
                                         conv = conv,
-                                        selected = ui.activeView == ChatMainView.CHAT && conv.id == ui.currentConvId,
+                                        selected = conv.id == ui.currentConvId,
                                         onSelect = { onSelectConv(conv.id) },
                                         onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
                                         onRename = { onRename(conv) },
@@ -1574,7 +1589,7 @@ private fun SidebarContent(
                                 items(recent, key = { it.id }) { conv ->
                                     ConversationRow(
                                         conv = conv,
-                                        selected = ui.activeView == ChatMainView.CHAT && conv.id == ui.currentConvId,
+                                        selected = conv.id == ui.currentConvId,
                                         onSelect = { onSelectConv(conv.id) },
                                         onTogglePin = { onTogglePin(conv.id, !conv.isPinned) },
                                         onRename = { onRename(conv) },
@@ -1588,70 +1603,11 @@ private fun SidebarContent(
             }
         }
 
-        // Bottom 3 Action Buttons (Horizontal 3-button row in single-column sidebar; vertical stack only if 68dp collapsed rail)
-        HorizontalDivider(color = colors.line.copy(alpha = 0.65f))
-        if (collapsed) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                SidebarRailIconButton(
-                    icon = Icons.Default.ChatBubbleOutline,
-                    label = "聊天",
-                    active = ui.activeView == ChatMainView.CHAT,
-                    onClick = { onSwitchView(ChatMainView.CHAT) },
-                )
-                SidebarRailIconButton(
-                    icon = Icons.Default.Search,
-                    label = "搜索",
-                    active = false,
-                    onClick = onOpenSearch,
-                )
-                SidebarRailIconButton(
-                    icon = Icons.Default.FolderOpen,
-                    label = "资料库",
-                    active = ui.activeView == ChatMainView.LIBRARY,
-                    onClick = { onSwitchView(ChatMainView.LIBRARY) },
-                )
-            }
-        } else {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp, bottom = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SidebarBottomNavButton(
-                    icon = Icons.Default.ChatBubbleOutline,
-                    label = "聊天",
-                    active = ui.activeView == ChatMainView.CHAT,
-                    onClick = { onSwitchView(ChatMainView.CHAT) },
-                    modifier = Modifier.weight(1f),
-                )
-                SidebarBottomNavButton(
-                    icon = Icons.Default.Search,
-                    label = "搜索",
-                    active = false,
-                    onClick = onOpenSearch,
-                    modifier = Modifier.weight(1f),
-                )
-                SidebarBottomNavButton(
-                    icon = Icons.Default.FolderOpen,
-                    label = "资料库",
-                    active = ui.activeView == ChatMainView.LIBRARY,
-                    onClick = { onSwitchView(ChatMainView.LIBRARY) },
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        }
-
         // Very Bottom: User profile (kept at the very bottom)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 4.dp, bottom = navBottom + 10.dp)
+                .padding(top = 8.dp, bottom = navBottom + 10.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .clickable(onClick = onOpenSettings)
                 .padding(horizontal = 8.dp, vertical = 8.dp),
@@ -1703,68 +1659,6 @@ private fun SidebarContent(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun SidebarBottomNavButton(
-    icon: ImageVector,
-    label: String,
-    active: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val colors = LocalWhitzColors.current
-    Row(
-        modifier = modifier
-            .height(40.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (active) colors.hover else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = if (active) colors.fg else colors.fgMuted,
-            modifier = Modifier.size(17.dp),
-        )
-        Spacer(modifier = Modifier.width(5.dp))
-        Text(
-            text = label,
-            fontSize = 12.5.sp,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-            color = if (active) colors.fg else colors.fgMuted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-@Composable
-private fun SidebarRailIconButton(
-    icon: ImageVector,
-    label: String,
-    active: Boolean,
-    onClick: () -> Unit,
-) {
-    val colors = LocalWhitzColors.current
-    Box(
-        modifier = Modifier
-            .size(40.dp)
-            .clip(CircleShape)
-            .background(if (active) colors.hover else Color.Transparent)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = if (active) colors.fg else colors.fgMuted,
-            modifier = Modifier.size(20.dp),
-        )
     }
 }
 

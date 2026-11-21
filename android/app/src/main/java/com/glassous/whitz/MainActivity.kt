@@ -34,8 +34,10 @@ import com.glassous.whitz.feature.auth.LoginScreen
 import com.glassous.whitz.feature.auth.RegisterScreen
 import com.glassous.whitz.feature.chat.ChatScreen
 import com.glassous.whitz.feature.chat.ChatViewModel
+import com.glassous.whitz.feature.chat.LibraryScreen
 import com.glassous.whitz.feature.chat.TaskDetailScreen
 import com.glassous.whitz.feature.settings.AddMemoryScreen
+import com.glassous.whitz.feature.settings.AssistantSettingsScreen
 import com.glassous.whitz.feature.settings.CreateSkillScreen
 import com.glassous.whitz.feature.settings.DevicesSettingsScreen
 import com.glassous.whitz.feature.settings.GithubSkillInstallScreen
@@ -168,8 +170,21 @@ private fun WhitzRoot(container: AppContainer) {
             ChatScreen(
                 vm = chatVm,
                 onOpenSettings = { navController.navigate(SettingsRoutes.GRAPH) },
+                onOpenLibrary = { navController.navigate("library") },
                 onOpenTaskDetails = { tab -> navController.navigate("task_details?tab=$tab") },
             )
+        }
+        composable("library") { backStackEntry ->
+            val chatEntry = remember(backStackEntry) {
+                runCatching { navController.getBackStackEntry("chat") }.getOrNull()
+            }
+            if (chatEntry != null) {
+                val chatVm: ChatViewModel = viewModel(chatEntry, factory = factory)
+                LibraryScreen(
+                    vm = chatVm,
+                    onBack = { navController.popBackStack() },
+                )
+            }
         }
         composable(
             route = "task_details?tab={tab}",
@@ -287,10 +302,19 @@ private fun WhitzRoot(container: AppContainer) {
                     )
                 }
             }
+            composable(SettingsRoutes.ASSISTANT) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    AssistantSettingsScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
             composable(SettingsRoutes.PERSONA) { entry ->
                 rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
                     PersonaSettingsScreen(
                         vm = vm,
+                        onOpenEditAssistant = { navController.navigate(SettingsRoutes.ASSISTANT) },
                         onBack = { navController.popBackStack() },
                     )
                 }

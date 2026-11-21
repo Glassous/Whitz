@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
@@ -89,7 +90,6 @@ import com.glassous.whitz.core.model.quotaPercentLabel
 import com.glassous.whitz.core.model.resolvedAssistantName
 import com.glassous.whitz.core.model.weeklyPercent
 import com.glassous.whitz.core.util.DateTimeUtils
-import com.glassous.whitz.feature.chat.AssistantProfileDialog
 import com.glassous.whitz.feature.chat.LibraryPane
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
@@ -109,6 +109,7 @@ object SettingsRoutes {
     const val SKILLS_CREATE = "settings/skills/create"
     const val SKILLS_GITHUB = "settings/skills/github"
     const val MEMBERSHIP = "settings/membership"
+    const val ASSISTANT = "settings/assistant"
     const val PERSONA = "settings/persona"
     const val DEVICES = "settings/devices"
 }
@@ -314,6 +315,12 @@ fun SettingsHomeScreen(
                         "会员与积分",
                         ui.credits?.let { "${it.tierLabel} · ${it.quotaPercentLabel()}" },
                     ) { go(SettingsRoutes.MEMBERSHIP) }
+                    HorizontalDivider(color = colors.line)
+                    SettingsMenuRow(
+                        Icons.Default.Edit,
+                        "编辑助手",
+                        user?.resolvedAssistantName(),
+                    ) { go(SettingsRoutes.ASSISTANT) }
                     HorizontalDivider(color = colors.line)
                     SettingsMenuRow(Icons.Default.SmartToy, "专属助手", null) { go(SettingsRoutes.PERSONA) }
                     HorizontalDivider(color = colors.line)
@@ -1156,15 +1163,128 @@ fun MembershipSettingsScreen(
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun PersonaSettingsScreen(
+fun AssistantSettingsScreen(
     vm: SettingsViewModel,
     onBack: () -> Unit,
 ) {
     val colors = LocalWhitzColors.current
     val user by vm.user.collectAsState()
     val ui by vm.ui.collectAsState()
+    val currentName = user?.resolvedAssistantName() ?: "Whitz"
+    val assistantAvatarUrl = vm.resolveAssetUrl(user?.assistantAvatarUrl)
+    var nameDraft by remember(user?.assistantName) { mutableStateOf(currentName) }
+
+    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) vm.uploadAssistantAvatar(uri)
+    }
+
+    SettingsPageScaffold(
+        title = "编辑助手",
+        ui = ui,
+        onBack = {
+            vm.clearFeedback()
+            onBack()
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = colors.surface,
+                border = BorderStroke(0.5.dp, colors.line),
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(CircleShape)
+                            .background(colors.canvas),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (!assistantAvatarUrl.isNullOrBlank()) {
+                            AsyncImage(
+                                model = assistantAvatarUrl,
+                                contentDescription = currentName,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            WhitzLogoMark(modifier = Modifier.size(30.dp))
+                        }
+                    }
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("助手头像", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = colors.fg)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = { avatarPicker.launch("image/*") },
+                                enabled = !ui.loading,
+                                shapes = ButtonDefaults.shapesFor(36.dp),
+                                modifier = Modifier.height(36.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp),
+                            ) {
+                                Text("更换头像", fontSize = 13.sp)
+                            }
+                            if (!user?.assistantAvatarUrl.isNullOrBlank()) {
+                                TextButton(
+                                    onClick = { vm.deleteAssistantAvatar() },
+                                    enabled = !ui.loading,
+                                    modifier = Modifier.height(36.dp),
+                                ) {
+                                    Text("恢复默认", fontSize = 13.sp, color = colors.fgMuted)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            WhitzTextField(
+                value = nameDraft,
+                onValueChange = { if (it.length <= 80) nameDraft = it },
+                label = "助手昵称",
+                placeholder = "Whitz",
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                text = "留空保存将恢复默认名称「Whitz」。",
+                fontSize = 12.sp,
+                color = colors.fgFaint,
+            )
+
+            Button(
+                onClick = { vm.updateAssistantName(nameDraft) },
+                shapes = ButtonDefaults.shapesFor(48.dp),
+                enabled = !ui.loading,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+            ) {
+                Text(if (ui.loading) "保存中…" else "保存")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun PersonaSettingsScreen(
+    vm: SettingsViewModel,
+    onOpenEditAssistant: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val user by vm.user.collectAsState()
+    val ui by vm.ui.collectAsState()
     var persona by remember(user?.id) { mutableStateOf(user?.persona ?: "") }
-    var assistantModalOpen by remember { mutableStateOf(false) }
 
     val assistantNameDisplay = user?.resolvedAssistantName() ?: "Whitz"
     val assistantAvatarUrl = vm.resolveAssetUrl(user?.assistantAvatarUrl)
@@ -1235,13 +1355,13 @@ fun PersonaSettingsScreen(
                     }
                     OutlinedButton(
                         onClick = {
-                            vm.clearAssistantDialogFeedback()
-                            assistantModalOpen = true
+                            vm.clearFeedback()
+                            onOpenEditAssistant()
                         },
                         shapes = ButtonDefaults.shapesFor(38.dp),
                         modifier = Modifier.fillMaxWidth().height(38.dp),
                     ) {
-                        Text("自定义头像与昵称", fontSize = 13.sp)
+                        Text("编辑助手头像与昵称", fontSize = 13.sp)
                     }
                 }
             }
@@ -1264,24 +1384,6 @@ fun PersonaSettingsScreen(
                 Text(if (ui.loading) "保存中..." else "保存人格设定")
             }
         }
-    }
-
-    if (assistantModalOpen) {
-        AssistantProfileDialog(
-            user = user,
-            resolveAssetUrl = { vm.resolveAssetUrl(it) },
-            saving = ui.assistantSaving,
-            error = ui.assistantError,
-            feedback = ui.assistantFeedback,
-            onPickAvatar = { vm.uploadAssistantAvatar(it) },
-            onResetAvatar = { vm.deleteAssistantAvatar() },
-            onSaveName = { nextName ->
-                vm.updateAssistantName(nextName) {
-                    assistantModalOpen = false
-                }
-            },
-            onDismiss = { assistantModalOpen = false },
-        )
     }
 }
 
