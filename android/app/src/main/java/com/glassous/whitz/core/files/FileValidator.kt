@@ -46,6 +46,7 @@ object FileValidator {
         ".jsx" to AllowedFileSpec(".jsx", "code", "text/jsx", "JSX"),
         ".vue" to AllowedFileSpec(".vue", "code", "text/plain", "Vue"),
         ".html" to AllowedFileSpec(".html", "code", "text/html", "HTML"),
+        ".htm" to AllowedFileSpec(".htm", "code", "text/html", "HTML"),
         ".css" to AllowedFileSpec(".css", "code", "text/css", "CSS"),
         ".sql" to AllowedFileSpec(".sql", "code", "application/sql", "SQL"),
         ".sh" to AllowedFileSpec(".sh", "code", "text/x-shellscript", "Shell"),

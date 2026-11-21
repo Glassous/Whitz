@@ -21,9 +21,13 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.content.ReceiveContentListener
+import androidx.compose.foundation.content.consume
+import androidx.compose.foundation.content.contentReceiver
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -54,6 +58,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -62,6 +67,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.NoteAdd
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -71,6 +77,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PushPin
@@ -140,8 +147,15 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -151,7 +165,12 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil3.compose.AsyncImage
 import com.glassous.whitz.R
+import com.glassous.whitz.core.files.INLINE_FILE_TOKEN_REGEX
+import com.glassous.whitz.core.files.extractInlineFileIds
+import com.glassous.whitz.core.files.isConversationImageFile
+import com.glassous.whitz.core.files.serializeFileToken
 import com.glassous.whitz.core.model.Conversation
+import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.Message
 import com.glassous.whitz.core.model.UploadTaskStatus
 import com.glassous.whitz.core.model.User
@@ -167,6 +186,7 @@ import com.glassous.whitz.ui.theme.WhitzProgressiveBlurTop
 import com.glassous.whitz.ui.theme.WhitzTextField
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Calendar
 import kotlin.math.roundToInt
@@ -190,10 +210,124 @@ internal val MainAssistantBoundsTransform = BoundsTransform { _, _ ->
     tween(durationMillis = 360, easing = FastOutSlowInEasing)
 }
 
+private data class MentionQueryMatch(
+    val start: Int,
+    val end: Int,
+    val query: String,
+)
+
+private val MENTION_AT_REGEX = Regex("""(?:^|[\s\n])@([^\s@\n]{0,40})$""")
+
+private fun findMentionQueryMatch(value: TextFieldValue): MentionQueryMatch? {
+    val cursor = value.selection.start.coerceIn(0, value.text.length)
+    val before = value.text.substring(0, cursor)
+    val m = MENTION_AT_REGEX.find(before) ?: return null
+    val atPos = before.lastIndexOf('@')
+    if (atPos < 0) return null
+    return MentionQueryMatch(start = atPos, end = cursor, query = m.groupValues[1])
+}
+
+private fun insertStringAtSelection(current: TextFieldValue, insert: String): TextFieldValue {
+    val start = current.selection.min.coerceIn(0, current.text.length)
+    val end = current.selection.max.coerceIn(0, current.text.length)
+    val nextText = buildString {
+        append(current.text, 0, start)
+        append(insert)
+        append(current.text, end, current.text.length)
+    }
+    val nextCursor = start + insert.length
+    return TextFieldValue(text = nextText, selection = TextRange(nextCursor))
+}
+
+private class FileTokenVisualTransformation(
+    private val pillBg: Color,
+    private val pillFg: Color,
+) : VisualTransformation {
+    private data class SpanMap(
+        val rStart: Int,
+        val rEnd: Int,
+        val tStart: Int,
+        val tEnd: Int,
+    )
+
+    override fun filter(text: AnnotatedString): TransformedText {
+        val raw = text.text
+        val matches = INLINE_FILE_TOKEN_REGEX.findAll(raw).toList()
+        if (matches.isEmpty()) {
+            return TransformedText(text, OffsetMapping.Identity)
+        }
+
+        val spans = mutableListOf<SpanMap>()
+        val annotated = buildAnnotatedString {
+            var rCursor = 0
+            for (m in matches) {
+                val rStart = m.range.first
+                val rEnd = m.range.last + 1
+                if (rStart > rCursor) {
+                    append(raw.substring(rCursor, rStart))
+                }
+                val tStart = length
+                val name = m.groupValues.getOrNull(2)?.trim().orEmpty().ifEmpty { "文件" }
+                val label = "「$name」"
+                pushStyle(
+                    SpanStyle(
+                        color = pillFg,
+                        background = pillBg,
+                        fontWeight = FontWeight.Medium,
+                    )
+                )
+                append(label)
+                pop()
+                val tEnd = length
+                spans += SpanMap(rStart = rStart, rEnd = rEnd, tStart = tStart, tEnd = tEnd)
+                rCursor = rEnd
+            }
+            if (rCursor < raw.length) {
+                append(raw.substring(rCursor))
+            }
+        }
+
+        val transformedLen = annotated.length
+        val origLen = raw.length
+
+        val mapping = object : OffsetMapping {
+            override fun originalToTransformed(offset: Int): Int {
+                var delta = 0
+                for (s in spans) {
+                    if (offset <= s.rStart) {
+                        return (offset + delta).coerceIn(0, transformedLen)
+                    }
+                    if (offset < s.rEnd) {
+                        return s.tEnd.coerceIn(0, transformedLen)
+                    }
+                    delta += (s.tEnd - s.tStart) - (s.rEnd - s.rStart)
+                }
+                return (offset + delta).coerceIn(0, transformedLen)
+            }
+
+            override fun transformedToOriginal(offset: Int): Int {
+                var delta = 0
+                for (s in spans) {
+                    if (offset <= s.tStart) {
+                        return (offset - delta).coerceIn(0, origLen)
+                    }
+                    if (offset < s.tEnd) {
+                        return s.rEnd.coerceIn(0, origLen)
+                    }
+                    delta += (s.tEnd - s.tStart) - (s.rEnd - s.rStart)
+                }
+                return (offset - delta).coerceIn(0, origLen)
+            }
+        }
+        return TransformedText(annotated, mapping)
+    }
+}
+
 @OptIn(
     ExperimentalMaterial3ExpressiveApi::class,
     ExperimentalLayoutApi::class,
     ExperimentalSharedTransitionApi::class,
+    ExperimentalFoundationApi::class,
 )
 @Composable
 fun ChatScreen(
@@ -220,7 +354,7 @@ fun ChatScreen(
     val inputFocusRequester = remember { FocusRequester() }
     val headerHazeState = rememberHazeState()
 
-    var inputText by remember { mutableStateOf("") }
+    var inputValue by remember { mutableStateOf(TextFieldValue("")) }
     var queuedSend by remember { mutableStateOf(false) }
     var isInputFocused by remember { mutableStateOf(false) }
     var composerExpanded by remember { mutableStateOf(false) }
@@ -228,19 +362,22 @@ fun ChatScreen(
     var showSearch by remember { mutableStateOf(false) }
     var showSkillPicker by remember { mutableStateOf(false) }
     var showLibraryPicker by remember { mutableStateOf(false) }
+    var showCreateFile by remember { mutableStateOf(false) }
+    var fileRenameTarget by remember { mutableStateOf<ConversationFile?>(null) }
     var desktopSidebarCollapsed by rememberSaveable { mutableStateOf(false) }
     var mainPanelOpen by rememberSaveable { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
     var editingMessage by remember { mutableStateOf<Message?>(null) }
     var savedDraftBeforeEdit by remember { mutableStateOf<String?>(null) }
     var selectingTextMessageId by remember { mutableStateOf<String?>(null) }
+    var highlightedMessageId by remember { mutableStateOf<String?>(null) }
     var dislikeReasonMessageId by remember { mutableStateOf<String?>(null) }
     var messageMenuVisible by remember { mutableStateOf(false) }
     var messageMenuTarget by remember { mutableStateOf<MessageMenuTarget?>(null) }
 
     val cancelEdit = {
         editingMessage = null
-        savedDraftBeforeEdit?.let { inputText = it }
+        savedDraftBeforeEdit?.let { inputValue = TextFieldValue(it, TextRange(it.length)) }
         savedDraftBeforeEdit = null
     }
 
@@ -307,6 +444,21 @@ fun ChatScreen(
         }
     }
 
+    val receiveContentListener = remember(vm) {
+        ReceiveContentListener { transferableContent ->
+            val clipData = transferableContent.clipEntry.clipData
+            val uris = (0 until clipData.itemCount).mapNotNull { idx ->
+                clipData.getItemAt(idx)?.uri
+            }
+            if (uris.isNotEmpty()) {
+                vm.enqueuePickedUris(uris, insertIntoInputOnComplete = true)
+                transferableContent.consume { item -> item.uri != null }
+            } else {
+                transferableContent
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
         vm.loadInitialData()
     }
@@ -323,14 +475,23 @@ fun ChatScreen(
     LaunchedEffect(ui.hasActiveUploads) {
         if (!ui.hasActiveUploads && queuedSend) {
             queuedSend = false
-            val trimmed = inputText.trim()
+            val trimmed = inputValue.text.trim()
             if (trimmed.isNotEmpty() && !ui.streaming && !ui.sendingMessage) {
-                inputText = ""
+                inputValue = TextFieldValue("")
                 composerExpanded = false
                 dismissPlusMenu()
                 vm.sendMessage(trimmed)
             }
         }
+    }
+
+    LaunchedEffect(ui.pendingInputInsertion) {
+        val pending = ui.pendingInputInsertion ?: return@LaunchedEffect
+        val token = serializeFileToken(pending.file.id, pending.file.filename) + " "
+        inputValue = insertStringAtSelection(inputValue, token)
+        mainPanelOpen = false
+        vm.consumePendingInputInsertion()
+        runCatching { inputFocusRequester.requestFocus() }
     }
 
     val visibleMessages = remember(ui.messages) { filterVisibleMessages(ui.messages) }
@@ -426,8 +587,30 @@ fun ChatScreen(
         }
     }
 
+    LaunchedEffect(ui.pendingFocusMessageId, visibleMessages.size, ui.switchingConversation) {
+        val targetId = ui.pendingFocusMessageId ?: return@LaunchedEffect
+        if (ui.switchingConversation) return@LaunchedEffect
+        val idx = visibleMessages.indexOfFirst { it.id == targetId }
+        if (idx >= 0) {
+            mainPanelOpen = false
+            listState.animateScrollToItem(idx, scrollOffset = -revealTopOffsetPx)
+            highlightedMessageId = targetId
+            vm.consumePendingFocusMessage()
+            delay(2200)
+            if (highlightedMessageId == targetId) {
+                highlightedMessageId = null
+            }
+        } else if (visibleMessages.isNotEmpty()) {
+            vm.consumePendingFocusMessage()
+        }
+    }
+
     // Back key handling: overlays & drawer close before exiting
+    BackHandler(enabled = ui.deliverablePreview != null) { vm.closeDeliverable() }
+    BackHandler(enabled = ui.imageLightbox != null) { vm.closeImageLightbox() }
     BackHandler(enabled = ui.previewTarget != null) { vm.closeFilePreview() }
+    BackHandler(enabled = showCreateFile) { showCreateFile = false }
+    BackHandler(enabled = fileRenameTarget != null) { fileRenameTarget = null }
     BackHandler(enabled = messageMenuVisible) { messageMenuVisible = false }
     BackHandler(enabled = selectingTextMessageId != null) { selectingTextMessageId = null }
     BackHandler(enabled = editingMessage != null) { cancelEdit() }
@@ -590,6 +773,7 @@ fun ChatScreen(
                                                     waitingFirstByte = ui.waitingFirstByte,
                                                     isActiveTurn = msg.id == ui.activeAssistantId,
                                                     isSelectedTurn = isSelected,
+                                                    isHighlighted = msg.id == highlightedMessageId,
                                                     isEditing = msg.id == editingMessage?.id,
                                                     isSelectingText = msg.id == selectingTextMessageId,
                                                     showDislikeReasons = msg.id == dislikeReasonMessageId,
@@ -630,7 +814,9 @@ fun ChatScreen(
                                                             onOpenTaskDetails(0)
                                                         }
                                                     },
-                                                    onOpenFile = { f -> vm.openFilePreview(f) },
+                                                    onOpenFile = { f -> vm.openFileSmart(f) },
+                                                    onOpenDeliverable = { t -> vm.openDeliverable(t) },
+                                                    onOpenLightbox = { f, pool -> vm.openImageLightbox(f, pool) },
                                                     onReact = { msgId, reaction, reasonCode ->
                                                         vm.reactToMessage(msgId, reaction, reasonCode)
                                                     },
@@ -874,11 +1060,13 @@ fun ChatScreen(
                             .height(bottomBlurHeightDp),
                     )
 
+                    val inlineIdsInInput = remember(inputValue.text) { extractInlineFileIds(inputValue.text) }
                     val hasAttachmentsOrSkills = ui.uploads.isNotEmpty() ||
                         ui.attachedIds.isNotEmpty() ||
+                        inlineIdsInInput.isNotEmpty() ||
                         ui.selectedSkillNames.isNotEmpty() ||
                         editingMessage != null
-                    val isComposerActive = isInputFocused || inputText.isNotEmpty() || hasAttachmentsOrSkills
+                    val isComposerActive = isInputFocused || inputValue.text.isNotEmpty() || hasAttachmentsOrSkills
 
                     val composerBottomPadding by animateDpAsState(
                         targetValue = if (isComposerActive) 10.dp else 24.dp,
@@ -978,6 +1166,106 @@ fun ChatScreen(
                                     Text(bannerError, color = colors.danger, fontSize = 12.5.sp, modifier = Modifier.weight(1f))
                                     IconButton(onClick = { vm.clearError() }, modifier = Modifier.size(24.dp)) {
                                         Icon(Icons.Default.Close, contentDescription = "关闭", tint = colors.danger, modifier = Modifier.size(14.dp))
+                                    }
+                                }
+                            }
+
+                            val mentionMatch = remember(inputValue) { findMentionQueryMatch(inputValue) }
+                            val mentionCandidates = remember(mentionMatch, ui.files) {
+                                if (mentionMatch == null || ui.files.isEmpty()) {
+                                    emptyList()
+                                } else {
+                                    val q = mentionMatch.query.trim().lowercase()
+                                    ui.files.filter { f ->
+                                        q.isEmpty() || f.filename.lowercase().contains(q)
+                                    }.take(6)
+                                }
+                            }
+                            if (mentionMatch != null && mentionCandidates.isNotEmpty()) {
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = colors.surface,
+                                    border = BorderStroke(0.8.dp, colors.lineStrong),
+                                    shadowElevation = 4.dp,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                                        Text(
+                                            text = "@ 引用工作区文件",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = colors.fgFaint,
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                        )
+                                        LazyRow(
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            items(mentionCandidates, key = { it.id }) { cand ->
+                                                val isImg = isConversationImageFile(cand)
+                                                val thumb = cand.thumbUrl ?: cand.previewUrl
+                                                Surface(
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    color = colors.canvas,
+                                                    border = BorderStroke(0.5.dp, colors.line),
+                                                    modifier = Modifier.clickable {
+                                                        val token = serializeFileToken(cand.id, cand.filename) + " "
+                                                        val raw = inputValue.text
+                                                        val before = raw.substring(0, mentionMatch.start)
+                                                        val after = raw.substring(mentionMatch.end)
+                                                        val nextText = before + token + after
+                                                        val nextCursor = before.length + token.length
+                                                        inputValue = TextFieldValue(
+                                                            text = nextText,
+                                                            selection = TextRange(nextCursor),
+                                                        )
+                                                    },
+                                                ) {
+                                                    if (isImg && !thumb.isNullOrBlank()) {
+                                                        AsyncImage(
+                                                            model = thumb,
+                                                            contentDescription = cand.filename,
+                                                            contentScale = ContentScale.Crop,
+                                                            modifier = Modifier.size(48.dp),
+                                                        )
+                                                    } else {
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .widthIn(max = 180.dp)
+                                                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                        ) {
+                                                            Icon(
+                                                                if (isImg) Icons.Default.Image else Icons.Default.AttachFile,
+                                                                contentDescription = null,
+                                                                tint = colors.fgMuted,
+                                                                modifier = Modifier.size(15.dp),
+                                                            )
+                                                            Column {
+                                                                Text(
+                                                                    text = cand.filename,
+                                                                    fontSize = 12.sp,
+                                                                    fontWeight = FontWeight.Medium,
+                                                                    color = colors.fg,
+                                                                    maxLines = 1,
+                                                                    overflow = TextOverflow.Ellipsis,
+                                                                )
+                                                                cand.qaSnippet?.takeIf { it.isNotBlank() }?.let { sn ->
+                                                                    Text(
+                                                                        text = sn,
+                                                                        fontSize = 10.sp,
+                                                                        color = colors.fgFaint,
+                                                                        maxLines = 1,
+                                                                        overflow = TextOverflow.Ellipsis,
+                                                                    )
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1123,8 +1411,23 @@ fun ChatScreen(
                                                 }
                                             }
 
-                                            val attachedFiles = ui.files.filter { it.id in ui.attachedIds }
-                                            if (ui.uploads.isNotEmpty() || attachedFiles.isNotEmpty() || ui.selectedSkillNames.isNotEmpty()) {
+                                            val attachedFiles = remember(ui.files, ui.attachedIds, inlineIdsInInput) {
+                                                val inlineSet = inlineIdsInInput.toSet()
+                                                ui.files.filter { it.id in ui.attachedIds && it.id !in inlineSet }
+                                            }
+                                            val inlineReferencedFiles = remember(ui.files, inlineIdsInInput) {
+                                                inlineIdsInInput.mapNotNull { id -> ui.files.firstOrNull { it.id == id } }
+                                            }
+                                            val removeInlineTokenById: (String) -> Unit = { targetId ->
+                                                val updated = INLINE_FILE_TOKEN_REGEX.replace(inputValue.text) { m ->
+                                                    if (m.groupValues[1] == targetId) "" else m.value
+                                                }
+                                                inputValue = TextFieldValue(
+                                                    text = updated,
+                                                    selection = TextRange(updated.length),
+                                                )
+                                            }
+                                            if (ui.uploads.isNotEmpty() || attachedFiles.isNotEmpty() || inlineReferencedFiles.isNotEmpty() || ui.selectedSkillNames.isNotEmpty()) {
                                                 FlowRow(
                                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                                     verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -1185,23 +1488,63 @@ fun ChatScreen(
                                                     }
 
                                                     attachedFiles.forEach { f ->
-                                                        Row(
-                                                            modifier = Modifier
-                                                                .clip(RoundedCornerShape(10.dp))
-                                                                .background(colors.canvas)
-                                                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                        ) {
-                                                            Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(13.dp))
-                                                            Spacer(modifier = Modifier.width(4.dp))
-                                                            Text(f.filename, fontSize = 12.sp, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                            Spacer(modifier = Modifier.width(4.dp))
-                                                            Icon(
-                                                                Icons.Default.Close,
-                                                                contentDescription = "移除",
-                                                                tint = colors.fgFaint,
-                                                                modifier = Modifier.size(14.dp).clickable { vm.detachFile(f.id) },
+                                                        if (isConversationImageFile(f)) {
+                                                            ComposerPureImageChip(
+                                                                file = f,
+                                                                onOpen = { vm.openImageLightbox(f) },
+                                                                onRemove = { vm.detachFile(f.id) },
                                                             )
+                                                        } else {
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .clip(RoundedCornerShape(10.dp))
+                                                                    .background(colors.canvas)
+                                                                    .clickable { vm.openFileSmart(f) }
+                                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                            ) {
+                                                                Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(13.dp))
+                                                                Spacer(modifier = Modifier.width(4.dp))
+                                                                Text(f.filename, fontSize = 12.sp, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                                Spacer(modifier = Modifier.width(4.dp))
+                                                                Icon(
+                                                                    Icons.Default.Close,
+                                                                    contentDescription = "移除",
+                                                                    tint = colors.fgFaint,
+                                                                    modifier = Modifier.size(14.dp).clickable { vm.detachFile(f.id) },
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+
+                                                    inlineReferencedFiles.forEach { f ->
+                                                        if (isConversationImageFile(f)) {
+                                                            ComposerPureImageChip(
+                                                                file = f,
+                                                                onOpen = { vm.openImageLightbox(f) },
+                                                                onRemove = { removeInlineTokenById(f.id) },
+                                                            )
+                                                        } else {
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .clip(RoundedCornerShape(10.dp))
+                                                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f))
+                                                                    .border(0.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
+                                                                    .clickable { vm.openFileSmart(f) }
+                                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                            ) {
+                                                                Icon(Icons.Default.AttachFile, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(13.dp))
+                                                                Spacer(modifier = Modifier.width(4.dp))
+                                                                Text(f.filename, fontSize = 12.sp, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                                Spacer(modifier = Modifier.width(4.dp))
+                                                                Icon(
+                                                                    Icons.Default.Close,
+                                                                    contentDescription = "移除行内引用",
+                                                                    tint = colors.fgFaint,
+                                                                    modifier = Modifier.size(14.dp).clickable { removeInlineTokenById(f.id) },
+                                                                )
+                                                            }
                                                         }
                                                     }
 
@@ -1228,9 +1571,9 @@ fun ChatScreen(
                                                 }
                                             }
 
-                                            val canExpandInput = inputText.length > 60 || inputText.contains('\n') || composerExpanded
+                                            val canExpandInput = inputValue.text.length > 60 || inputValue.text.contains('\n') || composerExpanded
                                             val hasActiveUploads = ui.hasActiveUploads
-                                            val canSend = inputText.isNotBlank() && !ui.streaming && !ui.sendingMessage && ui.agentStatus?.ready != false
+                                            val canSend = inputValue.text.isNotBlank() && !ui.streaming && !ui.sendingMessage && ui.agentStatus?.ready != false
 
                                             if (queuedSend && hasActiveUploads) {
                                                 Row(
@@ -1270,15 +1613,20 @@ fun ChatScreen(
                                             val safeInputMinHeight = inputMinHeight.coerceAtLeast(24.dp)
                                             val safeInputMaxHeight = inputMaxHeight.coerceAtLeast(safeInputMinHeight)
 
+                                            val tokenPillBg = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                            val tokenPillFg = MaterialTheme.colorScheme.primary
+                                            val fileTokenVisual = remember(tokenPillBg, tokenPillFg) {
+                                                FileTokenVisualTransformation(tokenPillBg, tokenPillFg)
+                                            }
                                             val inputFieldContent: @Composable (Modifier) -> Unit = { fieldMod ->
                                                 Box(
                                                     modifier = fieldMod.padding(horizontal = 4.dp, vertical = 6.dp),
                                                 ) {
-                                                    if (inputText.isEmpty()) {
+                                                    if (inputValue.text.isEmpty()) {
                                                         val placeholderText = when {
                                                             ui.agentStatus?.ready == false -> "助理正在初始化，请稍候…"
                                                             hasActiveUploads -> "文件上传中，可点发送排队…"
-                                                            else -> "给 $assistantName 发送消息"
+                                                            else -> "给 $assistantName 发送消息（支持 @ 引用文件）"
                                                         }
                                                         Text(
                                                             text = placeholderText,
@@ -1289,9 +1637,9 @@ fun ChatScreen(
                                                         )
                                                     }
                                                     BasicTextField(
-                                                        value = inputText,
+                                                        value = inputValue,
                                                         onValueChange = {
-                                                            inputText = it
+                                                            inputValue = it
                                                             if (plusMenuExpanded) dismissPlusMenu()
                                                         },
                                                         textStyle = TextStyle(
@@ -1300,10 +1648,12 @@ fun ChatScreen(
                                                             lineHeight = 22.sp,
                                                         ),
                                                         cursorBrush = SolidColor(colors.fg),
+                                                        visualTransformation = fileTokenVisual,
                                                         maxLines = Int.MAX_VALUE,
                                                         modifier = Modifier
                                                             .fillMaxWidth()
                                                             .heightIn(min = safeInputMinHeight, max = safeInputMaxHeight)
+                                                            .contentReceiver(receiveContentListener)
                                                             .focusRequester(inputFocusRequester)
                                                             .onFocusChanged { isInputFocused = it.isFocused },
                                                     )
@@ -1322,18 +1672,18 @@ fun ChatScreen(
                                                     onSend = {
                                                         val editTarget = editingMessage
                                                         if (editTarget != null) {
-                                                            val text = inputText
+                                                            val text = inputValue.text
                                                             editingMessage = null
                                                             savedDraftBeforeEdit = null
-                                                            inputText = ""
+                                                            inputValue = TextFieldValue("")
                                                             composerExpanded = false
                                                             dismissPlusMenu()
                                                             vm.editAndResend(editTarget.id, text)
                                                         } else if (hasActiveUploads) {
                                                             queuedSend = true
                                                         } else {
-                                                            val text = inputText
-                                                            inputText = ""
+                                                            val text = inputValue.text
+                                                            inputValue = TextFieldValue("")
                                                             composerExpanded = false
                                                             dismissPlusMenu()
                                                             vm.sendMessage(text)
@@ -1445,6 +1795,19 @@ fun ChatScreen(
                             assistantName = assistantName,
                             avatarUrl = vm.resolveAssetUrl(user?.assistantAvatarUrl),
                             resolvedTurn = resolvedTurn,
+                            files = ui.files,
+                            deletingFileId = ui.deletingFileId,
+                            mainFileScope = ui.mainFileScope,
+                            onMainFileScopeChange = { vm.setMainFileScope(it) },
+                            onOpenFile = { vm.openFileSmart(it) },
+                            onOpenLightbox = { img, pool -> vm.openImageLightbox(img, pool) },
+                            onInsertFile = { vm.requestInsertFileToInput(it) },
+                            onLocateMessage = { vm.locateFileMessage(it) },
+                            onRenameFile = { fileRenameTarget = it },
+                            onCreateFile = { showCreateFile = true },
+                            onOpenLibraryPicker = { showLibraryPicker = true },
+                            onUploadFiles = { filePickerLauncher.launch(arrayOf("*/*")) },
+                            onDeleteFile = { vm.deleteFile(it) },
                             fileError = ui.fileError,
                             navBottom = navBottom,
                             onDismiss = { mainPanelOpen = false },
@@ -1465,6 +1828,10 @@ fun ChatScreen(
                     onUploadLocalFile = {
                         dismissPlusMenu()
                         filePickerLauncher.launch(arrayOf("*/*"))
+                    },
+                    onCreateWorkspaceFile = {
+                        dismissPlusMenu()
+                        showCreateFile = true
                     },
                     onPickFromLibrary = {
                         dismissPlusMenu()
@@ -1494,10 +1861,10 @@ fun ChatScreen(
                     onEdit = { msg ->
                         messageMenuVisible = false
                         if (editingMessage == null) {
-                            savedDraftBeforeEdit = inputText
+                            savedDraftBeforeEdit = inputValue.text
                         }
                         editingMessage = msg
-                        inputText = msg.content
+                        inputValue = TextFieldValue(msg.content, TextRange(msg.content.length))
                         selectingTextMessageId = null
                         locateMessage(msg.id)
                         inputFocusRequester.requestFocus()
@@ -1611,6 +1978,40 @@ fun ChatScreen(
             fetchLibrary = { q -> vm.fetchLibraryFiles(q) },
             onAttach = { ids -> vm.attachFromLibrary(ids) },
             onDismiss = { showLibraryPicker = false },
+        )
+    }
+
+    ui.deliverablePreview?.let { deliv ->
+        DeliverableDialog(
+            state = deliv,
+            onDismiss = { vm.closeDeliverable() },
+            onSaveContent = { newContent -> vm.saveDeliverableContent(newContent) },
+            onResolveDownloadUrl = { f -> vm.getDownloadUrl(f) },
+            onLocateMessage = { f -> vm.locateFileMessage(f) },
+        )
+    }
+
+    ui.imageLightbox?.let { lb ->
+        ImageLightboxDialog(
+            state = lb,
+            onDismiss = { vm.closeImageLightbox() },
+            onLocateMessage = { f -> vm.locateFileMessage(f) },
+            onResolveDownloadUrl = { f -> vm.getDownloadUrl(f) },
+        )
+    }
+
+    if (showCreateFile) {
+        CreateTextFileDialog(
+            onDismiss = { showCreateFile = false },
+            onCreate = { name, content -> vm.createTextFile(name, content, openAfter = true) },
+        )
+    }
+
+    fileRenameTarget?.let { target ->
+        RenameFileDialog(
+            file = target,
+            onDismiss = { fileRenameTarget = null },
+            onConfirm = { newName -> vm.renameFile(target, newName) },
         )
     }
 
@@ -2569,6 +2970,58 @@ private fun MessageActionMenuOverlay(
     }
 }
 
+@Composable
+private fun ComposerPureImageChip(
+    file: ConversationFile,
+    onOpen: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val model = file.thumbUrl ?: file.previewUrl
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(colors.canvas)
+            .border(0.5.dp, colors.line, RoundedCornerShape(10.dp))
+            .clickable(onClick = onOpen),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (!model.isNullOrBlank()) {
+            AsyncImage(
+                model = model,
+                contentDescription = file.filename,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Icon(
+                Icons.Default.Image,
+                contentDescription = file.filename,
+                tint = colors.fgFaint,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(2.dp)
+                .size(16.dp)
+                .clip(CircleShape)
+                .background(colors.canvas.copy(alpha = 0.8f))
+                .clickable(onClick = onRemove),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Default.Close,
+                contentDescription = "移除图片",
+                tint = colors.fg,
+                modifier = Modifier.size(10.dp),
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun ComposerPlusMenuOverlay(
@@ -2580,6 +3033,7 @@ private fun ComposerPlusMenuOverlay(
     onOpenAttachMenu: () -> Unit,
     onDismissAttachMenu: () -> Unit,
     onUploadLocalFile: () -> Unit,
+    onCreateWorkspaceFile: () -> Unit,
     onPickFromLibrary: () -> Unit,
     onOpenSkillPicker: () -> Unit,
 ) {
@@ -2640,6 +3094,11 @@ private fun ComposerPlusMenuOverlay(
                                     text = { Text("上传本地文件") },
                                     leadingIcon = { Icon(Icons.Default.UploadFile, contentDescription = null) },
                                     onClick = onUploadLocalFile,
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("新建工作区文件") },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.NoteAdd, contentDescription = null) },
+                                    onClick = onCreateWorkspaceFile,
                                 )
                                 DropdownMenuItem(
                                     text = { Text("从资料库选择") },

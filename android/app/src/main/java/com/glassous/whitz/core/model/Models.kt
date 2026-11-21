@@ -215,6 +215,19 @@ data class ConversationFile(
     @SerialName("created_at") val createdAt: String = "",
     @SerialName("updated_at") val updatedAt: String = "",
     @SerialName("conversation_title") val conversationTitle: String? = null,
+    @SerialName("conversation_kind") val conversationKind: String? = null,
+    @SerialName("qa_snippet") val qaSnippet: String? = null,
+    @SerialName("turn_role") val turnRole: String? = null,
+)
+
+data class DeliverableTarget(
+    val fileId: String = "",
+    val filename: String,
+    val title: String? = null,
+    val summary: String? = null,
+    val conversationId: String? = null,
+    val ext: String = "",
+    val mimeType: String = "",
 )
 
 @Serializable

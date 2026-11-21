@@ -84,7 +84,7 @@ const kind = computed<"html" | "markdown" | "table" | "code">(() => {
 const canEdit = computed(() => !truncated.value && isWritableTextExt(ext.value));
 const supportsPreviewMode = computed(() => kind.value === "html" || kind.value === "markdown" || kind.value === "table");
 
-const modalWidth = computed(() => (fullscreen.value ? "98vw" : "min(92vw, 1140px)"));
+const modalWidth = computed(() => (fullscreen.value ? "calc(100dvw - 2rem)" : "min(92vw, 1140px)"));
 
 const badgeLabel = computed(() => {
   if (kind.value === "html") return "HTML";
@@ -280,10 +280,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <BaseModal :open="open" :width="modalWidth" @close="emit('close')">
+  <BaseModal :open="open" :width="modalWidth" flush @close="emit('close')">
     <div
-      class="-mx-6 -my-3 flex flex-col overflow-hidden"
-      :class="fullscreen ? 'h-[92vh]' : 'h-[min(82vh,760px)]'"
+      class="flex flex-col overflow-hidden"
+      :class="fullscreen ? 'h-[calc(100dvh-2rem)]' : 'h-[min(82dvh,760px)]'"
     >
       <!-- Header Toolbar -->
       <div class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3.5">

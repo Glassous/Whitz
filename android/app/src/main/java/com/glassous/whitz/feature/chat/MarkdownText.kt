@@ -1,7 +1,9 @@
 package com.glassous.whitz.feature.chat
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,9 +19,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -42,14 +48,20 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.glassous.whitz.core.files.getExtLower
+import com.glassous.whitz.core.files.parseDeliverablePayload
+import com.glassous.whitz.core.model.DeliverableTarget
 import com.glassous.whitz.ui.theme.LocalWhitzColors
+import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
 
 private sealed interface MdBlock {
     data class Heading(val level: Int, val text: String) : MdBlock
     data class Paragraph(val text: String) : MdBlock
     data class CodeBlock(val lang: String, val code: String) : MdBlock
+    data class DeliverableCard(val target: DeliverableTarget, val isLoading: Boolean) : MdBlock
     data class Quote(val text: String) : MdBlock
     data class BulletList(val items: List<String>) : MdBlock
     data class OrderedList(val items: List<Pair<String, String>>) : MdBlock
@@ -77,8 +89,26 @@ private fun parseMarkdownBlocks(input: String): List<MdBlock> {
                 codeLines.add(lines[i])
                 i++
             }
-            if (i < lines.size) i++
-            blocks.add(MdBlock.CodeBlock(lang, codeLines.joinToString("\n")))
+            val closed = i < lines.size
+            if (closed) i++
+            val rawBody = codeLines.joinToString("\n")
+            if (lang.equals("deliverable", ignoreCase = true) || lang.equals("whitz-deliverable", ignoreCase = true)) {
+                val parsed = parseDeliverablePayload(rawBody)
+                if (parsed != null) {
+                    blocks.add(MdBlock.DeliverableCard(parsed, isLoading = !closed))
+                } else if (!closed) {
+                    blocks.add(
+                        MdBlock.DeliverableCard(
+                            target = DeliverableTarget(filename = "deliverable.txt", title = "正在生成交付产物…"),
+                            isLoading = true,
+                        )
+                    )
+                } else {
+                    blocks.add(MdBlock.CodeBlock(lang, rawBody))
+                }
+            } else {
+                blocks.add(MdBlock.CodeBlock(lang, rawBody))
+            }
             continue
         }
         // Divider
@@ -281,6 +311,7 @@ private fun InlineMdText(
 fun MarkdownText(
     markdown: String,
     modifier: Modifier = Modifier,
+    onOpenDeliverable: (DeliverableTarget) -> Unit = {},
 ) {
     val colors = LocalWhitzColors.current
     val clipboard = LocalClipboardManager.current
@@ -509,6 +540,92 @@ fun MarkdownText(
                             .height(1.dp)
                             .background(colors.line),
                     )
+                }
+                is MdBlock.DeliverableCard -> {
+                    val target = block.target
+                    val extLabel = getExtLower(target.filename)
+                        .removePrefix(".")
+                        .uppercase()
+                        .ifEmpty { "TEXT" }
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = colors.surface,
+                        border = BorderStroke(0.8.dp, colors.lineStrong),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable(enabled = !block.isLoading) { onOpenDeliverable(target) },
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(RoundedCornerShape(11.dp))
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                if (block.isLoading) {
+                                    WhitzLoadingIndicator(size = 18.dp)
+                                } else {
+                                    Icon(
+                                        Icons.Default.Description,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text(
+                                        text = target.title ?: target.filename,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = colors.fg,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false),
+                                    )
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = colors.canvas,
+                                        border = BorderStroke(0.5.dp, colors.line),
+                                    ) {
+                                        Text(
+                                            text = extLabel,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = colors.fgMuted,
+                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = target.summary ?: target.filename,
+                                    fontSize = 12.sp,
+                                    color = colors.fgMuted,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            if (!block.isLoading) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = "查看交付产物",
+                                    tint = colors.fgFaint,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

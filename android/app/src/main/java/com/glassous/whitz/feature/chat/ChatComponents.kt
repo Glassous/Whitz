@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -39,6 +40,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.NoteAdd
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
@@ -50,6 +53,10 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SentimentSatisfied
@@ -58,6 +65,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -81,6 +90,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -100,9 +110,15 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
 import com.glassous.whitz.core.files.FileValidator
+import com.glassous.whitz.core.files.InlineMessageSegment
+import com.glassous.whitz.core.files.extractInlineFileIds
+import com.glassous.whitz.core.files.isConversationImageFile
+import com.glassous.whitz.core.files.isImageFile
+import com.glassous.whitz.core.files.parseInlineFileSegments
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.ConversationSearchHit
+import com.glassous.whitz.core.model.DeliverableTarget
 import com.glassous.whitz.core.model.MemoryPendingItem
 import com.glassous.whitz.core.model.Message
 import com.glassous.whitz.core.model.PendingControl
@@ -114,6 +130,7 @@ import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
+import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
 import com.glassous.whitz.ui.theme.WhitzTextField
 import kotlinx.serialization.json.JsonPrimitive
@@ -153,6 +170,7 @@ fun MessageBubble(
     waitingFirstByte: Boolean = false,
     isActiveTurn: Boolean,
     isSelectedTurn: Boolean = false,
+    isHighlighted: Boolean = false,
     isEditing: Boolean = false,
     isSelectingText: Boolean = false,
     showDislikeReasons: Boolean = false,
@@ -167,6 +185,8 @@ fun MessageBubble(
     onLongPress: (Offset) -> Unit = {},
     onOpenTurnDetails: (String) -> Unit,
     onOpenFile: (ConversationFile) -> Unit,
+    onOpenDeliverable: (DeliverableTarget) -> Unit = {},
+    onOpenLightbox: (ConversationFile, List<ConversationFile>?) -> Unit = { f, _ -> onOpenFile(f) },
     onReact: (messageId: String, reaction: String, reasonCode: String?) -> Unit = { _, _, _ -> },
 ) {
     val colors = LocalWhitzColors.current
@@ -181,6 +201,27 @@ fun MessageBubble(
                 horizontalAlignment = Alignment.End,
             ) {
                 val attachments = message.toolPayload?.attachments.orEmpty()
+                val inlineIds = remember(message.content) { extractInlineFileIds(message.content).toSet() }
+                val barAttachments = remember(attachments, inlineIds) {
+                    attachments.filterNot { it.id in inlineIds }
+                }
+                val messageImageFiles = remember(attachments, convFiles) {
+                    attachments.mapNotNull { att ->
+                        val resolved = convFiles.firstOrNull { it.id == att.id } ?: ConversationFile(
+                            id = att.id,
+                            filename = att.filename,
+                            ext = att.ext,
+                            category = att.category,
+                            sizeBytes = att.sizeBytes,
+                        )
+                        if (isConversationImageFile(resolved)) resolved else null
+                    }
+                }
+                val inlineSegments = remember(message.content, convFiles) {
+                    parseInlineFileSegments(message.content) { id ->
+                        convFiles.firstOrNull { it.id == id }?.filename
+                    }
+                }
                 val skills = message.toolPayload?.skills.orEmpty()
                 val bubbleShape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
 
@@ -234,10 +275,10 @@ fun MessageBubble(
                         .clip(bubbleShape)
                         .background(MaterialTheme.colorScheme.primary)
                         .then(
-                            if (isEditing || isSelectingText) {
-                                Modifier.border(1.5.dp, colors.fgMuted.copy(alpha = 0.7f), bubbleShape)
-                            } else {
-                                Modifier
+                            when {
+                                isEditing || isSelectingText -> Modifier.border(1.5.dp, colors.fgMuted.copy(alpha = 0.7f), bubbleShape)
+                                isHighlighted -> Modifier.border(2.dp, colors.warning, bubbleShape)
+                                else -> Modifier
                             },
                         )
                         .onGloballyPositioned { bubbleCoords = it }
@@ -260,13 +301,14 @@ fun MessageBubble(
                         )
                         .padding(horizontal = 14.dp, vertical = 10.dp),
                 ) {
-                    if (attachments.isNotEmpty()) {
+                    if (barAttachments.isNotEmpty()) {
+                        val hasContentAfter = inlineSegments.isNotEmpty() || skills.isNotEmpty()
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.padding(bottom = if (message.content.isNotBlank()) 6.dp else 0.dp),
+                            modifier = Modifier.padding(bottom = if (hasContentAfter) 6.dp else 0.dp),
                         ) {
-                            attachments.forEach { att ->
+                            barAttachments.forEach { att ->
                                 val targetFile = convFiles.firstOrNull { it.id == att.id } ?: ConversationFile(
                                     id = att.id,
                                     filename = att.filename,
@@ -274,28 +316,37 @@ fun MessageBubble(
                                     category = att.category,
                                     sizeBytes = att.sizeBytes,
                                 )
-                                Row(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.14f))
-                                        .clickable { onOpenFile(targetFile) }
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Icon(
-                                        Icons.Default.AttachFile,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onPrimary,
-                                        modifier = Modifier.size(13.dp),
+                                val isImg = isConversationImageFile(targetFile)
+                                if (isImg) {
+                                    PureMessageImageThumb(
+                                        file = targetFile,
+                                        sizeDp = 76.dp,
+                                        onClick = { onOpenLightbox(targetFile, messageImageFiles.ifEmpty { null }) },
                                     )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = att.filename,
-                                        color = MaterialTheme.colorScheme.onPrimary,
-                                        fontSize = 12.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
+                                } else {
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.14f))
+                                            .clickable { onOpenFile(targetFile) }
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Icon(
+                                            Icons.Default.AttachFile,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onPrimary,
+                                            modifier = Modifier.size(13.dp),
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = att.filename,
+                                            color = MaterialTheme.colorScheme.onPrimary,
+                                            fontSize = 12.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -325,23 +376,68 @@ fun MessageBubble(
                             }
                         }
                     }
-                    if (message.content.isNotBlank()) {
-                        if (isSelectingText) {
-                            SelectionContainer {
-                                Text(
-                                    text = message.content,
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                    fontSize = 15.sp,
-                                    lineHeight = 22.sp,
-                                )
+                    if (inlineSegments.isNotEmpty()) {
+                        val contentBlock: @Composable () -> Unit = {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                inlineSegments.forEach { seg ->
+                                    when (seg) {
+                                        is InlineMessageSegment.Text -> {
+                                            val display = seg.value.trim('\n')
+                                            if (display.isNotBlank()) {
+                                                Text(
+                                                    text = display,
+                                                    color = MaterialTheme.colorScheme.onPrimary,
+                                                    fontSize = 15.sp,
+                                                    lineHeight = 22.sp,
+                                                )
+                                            }
+                                        }
+                                        is InlineMessageSegment.FileRef -> {
+                                            val targetFile = convFiles.firstOrNull { it.id == seg.fileId } ?: ConversationFile(
+                                                id = seg.fileId,
+                                                filename = seg.filename,
+                                            )
+                                            if (isConversationImageFile(targetFile)) {
+                                                PureMessageImageThumb(
+                                                    file = targetFile,
+                                                    sizeDp = 120.dp,
+                                                    onClick = { onOpenLightbox(targetFile, messageImageFiles.ifEmpty { null }) },
+                                                )
+                                            } else {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(10.dp))
+                                                        .background(MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.16f))
+                                                        .clickable { onOpenFile(targetFile) }
+                                                        .padding(horizontal = 9.dp, vertical = 6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                ) {
+                                                    Icon(
+                                                        Icons.Default.AttachFile,
+                                                        contentDescription = null,
+                                                        tint = MaterialTheme.colorScheme.onPrimary,
+                                                        modifier = Modifier.size(14.dp),
+                                                    )
+                                                    Spacer(modifier = Modifier.width(5.dp))
+                                                    Text(
+                                                        text = seg.filename,
+                                                        color = MaterialTheme.colorScheme.onPrimary,
+                                                        fontSize = 12.5.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                        }
+                        if (isSelectingText) {
+                            SelectionContainer { contentBlock() }
                         } else {
-                            Text(
-                                text = message.content,
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                fontSize = 15.sp,
-                                lineHeight = 22.sp,
-                            )
+                            contentBlock()
                         }
                     }
                 }
@@ -495,12 +591,14 @@ fun MessageBubble(
                             MarkdownText(
                                 markdown = message.content,
                                 modifier = Modifier.fillMaxWidth(),
+                                onOpenDeliverable = onOpenDeliverable,
                             )
                         }
                     } else {
                         MarkdownText(
                             markdown = message.content,
                             modifier = Modifier.fillMaxWidth(),
+                            onOpenDeliverable = onOpenDeliverable,
                         )
                     }
                 } else if (message.status == "streaming") {
@@ -520,12 +618,9 @@ fun MessageBubble(
 
                 if (artifacts.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(10.dp))
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        artifacts.forEach { art ->
-                            val convFile = convFiles.firstOrNull { it.id == art.id } ?: ConversationFile(
+                    val artifactFiles = remember(artifacts, convFiles) {
+                        artifacts.map { art ->
+                            convFiles.firstOrNull { it.id == art.id } ?: ConversationFile(
                                 id = art.id,
                                 filename = art.filename,
                                 ext = art.ext,
@@ -537,20 +632,38 @@ fun MessageBubble(
                                 thumbUrl = art.thumbUrl,
                                 previewExpiresAt = art.previewExpiresAt,
                             )
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(colors.surface)
-                                    .border(1.dp, colors.line, RoundedCornerShape(12.dp))
-                                    .clickable { onOpenFile(convFile) }
-                                    .padding(horizontal = 11.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(15.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Column {
-                                    Text(art.filename, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = colors.fg)
-                                    Text(FileValidator.formatSize(art.sizeBytes), fontSize = 11.sp, color = colors.fgFaint)
+                        }
+                    }
+                    val imageArtifacts = remember(artifactFiles) {
+                        artifactFiles.filter { isConversationImageFile(it) }
+                    }
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        artifactFiles.forEach { convFile ->
+                            if (isConversationImageFile(convFile)) {
+                                PureMessageImageThumb(
+                                    file = convFile,
+                                    sizeDp = 96.dp,
+                                    onClick = { onOpenLightbox(convFile, imageArtifacts.ifEmpty { null }) },
+                                )
+                            } else {
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(colors.surface)
+                                        .border(1.dp, colors.line, RoundedCornerShape(12.dp))
+                                        .clickable { onOpenFile(convFile) }
+                                        .padding(horizontal = 11.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(15.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Column {
+                                        Text(convFile.filename, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = colors.fg)
+                                        Text(FileValidator.formatSize(convFile.sizeBytes), fontSize = 11.sp, color = colors.fgFaint)
+                                    }
                                 }
                             }
                         }
@@ -1131,94 +1244,494 @@ fun TaskStepsPane(
 }
 
 @Composable
+private fun PureMessageImageThumb(
+    file: ConversationFile,
+    sizeDp: Dp,
+    onClick: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val model = file.thumbUrl ?: file.previewUrl
+    Box(
+        modifier = Modifier
+            .size(sizeDp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(colors.surface)
+            .border(0.5.dp, colors.line, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (!model.isNullOrBlank()) {
+            AsyncImage(
+                model = model,
+                contentDescription = file.filename,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Icon(
+                Icons.Default.Image,
+                contentDescription = file.filename,
+                tint = colors.fgFaint,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
 fun TaskFilesPane(
     files: List<ConversationFile>,
     deletingFileId: String? = null,
+    isMainChat: Boolean = false,
+    mainFileScope: String = "all",
+    onMainScopeChange: ((String) -> Unit)? = null,
+    groupedByConversation: Boolean = isMainChat && mainFileScope == "all",
     onOpenFile: (ConversationFile) -> Unit,
+    onOpenLightbox: ((ConversationFile, List<ConversationFile>) -> Unit)? = null,
+    onInsertFile: ((ConversationFile) -> Unit)? = null,
+    onLocateMessage: ((ConversationFile) -> Unit)? = null,
+    onRenameFile: ((ConversationFile) -> Unit)? = null,
+    onCreateFile: (() -> Unit)? = null,
+    onOpenLibraryPicker: (() -> Unit)? = null,
+    onUploadFiles: (() -> Unit)? = null,
     onDeleteFile: (String) -> Unit,
     modifier: Modifier = Modifier,
     bottomPadding: Dp = 24.dp,
 ) {
     val colors = LocalWhitzColors.current
-    if (files.isEmpty()) {
-        Box(modifier = modifier.padding(32.dp), contentAlignment = Alignment.Center) {
-            Text(
-                text = "当前旁聊暂无文件。\n所有已发送文件自动全局共享给主聊天和旁聊；如需管理全部文件，请前往「资料库」。",
-                fontSize = 13.sp,
-                lineHeight = 20.sp,
-                color = colors.fgFaint,
+    val allImages = remember(files) { files.filter { isConversationImageFile(it) } }
+
+    Column(modifier = modifier) {
+        if (isMainChat && onMainScopeChange != null) {
+            WhitzConnectedRadioGroup(
+                options = listOf("all" to "全部对话", "conversation" to "仅主聊"),
+                selected = mainFileScope,
+                onSelect = onMainScopeChange,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 6.dp),
             )
         }
-    } else {
-        LazyColumn(
-            modifier = modifier,
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = bottomPadding),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(files, key = { it.id }) { f ->
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .clickable { onOpenFile(f) },
-                    shape = RoundedCornerShape(16.dp),
-                    color = colors.surface,
-                    border = BorderStroke(0.5.dp, colors.line),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+
+        if (onCreateFile != null || onOpenLibraryPicker != null || onUploadFiles != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (onCreateFile != null) {
+                    OutlinedButton(
+                        onClick = onCreateFile,
+                        shapes = ButtonDefaults.shapesFor(34.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f).height(34.dp),
                     ) {
-                        Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(f.filename, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Icon(Icons.AutoMirrored.Filled.NoteAdd, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("新建", fontSize = 12.sp, maxLines = 1)
+                    }
+                }
+                if (onOpenLibraryPicker != null) {
+                    OutlinedButton(
+                        onClick = onOpenLibraryPicker,
+                        shapes = ButtonDefaults.shapesFor(34.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f).height(34.dp),
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("资料库", fontSize = 12.sp, maxLines = 1)
+                    }
+                }
+                if (onUploadFiles != null) {
+                    OutlinedButton(
+                        onClick = onUploadFiles,
+                        shapes = ButtonDefaults.shapesFor(34.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f).height(34.dp),
+                    ) {
+                        Icon(Icons.Default.AttachFile, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("上传", fontSize = 12.sp, maxLines = 1)
+                    }
+                }
+            }
+        }
+
+        if (files.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                Text(
+                    text = if (isMainChat) {
+                        "暂无工作区文件。\n可点击上方「新建」创建文本/表格/网页，或上传、从资料库引用。"
+                    } else {
+                        "当前旁聊暂无文件。\n可新建、上传或引用资料库文件。"
+                    },
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp,
+                    color = colors.fgFaint,
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = bottomPadding),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (groupedByConversation) {
+                    val grouped = linkedMapOf<String, MutableList<ConversationFile>>()
+                    for (f in files) {
+                        val key = f.conversationId ?: "__current__"
+                        grouped.getOrPut(key) { mutableListOf() }.add(f)
+                    }
+                    grouped.forEach { (convKey, groupFiles) ->
+                        val sample = groupFiles.first()
+                        val groupTitle = sample.conversationTitle?.takeIf { it.isNotBlank() }
+                            ?: if (sample.conversationKind == "main") "主聊" else "旁聊对话"
+                        item(key = "grp-hdr-$convKey") {
                             Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 6.dp, bottom = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 Text(
-                                    "${FileValidator.formatSize(f.sizeBytes)} · ${if (f.source == "assistant") "AI" else "上传"}",
+                                    text = groupTitle,
                                     fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = colors.fgMuted,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    text = "${groupFiles.size} 个",
+                                    fontSize = 11.sp,
                                     color = colors.fgFaint,
                                 )
-                                if (f.indexStatus == "indexing") {
-                                    Row(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(colors.canvas)
-                                            .padding(horizontal = 5.dp, vertical = 1.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                    ) {
-                                        WhitzLoadingIndicator(size = 9.dp)
-                                        Text("索引中", fontSize = 10.sp, color = colors.fgMuted)
-                                    }
-                                }
                             }
                         }
-                        IconButton(
-                            onClick = { onDeleteFile(f.id) },
-                            enabled = deletingFileId != f.id,
-                            modifier = Modifier.size(32.dp),
-                        ) {
-                            if (deletingFileId == f.id) {
-                                WhitzLoadingIndicator(size = 14.dp)
-                            } else {
-                                Icon(Icons.Default.Close, contentDescription = "从当前旁聊移除", tint = colors.fgFaint, modifier = Modifier.size(17.dp))
+                        val groupImages = groupFiles.filter { isConversationImageFile(it) }
+                        val groupDocs = groupFiles.filterNot { isConversationImageFile(it) }
+                        if (groupImages.isNotEmpty()) {
+                            item(key = "grp-imgs-$convKey") {
+                                WorkspacePureImageGrid(
+                                    images = groupImages,
+                                    allImages = allImages,
+                                    deletingFileId = deletingFileId,
+                                    onOpenImage = { f -> onOpenLightbox?.invoke(f, allImages) ?: onOpenFile(f) },
+                                    onInsertFile = onInsertFile,
+                                    onLocateMessage = onLocateMessage,
+                                    onRenameFile = onRenameFile,
+                                    onDeleteFile = onDeleteFile,
+                                )
+                            }
+                        }
+                        items(groupDocs, key = { "doc-${convKey}-${it.id}" }) { f ->
+                            WorkspaceFileRowCard(
+                                file = f,
+                                deleting = deletingFileId == f.id,
+                                onOpen = { onOpenFile(f) },
+                                onInsert = onInsertFile?.let { cb -> { cb(f) } },
+                                onLocate = if (f.messageId != null && onLocateMessage != null) ({ onLocateMessage(f) }) else null,
+                                onRename = onRenameFile?.let { cb -> { cb(f) } },
+                                onDelete = { onDeleteFile(f.id) },
+                            )
+                        }
+                    }
+                } else {
+                    val images = files.filter { isConversationImageFile(it) }
+                    val docs = files.filterNot { isConversationImageFile(it) }
+                    if (images.isNotEmpty()) {
+                        item(key = "flat-imgs") {
+                            WorkspacePureImageGrid(
+                                images = images,
+                                allImages = allImages,
+                                deletingFileId = deletingFileId,
+                                onOpenImage = { f -> onOpenLightbox?.invoke(f, allImages) ?: onOpenFile(f) },
+                                onInsertFile = onInsertFile,
+                                onLocateMessage = onLocateMessage,
+                                onRenameFile = onRenameFile,
+                                onDeleteFile = onDeleteFile,
+                            )
+                        }
+                    }
+                    items(docs, key = { it.id }) { f ->
+                        WorkspaceFileRowCard(
+                            file = f,
+                            deleting = deletingFileId == f.id,
+                            onOpen = { onOpenFile(f) },
+                            onInsert = onInsertFile?.let { cb -> { cb(f) } },
+                            onLocate = if (f.messageId != null && onLocateMessage != null) ({ onLocateMessage(f) }) else null,
+                            onRename = onRenameFile?.let { cb -> { cb(f) } },
+                            onDelete = { onDeleteFile(f.id) },
+                        )
+                    }
+                }
+
+                item(key = "files-footer-hint") {
+                    Text(
+                        text = "图片支持多图缩放浏览；点击文档可直接预览、编辑与重命名。",
+                        fontSize = 11.5.sp,
+                        lineHeight = 17.sp,
+                        color = colors.fgFaint,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkspacePureImageGrid(
+    images: List<ConversationFile>,
+    allImages: List<ConversationFile>,
+    deletingFileId: String?,
+    onOpenImage: (ConversationFile) -> Unit,
+    onInsertFile: ((ConversationFile) -> Unit)?,
+    onLocateMessage: ((ConversationFile) -> Unit)?,
+    onRenameFile: ((ConversationFile) -> Unit)?,
+    onDeleteFile: (String) -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        images.chunked(3).forEach { rowFiles ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                rowFiles.forEach { img ->
+                    var menuOpen by remember(img.id) { mutableStateOf(false) }
+                    val model = img.thumbUrl ?: img.previewUrl
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .aspectRatio(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(colors.surface)
+                            .border(0.5.dp, colors.line, RoundedCornerShape(12.dp))
+                            .clickable { onOpenImage(img) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (!model.isNullOrBlank()) {
+                            AsyncImage(
+                                model = model,
+                                contentDescription = img.filename,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.Image,
+                                contentDescription = img.filename,
+                                tint = colors.fgFaint,
+                                modifier = Modifier.size(24.dp),
+                            )
+                        }
+
+                        if (deletingFileId == img.id) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(colors.canvas.copy(alpha = 0.65f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                WhitzLoadingIndicator(size = 18.dp)
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(4.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clip(CircleShape)
+                                        .background(colors.canvas.copy(alpha = 0.72f))
+                                        .clickable { menuOpen = true },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        Icons.Default.MoreVert,
+                                        contentDescription = "图片操作",
+                                        tint = colors.fg,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = menuOpen,
+                                    onDismissRequest = { menuOpen = false },
+                                ) {
+                                    if (onInsertFile != null) {
+                                        DropdownMenuItem(
+                                            text = { Text("插入到输入框") },
+                                            onClick = {
+                                                menuOpen = false
+                                                onInsertFile(img)
+                                            },
+                                        )
+                                    }
+                                    if (img.messageId != null && onLocateMessage != null) {
+                                        DropdownMenuItem(
+                                            text = { Text("定位对应问答") },
+                                            onClick = {
+                                                menuOpen = false
+                                                onLocateMessage(img)
+                                            },
+                                        )
+                                    }
+                                    if (onRenameFile != null) {
+                                        DropdownMenuItem(
+                                            text = { Text("重命名") },
+                                            onClick = {
+                                                menuOpen = false
+                                                onRenameFile(img)
+                                            },
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                        text = { Text("移除", color = colors.danger) },
+                                        onClick = {
+                                            menuOpen = false
+                                            onDeleteFile(img.id)
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
                 }
+                repeat(3 - rowFiles.size) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
             }
-            item(key = "files-footer-hint") {
-                Text(
-                    text = "所有已发送文件自动全局共享给主聊天和旁聊；如需彻底删除，请前往侧栏「资料库」。",
-                    fontSize = 11.5.sp,
-                    lineHeight = 17.sp,
-                    color = colors.fgFaint,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-                )
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceFileRowCard(
+    file: ConversationFile,
+    deleting: Boolean,
+    onOpen: () -> Unit,
+    onInsert: (() -> Unit)?,
+    onLocate: (() -> Unit)?,
+    onRename: (() -> Unit)?,
+    onDelete: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    var menuOpen by remember(file.id) { mutableStateOf(false) }
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onOpen),
+        shape = RoundedCornerShape(16.dp),
+        color = colors.surface,
+        border = BorderStroke(0.5.dp, colors.line),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 11.dp, bottom = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Default.AttachFile, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(file.filename, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = colors.fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        "${FileValidator.formatSize(file.sizeBytes)} · ${if (file.source == "assistant") "AI" else "上传"}",
+                        fontSize = 11.5.sp,
+                        color = colors.fgFaint,
+                    )
+                    if (file.indexStatus == "indexing") {
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(colors.canvas)
+                                .padding(horizontal = 5.dp, vertical = 1.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            WhitzLoadingIndicator(size = 9.dp)
+                            Text("索引中", fontSize = 10.sp, color = colors.fgMuted)
+                        }
+                    }
+                }
+                file.qaSnippet?.takeIf { it.isNotBlank() }?.let { snippet ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = if (onLocate != null) Modifier.clickable(onClick = onLocate) else Modifier,
+                    ) {
+                        Icon(
+                            Icons.Default.MyLocation,
+                            contentDescription = null,
+                            tint = if (onLocate != null) MaterialTheme.colorScheme.primary else colors.fgFaint,
+                            modifier = Modifier.size(11.dp),
+                        )
+                        Text(
+                            text = snippet,
+                            fontSize = 11.sp,
+                            color = if (onLocate != null) MaterialTheme.colorScheme.primary else colors.fgFaint,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+
+            if (onInsert != null) {
+                IconButton(onClick = onInsert, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Add, contentDescription = "插入到输入框", tint = colors.fgMuted, modifier = Modifier.size(17.dp))
+                }
+            }
+
+            if (deleting) {
+                Box(modifier = Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                    WhitzLoadingIndicator(size = 14.dp)
+                }
+            } else {
+                Box {
+                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "更多操作", tint = colors.fgFaint, modifier = Modifier.size(17.dp))
+                    }
+                    DropdownMenu(
+                        expanded = menuOpen,
+                        onDismissRequest = { menuOpen = false },
+                    ) {
+                        if (onLocate != null) {
+                            DropdownMenuItem(
+                                text = { Text("定位对应问答") },
+                                onClick = {
+                                    menuOpen = false
+                                    onLocate()
+                                },
+                            )
+                        }
+                        if (onRename != null) {
+                            DropdownMenuItem(
+                                text = { Text("重命名") },
+                                onClick = {
+                                    menuOpen = false
+                                    onRename()
+                                },
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("移除", color = colors.danger) },
+                            onClick = {
+                                menuOpen = false
+                                onDelete()
+                            },
+                        )
+                    }
+                }
             }
         }
     }

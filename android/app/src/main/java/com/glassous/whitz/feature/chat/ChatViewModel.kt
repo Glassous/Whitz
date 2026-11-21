@@ -9,12 +9,16 @@ import com.glassous.whitz.core.files.FileValidator
 import com.glassous.whitz.core.files.LibraryController
 import com.glassous.whitz.core.files.LocalPickedFile
 import com.glassous.whitz.core.files.UriFileReader
+import com.glassous.whitz.core.files.extractInlineFileIds
+import com.glassous.whitz.core.files.isConversationImageFile
+import com.glassous.whitz.core.files.isWritableTextExt
 import com.glassous.whitz.core.model.AgentStatus
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.ConversationDetail
 import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.ConversationSearchHit
 import com.glassous.whitz.core.model.CreditStatus
+import com.glassous.whitz.core.model.DeliverableTarget
 import com.glassous.whitz.core.model.FileAttachmentMeta
 import com.glassous.whitz.core.model.MemoryPendingItem
 import com.glassous.whitz.core.model.Message
@@ -38,15 +42,18 @@ import com.glassous.whitz.core.network.AvatarUploadRequest
 import com.glassous.whitz.core.network.ClarifyRequest
 import com.glassous.whitz.core.network.CompleteUploadRequest
 import com.glassous.whitz.core.network.CreateConversationRequest
+import com.glassous.whitz.core.network.CreateTextFileRequest
 import com.glassous.whitz.core.network.MessageReactionCreateRequest
 import com.glassous.whitz.core.network.PatchConversationRequest
 import com.glassous.whitz.core.network.PendingActionRequest
 import com.glassous.whitz.core.network.PresignRequest
+import com.glassous.whitz.core.network.RenameFileRequest
 import com.glassous.whitz.core.network.SchedulePendingResolveRequest
 import com.glassous.whitz.core.network.SseEvent
 import com.glassous.whitz.core.network.TicketRequest
 import com.glassous.whitz.feature.schedules.ScheduleController
 import com.glassous.whitz.core.network.UpdateAssistantRequest
+import com.glassous.whitz.core.network.UpdateFileContentRequest
 import com.glassous.whitz.core.network.WhitzJson
 import com.glassous.whitz.core.network.extractErrorMessage
 import com.glassous.whitz.core.util.ConversationSorter
@@ -87,6 +94,27 @@ data class PreviewTarget(
     val error: String? = null,
 )
 
+data class DeliverablePreviewState(
+    val target: DeliverableTarget,
+    val resolvedFile: ConversationFile? = null,
+    val content: String = "",
+    val truncated: Boolean = false,
+    val loading: Boolean = false,
+    val saving: Boolean = false,
+    val error: String? = null,
+    val saveMessage: String? = null,
+)
+
+data class ImageLightboxState(
+    val images: List<ConversationFile>,
+    val initialIndex: Int = 0,
+)
+
+data class PendingInputFileInsertion(
+    val seq: Long,
+    val file: ConversationFile,
+)
+
 data class ChatUiState(
     val conversations: List<Conversation> = emptyList(),
     val conversationsLoading: Boolean = false,
@@ -123,6 +151,7 @@ data class ChatUiState(
     val credits: CreditStatus? = null,
     // Files
     val files: List<ConversationFile> = emptyList(),
+    val mainFileScope: String = "all",
     val uploads: List<UploadTask> = emptyList(),
     val attachedIds: List<String> = emptyList(),
     val filesLoading: Boolean = false,
@@ -135,8 +164,12 @@ data class ChatUiState(
     // Search
     val searchResults: List<ConversationSearchHit> = emptyList(),
     val searching: Boolean = false,
-    // Preview
+    // Preview / Deliverable / Lightbox / Focus / Composer insertion
     val previewTarget: PreviewTarget? = null,
+    val deliverablePreview: DeliverablePreviewState? = null,
+    val imageLightbox: ImageLightboxState? = null,
+    val pendingFocusMessageId: String? = null,
+    val pendingInputInsertion: PendingInputFileInsertion? = null,
     // Assistant Profile dialog
     val assistantSaving: Boolean = false,
     val assistantFeedback: String? = null,
@@ -261,7 +294,7 @@ class ChatViewModel(
             }
             if (mySeq != openSeq) return
             loadFromConversation(detail)
-            _ui.update { it.copy(files = emptyList(), filesLoading = false) }
+            loadFiles(detail.id, scope = _ui.value.mainFileScope)
         } catch (t: Throwable) {
             if (mySeq != openSeq) return
             if (_ui.value.messages.isEmpty()) {
@@ -416,7 +449,7 @@ class ChatViewModel(
                 }
                 if (mySeq != openSeq) return@launch
                 loadFromConversation(detail)
-                _ui.update { it.copy(files = emptyList(), filesLoading = false) }
+                loadFiles(detail.id, scope = _ui.value.mainFileScope)
             } catch (t: Throwable) {
                 if (mySeq != openSeq) return@launch
                 _ui.update {
@@ -452,9 +485,9 @@ class ChatViewModel(
                 if (mySeq != openSeq) return@launch
                 loadFromConversation(detail)
                 if (detail.kind != "main") {
-                    loadFiles(convId)
+                    loadFiles(convId, scope = "conversation")
                 } else {
-                    _ui.update { it.copy(files = emptyList(), filesLoading = false) }
+                    loadFiles(convId, scope = _ui.value.mainFileScope)
                 }
             } catch (t: Throwable) {
                 if (mySeq != openSeq) return@launch
@@ -722,8 +755,12 @@ class ChatViewModel(
         val trimmed = content.trim()
         val state = _ui.value
         if (state.streaming || state.sendingMessage || state.hasActiveUploads) return
-        val attachedIds = state.attachedIds
-        val attachedFiles = state.files.filter { it.id in attachedIds }
+        val inlineIds = extractInlineFileIds(trimmed)
+        val mergedIds = (state.attachedIds + inlineIds).distinct()
+        val fileMap = state.files.associateBy { it.id }
+        val attachedFiles = mergedIds.map { id ->
+            fileMap[id] ?: ConversationFile(id = id, filename = id)
+        }
         val skillNames = state.selectedSkillNames
         if (trimmed.isEmpty()) return
 
@@ -866,7 +903,7 @@ class ChatViewModel(
         if (idx < 0) return
 
         val targetUser = state.messages[idx]
-        val attached = (targetUser.toolPayload?.attachments ?: emptyList()).map { att ->
+        val existingAtt = (targetUser.toolPayload?.attachments ?: emptyList()).map { att ->
             state.files.firstOrNull { it.id == att.id } ?: ConversationFile(
                 id = att.id,
                 conversationId = convId,
@@ -876,6 +913,16 @@ class ChatViewModel(
                 sizeBytes = att.sizeBytes,
             )
         }
+        val inlineIds = extractInlineFileIds(trimmed)
+        val existingIds = existingAtt.map { it.id }.toSet()
+        val extraInline = inlineIds.filterNot { it in existingIds }.map { id ->
+            state.files.firstOrNull { it.id == id } ?: ConversationFile(
+                id = id,
+                conversationId = convId,
+                filename = id,
+            )
+        }
+        val attached = existingAtt + extraInline
         val skills = targetUser.toolPayload?.skills ?: emptyList()
 
         if (userMessageId.startsWith("temp-")) {
@@ -1771,6 +1818,12 @@ class ChatViewModel(
             )
         }
         syncConversationsFromServer()
+        _ui.value.currentConvId?.let { cid ->
+            viewModelScope.launch {
+                val scope = if (_ui.value.isMainChat) _ui.value.mainFileScope else "conversation"
+                loadFiles(cid, scope = scope)
+            }
+        }
     }
 
     private fun updateReasoningBlock(
@@ -1821,11 +1874,16 @@ class ChatViewModel(
         }
     }
 
+    private var inputInsertSeq = 0L
+
     // --- Files & Uploads ---
-    private suspend fun loadFiles(convId: String) {
+    private suspend fun loadFiles(
+        convId: String,
+        scope: String = if (_ui.value.isMainChat) _ui.value.mainFileScope else "conversation",
+    ) {
         _ui.update { it.copy(filesLoading = true) }
         try {
-            val list = container.network.api.getConversationFiles(convId)
+            val list = container.network.api.getConversationFiles(convId, scope = scope)
             if (_ui.value.currentConvId == convId) {
                 _ui.update { it.copy(files = list, filesLoading = false) }
             }
@@ -1834,7 +1892,17 @@ class ChatViewModel(
         }
     }
 
-    fun enqueuePickedUris(uris: List<Uri>) {
+    fun setMainFileScope(scope: String) {
+        val clean = if (scope == "conversation") "conversation" else "all"
+        if (_ui.value.mainFileScope == clean) return
+        _ui.update { it.copy(mainFileScope = clean) }
+        val convId = _ui.value.currentConvId ?: return
+        if (_ui.value.isMainChat) {
+            viewModelScope.launch { loadFiles(convId, scope = clean) }
+        }
+    }
+
+    fun enqueuePickedUris(uris: List<Uri>, insertIntoInputOnComplete: Boolean = false) {
         if (uris.isEmpty()) return
         val cr = container.appContext.contentResolver
         val picked = mutableListOf<LocalPickedFile>()
@@ -1865,7 +1933,12 @@ class ChatViewModel(
 
         val state = _ui.value
         val activeCount = state.uploads.count { it.status != UploadTaskStatus.ERROR }
-        val remainingSlots = (FileValidator.MAX_FILES_PER_CONVERSATION - state.files.size - activeCount).coerceAtLeast(0)
+        val existingInConvCount = if (state.isMainChat && state.mainFileScope == "all") {
+            state.files.count { it.conversationId == state.currentConvId }
+        } else {
+            state.files.size
+        }
+        val remainingSlots = (FileValidator.MAX_FILES_PER_CONVERSATION - existingInConvCount - activeCount).coerceAtLeast(0)
         if (remainingSlots <= 0) {
             _ui.update { it.copy(fileError = "当前对话最多保留 ${FileValidator.MAX_FILES_PER_CONVERSATION} 个文件，请先删除部分文件") }
             return
@@ -1901,7 +1974,7 @@ class ChatViewModel(
                 tasks.map { (task, file) ->
                     val job = async {
                         sem.withPermit {
-                            runUploadTask(targetConvId, task.localId, file)
+                            runUploadTask(targetConvId, task.localId, file, insertIntoInputOnComplete)
                         }
                     }
                     uploadJobs[task.localId] = job
@@ -1911,7 +1984,12 @@ class ChatViewModel(
         }
     }
 
-    private suspend fun runUploadTask(convId: String, taskId: String, file: LocalPickedFile) {
+    private suspend fun runUploadTask(
+        convId: String,
+        taskId: String,
+        file: LocalPickedFile,
+        insertIntoInputOnComplete: Boolean = false,
+    ) {
         try {
             val presign = container.network.api.presignUpload(
                 convId,
@@ -1931,13 +2009,25 @@ class ChatViewModel(
                 CompleteUploadRequest(etag),
             )
             if (_ui.value.currentConvId == convId) {
+                val insertion = if (insertIntoInputOnComplete) {
+                    PendingInputFileInsertion(++inputInsertSeq, completed)
+                } else {
+                    null
+                }
                 _ui.update { state ->
-                    val nextFiles = state.files.filterNot { it.id == completed.id } + completed
-                    val nextAttached = if (completed.id in state.attachedIds) state.attachedIds else state.attachedIds + completed.id
+                    val nextFiles = listOf(completed) + state.files.filterNot { it.id == completed.id }
+                    val nextAttached = if (insertIntoInputOnComplete) {
+                        state.attachedIds
+                    } else if (completed.id in state.attachedIds) {
+                        state.attachedIds
+                    } else {
+                        state.attachedIds + completed.id
+                    }
                     state.copy(
                         files = nextFiles,
                         attachedIds = nextAttached,
                         uploads = state.uploads.filterNot { it.localId == taskId },
+                        pendingInputInsertion = insertion ?: state.pendingInputInsertion,
                     )
                 }
             }
@@ -2165,12 +2255,314 @@ class ChatViewModel(
 
     private fun upsertFile(file: ConversationFile) {
         _ui.update { state ->
-            if (state.currentConvId != null && file.conversationId != null && file.conversationId != state.currentConvId) {
+            val allowOtherConv = state.isMainChat && state.mainFileScope == "all"
+            if (!allowOtherConv && state.currentConvId != null && file.conversationId != null && file.conversationId != state.currentConvId) {
                 return@update state
             }
-            val next = state.files.filterNot { it.id == file.id } + file
+            val next = listOf(file) + state.files.filterNot { it.id == file.id }
             state.copy(files = next)
         }
+    }
+
+    fun requestInsertFileToInput(file: ConversationFile) {
+        _ui.update {
+            it.copy(pendingInputInsertion = PendingInputFileInsertion(++inputInsertSeq, file))
+        }
+    }
+
+    fun consumePendingInputInsertion() {
+        _ui.update { it.copy(pendingInputInsertion = null) }
+    }
+
+    fun consumePendingFocusMessage() {
+        _ui.update { it.copy(pendingFocusMessageId = null) }
+    }
+
+    fun locateFileMessage(file: ConversationFile) {
+        val targetMsgId = file.messageId ?: return
+        val targetConvId = file.conversationId
+        val currentConvId = _ui.value.currentConvId
+        if (targetConvId != null && targetConvId != currentConvId) {
+            openConversationAndFocus(targetConvId, targetMsgId)
+        } else {
+            _ui.update { it.copy(pendingFocusMessageId = targetMsgId) }
+        }
+    }
+
+    private fun openConversationAndFocus(convId: String, messageId: String) {
+        val mySeq = ++openSeq
+        pendingPollJob?.cancel()
+        pendingPollJob = null
+        streamJob?.cancel()
+        streamJob = null
+        _ui.update {
+            it.copy(
+                isNewSideDraft = false,
+                switchingConversation = true,
+                previewTarget = null,
+                pendingFocusMessageId = messageId,
+            )
+        }
+        viewModelScope.launch {
+            try {
+                val detail = container.network.api.getConversation(convId)
+                if (mySeq != openSeq) return@launch
+                loadFromConversation(detail)
+                if (detail.kind != "main") {
+                    loadFiles(convId, scope = "conversation")
+                } else {
+                    loadFiles(convId, scope = _ui.value.mainFileScope)
+                }
+            } catch (t: Throwable) {
+                if (mySeq != openSeq) return@launch
+                _ui.update {
+                    it.copy(
+                        switchingConversation = false,
+                        pendingFocusMessageId = null,
+                        error = extractErrorMessage(t, "加载对话失败"),
+                    )
+                }
+            }
+        }
+    }
+
+    fun createTextFile(
+        filename: String,
+        content: String = "",
+        overwrite: Boolean = false,
+        openAfter: Boolean = true,
+        onComplete: ((ConversationFile) -> Unit)? = null,
+    ) {
+        val cleanName = filename.trim()
+        if (cleanName.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                val convId = ensureConversation()
+                val created = container.network.api.createTextFile(
+                    convId,
+                    CreateTextFileRequest(filename = cleanName, content = content, overwrite = overwrite),
+                )
+                upsertFile(created)
+                onComplete?.invoke(created)
+                if (openAfter) {
+                    openDeliverableFromFile(created)
+                }
+            } catch (t: Throwable) {
+                _ui.update { it.copy(fileError = extractErrorMessage(t, "创建工作区文件失败")) }
+            }
+        }
+    }
+
+    fun renameFile(file: ConversationFile, newFilename: String, onDone: (() -> Unit)? = null) {
+        val clean = newFilename.trim()
+        val convId = file.conversationId ?: _ui.value.currentConvId
+        if (clean.isEmpty() || convId == null || clean == file.filename) {
+            onDone?.invoke()
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val updated = container.network.api.renameConversationFile(
+                    convId,
+                    file.id,
+                    RenameFileRequest(filename = clean),
+                )
+                upsertFile(updated)
+                _ui.update { state ->
+                    val currentDeliv = state.deliverablePreview
+                    if (currentDeliv?.target?.fileId == updated.id || currentDeliv?.resolvedFile?.id == updated.id) {
+                        state.copy(
+                            deliverablePreview = currentDeliv.copy(
+                                target = currentDeliv.target.copy(filename = updated.filename, ext = updated.ext),
+                                resolvedFile = updated,
+                            )
+                        )
+                    } else state
+                }
+                onDone?.invoke()
+            } catch (t: Throwable) {
+                _ui.update { it.copy(fileError = extractErrorMessage(t, "重命名文件失败")) }
+            }
+        }
+    }
+
+    fun openFileSmart(file: ConversationFile) {
+        if (isConversationImageFile(file)) {
+            openImageLightbox(file)
+        } else if (isWritableTextExt(file.filename, file.ext)) {
+            openDeliverableFromFile(file)
+        } else {
+            openFilePreview(file)
+        }
+    }
+
+    fun openDeliverableFromFile(file: ConversationFile) {
+        openDeliverable(
+            DeliverableTarget(
+                fileId = file.id,
+                filename = file.filename,
+                title = file.filename,
+                conversationId = file.conversationId ?: _ui.value.currentConvId,
+                ext = file.ext,
+                mimeType = file.mimeType,
+            )
+        )
+    }
+
+    fun openDeliverable(target: DeliverableTarget) {
+        val state = _ui.value
+        val matched = when {
+            target.fileId.isNotEmpty() -> state.files.firstOrNull { it.id == target.fileId }
+            else -> state.files.firstOrNull { it.filename == target.filename }
+        }
+        val resolvedTarget = target.copy(
+            fileId = matched?.id ?: target.fileId,
+            filename = matched?.filename ?: target.filename,
+            conversationId = matched?.conversationId ?: target.conversationId ?: state.currentConvId,
+            ext = (matched?.ext ?: target.ext),
+            mimeType = (matched?.mimeType ?: target.mimeType),
+        )
+        _ui.update {
+            it.copy(
+                deliverablePreview = DeliverablePreviewState(
+                    target = resolvedTarget,
+                    resolvedFile = matched,
+                    loading = true,
+                )
+            )
+        }
+        viewModelScope.launch {
+            val fileId = resolvedTarget.fileId
+            val convId = resolvedTarget.conversationId
+            if (fileId.isEmpty()) {
+                _ui.update {
+                    it.copy(
+                        deliverablePreview = it.deliverablePreview?.copy(
+                            loading = false,
+                            error = "未找到对应的工作区文件：${resolvedTarget.filename}",
+                        )
+                    )
+                }
+                return@launch
+            }
+            try {
+                val body = if (convId != null) {
+                    container.network.api.getPreviewContent(convId, fileId).string()
+                } else {
+                    container.network.api.getLibraryPreviewContent(fileId).string()
+                }
+                var text = body
+                var truncated = false
+                try {
+                    val elem = WhitzJson.parseToJsonElement(body)
+                    if (elem is JsonObject) {
+                        text = (elem["content"] as? JsonPrimitive)?.contentOrNull
+                            ?: (elem["text"] as? JsonPrimitive)?.contentOrNull
+                            ?: body
+                        truncated = (elem["truncated"] as? JsonPrimitive)?.booleanOrNull ?: false
+                    }
+                } catch (_: Exception) {
+                    /* raw text */
+                }
+                _ui.update { cur ->
+                    val dp = cur.deliverablePreview ?: return@update cur
+                    if (dp.target.fileId != fileId && dp.target.filename != resolvedTarget.filename) return@update cur
+                    cur.copy(
+                        deliverablePreview = dp.copy(
+                            content = text,
+                            truncated = truncated,
+                            loading = false,
+                            error = null,
+                        )
+                    )
+                }
+            } catch (t: Throwable) {
+                _ui.update { cur ->
+                    val dp = cur.deliverablePreview ?: return@update cur
+                    cur.copy(
+                        deliverablePreview = dp.copy(
+                            loading = false,
+                            error = extractErrorMessage(t, "加载交付物失败"),
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun saveDeliverableContent(newContent: String, onSaved: (() -> Unit)? = null) {
+        val current = _ui.value.deliverablePreview ?: return
+        val fileId = current.resolvedFile?.id ?: current.target.fileId
+        val convId = current.resolvedFile?.conversationId ?: current.target.conversationId ?: _ui.value.currentConvId
+        if (fileId.isEmpty() || convId == null || current.saving) return
+
+        _ui.update { cur ->
+            cur.copy(deliverablePreview = cur.deliverablePreview?.copy(saving = true, saveMessage = null, error = null))
+        }
+        viewModelScope.launch {
+            try {
+                val updated = container.network.api.updateFileContent(
+                    convId,
+                    fileId,
+                    UpdateFileContentRequest(content = newContent),
+                )
+                upsertFile(updated)
+                _ui.update { cur ->
+                    cur.copy(
+                        deliverablePreview = cur.deliverablePreview?.copy(
+                            resolvedFile = updated,
+                            content = newContent,
+                            truncated = false,
+                            saving = false,
+                            saveMessage = "已保存到工作区",
+                        )
+                    )
+                }
+                onSaved?.invoke()
+            } catch (t: Throwable) {
+                _ui.update { cur ->
+                    cur.copy(
+                        deliverablePreview = cur.deliverablePreview?.copy(
+                            saving = false,
+                            error = extractErrorMessage(t, "保存文件内容失败"),
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun closeDeliverable() {
+        _ui.update { it.copy(deliverablePreview = null) }
+    }
+
+    fun openImageLightbox(target: ConversationFile, pool: List<ConversationFile>? = null) {
+        val sourcePool = (pool ?: _ui.value.files).filter { isConversationImageFile(it) }
+        val images = if (sourcePool.any { it.id == target.id }) sourcePool else listOf(target) + sourcePool
+        val idx = images.indexOfFirst { it.id == target.id }.coerceAtLeast(0)
+        _ui.update { it.copy(imageLightbox = ImageLightboxState(images = images, initialIndex = idx)) }
+        viewModelScope.launch {
+            images.forEach { img ->
+                if (img.previewUrl.isNullOrBlank()) {
+                    runCatching { resolveFreshPreviewUrl(img.conversationId ?: _ui.value.currentConvId, img) }
+                        .getOrNull()
+                        ?.let { freshUrl ->
+                            _ui.update { cur ->
+                                val lb = cur.imageLightbox ?: return@update cur
+                                cur.copy(
+                                    imageLightbox = lb.copy(
+                                        images = lb.images.map { if (it.id == img.id) it.copy(previewUrl = freshUrl) else it }
+                                    )
+                                )
+                            }
+                        }
+                }
+            }
+        }
+    }
+
+    fun closeImageLightbox() {
+        _ui.update { it.copy(imageLightbox = null) }
     }
 
     private fun buildUserPayload(files: List<ConversationFile>, skills: List<String>): ToolPayload? {
@@ -2456,6 +2848,13 @@ class ChatViewModel(
                                 } else f
                             }
                         )
+                    }
+                } else if (action in setOf("added", "updated", "renamed")) {
+                    _ui.value.currentConvId?.let { cid ->
+                        viewModelScope.launch {
+                            val scope = if (_ui.value.isMainChat) _ui.value.mainFileScope else "conversation"
+                            loadFiles(cid, scope = scope)
+                        }
                     }
                 }
                 library.handleRealtimeLibraryEvent(action, fileId, idxStatus, idxChunks)

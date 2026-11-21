@@ -1,8 +1,25 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, useId, watch } from "vue";
+import { computed, nextTick, onMounted, ref, useId, watch } from "vue";
 
-const props = defineProps<{ open: boolean; title?: string; width?: string }>();
+const TAILWIND_WIDTH_MAP: Record<string, string> = {
+  "max-w-xs": "20rem",
+  "max-w-sm": "24rem",
+  "max-w-md": "28rem",
+  "max-w-lg": "32rem",
+  "max-w-xl": "36rem",
+  "max-w-2xl": "42rem",
+  "max-w-3xl": "48rem",
+  "max-w-4xl": "56rem",
+};
+
+const props = defineProps<{ open: boolean; title?: string; width?: string; flush?: boolean }>();
 const emit = defineEmits<{ close: [] }>();
+
+const resolvedWidth = computed(() => {
+  const raw = props.width?.trim();
+  if (!raw) return "32rem";
+  return TAILWIND_WIDTH_MAP[raw] ?? raw;
+});
 
 const titleId = useId();
 const dialogRef = ref<HTMLDialogElement | null>(null);
@@ -108,8 +125,8 @@ onMounted(() => {
 <template>
   <dialog
     ref="dialogRef"
-    class="whitz-dialog w-full"
-    :style="{ maxWidth: width ?? '32rem' }"
+    class="whitz-dialog"
+    :style="{ '--whitz-modal-width': resolvedWidth }"
     closedby="any"
     :aria-labelledby="title ? titleId : undefined"
     @cancel="onCancel"
@@ -119,10 +136,10 @@ onMounted(() => {
   >
     <div
       v-if="rendered"
-      class="w-full overflow-hidden rounded-[28px] bg-canvas shadow-2xl dark:bg-[#161615]"
+      class="flex max-h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-[28px] bg-canvas shadow-2xl dark:bg-[#161615]"
       style="box-shadow: var(--shadow)"
     >
-      <div v-if="title" class="flex items-center justify-between px-6 pb-2 pt-5">
+      <div v-if="title" class="flex shrink-0 items-center justify-between px-6 pb-2 pt-5">
         <h3 :id="titleId" class="text-[17px] font-semibold text-fg">{{ title }}</h3>
         <button
           type="button"
@@ -135,8 +152,16 @@ onMounted(() => {
           </svg>
         </button>
       </div>
-      <div class="px-6 py-3"><slot /></div>
-      <div v-if="$slots.footer" class="flex justify-end gap-2.5 px-6 pb-6 pt-3">
+      <div
+        :class="
+          flush
+            ? 'flex min-h-0 flex-1 flex-col overflow-hidden'
+            : 'custom-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-3'
+        "
+      >
+        <slot />
+      </div>
+      <div v-if="$slots.footer" class="flex shrink-0 justify-end gap-2.5 px-6 pb-6 pt-3">
         <slot name="footer" />
       </div>
     </div>

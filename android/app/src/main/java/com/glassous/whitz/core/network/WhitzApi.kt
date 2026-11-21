@@ -108,6 +108,23 @@ data class CompleteUploadRequest(val etag: String? = null)
 data class AttachFilesRequest(@SerialName("file_ids") val fileIds: List<String>)
 
 @Serializable
+data class CreateTextFileRequest(
+    val filename: String,
+    val content: String = "",
+    val overwrite: Boolean = false,
+)
+
+@Serializable
+data class UpdateFileContentRequest(
+    val content: String,
+)
+
+@Serializable
+data class RenameFileRequest(
+    val filename: String,
+)
+
+@Serializable
 data class RedeemRequest(val code: String)
 
 @Serializable
@@ -447,16 +464,39 @@ interface WhitzApi {
 
     // --- Files & Library ---
     @GET("conversations/{id}/files")
-    suspend fun getConversationFiles(@Path("id") id: String): List<ConversationFile>
+    suspend fun getConversationFiles(
+        @Path("id") id: String,
+        @Query("scope") scope: String = "conversation",
+    ): List<ConversationFile>
 
     @POST("conversations/{id}/files/presign")
     suspend fun presignUpload(@Path("id") id: String, @Body body: PresignRequest): PresignResponse
+
+    @POST("conversations/{id}/files/text")
+    suspend fun createTextFile(
+        @Path("id") id: String,
+        @Body body: CreateTextFileRequest,
+    ): ConversationFile
 
     @POST("conversations/{id}/files/{fileId}/complete")
     suspend fun completeUpload(
         @Path("id") id: String,
         @Path("fileId") fileId: String,
         @Body body: CompleteUploadRequest,
+    ): ConversationFile
+
+    @PUT("conversations/{id}/files/{fileId}/content")
+    suspend fun updateFileContent(
+        @Path("id") id: String,
+        @Path("fileId") fileId: String,
+        @Body body: UpdateFileContentRequest,
+    ): ConversationFile
+
+    @PATCH("conversations/{id}/files/{fileId}")
+    suspend fun renameConversationFile(
+        @Path("id") id: String,
+        @Path("fileId") fileId: String,
+        @Body body: RenameFileRequest,
     ): ConversationFile
 
     @DELETE("conversations/{id}/files/{fileId}")

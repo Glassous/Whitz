@@ -228,7 +228,8 @@ onBeforeUnmount(() => {
 <template>
   <dialog
     ref="dialogRef"
-    class="whitz-dialog mt-[10vh] w-full max-w-2xl sm:mt-[12vh]"
+    class="whitz-dialog"
+    :style="{ '--whitz-modal-width': '42rem' }"
     closedby="any"
     aria-label="搜索对话"
     @cancel="onCancel"
@@ -237,7 +238,7 @@ onBeforeUnmount(() => {
     @pointerup="onPointerup"
   >
     <div
-      class="flex w-full flex-col overflow-hidden rounded-[28px] bg-canvas shadow-2xl dark:bg-[#161615]"
+      class="flex max-h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-[28px] bg-canvas shadow-2xl dark:bg-[#161615]"
       style="box-shadow: var(--shadow)"
     >
           <!-- Top search input (borderless, large radius) -->
