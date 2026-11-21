@@ -232,4 +232,32 @@ class WhitzCoreTests {
         assertEquals(1, sections.summaryBlocks.size)
         assertEquals(0, sections.looseBlocks.size)
     }
+
+    @Test
+    fun homeChatCache_roundTripsConversationsAndMainDetail() {
+        val cache = com.glassous.whitz.core.storage.HomeChatCache(
+            userId = "u1",
+            conversations = listOf(
+                Conversation(id = "main-1", kind = "main", title = "主聊"),
+                Conversation(id = "side-1", kind = "side", title = "旁聊 A"),
+            ),
+            mainConversation = ConversationDetail(
+                id = "main-1",
+                kind = "main",
+                title = "主聊",
+                messages = listOf(
+                    Message(id = "m1", role = "user", content = "你好"),
+                    Message(id = "m2", role = "assistant", content = "你好！"),
+                ),
+            ),
+            savedAtMs = 123456789L,
+        )
+        val encoded = WhitzJson.encodeToString(com.glassous.whitz.core.storage.HomeChatCache.serializer(), cache)
+        val decoded = WhitzJson.decodeFromString(com.glassous.whitz.core.storage.HomeChatCache.serializer(), encoded)
+        assertEquals("u1", decoded.userId)
+        assertEquals(2, decoded.conversations.size)
+        assertEquals("main-1", decoded.mainConversation?.id)
+        assertEquals(2, decoded.mainConversation?.messages?.size)
+        assertEquals("你好！", decoded.mainConversation?.messages?.last()?.content)
+    }
 }

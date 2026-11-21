@@ -47,6 +47,7 @@ import com.glassous.whitz.core.network.extractErrorMessage
 import com.glassous.whitz.core.util.ConversationSorter
 import com.glassous.whitz.core.util.DateTimeUtils
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -85,9 +86,11 @@ data class ChatUiState(
     val conversations: List<Conversation> = emptyList(),
     val conversationsLoading: Boolean = false,
     val conversationsRefreshing: Boolean = false,
+    val showingCachedData: Boolean = false,
+    val initialRefreshing: Boolean = false,
     val currentConvId: String? = null,
-    val currentConvKind: String = "side",
-    val currentConvTitle: String = "新旁聊",
+    val currentConvKind: String = "main",
+    val currentConvTitle: String = "主聊",
     val isNewSideDraft: Boolean = false,
     val messages: List<Message> = emptyList(),
     val streaming: Boolean = false,
@@ -170,14 +173,67 @@ class ChatViewModel(
 
     private fun tempId(prefix: String): String = "$prefix-${System.currentTimeMillis()}-${seq++}"
 
+    init {
+        hydrateFromCache()
+    }
+
+    private fun hydrateFromCache() {
+        val userId = container.authManager.user.value?.id ?: return
+        val cached = container.chatCache.load(userId) ?: return
+        val sortedConvs = ConversationSorter.sort(cached.conversations)
+        val main = cached.mainConversation
+        if (sortedConvs.isEmpty() && main == null) return
+
+        val lastReasoned = main?.messages?.lastOrNull {
+            it.role == "assistant" && !it.toolPayload?.reasoning.isNullOrEmpty()
+        }
+        val lastAssistant = main?.messages?.lastOrNull { it.role == "assistant" }
+        _ui.update {
+            it.copy(
+                conversations = sortedConvs,
+                showingCachedData = true,
+                initialRefreshing = true,
+                currentConvId = main?.id ?: it.currentConvId,
+                currentConvKind = main?.kind ?: "main",
+                currentConvTitle = main?.title ?: it.currentConvTitle,
+                messages = main?.messages ?: it.messages,
+                plan = main?.plan ?: it.plan,
+                reasoning = lastReasoned?.toolPayload?.reasoning ?: it.reasoning,
+                selectedTurnId = lastAssistant?.id ?: it.selectedTurnId,
+                activeAssistantId = lastAssistant?.id ?: it.activeAssistantId,
+            )
+        }
+    }
+
+    private fun persistConversationsCache(conversations: List<Conversation>) {
+        val userId = container.authManager.user.value?.id ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            container.chatCache.save(userId = userId, conversations = conversations)
+        }
+    }
+
+    private fun persistMainConversationCache(detail: ConversationDetail) {
+        if (detail.kind != "main") return
+        val userId = container.authManager.user.value?.id ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            container.chatCache.save(userId = userId, mainConversation = detail)
+        }
+    }
+
     fun loadInitialData() {
         if (initialLoaded) return
         initialLoaded = true
         startRealtimeSync()
         viewModelScope.launch {
-            fetchConversations()
-            if (_ui.value.currentConvId == null && !_ui.value.isNewSideDraft) {
-                openMainConversation()
+            _ui.update { it.copy(initialRefreshing = true) }
+            try {
+                fetchConversations()
+                val cur = _ui.value
+                if (!cur.isNewSideDraft && (cur.currentConvId == null || cur.currentConvKind == "main")) {
+                    refreshMainConversationNow()
+                }
+            } finally {
+                _ui.update { it.copy(initialRefreshing = false, showingCachedData = false) }
             }
         }
         viewModelScope.launch { fetchAgentStatus() }
@@ -185,11 +241,32 @@ class ChatViewModel(
         viewModelScope.launch { fetchEnabledSkills() }
     }
 
+    private suspend fun refreshMainConversationNow() {
+        val mySeq = ++openSeq
+        val knownMainId = _ui.value.mainConversation?.id
+        try {
+            val detail = if (knownMainId != null) {
+                container.network.api.getConversation(knownMainId)
+            } else {
+                container.network.api.getMainConversation()
+            }
+            if (mySeq != openSeq) return
+            loadFromConversation(detail)
+            _ui.update { it.copy(files = emptyList(), filesLoading = false) }
+        } catch (t: Throwable) {
+            if (mySeq != openSeq) return
+            if (_ui.value.messages.isEmpty()) {
+                _ui.update { it.copy(error = extractErrorMessage(t, "加载主要聊天失败")) }
+            }
+        }
+    }
+
     suspend fun fetchConversations() {
         _ui.update { it.copy(conversationsLoading = true) }
         try {
-            val list = container.network.api.getConversations()
-            _ui.update { it.copy(conversations = ConversationSorter.sort(list), conversationsLoading = false) }
+            val sorted = ConversationSorter.sort(container.network.api.getConversations())
+            _ui.update { it.copy(conversations = sorted, conversationsLoading = false) }
+            persistConversationsCache(sorted)
         } catch (_: Throwable) {
             _ui.update { it.copy(conversationsLoading = false) }
         }
@@ -200,14 +277,15 @@ class ChatViewModel(
         viewModelScope.launch {
             _ui.update { it.copy(conversationsRefreshing = true) }
             try {
-                val list = container.network.api.getConversations()
+                val sorted = ConversationSorter.sort(container.network.api.getConversations())
                 _ui.update {
                     it.copy(
-                        conversations = ConversationSorter.sort(list),
+                        conversations = sorted,
                         conversationsRefreshing = false,
                         conversationsLoading = false,
                     )
                 }
+                persistConversationsCache(sorted)
             } catch (_: Throwable) {
                 _ui.update { it.copy(conversationsRefreshing = false) }
             }
@@ -217,8 +295,9 @@ class ChatViewModel(
     private fun syncConversationsFromServer() {
         viewModelScope.launch {
             try {
-                val list = container.network.api.getConversations()
-                _ui.update { it.copy(conversations = ConversationSorter.sort(list)) }
+                val sorted = ConversationSorter.sort(container.network.api.getConversations())
+                _ui.update { it.copy(conversations = sorted) }
+                persistConversationsCache(sorted)
             } catch (_: Throwable) {
                 /* ignore */
             }
@@ -384,6 +463,7 @@ class ChatViewModel(
                 currentConvKind = detail.kind,
                 currentConvTitle = detail.title,
                 isNewSideDraft = false,
+                showingCachedData = false,
                 messages = detail.messages,
                 plan = detail.plan,
                 reasoning = lastReasoned?.toolPayload?.reasoning ?: emptyList(),
@@ -404,6 +484,7 @@ class ChatViewModel(
                 attachedIds = emptyList(),
             )
         }
+        persistMainConversationCache(detail)
         if (detail.activeRunId == "pending") {
             _ui.update { it.copy(streaming = true, waitingFirstByte = true) }
             pollPendingRun(detail.id, attemptsLeft = 8)

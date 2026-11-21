@@ -27,6 +27,7 @@ enum class RefreshResult { OK, UNAUTHORIZED, ERROR }
 
 class AuthManager(
     val storage: TokenStorage,
+    private val onClearSession: () -> Unit = {},
 ) {
     private val refreshMutex = Mutex()
     private val rawClient = OkHttpClient.Builder()
@@ -68,6 +69,7 @@ class AuthManager(
 
     fun forceLogout(reason: LogoutReason? = null, customMessage: String? = null) {
         storage.clearSession()
+        onClearSession()
         _user.value = null
         if (reason != null) {
             val defaultMsg = when (reason) {

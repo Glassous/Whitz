@@ -162,24 +162,26 @@ private fun SettingsPageScaffold(
                     .widthIn(max = 840.dp)
                     .fillMaxSize(),
             ) {
-                if (!ui.error.isNullOrBlank()) {
+                val errorText = ui.error
+                if (!errorText.isNullOrBlank()) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(colors.dangerWeak)
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                     ) {
-                        Text(ui.error!!, color = colors.danger, fontSize = 13.sp)
+                        Text(errorText, color = colors.danger, fontSize = 13.sp)
                     }
                 }
-                if (!ui.message.isNullOrBlank()) {
+                val messageText = ui.message
+                if (!messageText.isNullOrBlank()) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(colors.successWeak)
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                     ) {
-                        Text(ui.message!!, color = colors.success, fontSize = 13.sp)
+                        Text(messageText, color = colors.success, fontSize = 13.sp)
                     }
                 }
                 content()
@@ -290,6 +292,65 @@ fun SettingsHomeScreen(
             }
 
             Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .clickable {
+                        vm.clearFeedback()
+                        onNavigateRoute(SettingsRoutes.ASSISTANT)
+                    },
+                shape = RoundedCornerShape(18.dp),
+                color = colors.surface,
+                border = BorderStroke(0.5.dp, colors.line),
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val assistantAvatarUrl = vm.resolveAssetUrl(user?.assistantAvatarUrl)
+                    val assistantName = user?.resolvedAssistantName() ?: "Whitz"
+                    Surface(
+                        modifier = Modifier.size(48.dp),
+                        shape = CircleShape,
+                        color = colors.canvas,
+                        border = BorderStroke(0.5.dp, colors.line),
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            if (!assistantAvatarUrl.isNullOrBlank()) {
+                                AsyncImage(
+                                    model = assistantAvatarUrl,
+                                    contentDescription = assistantName,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            } else {
+                                WhitzLogoMark(modifier = Modifier.size(24.dp))
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = assistantName,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 16.sp,
+                            color = colors.fg,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "编辑助手头像与昵称",
+                            fontSize = 13.sp,
+                            color = colors.fgMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = colors.fgFaint)
+                }
+            }
+
+            Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(18.dp),
                 color = colors.surface,
@@ -315,12 +376,6 @@ fun SettingsHomeScreen(
                         "会员与积分",
                         ui.credits?.let { "${it.tierLabel} · ${it.quotaPercentLabel()}" },
                     ) { go(SettingsRoutes.MEMBERSHIP) }
-                    HorizontalDivider(color = colors.line)
-                    SettingsMenuRow(
-                        Icons.Default.Edit,
-                        "编辑助手",
-                        user?.resolvedAssistantName(),
-                    ) { go(SettingsRoutes.ASSISTANT) }
                     HorizontalDivider(color = colors.line)
                     SettingsMenuRow(Icons.Default.SmartToy, "专属助手", null) { go(SettingsRoutes.PERSONA) }
                     HorizontalDivider(color = colors.line)

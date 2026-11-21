@@ -4,13 +4,21 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.BoundsTransform
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -160,7 +168,19 @@ private fun currentGreeting(): String {
     }
 }
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
+internal const val SHARED_KEY_ASSISTANT_AVATAR = "main_assistant_avatar"
+internal const val SHARED_KEY_ASSISTANT_NAME = "main_assistant_name"
+
+@OptIn(ExperimentalSharedTransitionApi::class)
+internal val MainAssistantBoundsTransform = BoundsTransform { _, _ ->
+    tween(durationMillis = 360, easing = FastOutSlowInEasing)
+}
+
+@OptIn(
+    ExperimentalMaterial3ExpressiveApi::class,
+    ExperimentalLayoutApi::class,
+    ExperimentalSharedTransitionApi::class,
+)
 @Composable
 fun ChatScreen(
     vm: ChatViewModel,
@@ -190,7 +210,12 @@ fun ChatScreen(
     var showSkillPicker by remember { mutableStateOf(false) }
     var showLibraryPicker by remember { mutableStateOf(false) }
     var desktopSidebarCollapsed by rememberSaveable { mutableStateOf(false) }
+    var mainPanelOpen by rememberSaveable { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
+
+    LaunchedEffect(ui.isMainChat) {
+        if (!ui.isMainChat) mainPanelOpen = false
+    }
 
     val assistantName = user?.resolvedAssistantName() ?: "Whitz"
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -317,7 +342,7 @@ fun ChatScreen(
     // Top of the newest message must clear the floating header (status bar + button/avatar row),
     // otherwise the first line of that message is hidden behind the floating header.
     val revealTopOffsetPx = with(density) {
-        (WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + if (ui.isMainChat) 86.dp else 68.dp).roundToPx()
+        (WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + if (ui.isMainChat) 130.dp else 68.dp).roundToPx()
     }
     val conversationScrollKey = ui.currentConvId ?: "local-new"
     var revealedConversationKey by rememberSaveable { mutableStateOf<String?>(null) }
@@ -360,6 +385,7 @@ fun ChatScreen(
     BackHandler(enabled = showSkillPicker) { showSkillPicker = false }
     BackHandler(enabled = showLibraryPicker) { showLibraryPicker = false }
     BackHandler(enabled = plusMenuExpanded) { dismissPlusMenu() }
+    BackHandler(enabled = mainPanelOpen) { mainPanelOpen = false }
     BackHandler(enabled = composerExpanded) { composerExpanded = false }
     BackHandler(enabled = drawerState.isOpen) {
         scope.launch { drawerState.close() }
@@ -415,19 +441,23 @@ fun ChatScreen(
                 }
 
                 // Center Chat Area (100% edge-to-edge)
-                Box(
+                SharedTransitionLayout(
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxHeight()
-                        .onGloballyPositioned { coords ->
-                            chatAreaCoords = coords
-                            refreshBottomBlurHeight()
-                        },
+                        .fillMaxHeight(),
                 ) {
-                    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-                    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-                    val composerOverlayDp = with(density) { bottomOverlayHeightPx.toDp() }
-                    val listTopPadding = statusTop + if (ui.isMainChat) 86.dp else 68.dp
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .onGloballyPositioned { coords ->
+                                chatAreaCoords = coords
+                                refreshBottomBlurHeight()
+                            },
+                    ) {
+                        val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+                        val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                        val composerOverlayDp = with(density) { bottomOverlayHeightPx.toDp() }
+                        val listTopPadding = statusTop + if (ui.isMainChat) 130.dp else 68.dp
                     val listBottomPadding = (if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottom) + 16.dp
 
                     // 1. Messages or Empty State (also the blur source for the floating header)
@@ -493,7 +523,9 @@ fun ChatScreen(
                             ) {
                                 items(visibleMessages, key = { it.id }) { msg ->
                                     Box(
-                                        modifier = Modifier.fillMaxWidth(),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .animateItem(),
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         Box(modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth()) {
@@ -517,7 +549,11 @@ fun ChatScreen(
                                                 onEditSubmit = { id, content -> vm.editAndResend(id, content) },
                                                 onOpenTurnDetails = { id ->
                                                     vm.selectTurn(id)
-                                                    onOpenTaskDetails(0)
+                                                    if (ui.isMainChat) {
+                                                        mainPanelOpen = true
+                                                    } else {
+                                                        onOpenTaskDetails(0)
+                                                    }
                                                 },
                                                 onOpenFile = { f -> vm.openFilePreview(f) },
                                             )
@@ -534,13 +570,13 @@ fun ChatScreen(
                             modifier = Modifier
                                 .align(Alignment.TopCenter)
                                 .fillMaxWidth()
-                                .height(statusTop + if (ui.isMainChat) 78.dp else 12.dp),
+                                .height(statusTop + if (ui.isMainChat) 122.dp else 12.dp),
                             maxAlpha = 0.85f,
                         )
                     }
 
                     // 2b. Floating Header:
-                    // - Main Chat: left sidebar button + centered Assistant Avatar & Nickname (tapping opens task panel), right toggle hidden
+                    // - Main Chat: left sidebar button + enlarged centered Assistant Avatar & 80%-opaque capsule Nickname (shared element -> task panel), right toggle hidden
                     // - Side Chat: left sidebar button + right task panel toggle (unchanged)
                     Box(
                         modifier = Modifier
@@ -571,43 +607,80 @@ fun ChatScreen(
 
                         if (ui.isMainChat) {
                             val mainAvatarUrl = vm.resolveAssetUrl(user?.assistantAvatarUrl)
-                            Column(
-                                modifier = Modifier
-                                    .align(Alignment.TopCenter)
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .clickable { onOpenTaskDetails(0) }
-                                    .padding(horizontal = 12.dp, vertical = 2.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = !mainPanelOpen,
+                                enter = fadeIn(tween(220)),
+                                exit = fadeOut(tween(180)),
+                                modifier = Modifier.align(Alignment.TopCenter),
                             ) {
-                                Box(
+                                val avatarSharedModifier = with(this@SharedTransitionLayout) {
+                                    Modifier.sharedBounds(
+                                        sharedContentState = rememberSharedContentState(key = SHARED_KEY_ASSISTANT_AVATAR),
+                                        animatedVisibilityScope = this@AnimatedVisibility,
+                                        boundsTransform = MainAssistantBoundsTransform,
+                                        zIndexInOverlay = 2f,
+                                    )
+                                }
+                                val nameSharedModifier = with(this@SharedTransitionLayout) {
+                                    Modifier.sharedBounds(
+                                        sharedContentState = rememberSharedContentState(key = SHARED_KEY_ASSISTANT_NAME),
+                                        animatedVisibilityScope = this@AnimatedVisibility,
+                                        boundsTransform = MainAssistantBoundsTransform,
+                                        resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(),
+                                        zIndexInOverlay = 2f,
+                                    )
+                                }
+                                Column(
                                     modifier = Modifier
-                                        .size(36.dp)
-                                        .clip(CircleShape)
-                                        .background(colors.surface)
-                                        .border(0.5.dp, colors.line, CircleShape),
-                                    contentAlignment = Alignment.Center,
+                                        .clip(RoundedCornerShape(24.dp))
+                                        .clickable(
+                                            interactionSource = remember { MutableInteractionSource() },
+                                            indication = null,
+                                        ) {
+                                            focusManager.clearFocus()
+                                            mainPanelOpen = true
+                                        }
+                                        .padding(horizontal = 16.dp, vertical = 2.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
                                 ) {
-                                    if (!mainAvatarUrl.isNullOrBlank()) {
-                                        AsyncImage(
-                                            model = mainAvatarUrl,
-                                            contentDescription = assistantName,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier.fillMaxSize(),
+                                    Box(
+                                        modifier = avatarSharedModifier
+                                            .size(60.dp)
+                                            .clip(CircleShape)
+                                            .background(colors.surface)
+                                            .border(1.dp, colors.line, CircleShape),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        if (!mainAvatarUrl.isNullOrBlank()) {
+                                            AsyncImage(
+                                                model = mainAvatarUrl,
+                                                contentDescription = assistantName,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize(),
+                                            )
+                                        } else {
+                                            WhitzLogoMark(modifier = Modifier.size(30.dp))
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = colors.surface.copy(alpha = 0.80f),
+                                        border = BorderStroke(0.5.dp, colors.line.copy(alpha = 0.65f)),
+                                    ) {
+                                        Text(
+                                            text = assistantName,
+                                            fontSize = 15.5.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = colors.fg,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = nameSharedModifier
+                                                .padding(horizontal = 14.dp, vertical = 4.dp)
+                                                .widthIn(max = 200.dp),
                                         )
-                                    } else {
-                                        WhitzLogoMark(modifier = Modifier.size(18.dp))
                                     }
                                 }
-                                Spacer(modifier = Modifier.height(3.dp))
-                                Text(
-                                    text = assistantName,
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = colors.fg,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.widthIn(max = 180.dp),
-                                )
                             }
                         } else {
                             androidx.compose.animation.AnimatedVisibility(
@@ -640,6 +713,36 @@ fun ChatScreen(
                                         )
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // 2c. Subtle background sync transition pill when showing cached homepage data
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = ui.initialRefreshing && ui.isMainChat && !mainPanelOpen,
+                        enter = fadeIn(tween(220)) + slideInVertically(tween(260)) { -it / 2 },
+                        exit = fadeOut(tween(280)) + slideOutVertically(tween(240)) { -it / 2 },
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = statusTop + 124.dp),
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = colors.surface.copy(alpha = 0.92f),
+                            border = BorderStroke(0.5.dp, colors.line),
+                            shadowElevation = 2.dp,
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                WhitzLoadingIndicator(size = 14.dp)
+                                Text(
+                                    text = if (ui.showingCachedData) "正在同步最新对话…" else "加载中…",
+                                    fontSize = 11.5.sp,
+                                    color = colors.fgMuted,
+                                )
                             }
                         }
                     }
@@ -1129,6 +1232,25 @@ fun ChatScreen(
                             .navigationBarsPadding()
                             .padding(bottom = 90.dp),
                     )
+
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = ui.isMainChat && mainPanelOpen,
+                        enter = fadeIn(tween(240)),
+                        exit = fadeOut(tween(280)),
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        MainChatTaskPanelOverlay(
+                            sharedTransitionScope = this@SharedTransitionLayout,
+                            animatedVisibilityScope = this@AnimatedVisibility,
+                            assistantName = assistantName,
+                            avatarUrl = vm.resolveAssetUrl(user?.assistantAvatarUrl),
+                            resolvedTurn = resolvedTurn,
+                            fileError = ui.fileError,
+                            navBottom = navBottom,
+                            onDismiss = { mainPanelOpen = false },
+                        )
+                    }
+                    }
                 }
             }
 
@@ -1161,6 +1283,7 @@ fun ChatScreen(
         } else {
             ModalNavigationDrawer(
                 drawerState = drawerState,
+                gesturesEnabled = !mainPanelOpen,
                 drawerContent = {
                     ModalDrawerSheet(
                         drawerContainerColor = colors.sidebar,
