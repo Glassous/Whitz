@@ -106,6 +106,13 @@ def _base_agent_prompt(assistant_name: str = "Whitz", *, is_main_chat: bool = Fa
         "2. 工具与 RAG 自主选择：\n"
         "   - 简单问答直接简洁、准确作答，避免过度铺垫；\n"
         "   - 用户提及已上传文件、文档或资料库文件时，优先使用 `rag_search_workspace` 混合检索定位片段，需要完整原文或查看图片时再调用 `read_workspace_file`；若 `rag_search_workspace` 未命中，可主动改用 `list_workspace_files` / `search_workspace_files` 自愈排查；\n"
+        "   - 用户消息中若出现 `[[file:<file_id>|<filename>]]` 标记，代表用户在该语义位置显式引用了对应工作区文件，可直接用其中的 `<file_id>` 调用 `read_workspace_file` 或 `edit_workspace_file`，并严格结合该文件在句子中的位置理解用户意图；\n"
+        "   - 工作区文件创建与修改：创建新文本产物或整体重写时调用 `write_workspace_file`；对工作区已有纯文本/代码/Markdown/HTML/CSV 文件做局部修改时，优先调用 `edit_workspace_file`（支持精准文本替换或行区间修补），避免全量重写导致截断；\n"
+        "   - 交付产物卡片规范：当需要向用户交付结构化报告、交互式网页、数据表格、长篇文档或代码文件等纯文本产物时，你可自主选择最合适的纯文本格式（如 `.html`、`.md`、`.csv`、`.txt`、`.json`、代码文件等），先调用 `write_workspace_file` 写入工作区获取 `file_id`，再在回复正文合适位置插入如下专用代码块，前端会自动渲染为可点击的交互卡片并在弹窗中展示（HTML 支持沙箱预览与主题联动，CSV 支持可视化表格编辑）：\n"
+        "     ```deliverable\n"
+        "     {\"file_id\": \"<返回的file_id>\", \"filename\": \"report.html\", \"title\": \"简明交付标题\", \"summary\": \"一句话说明核心内容\"}\n"
+        "     ```\n"
+        "     请勿在正文中倾倒数百行原始 HTML/CSV/长文档源码，正文仅做核心解读并嵌入交付卡片即可；\n"
         "   - 需要个性化背景时调用 `memory_search`，当用户表达长期偏好或重要项目背景且开启记忆功能时调用 `memory_propose`；"
         f"{extra_main}\n"
         "   - 需要实时外部资料时使用 `web_search`，摘要不足时再调用 `web_extract` 精读关键页面；\n"
@@ -304,10 +311,16 @@ def _build_system_prompt(state: AgentState, cfg: dict[str, Any], current_time_st
             "以下为当前工作区及资料库中可用的文件元数据（全资料库共享；未预灌全文，请按需调用 `rag_search_workspace` 或 `read_workspace_file`）："
         ]
         for att in attachments:
+            extra_parts: list[str] = []
+            if att.get("conversation_title"):
+                extra_parts.append(f"from_chat={att.get('conversation_title')}")
+            if att.get("qa_snippet"):
+                extra_parts.append(f"qa=\"{att.get('qa_snippet')}\"")
+            extra_str = (", " + ", ".join(extra_parts)) if extra_parts else ""
             lines.append(
                 f"- `{att.get('filename', 'file')}` (file_id=`{att.get('file_id')}`, "
                 f"category={att.get('category', 'unknown')}, mime={att.get('mime_type', '')}, "
-                f"size={att.get('size_bytes', 0)}B, scope={att.get('scope', 'library')})"
+                f"size={att.get('size_bytes', 0)}B, scope={att.get('scope', 'library')}{extra_str})"
             )
         sections.append("## 资料库与附件文件清单\n" + "\n".join(lines))
 

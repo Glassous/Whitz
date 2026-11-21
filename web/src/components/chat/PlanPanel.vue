@@ -10,6 +10,7 @@ import {
 } from "../../lib/fileTypes";
 import type {
   ConversationFile,
+  DeliverableTarget,
   LibraryFileItem,
   Plan,
   PlanItem,
@@ -41,6 +42,7 @@ const props = defineProps<{
   runningTool: string | null;
   turnKey: string;
   activeTab?: TaskPanelTab;
+  fileScope?: "all" | "conversation";
   files: ConversationFile[];
   uploads: UploadTask[];
   filesLoading?: boolean;
@@ -55,6 +57,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:activeTab": [TaskPanelTab];
+  "update:fileScope": ["all" | "conversation"];
   upload: [files: FileList, dataTransfer?: DataTransfer | null];
   "cancel-upload": [localId: string];
   "dismiss-upload": [localId: string];
@@ -62,6 +65,12 @@ const emit = defineEmits<{
   "delete-file": [fileId: string];
   "download-file": [file: ConversationFile];
   "preview-file": [file: ConversationFile];
+  "open-deliverable": [target: DeliverableTarget];
+  "open-lightbox": [file: ConversationFile, siblings: ConversationFile[]];
+  "insert-file": [file: ConversationFile];
+  "locate-file-message": [file: ConversationFile];
+  "rename-file": [fileId: string, filename: string];
+  "create-file": [filename: string, content: string];
   "close-preview": [];
   "attach-library": [fileIds: string[]];
 }>();
@@ -207,7 +216,6 @@ function onFileChange(e: Event) {
 }
 
 function onDragEnter(e: DragEvent) {
-  if (isMainMode.value) return;
   const check = validateDragItems(e.dataTransfer);
   if (!check.hasFiles) return;
   e.preventDefault();
@@ -217,7 +225,6 @@ function onDragEnter(e: DragEvent) {
 }
 
 function onDragOver(e: DragEvent) {
-  if (isMainMode.value) return;
   const check = validateDragItems(e.dataTransfer);
   if (!check.hasFiles) return;
   e.preventDefault();
@@ -229,7 +236,6 @@ function onDragOver(e: DragEvent) {
 }
 
 function onDragLeave(e: DragEvent) {
-  if (isMainMode.value) return;
   if (dragDepth.value <= 0) return;
   const check = validateDragItems(e.dataTransfer);
   if (!check.hasFiles && dragDepth.value === 0) return;
@@ -241,7 +247,6 @@ function onDragLeave(e: DragEvent) {
 }
 
 function onDrop(e: DragEvent) {
-  if (isMainMode.value) return;
   const hadFiles = e.dataTransfer?.types?.includes("Files") || (e.dataTransfer?.files?.length ?? 0) > 0;
   dragDepth.value = 0;
   dragValid.value = true;
@@ -448,6 +453,107 @@ async function confirmLibraryAttach() {
     libraryAttaching.value = false;
   }
 }
+
+// Grouped files (Main Chat "all" mode groups by conversation newest-first; otherwise single group)
+interface FileDisplayGroup {
+  key: string;
+  title: string | null;
+  images: ConversationFile[];
+  others: ConversationFile[];
+}
+
+const allImageFiles = computed(() => props.files.filter((f) => isImageFile(f)));
+
+const groupedFiles = computed<FileDisplayGroup[]>(() => {
+  const showConvHeaders = isMainMode.value && (props.fileScope ?? "all") === "all";
+  if (!showConvHeaders) {
+    const images: ConversationFile[] = [];
+    const others: ConversationFile[] = [];
+    for (const f of props.files) {
+      if (isImageFile(f)) images.push(f);
+      else others.push(f);
+    }
+    return props.files.length ? [{ key: "current", title: null, images, others }] : [];
+  }
+
+  const order: string[] = [];
+  const map = new Map<string, FileDisplayGroup>();
+  for (const f of props.files) {
+    const gKey = f.conversation_id ?? "__library__";
+    let g = map.get(gKey);
+    if (!g) {
+      g = {
+        key: gKey,
+        title: f.conversation_title || (f.conversation_id ? "对话工作区" : "个人资料库"),
+        images: [],
+        others: [],
+      };
+      map.set(gKey, g);
+      order.push(gKey);
+    }
+    if (isImageFile(f)) g.images.push(f);
+    else g.others.push(f);
+  }
+  return order.map((k) => map.get(k)!);
+});
+
+function onImageTileClick(file: ConversationFile) {
+  emit("open-lightbox", file, allImageFiles.value.length ? allImageFiles.value : [file]);
+}
+
+// Inline rename state
+const renamingFileId = ref<string | null>(null);
+const renameFileDraft = ref("");
+
+function startFileRename(file: ConversationFile) {
+  renamingFileId.value = file.id;
+  renameFileDraft.value = file.filename;
+}
+
+function cancelFileRename() {
+  renamingFileId.value = null;
+  renameFileDraft.value = "";
+}
+
+function submitFileRename(file: ConversationFile) {
+  const next = renameFileDraft.value.trim();
+  renamingFileId.value = null;
+  renameFileDraft.value = "";
+  if (!next || next === file.filename) return;
+  emit("rename-file", file.id, next);
+}
+
+// Create new text file modal state
+const createModalOpen = ref(false);
+const createFilename = ref("");
+const createContent = ref("");
+const createError = ref<string | null>(null);
+const QUICK_CREATE_EXTS = [".md", ".txt", ".csv", ".html", ".json", ".py"];
+
+function openCreateFileModal() {
+  if (props.uploadDisabled) return;
+  createFilename.value = "note.md";
+  createContent.value = "";
+  createError.value = null;
+  createModalOpen.value = true;
+}
+
+function applyQuickExt(ext: string) {
+  const cur = createFilename.value.trim();
+  const base = cur ? cur.replace(/\.[^.]+$/, "") : "untitled";
+  createFilename.value = `${base}${ext}`;
+}
+
+function submitCreateFile() {
+  const fname = createFilename.value.trim();
+  if (!fname) {
+    createError.value = "请输入文件名";
+    return;
+  }
+  createError.value = null;
+  createModalOpen.value = false;
+  emit("create-file", fname, createContent.value);
+}
 </script>
 
 <template>
@@ -475,6 +581,7 @@ async function confirmLibraryAttach() {
       :resizing="resizing"
       @close="emit('close-preview')"
       @download="emit('download-file', $event)"
+      @open-deliverable="emit('open-deliverable', $event)"
     />
 
     <template v-else>
@@ -581,14 +688,13 @@ async function confirmLibraryAttach() {
         </div>
       </div>
 
-      <!-- Split-pane container: Main Chat = Steps only (100%); Side Chat = Steps + Handle + Files -->
+      <!-- Split-pane container: Steps + Handle + Files (both Main Chat and Side Chat) -->
     <div ref="splitContainerRef" class="flex min-h-0 flex-1 flex-col">
       <!-- Top Pane: Steps -->
       <section
         aria-label="步骤"
         class="flex min-h-0 flex-col overflow-hidden"
-        :class="isMainMode ? 'flex-1' : ''"
-        :style="isMainMode ? undefined : { flexBasis: `${stepsRatio}%`, flexGrow: 0, flexShrink: 0 }"
+        :style="{ flexBasis: `${stepsRatio}%`, flexGrow: 0, flexShrink: 0 }"
       >
         <div class="flex shrink-0 items-center justify-between px-4 pb-1.5 pt-2">
           <div class="flex items-center gap-1.5">
@@ -724,9 +830,8 @@ async function confirmLibraryAttach() {
         </div>
       </section>
 
-      <!-- Draggable Split Handle (Side Chat only) -->
+      <!-- Draggable Split Handle -->
       <div
-        v-if="!isMainMode"
         role="separator"
         tabindex="0"
         aria-orientation="horizontal"
@@ -750,19 +855,48 @@ async function confirmLibraryAttach() {
         />
       </div>
 
-      <!-- Bottom Pane: Files (Side Chat only; Main Chat manages files in Library) -->
-      <section v-if="!isMainMode" aria-label="文件" class="flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div class="flex shrink-0 items-center justify-between gap-2 px-4 pb-2 pt-2.5">
+      <!-- Bottom Pane: Files (Both Main Chat & Side Chat, newest first) -->
+      <section aria-label="文件" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div class="flex shrink-0 flex-wrap items-center justify-between gap-1.5 px-4 pb-2 pt-2">
           <div class="flex items-center gap-1.5">
             <span class="text-[13px] font-semibold text-fg">文件</span>
             <span class="rounded-full bg-surface px-1.5 py-0.5 text-[11px] tabular-nums text-fg-muted">
-              {{ totalFileCount }} / {{ MAX_FILES_PER_CONVERSATION }}
+              <template v-if="isMainMode && (fileScope ?? 'all') === 'all'">{{ totalFileCount }}</template>
+              <template v-else>{{ totalFileCount }} / {{ MAX_FILES_PER_CONVERSATION }}</template>
             </span>
+            <!-- Main Chat Scope Switcher -->
+            <div v-if="isMainMode" class="ml-1 inline-flex rounded-lg bg-surface p-0.5 text-[11px]">
+              <button
+                type="button"
+                class="focus-ring rounded-md px-1.5 py-0.5 font-medium transition-colors"
+                :class="(fileScope ?? 'all') === 'all' ? 'bg-canvas text-fg shadow-2xs' : 'text-fg-muted hover:text-fg'"
+                @click="emit('update:fileScope', 'all')"
+              >
+                全部
+              </button>
+              <button
+                type="button"
+                class="focus-ring rounded-md px-1.5 py-0.5 font-medium transition-colors"
+                :class="fileScope === 'conversation' ? 'bg-canvas text-fg shadow-2xs' : 'text-fg-muted hover:text-fg'"
+                @click="emit('update:fileScope', 'conversation')"
+              >
+                主聊
+              </button>
+            </div>
           </div>
           <div class="flex items-center gap-1">
             <button
               type="button"
-              class="focus-ring inline-flex items-center gap-1 rounded-lg bg-canvas px-2 py-1 text-[12px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+              class="focus-ring inline-flex items-center gap-1 rounded-lg bg-canvas px-2 py-1 text-[11.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="uploadDisabled"
+              title="新建文本/代码/CSV/HTML 文件"
+              @click="openCreateFileModal"
+            >
+              <span>新建</span>
+            </button>
+            <button
+              type="button"
+              class="focus-ring inline-flex items-center gap-1 rounded-lg bg-canvas px-2 py-1 text-[11.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="uploadDisabled"
               title="从个人资料库引用文件"
               @click="openLibraryPicker"
@@ -771,14 +905,14 @@ async function confirmLibraryAttach() {
             </button>
             <button
               type="button"
-              class="focus-ring inline-flex items-center gap-1 rounded-lg bg-canvas px-2.5 py-1 text-[12px] font-medium text-fg transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+              class="focus-ring inline-flex items-center gap-1 rounded-lg bg-canvas px-2 py-1 text-[11.5px] font-medium text-fg transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="uploadDisabled"
               @click="openFilePicker"
             >
               <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
                 <path stroke-linecap="round" d="M12 5v14M5 12h14" />
               </svg>
-              <span>上传文件</span>
+              <span>上传</span>
             </button>
           </div>
         </div>
@@ -843,91 +977,206 @@ async function confirmLibraryAttach() {
             正在加载工作区文件…
           </div>
 
-          <div v-else-if="files.length" class="space-y-2">
-            <div
-              v-for="f in files"
-              :key="f.id"
-              role="button"
-              tabindex="0"
-              class="focus-ring group flex cursor-pointer items-center gap-2.5 rounded-xl bg-canvas/80 px-3 py-2.5 transition-colors hover:bg-canvas"
-              :title="`点击在线预览 ${f.filename}`"
-              @click="emit('preview-file', f)"
-              @keydown.enter.self="emit('preview-file', f)"
-              @keydown.space.self.prevent="emit('preview-file', f)"
-            >
-              <img
-                v-if="fileThumbUrl(f)"
-                :src="fileThumbUrl(f)!"
-                :alt="f.filename"
-                class="h-9 w-9 shrink-0 rounded-lg bg-surface object-cover"
-                @error="onThumbError(f)"
-              />
-              <span v-else class="shrink-0 rounded-md bg-surface px-1.5 py-0.5 text-[11px] font-medium text-fg-muted">
-                {{ categoryLabel(f.category, f.ext) }}
-              </span>
-              <div class="min-w-0 flex-1">
-                <p class="truncate text-[13.5px] font-medium text-fg" :title="f.filename">{{ f.filename }}</p>
-                <div class="flex items-center gap-1.5 text-[11.5px] text-fg-faint">
-                  <span class="tabular-nums">{{ formatFileSize(f.size_bytes) }}</span>
-                  <span
-                    v-if="f.source === 'assistant'"
-                    class="rounded bg-accent-weak/80 px-1 py-0.2 text-[10px] font-medium text-accent"
+          <div v-else-if="groupedFiles.length" class="space-y-3.5">
+            <div v-for="group in groupedFiles" :key="group.key" class="space-y-2">
+              <div
+                v-if="group.title"
+                class="flex items-center gap-1.5 pt-0.5 text-[11.5px] font-medium text-fg-faint"
+              >
+                <span class="truncate">{{ group.title }}</span>
+                <span class="h-px flex-1 bg-line/70" aria-hidden="true" />
+              </div>
+
+              <!-- Pure Image Grid (images show ONLY the image, no filename/size clutter) -->
+              <div v-if="group.images.length" class="grid grid-cols-3 gap-2">
+                <div
+                  v-for="img in group.images"
+                  :key="img.id"
+                  role="button"
+                  tabindex="0"
+                  class="focus-ring group/img relative aspect-square cursor-pointer overflow-hidden rounded-xl bg-canvas"
+                  :title="img.qa_snippet ? `${img.filename} · ${img.qa_snippet}` : img.filename"
+                  @click="onImageTileClick(img)"
+                  @keydown.enter.self="onImageTileClick(img)"
+                  @keydown.space.self.prevent="onImageTileClick(img)"
+                >
+                  <img
+                    v-if="fileThumbUrl(img)"
+                    :src="fileThumbUrl(img)!"
+                    :alt="img.filename"
+                    class="h-full w-full object-cover transition-transform duration-200 group-hover/img:scale-[1.04]"
+                    @error="onThumbError(img)"
+                  />
+                  <div v-else class="flex h-full w-full items-center justify-center bg-surface text-[11px] text-fg-faint">
+                    IMG
+                  </div>
+
+                  <!-- Hover Action Overlay -->
+                  <div
+                    class="absolute inset-x-1 top-1 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover/img:opacity-100 group-focus-within/img:opacity-100"
+                    @click.stop
                   >
-                    AI
-                  </span>
-                  <span
-                    v-if="f.index_status === 'indexing'"
-                    class="inline-flex items-center gap-1 rounded bg-surface px-1.5 py-0.2 text-[10px] text-fg-muted"
-                  >
-                    <Spinner :size="9" />
-                    索引中
-                  </span>
+                    <button
+                      type="button"
+                      class="flex h-6 w-6 items-center justify-center rounded-md bg-black/65 text-white backdrop-blur-xs transition-colors hover:bg-black/85"
+                      title="插入到输入框光标处"
+                      aria-label="插入到输入框"
+                      @click="emit('insert-file', img)"
+                    >
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                        <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+                      </svg>
+                    </button>
+                    <button
+                      v-if="img.message_id"
+                      type="button"
+                      class="flex h-6 w-6 items-center justify-center rounded-md bg-black/65 text-white backdrop-blur-xs transition-colors hover:bg-black/85"
+                      title="定位到对应问答消息"
+                      aria-label="定位到问答"
+                      @click="emit('locate-file-message', img)"
+                    >
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="flex h-6 w-6 items-center justify-center rounded-md bg-black/65 text-white backdrop-blur-xs transition-colors hover:bg-danger/90"
+                      title="从当前工作区移除"
+                      aria-label="移除"
+                      :disabled="props.deletingFileId === img.id"
+                      @click="onDeleteClick(img.id)"
+                    >
+                      <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3">
+                        <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               </div>
-              <div class="flex shrink-0 items-center gap-0.5" @click.stop>
-                <button
-                  type="button"
-                  class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-hover hover:text-fg"
-                  aria-label="在线预览"
-                  title="在线预览"
-                  @click="emit('preview-file', f)"
+
+              <!-- Non-Image File Rows -->
+              <div v-if="group.others.length" class="space-y-1.5">
+                <div
+                  v-for="f in group.others"
+                  :key="f.id"
+                  role="button"
+                  tabindex="0"
+                  class="focus-ring group flex cursor-pointer items-center gap-2 rounded-xl bg-canvas/80 px-2.5 py-2 transition-colors hover:bg-canvas"
+                  :title="f.qa_snippet ? `${f.filename} · 问答：${f.qa_snippet}` : `点击预览 ${f.filename}`"
+                  @click="renamingFileId !== f.id && emit('preview-file', f)"
+                  @keydown.enter.self="renamingFileId !== f.id && emit('preview-file', f)"
                 >
-                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-60"
-                  aria-label="下载文件"
-                  title="通过临时签名直链下载"
-                  :disabled="props.downloadingFileId === f.id"
-                  @click="onDownloadClick(f)"
-                >
-                  <Spinner v-if="props.downloadingFileId === f.id" :size="13" />
-                  <svg v-else class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  class="focus-ring flex h-7 w-7 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-danger-weak hover:text-danger disabled:cursor-not-allowed disabled:opacity-60"
-                  aria-label="从当前旁聊工作区移除"
-                  title="仅从当前旁聊工作区移除（文件仍保留在资料库中，彻底删除请前往资料库）"
-                  :disabled="props.deletingFileId === f.id"
-                  @click="onDeleteClick(f.id)"
-                >
-                  <Spinner v-if="props.deletingFileId === f.id" :size="13" />
-                  <svg v-else class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M18 6L6 18" />
-                  </svg>
-                </button>
+                  <span class="shrink-0 rounded-md bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted">
+                    {{ categoryLabel(f.category, f.ext) }}
+                  </span>
+
+                  <div class="min-w-0 flex-1" @click.stop="renamingFileId === f.id && $event.stopPropagation()">
+                    <input
+                      v-if="renamingFileId === f.id"
+                      v-model="renameFileDraft"
+                      type="text"
+                      class="focus-ring w-full rounded bg-surface px-1.5 py-0.5 text-[13px] font-medium text-fg outline-none"
+                      autofocus
+                      @keydown.enter.prevent="submitFileRename(f)"
+                      @keydown.esc.prevent="cancelFileRename"
+                      @blur="submitFileRename(f)"
+                    />
+                    <p
+                      v-else
+                      class="truncate text-[13px] font-medium text-fg"
+                      :title="f.filename"
+                      @dblclick.stop="startFileRename(f)"
+                    >
+                      {{ f.filename }}
+                    </p>
+                    <div class="flex items-center gap-1.5 text-[11px] text-fg-faint">
+                      <span class="tabular-nums">{{ formatFileSize(f.size_bytes) }}</span>
+                      <span
+                        v-if="f.source === 'assistant'"
+                        class="rounded bg-accent-weak/80 px-1 text-[10px] font-medium text-accent"
+                      >
+                        AI
+                      </span>
+                      <span
+                        v-if="f.index_status === 'indexing'"
+                        class="inline-flex items-center gap-1 rounded bg-surface px-1 text-[10px] text-fg-muted"
+                      >
+                        <Spinner :size="9" />
+                        索引中
+                      </span>
+                      <span v-else-if="f.qa_snippet" class="truncate opacity-80">· {{ f.qa_snippet }}</span>
+                    </div>
+                  </div>
+
+                  <div class="flex shrink-0 items-center gap-0.5" @click.stop>
+                    <button
+                      type="button"
+                      class="focus-ring flex h-6.5 w-6.5 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-hover hover:text-fg"
+                      aria-label="插入到输入框"
+                      title="插入到输入框光标处"
+                      @click="emit('insert-file', f)"
+                    >
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+                      </svg>
+                    </button>
+                    <button
+                      v-if="f.message_id"
+                      type="button"
+                      class="focus-ring flex h-6.5 w-6.5 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-hover hover:text-fg"
+                      aria-label="定位到问答"
+                      title="定位到对应问答消息"
+                      @click="emit('locate-file-message', f)"
+                    >
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="focus-ring hidden h-6.5 w-6.5 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-hover hover:text-fg group-hover:flex"
+                      aria-label="重命名"
+                      title="重命名文件"
+                      @click="startFileRename(f)"
+                    >
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="focus-ring flex h-6.5 w-6.5 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-60"
+                      aria-label="下载文件"
+                      title="下载"
+                      :disabled="props.downloadingFileId === f.id"
+                      @click="onDownloadClick(f)"
+                    >
+                      <Spinner v-if="props.downloadingFileId === f.id" :size="12" />
+                      <svg v-else class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="focus-ring flex h-6.5 w-6.5 items-center justify-center rounded-lg text-fg-faint transition-colors hover:bg-danger-weak hover:text-danger disabled:cursor-not-allowed disabled:opacity-60"
+                      aria-label="从当前工作区移除"
+                      title="从当前工作区移除（保留在资料库中）"
+                      :disabled="props.deletingFileId === f.id"
+                      @click="onDeleteClick(f.id)"
+                    >
+                      <Spinner v-if="props.deletingFileId === f.id" :size="12" />
+                      <svg v-else class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M18 6L6 18" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
 
-            <p class="pt-1 text-[12px] leading-relaxed text-fg-faint">
-              所有已发送文件自动全局共享给主聊天和旁聊；如需彻底删除，请前往左侧「资料库」。
+            <p class="pt-1 text-[11.5px] leading-relaxed text-fg-faint">
+              点击「+」可将文件插入输入框光标处；双击文件名可内联重命名。
             </p>
           </div>
 
@@ -955,6 +1204,49 @@ async function confirmLibraryAttach() {
       </section>
     </div>
     </template>
+
+    <!-- Create Text File Modal -->
+    <BaseModal :open="createModalOpen" title="新建工作区文件" width="34rem" @close="createModalOpen = false">
+      <div class="space-y-3">
+        <div>
+          <label class="mb-1 block text-[12.5px] font-medium text-fg-muted">文件名</label>
+          <input
+            v-model="createFilename"
+            type="text"
+            placeholder="例如：notes.md、data.csv、report.html"
+            class="focus-ring h-9 w-full rounded-xl bg-surface px-3 text-[13.5px] text-fg placeholder:text-fg-faint"
+            @keydown.enter.prevent="submitCreateFile"
+          />
+          <div class="mt-1.5 flex flex-wrap gap-1">
+            <button
+              v-for="ext in QUICK_CREATE_EXTS"
+              :key="ext"
+              type="button"
+              class="rounded-md bg-surface px-2 py-0.5 text-[11px] font-medium text-fg-muted hover:bg-hover hover:text-fg"
+              @click="applyQuickExt(ext)"
+            >
+              {{ ext }}
+            </button>
+          </div>
+        </div>
+        <div>
+          <label class="mb-1 block text-[12.5px] font-medium text-fg-muted">初始内容（可选）</label>
+          <textarea
+            v-model="createContent"
+            v-scrollbar
+            rows="7"
+            spellcheck="false"
+            placeholder="输入文本、Markdown、CSV 表格或代码内容…"
+            class="custom-scrollbar focus-ring w-full resize-y rounded-xl bg-surface p-3 font-mono text-[12.5px] leading-relaxed text-fg placeholder:text-fg-faint"
+          />
+        </div>
+        <p v-if="createError" class="text-[12px] text-danger">{{ createError }}</p>
+      </div>
+      <template #footer>
+        <BaseButton variant="soft" rounded="full" @click="createModalOpen = false">取消</BaseButton>
+        <BaseButton rounded="full" @click="submitCreateFile">创建</BaseButton>
+      </template>
+    </BaseModal>
 
     <!-- Library Quick Attach Modal -->
     <BaseModal :open="libraryOpen" title="从个人资料库引用文件" width="36rem" @close="!libraryAttaching && (libraryOpen = false)">

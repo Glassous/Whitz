@@ -352,6 +352,8 @@ class ConversationFileOut(BaseModel):
 
     id: uuid.UUID
     conversation_id: uuid.UUID | None = None
+    conversation_title: str | None = None
+    conversation_kind: str | None = None
     filename: str
     ext: str
     mime_type: str
@@ -363,6 +365,8 @@ class ConversationFileOut(BaseModel):
     source: str = "user"
     is_global: bool = True
     message_id: uuid.UUID | None = None
+    qa_snippet: str | None = None
+    turn_role: str | None = None
     preview_url: str | None = None
     thumb_url: str | None = None
     preview_expires_at: datetime | None = None
@@ -371,7 +375,21 @@ class ConversationFileOut(BaseModel):
 
 
 class LibraryFileOut(ConversationFileOut):
-    conversation_title: str | None = None
+    pass
+
+
+class CreateTextFileRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    content: str = Field(default="", max_length=2 * 1024 * 1024)
+    overwrite: bool = False
+
+
+class UpdateTextFileContentRequest(BaseModel):
+    content: str = Field(default="", max_length=2 * 1024 * 1024)
+
+
+class RenameConversationFileRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
 
 
 class LibraryFileUpdateRequest(BaseModel):

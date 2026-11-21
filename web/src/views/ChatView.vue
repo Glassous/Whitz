@@ -8,7 +8,7 @@ import { useCreditsStore } from "../stores/credits";
 import { useFilesStore } from "../stores/files";
 import { useRealtimeStore } from "../stores/realtime";
 import { api } from "../api/client";
-import type { AgentStatus, ConversationFile, PreviewTarget, TaskPanelTab } from "../types";
+import type { AgentStatus, ConversationFile, DeliverableTarget, PreviewTarget, TaskPanelTab } from "../types";
 import ConversationSidebar from "../components/chat/ConversationSidebar.vue";
 import MessageList from "../components/chat/MessageList.vue";
 import ChatInput from "../components/chat/ChatInput.vue";
@@ -19,6 +19,8 @@ import MemoryPendingCard from "../components/chat/MemoryPendingCard.vue";
 import SkillPendingCard from "../components/chat/SkillPendingCard.vue";
 import SchedulePendingCard from "../components/chat/SchedulePendingCard.vue";
 import SearchModal from "../components/chat/SearchModal.vue";
+import DeliverableModal from "../components/chat/DeliverableModal.vue";
+import ImageLightboxModal from "../components/chat/ImageLightboxModal.vue";
 import LibraryPanel from "../components/settings/LibraryPanel.vue";
 import ScheduledTasksPanel from "../components/schedules/ScheduledTasksPanel.vue";
 
@@ -89,7 +91,13 @@ function savePanelWidth(width: number) {
 const agent = ref<AgentStatus | null>(null);
 const showPlan = ref(false);
 const planTab = ref<TaskPanelTab>("steps");
+const mainFileScope = ref<"all" | "conversation">("all");
 const previewTarget = ref<PreviewTarget | null>(null);
+const deliverableTarget = ref<DeliverableTarget | null>(null);
+const lightboxOpen = ref(false);
+const lightboxImages = ref<ConversationFile[]>([]);
+const lightboxIndex = ref(0);
+const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null);
 const panelWidth = ref<number>(loadInitialPanelWidth());
 const isResizingPanel = ref(false);
 let prePreviewPanelWidth: number | null = null;
@@ -231,12 +239,7 @@ async function openConversation(id: string): Promise<boolean> {
     const detail = await conversations.open(id);
     if (seq !== openSeq) return false;
     chat.loadFromConversation(detail);
-    if (detail.kind !== "main") {
-      void filesStore.load(id);
-    } else {
-      filesStore.reset();
-      filesStore.convId = id;
-    }
+    void filesStore.load(id, detail.kind === "main" ? mainFileScope.value : "conversation");
     return true;
   } catch {
     if (seq !== openSeq) return false;
@@ -265,8 +268,7 @@ async function openMainConversation() {
   try {
     const detail = mainId ? await conversations.open(mainId) : await conversations.openMain();
     chat.loadFromConversation(detail);
-    filesStore.reset();
-    filesStore.convId = detail.id;
+    void filesStore.load(detail.id, mainFileScope.value);
     showPlan.value = true;
     planTab.value = "steps";
     if (routeConversationId.value !== detail.id) {
@@ -381,15 +383,93 @@ async function ensureConversationId(): Promise<string> {
 
 async function onUploadFiles(fileList: FileList, dataTransfer?: DataTransfer | null, switchToFilesTab = false) {
   if (!agent.value?.ready) return;
-  if (switchToFilesTab && !isMainChat.value) {
+  if (switchToFilesTab) {
     previewTarget.value = null;
     showPlan.value = true;
     planTab.value = "files";
   }
   const started = await filesStore.enqueueFiles(fileList, ensureConversationId, dataTransfer);
-  if (started && !isMainChat.value && window.innerWidth >= 1024) {
+  if (started && window.innerWidth >= 1024) {
     showPlan.value = true;
   }
+}
+
+async function onPasteFiles(files: File[]) {
+  if (!agent.value?.ready || !files.length) return;
+  await filesStore.enqueueFiles(files, ensureConversationId, null, {
+    attachToBar: false,
+    onTaskCreated(task) {
+      chatInputRef.value?.insertUploadingChip(task);
+    },
+    onTaskCompleted(localId, completed) {
+      chatInputRef.value?.resolveInlineUpload(localId, completed);
+    },
+    onTaskFailed(localId) {
+      chatInputRef.value?.failInlineUpload(localId);
+    },
+  });
+}
+
+function onInsertFileToInput(file: ConversationFile) {
+  chatInputRef.value?.insertFile(file);
+  if (window.innerWidth < 1024) {
+    mobileStepsOpen.value = false;
+  }
+}
+
+async function onLocateFileMessage(file: ConversationFile) {
+  if (!file.message_id) return;
+  const targetConvId = file.conversation_id;
+  if (targetConvId && targetConvId !== conversations.current?.id) {
+    await onSelectFromSearch(targetConvId, file.message_id);
+  } else {
+    focusMessageId.value = null;
+    await Promise.resolve();
+    focusMessageId.value = file.message_id;
+  }
+  if (window.innerWidth < 1024) {
+    mobileStepsOpen.value = false;
+  }
+}
+
+function onMainFileScopeChange(nextScope: "all" | "conversation") {
+  mainFileScope.value = nextScope;
+  if (conversations.current?.id) {
+    void filesStore.load(conversations.current.id, isMainChat.value ? nextScope : "conversation");
+  }
+}
+
+async function onCreateWorkspaceFile(filename: string, content: string) {
+  if (!agent.value?.ready) return;
+  try {
+    await filesStore.createTextFile(filename, content, ensureConversationId, false);
+  } catch (e: any) {
+    filesStore.error = e?.detail?.detail ?? e?.message ?? "新建文件失败";
+  }
+}
+
+async function onRenameWorkspaceFile(fileId: string, filename: string) {
+  try {
+    const target = filesStore.files.find((f) => f.id === fileId);
+    await filesStore.renameFile(fileId, filename, target?.conversation_id ?? undefined);
+  } catch (e: any) {
+    filesStore.error = e?.detail?.detail ?? e?.message ?? "重命名文件失败";
+  }
+}
+
+function onOpenDeliverable(target: DeliverableTarget) {
+  deliverableTarget.value = {
+    ...target,
+    conversationId: target.conversationId ?? conversations.current?.id ?? null,
+  };
+}
+
+function onOpenLightbox(file: ConversationFile, siblings: ConversationFile[]) {
+  const list = siblings.length ? siblings : [file];
+  const idx = list.findIndex((f) => f.id === file.id);
+  lightboxImages.value = list;
+  lightboxIndex.value = idx >= 0 ? idx : 0;
+  lightboxOpen.value = true;
 }
 
 function onRetryUpload(localId: string) {
@@ -464,20 +544,36 @@ function closeMobileDrawer() {
   previewTarget.value = null;
 }
 
-async function onSend(content: string) {
+async function onSend(content: string, inlineFileIds: string[] = []) {
   if (sendingMessage.value || chat.streaming || filesStore.hasActiveUploads) return;
   sendingMessage.value = true;
   try {
     await ensureConversationId();
-    const attached = filesStore.attachedFiles;
+    const barAttached = filesStore.attachedFiles;
     filesStore.consumeAttachedIds();
+    const seen = new Set(barAttached.map((f) => f.id));
+    const combined: ConversationFile[] = [...barAttached];
+    for (const fid of inlineFileIds) {
+      if (seen.has(fid)) continue;
+      const found = filesStore.files.find((f) => f.id === fid);
+      if (found) {
+        seen.add(fid);
+        combined.push(found);
+      }
+    }
     const skillNames = [...selectedSkills.value];
     selectedSkills.value = [];
     planTab.value = "steps";
-    const sendPromise = chat.send(content, attached, skillNames);
+    const sendPromise = chat.send(content, combined, skillNames);
     sendingMessage.value = false;
     await sendPromise;
     await conversations.fetchList();
+    if (conversations.current?.id) {
+      void filesStore.load(
+        conversations.current.id,
+        isMainChat.value ? mainFileScope.value : "conversation",
+      );
+    }
   } catch (e: any) {
     chat.error = e?.detail?.detail ?? e?.message ?? "无法开始对话，请稍后重试";
   } finally {
@@ -809,7 +905,7 @@ onBeforeUnmount(() => {
           <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v14H3zM15 5v14" />
         </svg>
         <span
-          v-if="!isMainChat && filesStore.fileCount > 0 && !showPlan"
+          v-if="filesStore.fileCount > 0 && !showPlan"
           class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-accent"
           aria-hidden="true"
         />
@@ -852,6 +948,8 @@ onBeforeUnmount(() => {
             @edit="onEditMessage"
             @preview-html="onPreviewHtml"
             @preview-file="onPreviewFile"
+            @open-deliverable="onOpenDeliverable"
+            @open-lightbox="onOpenLightbox"
             @download-file="onDownloadFile"
           />
 
@@ -978,6 +1076,7 @@ onBeforeUnmount(() => {
             </Transition>
 
             <ChatInput
+              ref="chatInputRef"
               v-model:selected-skills="selectedSkills"
               :streaming="chat.streaming"
               :sending="sendingMessage || chat.waitingFirstByte"
@@ -986,10 +1085,12 @@ onBeforeUnmount(() => {
               :uploading="filesStore.hasActiveUploads"
               :uploads="filesStore.uploads"
               :attached-files="filesStore.attachedFiles"
+              :workspace-files="filesStore.files"
               :assistant-name="assistantName"
               @send="onSend"
               @stop="chat.stop"
               @upload="(files, dt) => onUploadFiles(files, dt, false)"
+              @paste-files="onPasteFiles"
               @cancel-upload="filesStore.cancelUpload"
               @dismiss-upload="filesStore.dismissUpload"
               @retry-upload="onRetryUpload"
@@ -1035,6 +1136,7 @@ onBeforeUnmount(() => {
         <div class="h-full" :style="{ width: `${panelWidth}px` }">
           <PlanPanel
             v-model:active-tab="planTab"
+            :file-scope="mainFileScope"
             :mode="isMainChat ? 'main' : 'side'"
             :assistant-name="assistantName"
             :assistant-avatar-url="assistantAvatarUrl"
@@ -1053,6 +1155,7 @@ onBeforeUnmount(() => {
             :deleting-file-id="deletingFileId"
             :downloading-file-id="downloadingFileId"
             :attach-library-action="onAttachLibraryFiles"
+            @update:file-scope="onMainFileScopeChange"
             @upload="(files, dt) => onUploadFiles(files, dt, true)"
             @cancel-upload="filesStore.cancelUpload"
             @dismiss-upload="filesStore.dismissUpload"
@@ -1060,6 +1163,12 @@ onBeforeUnmount(() => {
             @delete-file="onDeleteFile"
             @download-file="onDownloadFile"
             @preview-file="onPreviewFile"
+            @open-deliverable="onOpenDeliverable"
+            @open-lightbox="onOpenLightbox"
+            @insert-file="onInsertFileToInput"
+            @locate-file-message="onLocateFileMessage"
+            @rename-file="onRenameWorkspaceFile"
+            @create-file="onCreateWorkspaceFile"
             @close-preview="closePreview"
             @attach-library="onAttachLibraryFiles"
           />
@@ -1098,6 +1207,7 @@ onBeforeUnmount(() => {
           <div class="min-h-0 flex-1">
             <PlanPanel
               v-model:active-tab="planTab"
+              :file-scope="mainFileScope"
               :hide-header="true"
               :mode="isMainChat ? 'main' : 'side'"
               :assistant-name="assistantName"
@@ -1116,6 +1226,7 @@ onBeforeUnmount(() => {
               :deleting-file-id="deletingFileId"
               :downloading-file-id="downloadingFileId"
               :attach-library-action="onAttachLibraryFiles"
+              @update:file-scope="onMainFileScopeChange"
               @upload="(files, dt) => onUploadFiles(files, dt, true)"
               @cancel-upload="filesStore.cancelUpload"
               @dismiss-upload="filesStore.dismissUpload"
@@ -1123,6 +1234,12 @@ onBeforeUnmount(() => {
               @delete-file="onDeleteFile"
               @download-file="onDownloadFile"
               @preview-file="onPreviewFile"
+              @open-deliverable="onOpenDeliverable"
+              @open-lightbox="onOpenLightbox"
+              @insert-file="onInsertFileToInput"
+              @locate-file-message="onLocateFileMessage"
+              @rename-file="onRenameWorkspaceFile"
+              @create-file="onCreateWorkspaceFile"
               @close-preview="closePreview"
               @attach-library="onAttachLibraryFiles"
             />
@@ -1135,6 +1252,17 @@ onBeforeUnmount(() => {
       :conversations="conversations.conversations"
       @close="searchOpen = false"
       @select="onSelectFromSearch"
+    />
+    <DeliverableModal
+      :target="deliverableTarget"
+      @close="deliverableTarget = null"
+    />
+    <ImageLightboxModal
+      :open="lightboxOpen"
+      :images="lightboxImages"
+      :initial-index="lightboxIndex"
+      @close="lightboxOpen = false"
+      @download="onDownloadFile"
     />
   </div>
 </template>

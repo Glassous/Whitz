@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
-import type { ConversationFile, FileAttachmentMeta, Message, UserReactionType, WorkspaceArtifactMeta } from "../../types";
+import type { ConversationFile, DeliverableTarget, FileAttachmentMeta, Message, UserReactionType, WorkspaceArtifactMeta } from "../../types";
 import { useAuthStore } from "../../stores/auth";
 import { useChatStore } from "../../stores/chat";
 import { useFilesStore } from "../../stores/files";
-import { categoryLabel, formatFileSize } from "../../lib/fileTypes";
+import { categoryLabel, formatFileSize, getFileExt, getFileSpec } from "../../lib/fileTypes";
+import { isWritableTextExt, parseInlineFileSegments } from "../../lib/fileTokens";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 import Spinner from "../ui/Spinner.vue";
 
@@ -17,6 +18,8 @@ const emit = defineEmits<{
   edit: [userMessageId: string, content: string];
   "preview-html": [html: string];
   "preview-file": [file: ConversationFile];
+  "open-deliverable": [target: DeliverableTarget];
+  "open-lightbox": [file: ConversationFile, siblings: ConversationFile[]];
   "download-file": [file: ConversationFile];
 }>();
 
@@ -281,6 +284,92 @@ const resolvedAttachments = computed(() =>
   (props.message.tool_payload?.attachments ?? []).map((att) => resolveAttachmentFile(att)),
 );
 
+const inlineSegments = computed(() => {
+  if (props.message.role !== "user") return [];
+  return parseInlineFileSegments(props.message.content ?? "");
+});
+
+const hasInlineFiles = computed(() => inlineSegments.value.some((s) => s.type === "file"));
+
+const inlineFileIdSet = computed(() => {
+  const set = new Set<string>();
+  for (const s of inlineSegments.value) {
+    if (s.type === "file") set.add(s.fileId);
+  }
+  return set;
+});
+
+// Top attachment bar excludes files already rendered inline inside the bubble
+const barAttachments = computed(() =>
+  resolvedAttachments.value.filter((f) => !inlineFileIdSet.value.has(f.id)),
+);
+
+function resolveInlineFile(fileId: string, filename: string): ConversationFile {
+  const fromStore = filesStore.files.find((f) => f.id === fileId);
+  if (fromStore) return fromStore;
+  const fromAtt = resolvedAttachments.value.find((f) => f.id === fileId);
+  if (fromAtt) return fromAtt;
+  const spec = getFileSpec(filename);
+  const ext = spec?.ext ?? getFileExt(filename);
+  return {
+    id: fileId,
+    conversation_id: chat.convId,
+    filename,
+    ext,
+    mime_type: spec?.mime ?? "",
+    category: spec?.category ?? "document",
+    size_bytes: 0,
+    status: "ready",
+    source: "user",
+    is_global: true,
+    created_at: props.message.created_at,
+    updated_at: props.message.created_at,
+  };
+}
+
+const messageImageFiles = computed<ConversationFile[]>(() => {
+  const seen = new Set<string>();
+  const imgs: ConversationFile[] = [];
+  const pushIfImg = (f: ConversationFile) => {
+    if (isImageFile(f) && !seen.has(f.id)) {
+      seen.add(f.id);
+      imgs.push(f);
+    }
+  };
+  for (const f of resolvedAttachments.value) pushIfImg(f);
+  for (const seg of inlineSegments.value) {
+    if (seg.type === "file") pushIfImg(resolveInlineFile(seg.fileId, seg.filename));
+  }
+  for (const f of resolvedArtifacts.value) pushIfImg(f);
+  return imgs;
+});
+
+function onFileClick(file: ConversationFile) {
+  if (isImageFile(file)) {
+    emit("open-lightbox", file, messageImageFiles.value.length ? messageImageFiles.value : [file]);
+    return;
+  }
+  emit("preview-file", file);
+}
+
+function onArtifactPreview(file: ConversationFile) {
+  if (isImageFile(file)) {
+    emit("open-lightbox", file, messageImageFiles.value.length ? messageImageFiles.value : [file]);
+    return;
+  }
+  const ext = (file.ext || getFileExt(file.filename)).toLowerCase();
+  if (isWritableTextExt(ext)) {
+    emit("open-deliverable", {
+      fileId: file.id,
+      filename: file.filename,
+      title: file.filename,
+      conversationId: file.conversation_id ?? undefined,
+    });
+    return;
+  }
+  emit("preview-file", file);
+}
+
 const resolvedArtifacts = computed(() =>
   (props.message.tool_payload?.artifacts ?? []).map((art) => resolveArtifactFile(art)),
 );
@@ -306,33 +395,44 @@ const resolvedArtifacts = computed(() =>
         </span>
       </div>
 
-      <!-- Attached files & image thumbnails -->
+      <!-- Attached files & image thumbnails (deduplicated against inline tokens) -->
       <div
-        v-if="resolvedAttachments.length"
+        v-if="barAttachments.length"
         class="mb-1.5 flex flex-wrap justify-end gap-1.5"
       >
-        <button
-          v-for="file in resolvedAttachments"
-          :key="file.id"
-          type="button"
-          class="focus-ring inline-flex max-w-[240px] items-center gap-2 rounded-xl bg-surface px-2.5 py-1.5 text-left text-[12px] text-fg-muted transition-colors hover:bg-hover"
-          :title="`${file.filename} (${formatFileSize(file.size_bytes)}) — 点击预览`"
-          @click="emit('preview-file', file)"
-        >
-          <img
+        <template v-for="file in barAttachments" :key="file.id">
+          <!-- Image: pure thumbnail without filename/ext clutter -->
+          <button
             v-if="imageThumbUrl(file)"
-            :src="imageThumbUrl(file)!"
-            :alt="file.filename"
-            class="h-10 w-10 shrink-0 rounded-lg bg-canvas object-cover"
-            @error="onThumbError(file)"
-          />
-          <svg v-else class="h-3.5 w-3.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M14 2v6h6" />
-          </svg>
-          <span class="min-w-0 flex-1 truncate font-medium text-fg">{{ file.filename }}</span>
-          <span class="shrink-0 text-[11px] text-fg-faint">{{ categoryLabel(file.category, file.ext) }}</span>
-        </button>
+            type="button"
+            class="focus-ring overflow-hidden rounded-xl bg-surface transition-transform hover:scale-[1.02]"
+            :title="file.filename"
+            @click="onFileClick(file)"
+          >
+            <img
+              :src="imageThumbUrl(file)!"
+              :alt="file.filename"
+              class="h-20 w-20 object-cover sm:h-24 sm:w-24"
+              @error="onThumbError(file)"
+            />
+          </button>
+
+          <!-- Non-image file chip -->
+          <button
+            v-else
+            type="button"
+            class="focus-ring inline-flex max-w-[240px] items-center gap-2 rounded-xl bg-surface px-2.5 py-1.5 text-left text-[12px] text-fg-muted transition-colors hover:bg-hover"
+            :title="`${file.filename} (${formatFileSize(file.size_bytes)}) — 点击预览`"
+            @click="onFileClick(file)"
+          >
+            <svg class="h-3.5 w-3.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M14 2v6h6" />
+            </svg>
+            <span class="min-w-0 flex-1 truncate font-medium text-fg">{{ file.filename }}</span>
+            <span class="shrink-0 text-[11px] text-fg-faint">{{ categoryLabel(file.category, file.ext) }}</span>
+          </button>
+        </template>
       </div>
 
       <!-- Inline Edit Mode -->
@@ -368,12 +468,45 @@ const resolvedArtifacts = computed(() =>
         </div>
       </div>
 
-      <!-- Normal User Message Bubble -->
+      <!-- Normal User Message Bubble (with inline file cards & pure image thumbnails) -->
       <div
         v-else
         class="w-fit max-w-full whitespace-pre-wrap rounded-[22px] bg-surface px-4 py-2.5 text-[15px] leading-relaxed text-fg"
       >
-        {{ message.content }}
+        <template v-if="hasInlineFiles">
+          <template v-for="(seg, idx) in inlineSegments" :key="idx">
+            <template v-if="seg.type === 'text'">{{ seg.text }}</template>
+            <template v-else>
+              <button
+                v-if="imageThumbUrl(resolveInlineFile(seg.fileId, seg.filename))"
+                type="button"
+                class="focus-ring mx-0.5 my-0.5 inline-block overflow-hidden rounded-xl align-middle transition-transform hover:scale-[1.03]"
+                :title="seg.filename"
+                @click="onFileClick(resolveInlineFile(seg.fileId, seg.filename))"
+              >
+                <img
+                  :src="imageThumbUrl(resolveInlineFile(seg.fileId, seg.filename))!"
+                  :alt="seg.filename"
+                  class="block h-16 max-w-[120px] rounded-xl object-cover"
+                  @error="onThumbError(resolveInlineFile(seg.fileId, seg.filename))"
+                />
+              </button>
+              <button
+                v-else
+                type="button"
+                class="focus-ring mx-0.5 inline-flex max-w-[220px] items-center gap-1 rounded-lg border border-line/80 bg-canvas/90 px-2 py-0.5 align-middle text-[12.5px] font-medium text-fg transition-colors hover:bg-hover"
+                :title="`${seg.filename} — 点击查看`"
+                @click="onFileClick(resolveInlineFile(seg.fileId, seg.filename))"
+              >
+                <span class="shrink-0 rounded bg-surface px-1 text-[10px] font-medium text-fg-muted">
+                  {{ categoryLabel(resolveInlineFile(seg.fileId, seg.filename).category, resolveInlineFile(seg.fileId, seg.filename).ext) }}
+                </span>
+                <span class="truncate">{{ seg.filename }}</span>
+              </button>
+            </template>
+          </template>
+        </template>
+        <template v-else>{{ message.content }}</template>
       </div>
 
       <!-- AI Positive Reaction Badge on User Message -->
@@ -489,7 +622,12 @@ const resolvedArtifacts = computed(() =>
       <span>{{ chat.reconnecting ? "正在恢复实时输出…" : chat.waitingFirstByte ? "助理已接收请求，正在准备回复…" : "正在组织回答…" }}</span>
     </div>
 
-    <MarkdownRenderer v-else :content="message.content" @preview-html="emit('preview-html', $event)" />
+    <MarkdownRenderer
+      v-else
+      :content="message.content"
+      @preview-html="emit('preview-html', $event)"
+      @open-deliverable="emit('open-deliverable', $event)"
+    />
 
     <!-- AI Generated Workspace Artifact Cards -->
     <div v-if="resolvedArtifacts.length" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -501,7 +639,7 @@ const resolvedArtifacts = computed(() =>
         <button
           type="button"
           class="focus-ring flex min-w-0 flex-1 items-center gap-2.5 text-left"
-          @click="emit('preview-file', file)"
+          @click="onArtifactPreview(file)"
         >
           <img
             v-if="imageThumbUrl(file)"
@@ -533,7 +671,7 @@ const resolvedArtifacts = computed(() =>
           <button
             type="button"
             class="focus-ring rounded-lg bg-canvas px-2.5 py-1.5 text-[12px] font-medium text-fg transition-colors hover:bg-hover"
-            @click="emit('preview-file', file)"
+            @click="onArtifactPreview(file)"
           >
             在线预览
           </button>

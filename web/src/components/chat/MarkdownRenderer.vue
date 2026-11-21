@@ -4,10 +4,13 @@ import MarkdownIt, { type StateBlock, type StateInline, type Token } from "markd
 import hljs from "highlight.js/lib/common";
 import katex from "katex";
 
+import type { DeliverableTarget } from "../../types";
+
 const props = defineProps<{ content: string }>();
 
 const emit = defineEmits<{
   "preview-html": [html: string];
+  "open-deliverable": [target: DeliverableTarget];
 }>();
 
 const containerRef = ref<HTMLElement | null>(null);
@@ -320,6 +323,56 @@ md.renderer.rules.fence = (tokens: Token[], idx: number) => {
     '<span class="md-copy-label">复制</span>' +
     "</button>";
 
+  if (langLower === "deliverable" || langLower === "whitz-deliverable") {
+    let parsed: { file_id?: string; id?: string; filename?: string; title?: string; summary?: string } | null = null;
+    try {
+      const obj = JSON.parse(rawCode.trim());
+      if (obj && typeof obj === "object") parsed = obj;
+    } catch {
+      parsed = null;
+    }
+    const fid = String(parsed?.file_id || parsed?.id || "").trim();
+    const fname = String(parsed?.filename || "").trim();
+    const title = String(parsed?.title || fname || "交付产物").trim();
+    const summary = String(parsed?.summary || "").trim();
+
+    if (!fid || !fname) {
+      return (
+        '<div class="md-deliverable-card is-loading">' +
+        '<span class="md-deliverable-badge">交付</span>' +
+        '<div class="md-deliverable-info">' +
+        '<div class="md-deliverable-title">正在生成交互交付卡片…</div>' +
+        "</div>" +
+        "</div>"
+      );
+    }
+
+    const dotIdx = fname.lastIndexOf(".");
+    const extLabel = dotIdx >= 0 ? fname.slice(dotIdx + 1).toUpperCase() : "TEXT";
+    const actionLabel =
+      extLabel === "HTML" || extLabel === "HTM"
+        ? "查看页面"
+        : extLabel === "CSV" || extLabel === "TSV"
+          ? "查看表格"
+          : "弹窗查看";
+
+    return (
+      `<button type="button" class="md-deliverable-card" data-action="open-deliverable"` +
+      ` data-file-id="${md.utils.escapeHtml(fid)}"` +
+      ` data-filename="${md.utils.escapeHtml(fname)}"` +
+      ` data-title="${md.utils.escapeHtml(title)}"` +
+      ` data-summary="${md.utils.escapeHtml(summary)}">` +
+      `<span class="md-deliverable-badge">${md.utils.escapeHtml(extLabel)}</span>` +
+      '<span class="md-deliverable-info">' +
+      `<span class="md-deliverable-title">${md.utils.escapeHtml(title)}</span>` +
+      (summary ? `<span class="md-deliverable-summary">${md.utils.escapeHtml(summary)}</span>` : "") +
+      `<span class="md-deliverable-file">${md.utils.escapeHtml(fname)}</span>` +
+      "</span>" +
+      `<span class="md-deliverable-cta">${PREVIEW_ICON_SVG}<span>${actionLabel}</span></span>` +
+      "</button>"
+    );
+  }
+
   if (langLower === "mermaid") {
     return (
       '<div class="md-code-block md-mermaid-block" data-lang="mermaid" data-view="diagram">' +
@@ -560,10 +613,25 @@ function onContainerClick(event: MouseEvent) {
   if (!target) return;
   const btn = target.closest<HTMLButtonElement>("button[data-action]");
   if (!btn) return;
+  const action = btn.dataset.action;
+
+  if (action === "open-deliverable") {
+    const fileId = btn.dataset.fileId?.trim();
+    const filename = btn.dataset.filename?.trim();
+    if (fileId && filename) {
+      emit("open-deliverable", {
+        fileId,
+        filename,
+        title: btn.dataset.title?.trim() || filename,
+        summary: btn.dataset.summary?.trim() || undefined,
+      });
+    }
+    return;
+  }
+
   const block = btn.closest<HTMLElement>(".md-code-block");
   if (!block) return;
 
-  const action = btn.dataset.action;
   if (action === "copy") {
     void handleCopyBlock(block, btn);
   } else if (action === "preview-html") {

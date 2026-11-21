@@ -2,12 +2,14 @@
 import { computed, ref, watch } from "vue";
 import hljs from "highlight.js/lib/common";
 import { categoryLabel, formatFileSize, getFileExt } from "../../lib/fileTypes";
+import { isWritableTextExt } from "../../lib/fileTokens";
 import { useFilesStore } from "../../stores/files";
-import type { ConversationFile, PreviewTarget } from "../../types";
+import type { ConversationFile, DeliverableTarget, PreviewTarget } from "../../types";
+import Spinner from "../ui/Spinner.vue";
+import CsvTableEditor from "./CsvTableEditor.vue";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
-const MAX_TABLE_ROWS = 500;
 
 const HLJS_LANG_MAP: Record<string, string> = {
   ".html": "xml",
@@ -47,13 +49,18 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: [];
   download: [file: ConversationFile];
+  "open-deliverable": [target: DeliverableTarget];
 }>();
 
 const filesStore = useFilesStore();
 
 const loading = ref(false);
+const saving = ref(false);
 const error = ref<string | null>(null);
+const saveNotice = ref<string | null>(null);
 const textContent = ref("");
+const editDraft = ref("");
+const editingSource = ref(false);
 const truncated = ref(false);
 const freshUrl = ref<string | null>(null);
 const viewMode = ref<"preview" | "source">("preview");
@@ -96,65 +103,56 @@ const canCopyText = computed(
   () => (previewKind.value === "html" || previewKind.value === "markdown" || previewKind.value === "table" || previewKind.value === "code") && textContent.value.length > 0,
 );
 
-function parseDelimitedTable(raw: string, delimiter: string): { headers: string[]; rows: string[][]; totalRows: number } {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let inQuotes = false;
+const canEditFile = computed(
+  () => props.target.kind === "file" && !truncated.value && isWritableTextExt(targetExt.value),
+);
 
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (raw[i + 1] === '"') {
-          cell += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        cell += ch;
-      }
-      continue;
-    }
-
-    if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === delimiter) {
-      row.push(cell);
-      cell = "";
-    } else if (ch === "\r" || ch === "\n") {
-      if (ch === "\r" && raw[i + 1] === "\n") i++;
-      row.push(cell);
-      cell = "";
-      if (row.some((c) => c.length > 0) || rows.length > 0) {
-        rows.push(row);
-      }
-      row = [];
-    } else {
-      cell += ch;
-    }
-  }
-  if (cell.length > 0 || row.length > 0) {
-    row.push(cell);
-    rows.push(row);
-  }
-
-  if (!rows.length) return { headers: [], rows: [], totalRows: 0 };
-  const headers = rows[0];
-  const body = rows.slice(1);
-  return {
-    headers,
-    rows: body.slice(0, MAX_TABLE_ROWS),
-    totalRows: body.length,
-  };
+function startSourceEdit() {
+  if (!canEditFile.value) return;
+  editDraft.value = textContent.value;
+  viewMode.value = "source";
+  editingSource.value = true;
+  saveNotice.value = null;
 }
 
-const tableData = computed(() => {
-  if (previewKind.value !== "table" || !textContent.value) return null;
-  const delim = targetExt.value === ".tsv" ? "\t" : ",";
-  return parseDelimitedTable(textContent.value, delim);
-});
+function cancelSourceEdit() {
+  editingSource.value = false;
+  editDraft.value = "";
+}
+
+async function saveEditedText(nextText: string) {
+  if (props.target.kind !== "file" || saving.value) return;
+  saving.value = true;
+  error.value = null;
+  saveNotice.value = null;
+  try {
+    await filesStore.updateFileContent(
+      props.target.file.id,
+      nextText,
+      props.target.file.conversation_id ?? undefined,
+    );
+    textContent.value = nextText;
+    editingSource.value = false;
+    saveNotice.value = "已保存";
+    window.setTimeout(() => {
+      saveNotice.value = null;
+    }, 2000);
+  } catch (e: any) {
+    error.value = e?.detail?.detail ?? e?.message ?? "保存失败，请重试";
+  } finally {
+    saving.value = false;
+  }
+}
+
+function openInModal() {
+  if (props.target.kind !== "file") return;
+  emit("open-deliverable", {
+    fileId: props.target.file.id,
+    filename: props.target.file.filename,
+    title: props.target.file.filename,
+    conversationId: props.target.file.conversation_id ?? undefined,
+  });
+}
 
 const highlightedCodeHtml = ref("");
 
@@ -192,6 +190,8 @@ async function loadTarget() {
   const seq = ++loadSeq;
   loading.value = true;
   error.value = null;
+  editingSource.value = false;
+  saveNotice.value = null;
   textContent.value = "";
   truncated.value = false;
   freshUrl.value = null;
@@ -352,13 +352,55 @@ watch(() => props.target, () => {
 
           <!-- Copy source button -->
           <button
-            v-if="canCopyText"
+            v-if="canCopyText && !editingSource"
             type="button"
             class="focus-ring flex h-7.5 items-center gap-1 rounded-lg bg-surface px-2 text-[11.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
             :title="copied ? '已复制' : '复制内容'"
             @click="copySource"
           >
             <span>{{ copied ? "已复制" : "复制" }}</span>
+          </button>
+
+          <!-- Edit / Save for writable text files -->
+          <template v-if="canEditFile && (viewMode === 'source' || previewKind === 'code')">
+            <template v-if="editingSource">
+              <button
+                type="button"
+                class="focus-ring flex h-7.5 items-center rounded-lg px-2 text-[11.5px] font-medium text-fg-muted hover:bg-hover hover:text-fg"
+                :disabled="saving"
+                @click="cancelSourceEdit"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                class="focus-ring inline-flex h-7.5 items-center gap-1 rounded-lg bg-primary px-2.5 text-[11.5px] font-medium text-primary-fg hover:bg-primary-hover disabled:opacity-50"
+                :disabled="saving"
+                @click="saveEditedText(editDraft)"
+              >
+                <Spinner v-if="saving" :size="11" />
+                <span>保存</span>
+              </button>
+            </template>
+            <button
+              v-else
+              type="button"
+              class="focus-ring flex h-7.5 items-center rounded-lg bg-surface px-2 text-[11.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+              @click="startSourceEdit"
+            >
+              编辑
+            </button>
+          </template>
+
+          <!-- Pop out to large modal for text deliverables -->
+          <button
+            v-if="canEditFile && !editingSource"
+            type="button"
+            class="focus-ring flex h-7.5 items-center rounded-lg bg-surface px-2 text-[11.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+            title="在居中大弹窗中查看"
+            @click="openInModal"
+          >
+            弹窗查看
           </button>
 
           <!-- Download button -->
@@ -416,6 +458,16 @@ watch(() => props.target, () => {
             下载文件
           </button>
         </div>
+      </div>
+
+      <!-- Source Editor Overlay when editing writable text -->
+      <div v-else-if="editingSource" class="flex min-h-0 flex-1 flex-col bg-canvas p-3">
+        <textarea
+          v-model="editDraft"
+          v-scrollbar
+          spellcheck="false"
+          class="custom-scrollbar min-h-0 flex-1 resize-none rounded-xl border border-line bg-sidebar p-3 font-mono text-[12.5px] leading-relaxed text-fg outline-none focus:border-accent"
+        />
       </div>
 
       <!-- HTML Sandboxed Preview (isolated origin via sandbox="allow-scripts" only) -->
@@ -494,56 +546,16 @@ watch(() => props.target, () => {
         />
       </div>
 
-      <!-- CSV / TSV Table Preview -->
+      <!-- CSV / TSV Table Preview & Editor -->
       <template v-else-if="previewKind === 'table'">
-        <div v-if="viewMode === 'preview' && tableData && tableData.headers.length" class="flex min-h-0 flex-1 flex-col">
-          <div class="flex items-center justify-between border-b border-line bg-canvas/50 px-3.5 py-1.5 text-[11.5px] text-fg-faint">
-            <span class="tabular-nums">
-              {{ tableData.headers.length }} 列 · 共 {{ tableData.totalRows }} 行
-              <template v-if="tableData.totalRows > MAX_TABLE_ROWS">（当前展示前 {{ MAX_TABLE_ROWS }} 行）</template>
-            </span>
-            <span v-if="truncated" class="text-warning">文件较大，预览已截断</span>
-          </div>
-          <div v-scrollbar class="custom-scrollbar min-h-0 flex-1 overflow-auto bg-canvas">
-            <table class="w-full border-collapse text-left text-[12.5px]">
-              <thead class="sticky top-0 z-10 bg-surface">
-                <tr>
-                  <th
-                    class="border-b border-r border-line px-2.5 py-2 text-center font-medium tabular-nums text-fg-faint"
-                  >
-                    #
-                  </th>
-                  <th
-                    v-for="(h, hi) in tableData.headers"
-                    :key="hi"
-                    class="whitespace-nowrap border-b border-r border-line px-3 py-2 font-semibold text-fg"
-                  >
-                    {{ h }}
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="(r, ri) in tableData.rows"
-                  :key="ri"
-                  class="odd:bg-canvas even:bg-sidebar/40 hover:bg-hover/50"
-                >
-                  <td class="border-b border-r border-line px-2.5 py-1.5 text-center tabular-nums text-fg-faint">
-                    {{ ri + 1 }}
-                  </td>
-                  <td
-                    v-for="(_, ci) in tableData.headers"
-                    :key="ci"
-                    class="max-w-[260px] truncate border-b border-r border-line px-3 py-1.5 text-fg"
-                    :title="r[ci] ?? ''"
-                  >
-                    {{ r[ci] ?? "" }}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <CsvTableEditor
+          v-if="viewMode === 'preview'"
+          :content="textContent"
+          :delimiter="targetExt === '.tsv' ? '\t' : ','"
+          :readonly="!canEditFile"
+          :saving="saving"
+          @save="saveEditedText"
+        />
         <div v-else v-scrollbar class="custom-scrollbar min-h-0 flex-1 overflow-auto p-3.5">
           <pre class="rounded-xl bg-[var(--code)] p-3.5 font-mono text-[12.5px] leading-relaxed text-[#e6edf3] overflow-x-auto"><code>{{ textContent }}</code></pre>
         </div>

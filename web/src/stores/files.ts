@@ -74,8 +74,16 @@ function putToCos(
 
 let uploadSeq = 0;
 
+export interface EnqueueFilesOptions {
+  attachToBar?: boolean;
+  onTaskCreated?: (task: UploadTask) => void;
+  onTaskCompleted?: (localId: string, file: ConversationFile) => void;
+  onTaskFailed?: (localId: string, err: string) => void;
+}
+
 export const useFilesStore = defineStore("files", () => {
   const convId = ref<string | null>(null);
+  const listScope = ref<"conversation" | "all">("conversation");
   const files = ref<ConversationFile[]>([]);
   const uploads = ref<UploadTask[]>([]);
   const attachedIds = ref<string[]>([]);
@@ -126,7 +134,7 @@ export const useFilesStore = defineStore("files", () => {
     error.value = null;
   }
 
-  async function load(conversationId: string) {
+  async function load(conversationId: string, scope: "conversation" | "all" = "conversation") {
     if (convId.value !== conversationId) {
       for (const abort of abortMap.values()) abort();
       abortMap.clear();
@@ -137,9 +145,11 @@ export const useFilesStore = defineStore("files", () => {
       error.value = null;
     }
     convId.value = conversationId;
+    listScope.value = scope;
     loading.value = true;
     try {
-      files.value = await api.get<ConversationFile[]>(`/conversations/${conversationId}/files`);
+      const qs = scope === "all" ? "?scope=all" : "";
+      files.value = await api.get<ConversationFile[]>(`/conversations/${conversationId}/files${qs}`);
     } catch (e: any) {
       error.value = errorText(e, "加载对话文件失败");
       files.value = [];
@@ -158,7 +168,12 @@ export const useFilesStore = defineStore("files", () => {
     error.value = `部分文件无法上传：${head}${extra}。${SUPPORTED_TYPES_SUMMARY}`;
   }
 
-  async function runUploadTask(targetConvId: string, taskId: string, file: File) {
+  async function runUploadTask(
+    targetConvId: string,
+    taskId: string,
+    file: File,
+    options?: EnqueueFilesOptions,
+  ) {
     const findTask = () => uploads.value.find((u) => u.localId === taskId);
     try {
       const presign = await api.post<PresignResponse>(`/conversations/${targetConvId}/files/presign`, {
@@ -194,12 +209,13 @@ export const useFilesStore = defineStore("files", () => {
         { etag },
       );
 
-      if (convId.value === targetConvId) {
-        files.value = [...files.value.filter((f) => f.id !== completed.id), completed];
-        if (!attachedIds.value.includes(completed.id)) {
+      if (convId.value === targetConvId || listScope.value === "all") {
+        files.value = [completed, ...files.value.filter((f) => f.id !== completed.id)];
+        if (options?.attachToBar !== false && !attachedIds.value.includes(completed.id)) {
           attachedIds.value = [...attachedIds.value, completed.id];
         }
       }
+      options?.onTaskCompleted?.(taskId, completed);
       revokeTaskPreview(findTask());
       uploads.value = uploads.value.filter((u) => u.localId !== taskId);
     } catch (e: any) {
@@ -209,12 +225,14 @@ export const useFilesStore = defineStore("files", () => {
         uploads.value = uploads.value.filter((u) => u.localId !== taskId);
         return;
       }
+      const msg = errorText(e, "上传失败");
       const cur = findTask();
       if (cur) {
         cur.status = "error";
-        cur.error = errorText(e, "上传失败");
+        cur.error = msg;
       }
       error.value = errorText(e, `${file.name} 上传失败`);
+      options?.onTaskFailed?.(taskId, msg);
     }
   }
 
@@ -222,6 +240,7 @@ export const useFilesStore = defineStore("files", () => {
     inputFiles: FileList | File[],
     ensureConversation: () => Promise<string>,
     dataTransfer?: DataTransfer | null,
+    options?: EnqueueFilesOptions,
   ): Promise<boolean> {
     error.value = null;
     const { accepted, rejected } = validateSelectedFiles(inputFiles, dataTransfer);
@@ -229,7 +248,10 @@ export const useFilesStore = defineStore("files", () => {
     if (!accepted.length) return false;
 
     const currentUsed = files.value.length + activeUploads.value.length;
-    const remainingSlots = Math.max(0, MAX_FILES_PER_CONVERSATION - currentUsed);
+    const remainingSlots =
+      listScope.value === "all"
+        ? accepted.length
+        : Math.max(0, MAX_FILES_PER_CONVERSATION - currentUsed);
     if (remainingSlots <= 0) {
       error.value = `当前对话最多保留 ${MAX_FILES_PER_CONVERSATION} 个文件，请先删除部分文件后再上传`;
       return false;
@@ -251,20 +273,19 @@ export const useFilesStore = defineStore("files", () => {
         isImage && typeof URL !== "undefined" && typeof URL.createObjectURL === "function"
           ? URL.createObjectURL(file)
           : null;
-      uploads.value = [
-        ...uploads.value,
-        {
-          localId: taskId,
-          filename: file.name,
-          ext: spec?.ext ?? getFileExt(file.name),
-          category: spec?.category ?? "document",
-          sizeBytes: file.size,
-          progress: 0,
-          status: "signing",
-          file,
-          localPreviewUrl,
-        },
-      ];
+      const taskObj: UploadTask = {
+        localId: taskId,
+        filename: file.name,
+        ext: spec?.ext ?? getFileExt(file.name),
+        category: spec?.category ?? "document",
+        sizeBytes: file.size,
+        progress: 0,
+        status: "signing",
+        file,
+        localPreviewUrl,
+      };
+      uploads.value = [...uploads.value, taskObj];
+      options?.onTaskCreated?.(taskObj);
       createdTasks.push({ taskId, file });
     }
 
@@ -276,6 +297,7 @@ export const useFilesStore = defineStore("files", () => {
       error.value = errorText(e, "无法创建对话以保存文件");
       for (const t of createdTasks) {
         updateTask(t.taskId, { status: "error", error: "创建对话失败" });
+        options?.onTaskFailed?.(t.taskId, "创建对话失败");
       }
       return false;
     }
@@ -287,7 +309,7 @@ export const useFilesStore = defineStore("files", () => {
       while (idx < createdTasks.length) {
         const next = createdTasks[idx++];
         if (!next) break;
-        await runUploadTask(targetConvId, next.taskId, next.file);
+        await runUploadTask(targetConvId, next.taskId, next.file, options);
       }
     });
     await Promise.all(workers);
@@ -352,15 +374,69 @@ export const useFilesStore = defineStore("files", () => {
   }
 
   function upsertFile(file: ConversationFile) {
-    if (convId.value && file.conversation_id && file.conversation_id !== convId.value) return;
+    if (
+      listScope.value !== "all" &&
+      convId.value &&
+      file.conversation_id &&
+      file.conversation_id !== convId.value
+    ) {
+      return;
+    }
     const idx = files.value.findIndex((f) => f.id === file.id);
     if (idx >= 0) {
       const next = [...files.value];
       next[idx] = { ...next[idx], ...file };
       files.value = next;
     } else {
-      files.value = [...files.value, file];
+      files.value = [file, ...files.value];
     }
+  }
+
+  async function createTextFile(
+    filename: string,
+    content: string,
+    ensureConversation: () => Promise<string>,
+    overwrite = false,
+  ): Promise<ConversationFile> {
+    const cid = convId.value ?? (await ensureConversation());
+    convId.value = cid;
+    const created = await api.post<ConversationFile>(`/conversations/${cid}/files/text`, {
+      filename,
+      content,
+      overwrite,
+    });
+    upsertFile(created);
+    return created;
+  }
+
+  async function updateFileContent(
+    fileId: string,
+    content: string,
+    targetConvId?: string | null,
+  ): Promise<ConversationFile> {
+    const cid = targetConvId || convId.value;
+    if (!cid) throw new Error("未选择对话");
+    const updated = await api.put<ConversationFile>(
+      `/conversations/${cid}/files/${fileId}/content`,
+      { content },
+    );
+    upsertFile(updated);
+    return updated;
+  }
+
+  async function renameFile(
+    fileId: string,
+    filename: string,
+    targetConvId?: string | null,
+  ): Promise<ConversationFile> {
+    const cid = targetConvId || convId.value;
+    if (!cid) throw new Error("未选择对话");
+    const updated = await api.patch<ConversationFile>(
+      `/conversations/${cid}/files/${fileId}`,
+      { filename },
+    );
+    upsertFile(updated);
+    return updated;
   }
 
   async function removeFile(fileId: string) {
@@ -595,6 +671,7 @@ export const useFilesStore = defineStore("files", () => {
 
   return {
     convId,
+    listScope,
     files,
     uploads,
     activeUploads,
@@ -614,6 +691,9 @@ export const useFilesStore = defineStore("files", () => {
     detachFile,
     consumeAttachedIds,
     upsertFile,
+    createTextFile,
+    updateFileContent,
+    renameFile,
     removeFile,
     removeLocalFile,
     patchLocalIndexStatus,

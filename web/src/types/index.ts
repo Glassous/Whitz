@@ -146,6 +146,8 @@ export type FileCategory = "document" | "spreadsheet" | "code" | "image";
 export interface ConversationFile {
   id: string;
   conversation_id: string | null;
+  conversation_title?: string | null;
+  conversation_kind?: string | null;
   filename: string;
   ext: string;
   mime_type: string;
@@ -157,11 +159,21 @@ export interface ConversationFile {
   source: "user" | "assistant" | string;
   is_global: boolean;
   message_id?: string | null;
+  qa_snippet?: string | null;
+  turn_role?: "user" | "assistant" | string | null;
   preview_url?: string | null;
   thumb_url?: string | null;
   preview_expires_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface DeliverableTarget {
+  fileId: string;
+  filename: string;
+  title?: string;
+  summary?: string;
+  conversationId?: string | null;
 }
 
 export interface LibraryFileItem extends ConversationFile {

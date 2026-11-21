@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.models import Conversation, ConversationFile, User
-from app.services import cos, file_chunks, file_parser, file_types
+from app.services import cos, file_chunks, file_parser, file_provenance, file_types
 
 MAX_WRITE_FILE_BYTES = 2 * 1024 * 1024
 WRITABLE_TEXT_EXTENSIONS = frozenset(
@@ -122,6 +122,33 @@ MCP_TOOLS: list[dict[str, Any]] = [
             "required": ["conversation_id", "filename", "content"],
         },
     },
+    {
+        "name": "edit_workspace_file",
+        "description": (
+            "局部修改工作区中已存在的纯文本/代码/Markdown/HTML/CSV 文件，无需全量重写。"
+            "支持两种模式：（1）精准文本替换：提供 old_text 与 new_text（可选 replace_all）；"
+            "（2）行号区间替换：提供 start_line、end_line（从 1 开始的闭区间）与 new_content。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "conversation_id": {"type": "string", "description": "当前对话的 UUID"},
+                "file_id": {"type": "string", "description": "目标文件的 UUID（与 filename 二选一，优先传 file_id）"},
+                "filename": {"type": "string", "description": "目标文件名（当未提供 file_id 时按当前对话最新同名文件匹配）"},
+                "old_text": {"type": "string", "description": "文本替换模式：要被替换的原文本片段"},
+                "new_text": {"type": "string", "description": "文本替换模式：替换后的新文本片段"},
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "文本替换模式：是否替换全部匹配项（默认 false，若匹配多处将提示补充上下文）",
+                    "default": False,
+                },
+                "start_line": {"type": "integer", "description": "行区间替换模式：起始行号（从 1 开始，含）"},
+                "end_line": {"type": "integer", "description": "行区间替换模式：结束行号（从 1 开始，含）"},
+                "new_content": {"type": "string", "description": "行区间替换模式：替换该行区间的新文本内容"},
+            },
+            "required": ["conversation_id"],
+        },
+    },
 ]
 
 
@@ -176,9 +203,10 @@ async def call_tool(
         if not want_global:
             stmt = stmt.where(ConversationFile.conversation_id == conv.id)
 
-        rows = (
-            await db.execute(stmt.order_by(ConversationFile.created_at.asc()))
-        ).scalars().all()
+        rows = list(
+            (await db.execute(stmt.order_by(ConversationFile.created_at.desc()))).scalars().all()
+        )
+        provenance_map = await file_provenance.resolve_files_provenance(db, user, rows)
         return _text_result(
             {
                 "conversation_id": str(conv.id),
@@ -194,6 +222,11 @@ async def call_tool(
                         "source": r.source,
                         "is_global": True,
                         "scope": "conversation" if r.conversation_id == conv.id else "library",
+                        "conversation_id": str(r.conversation_id) if r.conversation_id else None,
+                        "conversation_title": (provenance_map.get(r.id) or {}).get("conversation_title"),
+                        "message_id": str(r.message_id) if r.message_id else None,
+                        "turn_role": (provenance_map.get(r.id) or {}).get("turn_role"),
+                        "qa_snippet": (provenance_map.get(r.id) or {}).get("qa_snippet"),
                         "created_at": r.created_at.isoformat(),
                     }
                     for r in rows
@@ -382,6 +415,14 @@ async def call_tool(
             await db.commit()
             await db.refresh(existing)
             await file_chunks.index_file_chunks_safe(db, existing, raw=raw_bytes)
+            await db.refresh(existing)
+            from app.services import realtime_bus
+
+            await realtime_bus.publish_user_event(
+                user.id,
+                "library.updated",
+                {"action": "updated", "file_id": str(existing.id), "conversation_id": str(conv.id)},
+            )
             return _text_result(
                 {
                     "status": "updated",
@@ -436,6 +477,14 @@ async def call_tool(
         await db.commit()
         await db.refresh(row)
         await file_chunks.index_file_chunks_safe(db, row, raw=raw_bytes)
+        await db.refresh(row)
+        from app.services import realtime_bus
+
+        await realtime_bus.publish_user_event(
+            user.id,
+            "library.updated",
+            {"action": "added", "file_id": str(row.id), "conversation_id": str(conv.id)},
+        )
         return _text_result(
             {
                 "status": "created",
@@ -447,6 +496,145 @@ async def call_tool(
                 "mime_type": row.mime_type,
                 "size_bytes": row.size_bytes,
                 "source": row.source,
+            }
+        )
+
+    if name == "edit_workspace_file":
+        if not settings.cos_configured:
+            return _text_result("错误：对象存储 COS 尚未配置，无法编辑工作区文件。", is_error=True)
+
+        file_row: ConversationFile | None = None
+        raw_file_id = str(args.get("file_id") or "").strip()
+        raw_filename = file_types.sanitize_filename(str(args.get("filename") or ""))
+        if raw_file_id:
+            file_row = await _owned_ready_file(db, user, conv, raw_file_id)
+        elif raw_filename:
+            file_row = (
+                await db.execute(
+                    select(ConversationFile)
+                    .where(
+                        ConversationFile.conversation_id == conv.id,
+                        ConversationFile.user_id == user.id,
+                        ConversationFile.filename == raw_filename,
+                        ConversationFile.status == "ready",
+                    )
+                    .order_by(ConversationFile.created_at.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+        if file_row is None:
+            return _text_result("错误：未找到目标文件（请检查 file_id 或 filename）。", is_error=True)
+
+        ext = (file_row.ext or os.path.splitext(file_row.filename)[1]).lower()
+        if ext not in WRITABLE_TEXT_EXTENSIONS:
+            return _text_result(
+                f"错误：文件 {file_row.filename}（{ext}）不是可编辑的纯文本/代码格式。",
+                is_error=True,
+            )
+
+        try:
+            current_raw = await cos.get_object_bytes(
+                file_row.storage_key,
+                max_bytes=MAX_WRITE_FILE_BYTES,
+                settings=settings,
+            )
+        except cos.CosError as exc:
+            return _text_result(f"读取原文件失败: {exc}", is_error=True)
+
+        current_text = file_parser.decode_text(current_raw)
+        lines_before = len(current_text.splitlines())
+
+        old_text = args.get("old_text")
+        new_text = args.get("new_text")
+        start_line = args.get("start_line")
+        end_line = args.get("end_line")
+        new_content = args.get("new_content")
+
+        if isinstance(old_text, str) and isinstance(new_text, str):
+            if not old_text:
+                return _text_result("错误：old_text 不能为空。", is_error=True)
+            occurrences = current_text.count(old_text)
+            if occurrences == 0:
+                return _text_result(
+                    "错误：在文件中未找到完全匹配的 old_text，请先调用 read_workspace_file 核对准确内容。",
+                    is_error=True,
+                )
+            replace_all = bool(args.get("replace_all", False))
+            if occurrences > 1 and not replace_all:
+                return _text_result(
+                    f"错误：old_text 在文件中匹配了 {occurrences} 处，请补充更多上下文使其唯一，或设置 replace_all=true。",
+                    is_error=True,
+                )
+            updated_text = current_text.replace(old_text, new_text) if replace_all else current_text.replace(old_text, new_text, 1)
+        elif start_line is not None and end_line is not None and isinstance(new_content, str):
+            try:
+                s_idx = int(start_line)
+                e_idx = int(end_line)
+            except (TypeError, ValueError):
+                return _text_result("错误：start_line 和 end_line 必须是整数。", is_error=True)
+            orig_lines = current_text.splitlines(keepends=True)
+            total_lines = len(orig_lines)
+            if s_idx < 1 or e_idx < s_idx or s_idx > max(1, total_lines + 1):
+                return _text_result(
+                    f"错误：行号范围无效（start_line={s_idx}, end_line={e_idx}, 文件共 {total_lines} 行）。",
+                    is_error=True,
+                )
+            e_clamped = min(e_idx, total_lines)
+            replacement = new_content
+            if replacement and not replacement.endswith("\n") and e_clamped < total_lines:
+                replacement += "\n"
+            updated_text = "".join(orig_lines[: s_idx - 1]) + replacement + "".join(orig_lines[e_clamped:])
+        else:
+            return _text_result(
+                "错误：请提供文本替换参数 (old_text + new_text) 或行号区间参数 (start_line + end_line + new_content)。",
+                is_error=True,
+            )
+
+        raw_bytes = updated_text.encode("utf-8")
+        if len(raw_bytes) > MAX_WRITE_FILE_BYTES:
+            return _text_result("错误：修改后的文件大小超过 2 MB 上限。", is_error=True)
+
+        try:
+            etag = await cos.put_object_bytes(
+                file_row.storage_key,
+                raw_bytes,
+                file_row.mime_type,
+                settings=settings,
+            )
+        except cos.CosError as exc:
+            return _text_result(f"写回文件失败: {exc}", is_error=True)
+
+        file_row.size_bytes = len(raw_bytes)
+        file_row.etag = etag
+        file_row.updated_at = datetime.now(timezone.utc)
+        # Allow current ChatPipeline run to attach this edited file as a refreshed artifact
+        if file_row.conversation_id == conv.id:
+            file_row.source = "assistant"
+            file_row.message_id = None
+        await db.commit()
+        await db.refresh(file_row)
+        await file_chunks.index_file_chunks_safe(db, file_row, raw=raw_bytes)
+        await db.refresh(file_row)
+
+        from app.services import realtime_bus
+
+        await realtime_bus.publish_user_event(
+            user.id,
+            "library.updated",
+            {"action": "updated", "file_id": str(file_row.id), "conversation_id": str(file_row.conversation_id or conv.id)},
+        )
+        return _text_result(
+            {
+                "status": "edited",
+                "file_id": str(file_row.id),
+                "conversation_id": str(file_row.conversation_id or conv.id),
+                "filename": file_row.filename,
+                "ext": file_row.ext,
+                "category": file_row.category,
+                "mime_type": file_row.mime_type,
+                "size_bytes": file_row.size_bytes,
+                "lines_before": lines_before,
+                "lines_after": len(updated_text.splitlines()),
             }
         )
 

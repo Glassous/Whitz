@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from "vue";
-import type { ConversationFile, Message } from "../../types";
+import type { ConversationFile, DeliverableTarget, Message } from "../../types";
 import MessageBubble from "./MessageBubble.vue";
 
 const props = defineProps<{
@@ -15,6 +15,8 @@ const emit = defineEmits<{
   edit: [userMessageId: string, content: string];
   "preview-html": [html: string];
   "preview-file": [file: ConversationFile];
+  "open-deliverable": [target: DeliverableTarget];
+  "open-lightbox": [file: ConversationFile, siblings: ConversationFile[]];
   "download-file": [file: ConversationFile];
 }>();
 
@@ -197,6 +199,8 @@ onBeforeUnmount(() => {
           @edit="(id, content) => emit('edit', id, content)"
           @preview-html="emit('preview-html', $event)"
           @preview-file="emit('preview-file', $event)"
+          @open-deliverable="emit('open-deliverable', $event)"
+          @open-lightbox="(f, list) => emit('open-lightbox', f, list)"
           @download-file="emit('download-file', $event)"
         />
       </div>

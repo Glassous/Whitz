@@ -94,6 +94,7 @@ async def test_mcp_files_auth_and_tools(client, register, db, monkeypatch):
         "read_workspace_file",
         "search_workspace_files",
         "write_workspace_file",
+        "edit_workspace_file",
     }
 
     # Call list_workspace_files
@@ -247,4 +248,67 @@ async def test_mcp_files_auth_and_tools(client, register, db, monkeypatch):
         headers=mcp_headers,
     )
     assert bad_write.json()["result"]["isError"] is True
+
+    # edit_workspace_file: targeted text replacement & line-range patch
+    async def _fake_get_written(key: str, *, max_bytes: int, settings=None) -> bytes:
+        return written_objects.get(key, b"line1\nline2\nline3")
+
+    monkeypatch.setattr(cos, "get_object_bytes", _fake_get_written)
+    edit_resp = await client.post(
+        "/api/internal/mcp/files",
+        json={
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "edit_workspace_file",
+                "arguments": {
+                    "conversation_id": conv_id,
+                    "file_id": write_payload["file_id"],
+                    "old_text": "<h1>Report</h1>",
+                    "new_text": "<h1>Q3 Report</h1>\n<p>Updated</p>",
+                },
+            },
+        },
+        headers=mcp_headers,
+    )
+    edit_payload = json.loads(edit_resp.json()["result"]["content"][0]["text"])
+    assert edit_payload["status"] == "edited"
+    assert edit_payload["lines_after"] == 2
+    assert b"<h1>Q3 Report</h1>" in written_objects[created_row.storage_key]
+
+    # User-side create text file, update content, inline rename, and scope=all list
+    user_hdr = auth_header(u1_auth["access_token"])
+    create_resp = await client.post(
+        f"/api/conversations/{conv_id}/files/text",
+        json={"filename": "metrics.csv", "content": "name,val\nA,1\n"},
+        headers=user_hdr,
+    )
+    assert create_resp.status_code == 201
+    csv_id = create_resp.json()["id"]
+
+    update_resp = await client.put(
+        f"/api/conversations/{conv_id}/files/{csv_id}/content",
+        json={"content": "name,val\nA,2\nB,3\n"},
+        headers=user_hdr,
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["size_bytes"] == len("name,val\nA,2\nB,3\n".encode("utf-8"))
+
+    rename_resp = await client.patch(
+        f"/api/conversations/{conv_id}/files/{csv_id}",
+        json={"filename": "q3_metrics.csv"},
+        headers=user_hdr,
+    )
+    assert rename_resp.status_code == 200
+    assert rename_resp.json()["filename"] == "q3_metrics.csv"
+
+    all_list = await client.get(
+        f"/api/conversations/{conv_id}/files?scope=all",
+        headers=user_hdr,
+    )
+    assert all_list.status_code == 200
+    items = all_list.json()
+    assert any(item["filename"] == "q3_metrics.csv" and item["conversation_title"] == "MCP Workspace" for item in items)
+
     get_settings.cache_clear()

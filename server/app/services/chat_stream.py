@@ -18,6 +18,7 @@ from app.db.session import SessionLocal
 from app.services import (
     cos,
     cross_chat_memory,
+    file_provenance,
     limits,
     membership,
     memory_service,
@@ -146,7 +147,12 @@ def parse_todos(preview) -> list[dict] | None:
 
 def _is_write_workspace_tool(tool_name: str) -> bool:
     cleaned = (tool_name or "").strip().lower()
-    return cleaned == "write_workspace_file" or cleaned.endswith("write_workspace_file")
+    return (
+        cleaned == "write_workspace_file"
+        or cleaned.endswith("write_workspace_file")
+        or cleaned == "edit_workspace_file"
+        or cleaned.endswith("edit_workspace_file")
+    )
 
 
 def _extract_artifact_file_id(preview: Any) -> uuid.UUID | None:
@@ -994,6 +1000,7 @@ def _build_workspace_instructions(
     workspace_files: list[ConversationFile],
     attached_ids: set[uuid.UUID],
     total_library_count: int = 0,
+    provenance_map: dict[uuid.UUID, dict[str, Any]] | None = None,
 ) -> str | None:
     if not workspace_files:
         return None
@@ -1002,18 +1009,27 @@ def _build_workspace_instructions(
         header += f"，用户资料库共 {total_library_count} 个已就绪文件"
     header += "）："
     lines = [header]
+    prov = provenance_map or {}
     for f in workspace_files:
         tags: list[str] = []
         if f.id in attached_ids:
             tags.append("本轮新附带")
         if f.conversation_id != conv_id:
             tags.append("资料库共享")
+        p = prov.get(f.id) or {}
+        conv_title = p.get("conversation_title")
+        qa_snippet = p.get("qa_snippet")
+        if conv_title and f.conversation_id != conv_id:
+            tags.append(f"来自会话《{conv_title}》")
+        if qa_snippet:
+            tags.append(f"问答：「{qa_snippet}」")
         tag_str = f" [{' · '.join(tags)}]" if tags else ""
         lines.append(
             f"- {f.filename}{tag_str} (file_id={f.id}, category={f.category}, mime={f.mime_type}, size={f.size_bytes} bytes)"
         )
     lines.append(
-        "若用户询问或需要处理以上任意文件或资料库中其他历史文件，请优先使用 rag_search_workspace 或 list_workspace_files / read_workspace_file 按需读取真实内容；若需要向用户交付报告、代码、网页、表格等文本产物，可调用 write_workspace_file 写入工作区。"
+        "若用户询问或需要处理以上任意文件或资料库中其他历史文件，请优先使用 rag_search_workspace 或 list_workspace_files / read_workspace_file 按需读取真实内容；"
+        "若需要向用户交付报告、网页、表格、代码或文档等纯文本产物，可调用 write_workspace_file 创建或 edit_workspace_file 局部修改工作区文件，并在正文中以 ```deliverable 卡片指定出来。"
     )
     return "\n".join(lines)
 
@@ -1132,7 +1148,8 @@ async def _prepare_turn_context(
         .all()
     )
     conv_file_ids = {f.id for f in conv_files}
-    requested_ids = list(dict.fromkeys(file_ids or []))
+    inline_ids = file_provenance.extract_inline_file_ids(query_text)
+    requested_ids = list(dict.fromkeys([*(file_ids or []), *inline_ids]))
     missing_requested = [fid for fid in requested_ids if fid not in conv_file_ids]
 
     global_attached: list[ConversationFile] = []
@@ -1213,6 +1230,8 @@ async def _prepare_turn_context(
     if cleaned_skills:
         user_payload["skills"] = cleaned_skills
 
+    provenance_map = await file_provenance.resolve_files_provenance(db, user, all_context_files)
+
     attachments_meta = [
         {
             "id": str(f.id),
@@ -1225,6 +1244,11 @@ async def _prepare_turn_context(
             "is_global": True,
             "scope": "conversation" if f.conversation_id == conv_id else "library",
             "attached": f.id in {af.id for af in attached_files},
+            "conversation_id": str(f.conversation_id) if f.conversation_id else None,
+            "conversation_title": (provenance_map.get(f.id) or {}).get("conversation_title"),
+            "message_id": str(f.message_id) if f.message_id else None,
+            "turn_role": (provenance_map.get(f.id) or {}).get("turn_role"),
+            "qa_snippet": (provenance_map.get(f.id) or {}).get("qa_snippet"),
         }
         for f in all_context_files
     ]
@@ -1256,6 +1280,7 @@ async def _prepare_turn_context(
         all_context_files,
         {f.id for f in attached_files},
         total_library_count=total_library_count,
+        provenance_map=provenance_map,
     )
     if workspace_ctx:
         instruction_parts.append(workspace_ctx)
@@ -1287,6 +1312,7 @@ async def _prepare_turn_context(
         "memory_require_confirm": bool(user.memory_require_confirm),
         "ai_reactions_enabled": bool(getattr(user, "ai_reactions_enabled", True)),
         "attachments": attachments_meta,
+        "attached_file_ids": [f.id for f in attached_files],
         "skills": active_skills_meta,
         "requested_skills": cleaned_skills,
     }
@@ -1434,6 +1460,19 @@ async def stream_chat(
                 created_at=user_msg.created_at + timedelta(milliseconds=1),
             )
             db.add_all([user_msg, assistant])
+            await db.flush()
+            attached_fids = turn_ctx.get("attached_file_ids") or []
+            if attached_fids:
+                await db.execute(
+                    update(ConversationFile)
+                    .where(
+                        ConversationFile.id.in_(attached_fids),
+                        ConversationFile.conversation_id == conv.id,
+                        ConversationFile.user_id == user.id,
+                        ConversationFile.message_id.is_(None),
+                    )
+                    .values(message_id=user_msg.id)
+                )
             conv.plan = None
             conv.last_message_at = datetime.now(timezone.utc)
             await db.commit()
@@ -1758,6 +1797,19 @@ async def stream_edit(
                 created_at=user_msg.created_at + timedelta(milliseconds=1),
             )
             db.add_all([user_msg, assistant])
+            await db.flush()
+            attached_fids = turn_ctx.get("attached_file_ids") or []
+            if attached_fids:
+                await db.execute(
+                    update(ConversationFile)
+                    .where(
+                        ConversationFile.id.in_(attached_fids),
+                        ConversationFile.conversation_id == conv.id,
+                        ConversationFile.user_id == user.id,
+                        ConversationFile.message_id.is_(None),
+                    )
+                    .values(message_id=user_msg.id)
+                )
             conv.plan = None
             conv.last_message_at = datetime.now(timezone.utc)
             await db.commit()
