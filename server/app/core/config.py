@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -145,6 +146,12 @@ class Settings(BaseSettings):
     @property
     def max_file_size_bytes(self) -> int:
         return max(1, int(self.file_max_size_mb)) * 1024 * 1024
+
+    @property
+    def app_data_path(self) -> Path:
+        """APP_DATA_DIR 解析后的路径；空值（.env 里写了 APP_DATA_DIR=）回退到默认目录。"""
+        raw = (self.app_data_dir or "").strip()
+        return Path(raw or "./.whitz-data")
 
 
 @lru_cache

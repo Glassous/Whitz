@@ -90,6 +90,25 @@ services:
     networks:
       - whitz_net
 
+  # 一次性任务：共享数据卷由 dockerd 以 root:root 创建，而 server 以 1000:1000
+  # 只读根文件系统运行，若不预先建目录并移交属主，上传头像会因 EACCES 返回 500。
+  # 复用 server 镜像（部署前已 pull），避免生产环境再拉取新镜像失败。
+  app-data-init:
+    image: ${WHITZ_SERVER_IMAGE:-ghcr.io/glassous/whitz-server:latest}
+    container_name: whitz-app-data-init
+    restart: "no"
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - "mkdir -p /app-data/avatars && chown 1000:1000 /app-data /app-data/avatars"
+    volumes:
+      - app_data:/app-data
+    network_mode: none
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
   agent-api:
     # 镜像由 GitHub Actions 构建并推送，部署脚本注入 WHITZ_AGENT_IMAGE
     image: ${WHITZ_AGENT_IMAGE:-ghcr.io/glassous/whitz-agent:latest}
@@ -320,6 +339,8 @@ services:
         condition: service_healthy
       agent-api:
         condition: service_healthy
+      app-data-init:
+        condition: service_completed_successfully
     read_only: true
     tmpfs:
       - /tmp

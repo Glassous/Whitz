@@ -1,6 +1,9 @@
 import base64
 import binascii
+import logging
+import os
 import re
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -38,31 +41,107 @@ from app.services import audit, membership
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
+logger = logging.getLogger("whitz")
+
 _AVATAR_DATA_URL_RE = re.compile(r"^data:image/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$")
 _AVATAR_EXT_MAP = {"png": ("png", "image/png"), "jpeg": ("jpg", "image/jpeg"), "webp": ("webp", "image/webp")}
 _MAX_AVATAR_BYTES = 1_048_576
+_AVATAR_EXTS = ("webp", "png", "jpg")
+_AVATAR_MIME = {"webp": "image/webp", "png": "image/png", "jpg": "image/jpeg"}
+
+# 解析后的头像目录：生产容器以非 root 运行且 /app-data 可能是 root 所有的卷，
+# 此时写入会抛 PermissionError 并变成 500，因此这里探测可写目录并缓存结果。
+_avatars_root: Path | None = None
+_avatars_root_key: str | None = None
+
+
+def _ensure_writable_dir(path: Path) -> bool:
+    probe = path / f".probe-{uuid.uuid4().hex}"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe.write_bytes(b"")
+    except OSError:
+        return False
+    try:
+        probe.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return True
+
+
+def _reset_avatars_dir_cache() -> None:
+    global _avatars_root, _avatars_root_key
+    _avatars_root = None
+    _avatars_root_key = None
 
 
 def _avatars_dir() -> Path:
-    path = Path(get_settings().app_data_dir) / "avatars"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    global _avatars_root, _avatars_root_key
+    primary = get_settings().app_data_path / "avatars"
+    key = str(primary)
+    if _avatars_root is not None and _avatars_root_key == key:
+        return _avatars_root
+    if _ensure_writable_dir(primary):
+        _avatars_root, _avatars_root_key = primary, key
+        return primary
+    logger.warning("头像目录不可写（%s），临时回退到系统临时目录；容器重建后这些头像会丢失", primary)
+    fallback = Path(tempfile.gettempdir()) / "whitz-avatars"
+    if not _ensure_writable_dir(fallback):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "头像存储暂不可用，请稍后重试")
+    _avatars_root, _avatars_root_key = fallback, key
+    return fallback
+
+
+def _write_avatar(target: Path, raw: bytes) -> None:
+    tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_bytes(raw)
+        os.replace(tmp, target)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        _reset_avatars_dir_cache()
+        logger.exception("头像写入失败: %s", target)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "头像保存失败，请稍后重试") from exc
+
+
+def _remove_avatar_files(stem_prefix: str, user_id: uuid.UUID) -> None:
+    try:
+        root = _avatars_dir()
+    except HTTPException:
+        return
+    for ext in _AVATAR_EXTS:
+        candidate = root / f"{stem_prefix}{user_id}.{ext}"
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("删除旧头像失败: %s", candidate)
 
 
 def _remove_user_avatars(user_id: uuid.UUID) -> None:
-    root = _avatars_dir()
-    for ext in ("webp", "png", "jpg"):
-        candidate = root / f"{user_id}.{ext}"
-        if candidate.exists():
-            candidate.unlink(missing_ok=True)
+    _remove_avatar_files("", user_id)
 
 
 def _remove_assistant_avatars(user_id: uuid.UUID) -> None:
+    _remove_avatar_files("assistant_", user_id)
+
+
+def _avatar_response(prefix: str, user_id: uuid.UUID, missing_detail: str) -> Response:
     root = _avatars_dir()
-    for ext in ("webp", "png", "jpg"):
-        candidate = root / f"assistant_{user_id}.{ext}"
-        if candidate.exists():
-            candidate.unlink(missing_ok=True)
+    for ext in _AVATAR_EXTS:
+        candidate = root / f"{prefix}{user_id}.{ext}"
+        try:
+            if not candidate.is_file():
+                continue
+            content = candidate.read_bytes()
+        except OSError:
+            logger.warning("读取头像失败: %s", candidate)
+            continue
+        return Response(
+            content=content,
+            media_type=_AVATAR_MIME[ext],
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+    raise HTTPException(status.HTTP_404_NOT_FOUND, missing_detail)
 
 
 def _decode_validated_avatar(data_url: str) -> tuple[str, bytes]:
@@ -254,7 +333,7 @@ async def upload_avatar(
     ext, raw = _decode_validated_avatar(body.data_url)
     _remove_user_avatars(user.id)
     target = _avatars_dir() / f"{user.id}.{ext}"
-    target.write_bytes(raw)
+    _write_avatar(target, raw)
     user.avatar_url = f"/api/users/{user.id}/avatar?v={int(time.time() * 1000)}"
     await db.commit()
     await db.refresh(user)
@@ -306,7 +385,7 @@ async def upload_assistant_avatar(
     ext, raw = _decode_validated_avatar(body.data_url)
     _remove_assistant_avatars(user.id)
     target = _avatars_dir() / f"assistant_{user.id}.{ext}"
-    target.write_bytes(raw)
+    _write_avatar(target, raw)
     user.assistant_avatar_url = f"/api/users/{user.id}/assistant-avatar?v={int(time.time() * 1000)}"
     await db.commit()
     await db.refresh(user)
@@ -508,27 +587,9 @@ async def revoke_all_my_sessions(
 
 @router.get("/{user_id}/avatar")
 async def get_avatar(user_id: uuid.UUID) -> Response:
-    root = _avatars_dir()
-    for ext, mime in (("webp", "image/webp"), ("png", "image/png"), ("jpg", "image/jpeg")):
-        candidate = root / f"{user_id}.{ext}"
-        if candidate.is_file():
-            return Response(
-                content=candidate.read_bytes(),
-                media_type=mime,
-                headers={"Cache-Control": "public, max-age=31536000, immutable"},
-            )
-    raise HTTPException(status.HTTP_404_NOT_FOUND, "头像不存在")
+    return _avatar_response("", user_id, "头像不存在")
 
 
 @router.get("/{user_id}/assistant-avatar")
 async def get_assistant_avatar(user_id: uuid.UUID) -> Response:
-    root = _avatars_dir()
-    for ext, mime in (("webp", "image/webp"), ("png", "image/png"), ("jpg", "image/jpeg")):
-        candidate = root / f"assistant_{user_id}.{ext}"
-        if candidate.is_file():
-            return Response(
-                content=candidate.read_bytes(),
-                media_type=mime,
-                headers={"Cache-Control": "public, max-age=31536000, immutable"},
-            )
-    raise HTTPException(status.HTTP_404_NOT_FOUND, "助手头像不存在")
+    return _avatar_response("assistant_", user_id, "助手头像不存在")

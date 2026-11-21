@@ -204,7 +204,7 @@ def _global_skills_dir() -> Path:
     configured = (settings.builtin_skills_dir or "").strip()
     if configured:
         return Path(configured)
-    app_skills = Path(settings.app_data_dir) / "skills"
+    app_skills = settings.app_data_path / "skills"
     if app_skills.is_dir():
         return app_skills
     return Path(__file__).resolve().parents[2] / "resources" / "builtin_skills"

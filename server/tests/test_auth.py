@@ -215,6 +215,48 @@ async def test_extended_profile_fields_update_and_validation(register, client):
     assert me.json()["gender"] == "非二元"
 
 
+async def test_avatar_upload_falls_back_when_data_dir_unwritable(monkeypatch, register, client):
+    """APP_DATA_DIR 不可写时（容器卷属主不匹配）不能抛 500，应降级到临时目录。"""
+    import shutil
+    import tempfile
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from app.api.routes import users as users_routes
+
+    workdir = Path(tempfile.mkdtemp(prefix="whitz-avatar-fallback-"))
+    blocked = workdir / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
+    fallback_root = workdir / "tmp"
+    fallback_root.mkdir()
+
+    monkeypatch.setattr(users_routes, "get_settings", lambda: SimpleNamespace(app_data_path=blocked / "data"))
+    monkeypatch.setattr(users_routes.tempfile, "gettempdir", lambda: str(fallback_root))
+    users_routes._reset_avatars_dir_cache()
+    try:
+        data = await register(email="avatar-fallback@test.local", display_name="AvatarFallback")
+        headers = auth_header(data["access_token"])
+        tiny_png_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        up = await client.put(
+            "/api/users/me/avatar",
+            json={"data_url": f"data:image/png;base64,{tiny_png_b64}"},
+            headers=headers,
+        )
+        assert up.status_code == 200, up.text
+        stored = fallback_root / "whitz-avatars" / f"{data['user']['id']}.png"
+        assert stored.is_file()
+
+        fetched = await client.get(up.json()["avatar_url"])
+        assert fetched.status_code == 200
+        assert fetched.headers["content-type"] == "image/png"
+    finally:
+        users_routes._reset_avatars_dir_cache()
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 async def test_login_with_email_code(register, client, sent_emails):
     await register(email="codelogin@test.local", password="Passw0rd!")
 
