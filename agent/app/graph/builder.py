@@ -33,6 +33,108 @@ logger = logging.getLogger("whitz.agent.graph")
 SYSTEM_CONTEXT_MSG_ID = "whitz-system-context"
 DEFAULT_MAX_TOOL_ITERATIONS = 30
 _NODE_LABELS = {n["id"]: n["label"] for n in GRAPH_NODES}
+_NUMBERED_PREFIX_RE = re.compile(r"^\s*\d+[.、)）]\s*")
+
+
+def _looks_like_subquestions(items: list[str]) -> bool:
+    """Detect when a model mistakenly puts numbered/question sentences into `options`."""
+    if len(items) < 2:
+        return False
+    q_marks = sum(1 for item in items if "?" in item or "？" in item)
+    if q_marks >= max(2, (len(items) + 1) // 2):
+        return True
+    numbered = sum(1 for item in items if _NUMBERED_PREFIX_RE.match(item))
+    long_items = sum(1 for item in items if len(item) >= 24)
+    return numbered >= 2 and long_items >= 2
+
+
+def _normalize_clarify_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Normalize clarify tool args into a unified structure supporting single/multi questions & options."""
+    top_question = str(args.get("question") or "").strip()
+    multiple = bool(args.get("multiple"))
+    raw_options = (
+        [str(o).strip() for o in args.get("options") or [] if str(o).strip()]
+        if isinstance(args.get("options"), list)
+        else []
+    )
+    raw_questions = args.get("questions") if isinstance(args.get("questions"), list) else []
+
+    normalized_questions: list[dict[str, Any]] = []
+    if raw_questions:
+        for idx, item in enumerate(raw_questions):
+            if isinstance(item, dict):
+                q_text = str(item.get("question") or item.get("title") or item.get("prompt") or "").strip()
+                if not q_text:
+                    continue
+                q_id = str(item.get("id") or f"q{idx + 1}").strip() or f"q{idx + 1}"
+                q_opts = (
+                    [str(o).strip() for o in item.get("options") or [] if str(o).strip()]
+                    if isinstance(item.get("options"), list)
+                    else []
+                )
+                q_multi = bool(item.get("multiple"))
+                q_custom = True if item.get("allow_custom") is None else bool(item.get("allow_custom"))
+                q_placeholder = str(item.get("placeholder")).strip() if item.get("placeholder") else None
+                normalized_questions.append(
+                    {
+                        "id": q_id,
+                        "question": q_text,
+                        "options": q_opts,
+                        "multiple": q_multi,
+                        "allow_custom": q_custom,
+                        "placeholder": q_placeholder,
+                    }
+                )
+            elif isinstance(item, str) and item.strip():
+                normalized_questions.append(
+                    {
+                        "id": f"q{idx + 1}",
+                        "question": item.strip(),
+                        "options": [],
+                        "multiple": False,
+                        "allow_custom": True,
+                        "placeholder": None,
+                    }
+                )
+    elif raw_options and _looks_like_subquestions(raw_options):
+        for idx, text in enumerate(raw_options):
+            normalized_questions.append(
+                {
+                    "id": f"q{idx + 1}",
+                    "question": text,
+                    "options": [],
+                    "multiple": False,
+                    "allow_custom": True,
+                    "placeholder": None,
+                }
+            )
+        raw_options = []
+
+    if not normalized_questions:
+        fallback_q = top_question or "请补充更多信息以便继续。"
+        normalized_questions = [
+            {
+                "id": "q1",
+                "question": fallback_q,
+                "options": raw_options,
+                "multiple": multiple,
+                "allow_custom": True,
+                "placeholder": None,
+            }
+        ]
+
+    resolved_question = top_question or (
+        normalized_questions[0]["question"]
+        if len(normalized_questions) == 1
+        else "请补充以下信息以便继续："
+    )
+    return {
+        "question": resolved_question,
+        "options": raw_options,
+        "multiple": multiple,
+        "questions": normalized_questions,
+        "preview": resolved_question,
+    }
 
 
 def _emit_node_running(node: str, *, route: str | None = None, model: str | None = None) -> None:
@@ -118,7 +220,7 @@ def _base_agent_prompt(assistant_name: str = "Whitz", *, is_main_chat: bool = Fa
         "   - 需要实时外部资料时使用 `web_search`，可根据查询目标自主选择搜索引擎 `provider`：`\"bocha\"`（博查 AI 搜索，响应快，最适合国内新闻、中文资料、国内企业与政策等）或 `\"tavily\"`（速度较慢但最适合国外英文资料、国际新闻、海外技术社区与英文文档）；若需兼顾国内外对比可并行调用两次 `web_search`，摘要不足时再调用 `web_extract` 精读关键页面；\n"
         "   - 需要调用公开 HTTP/REST API、发送自定义 Method/Headers/Query/JSON/表单请求或查看响应状态码与响应头（等效 curl 能力）时，直接调用 `http_request`；\n"
         "   - 复杂多步骤任务使用 `todo_list` 维护进度计划，或通过 `delegate_subtask` 委派给 `researcher` / `coder` 子智能体；\n"
-        "   - 需要精确计算或验证代码时调用 `execute_code`（系统会自动暂停等待用户审批）；遇到关键歧义时调用 `clarify` 向用户追问；\n"
+        "   - 需要精确计算或验证代码时调用 `execute_code`（系统会自动暂停等待用户审批）；遇到关键歧义时调用 `clarify` 向用户追问（单个问题用 `question` + 可选答案 `options`，多个独立问题务必使用 `questions` 列表分项提问）；\n"
         "   - 若技能摘要与当前任务相关，调用 `skill_view` 按需加载完整技能指南后再执行；\n"
         "   - 当用户希望设置周期提醒或自动定时执行某项任务时，可调用 `list_scheduled_tasks`、`create_scheduled_task`、`update_scheduled_task`、`delete_scheduled_task` 管理定时任务（变更会生成待确认卡片由用户确认生效）；\n"
         "   - 当用户提出精彩见解、高质量背景描述或友好致谢且工具可用时，可适度调用 `react_to_user_message` 给出正向点赞（`like`/`love`/`sparkle`/`insightful`，严禁负面回应，勿每轮刷屏）。\n"
@@ -679,24 +781,28 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             args = dict(tc.get("args") or {})
 
             if name == "clarify":
-                question = str(args.get("question") or "请补充更多信息以便继续。")
-                options = args.get("options") if isinstance(args.get("options"), list) else []
+                clarify_payload = _normalize_clarify_args(args)
                 resume_val = interrupt(
                     {
                         "kind": "clarify",
                         "tool": "clarify",
                         "call_id": call_id,
-                        "question": question,
-                        "options": options,
-                        "preview": question,
+                        **clarify_payload,
                     }
                 )
-                answer = resume_val.get("answer") if isinstance(resume_val, dict) else str(resume_val or "")
+                if isinstance(resume_val, dict):
+                    answer = str(resume_val.get("answer") or "")
+                    answers = resume_val.get("answers")
+                    tool_result: dict[str, Any] = {"answer": answer}
+                    if answers:
+                        tool_result["answers"] = answers
+                else:
+                    tool_result = {"answer": str(resume_val or "")}
                 out_msgs.append(
                     ToolMessage(
                         tool_call_id=call_id,
                         name="clarify",
-                        content=json.dumps({"answer": answer}, ensure_ascii=False),
+                        content=json.dumps(tool_result, ensure_ascii=False),
                     )
                 )
             elif name == "execute_code":

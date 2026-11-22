@@ -220,6 +220,9 @@ onBeforeUnmount(() => {
 
 const isCurrent = computed(() => chat.selectedTurn?.id === props.message.id);
 const isLive = computed(() => chat.streaming && chat.activeAssistantId === props.message.id);
+const isWaitingControl = computed(
+  () => isLive.value && (props.message.status === "waiting" || !!chat.pendingControl),
+);
 const isFailureOrCancelled = computed(
   () => !isLive.value && (props.message.status === "failed" || props.message.status === "cancelled"),
 );
@@ -227,6 +230,9 @@ const isFailureOrCancelled = computed(
 const liveLabel = computed(() => {
   if (chat.stopping) return "正在停止生成…";
   if (chat.reconnecting) return "网络重连中，正在恢复进度…";
+  if (isWaitingControl.value) {
+    return chat.pendingControl?.kind === "approval" ? "等待你的批准" : "等待你补充信息";
+  }
   if (chat.currentStep) {
     const step = chat.currentStep;
     return step.title ? `步骤 ${step.index}/${step.total} · ${step.title}` : `步骤 ${step.index}/${step.total}`;
@@ -697,7 +703,17 @@ const resolvedArtifacts = computed(() =>
         <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent/60 [animation-delay:150ms]" />
         <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent/40 [animation-delay:300ms]" />
       </span>
-      <span>{{ chat.reconnecting ? "正在恢复实时输出…" : chat.waitingFirstByte ? "助理已接收请求，正在准备回复…" : "正在组织回答…" }}</span>
+      <span>{{
+        chat.reconnecting
+          ? "正在恢复实时输出…"
+          : isWaitingControl
+            ? chat.pendingControl?.kind === "approval"
+              ? "正在等待你的审批确认…"
+              : "正在等待你的澄清回答，提交后将继续执行…"
+            : chat.waitingFirstByte
+              ? "助理已接收请求，正在准备回复…"
+              : "正在组织回答…"
+      }}</span>
     </div>
 
     <MarkdownRenderer

@@ -2,6 +2,7 @@ package com.glassous.whitz.core.network
 
 import com.glassous.whitz.core.model.AgentStatus
 import com.glassous.whitz.core.model.AuthResponse
+import com.glassous.whitz.core.model.ClarifyAnswerItem
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.ConversationDetail
 import com.glassous.whitz.core.model.ConversationFile
@@ -92,6 +93,7 @@ data class ClarifyRequest(
     @SerialName("request_id") val requestId: String?,
     @SerialName("execution_generation") val executionGeneration: Int?,
     val answer: String,
+    val answers: List<ClarifyAnswerItem>? = null,
 )
 
 @Serializable

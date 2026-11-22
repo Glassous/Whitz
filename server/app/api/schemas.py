@@ -424,10 +424,40 @@ class ApprovalRequest(BaseModel):
     choice: str = Field(pattern="^(once|deny)$")
 
 
+class ClarifyAnswerItem(BaseModel):
+    id: str | None = None
+    question: str | None = None
+    selected: list[str] = Field(default_factory=list)
+    text: str = Field(default="", max_length=4000)
+
+
 class ClarifyRequest(BaseModel):
     request_id: str
     execution_generation: int
-    answer: str = Field(min_length=1, max_length=4000)
+    answer: str = Field(default="", max_length=16000)
+    answers: list[ClarifyAnswerItem] | None = None
+
+    @model_validator(mode="after")
+    def _ensure_non_empty_clarify(self) -> "ClarifyRequest":
+        cleaned_answer = (self.answer or "").strip()
+        if not cleaned_answer and self.answers:
+            lines: list[str] = []
+            for idx, item in enumerate(self.answers, start=1):
+                parts = [*[s.strip() for s in item.selected if s.strip()]]
+                if item.text.strip():
+                    parts.append(item.text.strip())
+                if not parts:
+                    continue
+                val = "；".join(parts)
+                if item.question and item.question.strip():
+                    lines.append(f"{idx}. {item.question.strip()}\n答：{val}")
+                else:
+                    lines.append(f"{idx}. {val}")
+            cleaned_answer = "\n\n".join(lines).strip()
+        if not cleaned_answer:
+            raise ValueError("回答内容不能为空")
+        self.answer = cleaned_answer
+        return self
 
 
 class CreditWindowOut(BaseModel):

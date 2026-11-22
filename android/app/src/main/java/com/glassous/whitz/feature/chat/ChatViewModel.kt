@@ -13,6 +13,9 @@ import com.glassous.whitz.core.files.extractInlineFileIds
 import com.glassous.whitz.core.files.isConversationImageFile
 import com.glassous.whitz.core.files.isWritableTextExt
 import com.glassous.whitz.core.model.AgentStatus
+import com.glassous.whitz.core.model.ClarifyAnswerItem
+import com.glassous.whitz.core.model.ClarifyDetail
+import com.glassous.whitz.core.model.ClarifyQuestionItem
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.ConversationDetail
 import com.glassous.whitz.core.model.ConversationFile
@@ -1190,7 +1193,7 @@ class ChatViewModel(
         }
     }
 
-    fun clarifyControl(answer: String) {
+    fun clarifyControl(answer: String, answers: List<ClarifyAnswerItem>? = null) {
         val convId = _ui.value.currentConvId ?: return
         val ctrl = _ui.value.pendingControl ?: return
         val trimmed = answer.trim()
@@ -1201,7 +1204,7 @@ class ChatViewModel(
                 val headers = chatTicketHeaders(convId, "clarify")
                 container.network.api.submitClarify(
                     convId,
-                    ClarifyRequest(ctrl.requestId, ctrl.executionGeneration, trimmed),
+                    ClarifyRequest(ctrl.requestId, ctrl.executionGeneration, trimmed, answers?.takeIf { it.isNotEmpty() }),
                     headers,
                 )
                 _ui.update { state ->
@@ -1648,6 +1651,7 @@ class ChatViewModel(
                     executionGeneration = d.int("execution_generation"),
                     tool = d.str("tool"),
                     preview = formatControlPreview(d),
+                    clarify = normalizeClarifyDetail(d),
                 )
                 _ui.update { state ->
                     state.copy(
@@ -2960,6 +2964,87 @@ class ChatViewModel(
         }
     }
 
+    private fun looksLikeSubquestions(items: List<String>): Boolean {
+        if (items.size < 2) return false
+        val qMarks = items.count { it.contains("?") || it.contains("？") }
+        if (qMarks >= maxOf(2, (items.size + 1) / 2)) return true
+        val numbered = items.count { Regex("^\\s*\\d+[.、)）]\\s*").containsMatchIn(it) }
+        val longItems = items.count { it.length >= 24 }
+        return numbered >= 2 && longItems >= 2
+    }
+
+    private fun normalizeClarifyDetail(raw: JsonObject): ClarifyDetail {
+        val det = (raw["detail"] as? JsonObject) ?: raw
+        val previewObj = raw["preview"] as? JsonObject
+        val rawTopQuestion = det.str("question")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: raw.str("question")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: previewObj?.str("question")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: (raw["preview"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+            ?: ""
+        val topMultiple = det.bool("multiple") ?: raw.bool("multiple") ?: false
+        val rawOptsArr = (det["options"] as? JsonArray)
+            ?: (raw["options"] as? JsonArray)
+            ?: (previewObj?.get("options") as? JsonArray)
+        var topOptions = rawOptsArr
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty) }
+            .orEmpty()
+
+        val rawQuestionsArr = (det["questions"] as? JsonArray)
+            ?: (raw["questions"] as? JsonArray)
+            ?: (previewObj?.get("questions") as? JsonArray)
+
+        val questions = mutableListOf<ClarifyQuestionItem>()
+        if (rawQuestionsArr != null && rawQuestionsArr.isNotEmpty()) {
+            rawQuestionsArr.forEachIndexed { idx, el ->
+                if (el is JsonObject) {
+                    val qText = (el.str("question") ?: el.str("title") ?: el.str("prompt"))?.trim().orEmpty()
+                    if (qText.isNotEmpty()) {
+                        val opts = (el["options"] as? JsonArray)
+                            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty) }
+                            .orEmpty()
+                        questions += ClarifyQuestionItem(
+                            id = el.str("id")?.takeIf { it.isNotBlank() } ?: "q${idx + 1}",
+                            question = qText,
+                            options = opts,
+                            multiple = el.bool("multiple") ?: false,
+                            allowCustom = el.bool("allow_custom") ?: true,
+                            placeholder = el.str("placeholder")?.trim()?.takeIf { it.isNotEmpty() },
+                        )
+                    }
+                } else if (el is JsonPrimitive) {
+                    val txt = el.contentOrNull?.trim().orEmpty()
+                    if (txt.isNotEmpty()) {
+                        questions += ClarifyQuestionItem(id = "q${idx + 1}", question = txt)
+                    }
+                }
+            }
+        } else if (topOptions.isNotEmpty() && looksLikeSubquestions(topOptions)) {
+            topOptions.forEachIndexed { idx, txt ->
+                questions += ClarifyQuestionItem(id = "q${idx + 1}", question = txt)
+            }
+            topOptions = emptyList()
+        }
+
+        if (questions.isEmpty()) {
+            questions += ClarifyQuestionItem(
+                id = "q1",
+                question = rawTopQuestion.ifEmpty { "请补充更多信息以便继续。" },
+                options = topOptions,
+                multiple = topMultiple,
+                allowCustom = det.bool("allow_custom") ?: true,
+            )
+        }
+
+        return ClarifyDetail(
+            question = rawTopQuestion.ifEmpty {
+                if (questions.size == 1) questions.first().question else "请补充以下信息以便继续："
+            },
+            options = topOptions,
+            multiple = topMultiple,
+            questions = questions,
+        )
+    }
+
     private fun hydratePendingControl(raw: JsonObject?): PendingControl? {
         if (raw == null) return null
         val rawKind = raw.str("kind")
@@ -2971,6 +3056,7 @@ class ChatViewModel(
             executionGeneration = raw.int("execution_generation"),
             tool = rawTool,
             preview = formatControlPreview(raw),
+            clarify = if (kind == "clarify") normalizeClarifyDetail(raw) else null,
         )
     }
 

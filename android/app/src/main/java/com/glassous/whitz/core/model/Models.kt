@@ -299,12 +299,42 @@ data class AgentStatus(
     @SerialName("enabled_toolsets") val enabledToolsets: List<String> = emptyList(),
 )
 
+data class ClarifyQuestionItem(
+    val id: String,
+    val question: String,
+    val options: List<String> = emptyList(),
+    val multiple: Boolean = false,
+    val allowCustom: Boolean = true,
+    val placeholder: String? = null,
+)
+
+data class ClarifyDetail(
+    val question: String? = null,
+    val options: List<String> = emptyList(),
+    val multiple: Boolean = false,
+    val questions: List<ClarifyQuestionItem> = emptyList(),
+)
+
+@Serializable
+data class ClarifyAnswerItem(
+    val id: String? = null,
+    val question: String? = null,
+    val selected: List<String> = emptyList(),
+    val text: String = "",
+)
+
+data class ClarifySubmitPayload(
+    val answer: String,
+    val answers: List<ClarifyAnswerItem> = emptyList(),
+)
+
 data class PendingControl(
     val kind: String, // "approval" | "clarify"
     val requestId: String? = null,
     val executionGeneration: Int? = null,
     val tool: String? = null,
     val preview: String? = null,
+    val clarify: ClarifyDetail? = null,
 )
 
 @Serializable

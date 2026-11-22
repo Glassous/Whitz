@@ -96,6 +96,7 @@ class ResumeRunRequest(BaseModel):
     kind: str | None = None
     choice: str | None = None
     answer: str | None = None
+    answers: list[dict[str, Any]] | None = None
     approved: bool | None = None
     resume: Any = None
 
@@ -368,8 +369,10 @@ def create_app(
 
         if body.resume is not None:
             resume_payload = body.resume
-        elif body.answer is not None:
-            resume_payload = {"answer": body.answer}
+        elif body.answer is not None or body.answers is not None:
+            resume_payload = {"answer": body.answer or ""}
+            if body.answers is not None:
+                resume_payload["answers"] = body.answers
         else:
             resume_payload = {"choice": body.choice, "approved": body.approved}
 
@@ -383,7 +386,7 @@ def create_app(
             {
                 "request_id": body.request_id,
                 "execution_generation": current_gen,
-                "kind": body.kind or ("clarify" if body.answer is not None else "approval"),
+                "kind": body.kind or ("clarify" if (body.answer is not None or body.answers is not None) else "approval"),
             },
             ttl_seconds=s.event_stream_ttl_seconds,
             max_len=s.stream_max_len,

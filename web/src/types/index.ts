@@ -303,12 +303,42 @@ export interface AgentStatus {
   detail?: unknown;
 }
 
+export interface ClarifyQuestionItem {
+  id: string;
+  question: string;
+  options: string[];
+  multiple: boolean;
+  allow_custom: boolean;
+  placeholder?: string | null;
+}
+
+export interface ClarifyDetail {
+  question?: string | null;
+  options?: string[];
+  multiple?: boolean;
+  questions?: ClarifyQuestionItem[];
+}
+
+export interface ClarifyAnswerItem {
+  id?: string | null;
+  question?: string | null;
+  selected: string[];
+  text: string;
+}
+
+export interface ClarifySubmitPayload {
+  answer: string;
+  answers?: ClarifyAnswerItem[];
+}
+
 export interface PendingControl {
   kind: "approval" | "clarify";
   request_id: string | null;
   execution_generation: number | null;
   tool?: string | null;
   preview?: string | null;
+  detail?: Record<string, any> | null;
+  clarify?: ClarifyDetail | null;
 }
 
 export interface SkillItem {

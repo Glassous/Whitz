@@ -43,6 +43,7 @@ const TOOL_LABELS: Record<string, string> = {
   rag_search_workspace: "检索工作区",
   memory_search: "检索长期记忆",
   memory_propose: "提议写入记忆",
+  clarify: "向用户澄清",
   execute_code: "沙盒代码执行",
   delegate_subtask: "子智能体协作",
   request_deep_thinking: "开启深度思考",
@@ -183,6 +184,10 @@ function toolSummary(tool: ReasoningTool): string {
   if (tool.name === "skill_view") {
     const args = parseArgs(tool.args);
     return typeof args?.name === "string" ? args.name : "";
+  }
+  if (tool.name === "clarify") {
+    const args = parseArgs(tool.args);
+    return typeof args?.question === "string" ? args.question : "";
   }
   const args = stripWrapper(tool.args);
   return (args || stripWrapper(tool.result)).split("\n")[0]?.slice(0, 80) ?? "";

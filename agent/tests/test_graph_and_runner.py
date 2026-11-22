@@ -207,6 +207,109 @@ async def test_execute_and_resume_clarify_and_subagent(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_clarify_multi_questions_and_subquestion_options_fallback(monkeypatch):
+    from app.graph.builder import _normalize_clarify_args
+
+    # 1. Explicit multi-question payload normalization
+    norm_multi = _normalize_clarify_args(
+        {
+            "question": "请补充以下迁移信息：",
+            "questions": [
+                {"id": "storage", "question": "目前使用的是哪家对象存储？", "options": ["阿里云 OSS", "AWS S3"]},
+                {"id": "scale", "question": "数据量和文件数大约多少？"},
+            ],
+        }
+    )
+    assert norm_multi["question"] == "请补充以下迁移信息："
+    assert len(norm_multi["questions"]) == 2
+    assert norm_multi["questions"][0]["options"] == ["阿里云 OSS", "AWS S3"]
+    assert norm_multi["questions"][1]["options"] == []
+
+    # 2. Legacy fallback: numbered sub-questions mistakenly placed in `options`
+    norm_fallback = _normalize_clarify_args(
+        {
+            "question": "为了给出可落地的迁移方案，请补充几个关键信息：",
+            "options": [
+                "1. 现有项目用什么对象存储，数据量多大？",
+                "2. 外网访问和带宽情况如何？",
+            ],
+        }
+    )
+    assert norm_fallback["options"] == []
+    assert len(norm_fallback["questions"]) == 2
+    assert norm_fallback["questions"][0]["question"].startswith("1. 现有项目")
+    assert norm_fallback["questions"][1]["question"].startswith("2. 外网访问")
+
+    # 3. End-to-end interrupt + structured answers resume
+    redis = FakeRedis()
+    checkpointer = InMemorySaver()
+    scripted = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_clarify_multi",
+                        "name": "clarify",
+                        "args": {
+                            "question": "为了给出可落地的迁移方案，请补充几个关键信息：",
+                            "options": [
+                                "1. 现有项目用什么对象存储，数据量多大？",
+                                "2. 是否需要公网访问？",
+                            ],
+                        },
+                    }
+                ],
+            ),
+            AIMessage(content="收到，已根据你提供的阿里云 OSS（2TB）和内网访问需求制定迁移方案。"),
+        ]
+    )
+    fake_router = FakeRouter(scripted)
+    monkeypatch.setattr(runner, "ModelRouter", lambda *a, **kw: fake_router)
+
+    run_id = uuid.uuid4().hex
+    meta1 = await runner.execute_run(
+        run_id,
+        {
+            "thread_id": "thread-clarify-multi",
+            "conversation_id": str(uuid.uuid4()),
+            "user_id": str(uuid.uuid4()),
+            "input": "能不能用家用NAS替代对象存储并将现有项目迁移",
+            "memory_enabled": False,
+        },
+        redis=redis,
+        checkpointer=checkpointer,
+        settings=AgentSettings(internal_mcp_base_url=""),
+    )
+    assert meta1["status"] == "waiting_for_clarify"
+    ctl = meta1["pending_controls"][0]
+    assert len(ctl["detail"]["questions"]) == 2
+    assert ctl["detail"]["options"] == []
+
+    answers = [
+        {"id": "q1", "question": "1. 现有项目用什么对象存储，数据量多大？", "selected": [], "text": "阿里云 OSS，约 2TB"},
+        {"id": "q2", "question": "2. 是否需要公网访问？", "selected": [], "text": "仅内网"},
+    ]
+    meta2 = await runner.resume_run(
+        run_id,
+        {"answer": "1. 阿里云 OSS，约 2TB\n2. 仅内网", "answers": answers},
+        redis=redis,
+        checkpointer=checkpointer,
+        settings=AgentSettings(internal_mcp_base_url=""),
+    )
+    assert meta2["status"] == "completed"
+    completed_tools = [
+        json.loads(fields["data"])
+        for _, fields in redis.streams[runner.events_key(run_id)]
+        if fields["event"] == "tool.completed"
+    ]
+    assert completed_tools
+    parsed_result = json.loads(completed_tools[-1]["result"])
+    assert "阿里云 OSS" in parsed_result["answer"]
+    assert len(parsed_result["answers"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_pre_cancelled_run_emits_run_cancelled():
     redis = FakeRedis()
     run_id = uuid.uuid4().hex

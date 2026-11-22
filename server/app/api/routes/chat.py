@@ -462,6 +462,7 @@ async def clarify(
     if not conv.active_run_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "没有进行中的任务")
     run_id = conv.active_run_id
+    answers_payload = [a.model_dump() for a in body.answers] if body.answers else None
     client = await _client_for(user)
     try:
         result = await client.resume_run(
@@ -470,6 +471,7 @@ async def clarify(
             request_id=body.request_id,
             execution_generation=body.execution_generation,
             answer=body.answer,
+            answers=answers_payload,
         )
     except AgentError as exc:
         raise HTTPException(exc.status_code, exc.detail)
@@ -488,12 +490,6 @@ async def clarify(
     ).scalars().first()
     if assistant is not None and assistant.status == "waiting":
         assistant.status = "streaming"
-    if body.choice == "deny":
-        await db.execute(
-            update(RunTelemetry)
-            .where(RunTelemetry.run_id == run_id)
-            .values(hitl_denied_count=RunTelemetry.hitl_denied_count + 1)
-        )
     await db.commit()
     await realtime_bus.publish_user_event(
         user.id,
@@ -510,7 +506,14 @@ async def clarify(
             "pending_control": None,
         },
     )
-    await audit.record("chat.clarify", actor=user, target_type="conversation", target_id=conv.id, request=request)
+    await audit.record(
+        "chat.clarify",
+        actor=user,
+        target_type="conversation",
+        target_id=conv.id,
+        request=request,
+        metadata={"answer_count": len(answers_payload) if answers_payload else 1},
+    )
     return result
 
 

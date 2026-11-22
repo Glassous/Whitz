@@ -894,15 +894,46 @@ fun ApprovalCard(
     }
 }
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun ClarifyCard(
     control: PendingControl,
     submitting: Boolean = false,
-    onSubmit: (String) -> Unit,
+    onSubmit: (com.glassous.whitz.core.model.ClarifySubmitPayload) -> Unit,
 ) {
     val colors = LocalWhitzColors.current
-    var answer by remember(control.requestId) { mutableStateOf("") }
+    val questions = remember(control.requestId, control.executionGeneration, control.clarify, control.preview) {
+        val list = control.clarify?.questions.orEmpty()
+        if (list.isNotEmpty()) list
+        else listOf(
+            com.glassous.whitz.core.model.ClarifyQuestionItem(
+                id = "q1",
+                question = control.clarify?.question ?: control.preview ?: "请补充更多信息以便继续。",
+                options = control.clarify?.options.orEmpty(),
+                multiple = control.clarify?.multiple ?: false,
+                allowCustom = true,
+            ),
+        )
+    }
+    val isMulti = questions.size > 1
+    val introText = remember(control.clarify, control.preview, questions) {
+        if (!isMulti) ""
+        else {
+            val raw = (control.clarify?.question ?: control.preview).orEmpty().trim()
+            if (raw.isBlank() || raw == questions.firstOrNull()?.question) "" else raw
+        }
+    }
+    val selectedMap = remember(control.requestId, control.executionGeneration) {
+        androidx.compose.runtime.mutableStateMapOf<String, List<String>>()
+    }
+    val textMap = remember(control.requestId, control.executionGeneration) {
+        androidx.compose.runtime.mutableStateMapOf<String, String>()
+    }
+    val answeredCount = questions.count { q ->
+        !selectedMap[q.id].isNullOrEmpty() || !textMap[q.id].isNullOrBlank()
+    }
+    val canSubmit = !submitting && answeredCount > 0
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -910,26 +941,144 @@ fun ClarifyCard(
         border = BorderStroke(1.dp, colors.lineStrong),
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            Text("需要补充信息", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = colors.fg)
-            if (!control.preview.isNullOrBlank()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("助理需要你澄清", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = colors.fg)
+                if (isMulti) {
+                    Text(
+                        "已答 $answeredCount / ${questions.size}",
+                        fontSize = 11.5.sp,
+                        color = colors.fgMuted,
+                    )
+                }
+            }
+            if (introText.isNotBlank()) {
                 Spacer(modifier = Modifier.height(6.dp))
-                Text(control.preview, fontSize = 13.sp, color = colors.fgMuted)
+                Text(introText, fontSize = 13.sp, color = colors.fgMuted)
             }
             Spacer(modifier = Modifier.height(10.dp))
-            WhitzTextField(
-                value = answer,
-                onValueChange = { answer = it },
-                placeholder = "输入你的回答...",
-                enabled = !submitting,
-                singleLine = false,
-                maxLines = 4,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 320.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                questions.forEachIndexed { idx, q ->
+                    val currentSelected = selectedMap[q.id].orEmpty()
+                    val currentText = textMap[q.id].orEmpty()
+                    val title = if (isMulti && !Regex("^\\s*\\d+[.、)）]\\s*").containsMatchIn(q.question)) {
+                        "${idx + 1}. ${q.question}"
+                    } else {
+                        q.question
+                    }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .then(
+                                if (isMulti) {
+                                    Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(colors.canvas.copy(alpha = 0.6f))
+                                        .padding(10.dp)
+                                } else {
+                                    Modifier
+                                }
+                            ),
+                    ) {
+                        Text(title, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = colors.fg)
+                        if (q.options.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                q.options.forEach { opt ->
+                                    val selected = opt in currentSelected
+                                    val accentColor = MaterialTheme.colorScheme.primary
+                                    val accentBg = MaterialTheme.colorScheme.primaryContainer
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (selected) accentBg else colors.canvas,
+                                        border = BorderStroke(1.dp, if (selected) accentColor else colors.line),
+                                        modifier = Modifier.clickable(enabled = !submitting) {
+                                            selectedMap[q.id] = if (q.multiple) {
+                                                if (selected) currentSelected - opt else currentSelected + opt
+                                            } else {
+                                                if (selected) emptyList() else listOf(opt)
+                                            }
+                                        },
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            if (selected) {
+                                                Icon(
+                                                    Icons.Default.Check,
+                                                    contentDescription = null,
+                                                    tint = accentColor,
+                                                    modifier = Modifier.size(14.dp),
+                                                )
+                                            }
+                                            Text(
+                                                opt,
+                                                fontSize = 12.5.sp,
+                                                color = if (selected) accentColor else colors.fgMuted,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (q.allowCustom || q.options.isEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            WhitzTextField(
+                                value = currentText,
+                                onValueChange = { textMap[q.id] = it },
+                                placeholder = q.placeholder
+                                    ?: if (q.options.isNotEmpty()) "补充说明或填写其他答案（可选）..." else "输入你的回答...",
+                                enabled = !submitting,
+                                singleLine = false,
+                                maxLines = if (isMulti) 3 else 4,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            }
             Spacer(modifier = Modifier.height(10.dp))
             Button(
-                onClick = { onSubmit(answer) },
+                onClick = {
+                    val answers = questions.map { q ->
+                        com.glassous.whitz.core.model.ClarifyAnswerItem(
+                            id = q.id,
+                            question = q.question,
+                            selected = selectedMap[q.id].orEmpty(),
+                            text = textMap[q.id].orEmpty().trim(),
+                        )
+                    }
+                    val formatted = questions.mapIndexedNotNull { idx, q ->
+                        val sel = selectedMap[q.id].orEmpty()
+                        val txt = textMap[q.id].orEmpty().trim()
+                        if (sel.isEmpty() && txt.isBlank()) return@mapIndexedNotNull null
+                        val combined = when {
+                            sel.isNotEmpty() && txt.isNotBlank() -> "${sel.joinToString("、")}（$txt）"
+                            sel.isNotEmpty() -> sel.joinToString("、")
+                            else -> txt
+                        }
+                        if (isMulti) "${idx + 1}. ${q.question}\n答：$combined" else combined
+                    }.joinToString("\n\n").trim()
+                    if (formatted.isNotBlank()) {
+                        onSubmit(com.glassous.whitz.core.model.ClarifySubmitPayload(formatted, answers))
+                    }
+                },
                 shapes = ButtonDefaults.shapesFor(36.dp),
-                enabled = answer.isNotBlank() && !submitting,
+                enabled = canSubmit,
                 modifier = Modifier.align(Alignment.End),
             ) {
                 Text(if (submitting) "提交中…" else "提交")

@@ -4,6 +4,9 @@ import { api } from "../api/client";
 import { chatTicketHeaders } from "../api/chatTickets";
 import { streamSSE, streamSSEGet, type SSEEvent } from "../api/sse";
 import type {
+  ClarifyDetail,
+  ClarifyQuestionItem,
+  ClarifySubmitPayload,
   ConversationDetail,
   ConversationFile,
   MemoryOverview,
@@ -66,7 +69,11 @@ export const useChatStore = defineStore("chat", () => {
 
   const runningTool = computed(() => {
     const row = messages.value.findLast((m) => m.role === "tool" && m.status === "running");
-    return row?.tool_name ?? null;
+    if (!row?.tool_name) return null;
+    if (pendingControl.value && (pendingControl.value.tool === row.tool_name || row.tool_name === "clarify" || row.tool_name === "execute_code")) {
+      return null;
+    }
+    return row.tool_name;
   });
 
   function findMessage(id: string | null): Message | undefined {
@@ -201,18 +208,118 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
+  function looksLikeSubquestions(items: string[]): boolean {
+    if (items.length < 2) return false;
+    const qMarks = items.filter((item) => item.includes("?") || item.includes("？")).length;
+    if (qMarks >= Math.max(2, Math.ceil(items.length / 2))) return true;
+    const numbered = items.filter((item) => /^\s*\d+[.、)）]\s*/.test(item)).length;
+    const longItems = items.filter((item) => item.length >= 24).length;
+    return numbered >= 2 && longItems >= 2;
+  }
+
+  function normalizeClarifyDetail(raw: Record<string, any>): ClarifyDetail {
+    const det = raw.detail && typeof raw.detail === "object" ? (raw.detail as Record<string, any>) : raw;
+    const previewObj = raw.preview && typeof raw.preview === "object" ? (raw.preview as Record<string, any>) : null;
+    const rawTopQuestion =
+      (typeof det.question === "string" && det.question.trim()) ||
+      (typeof raw.question === "string" && raw.question.trim()) ||
+      (previewObj && typeof previewObj.question === "string" && previewObj.question.trim()) ||
+      (typeof raw.preview === "string" && raw.preview.trim()) ||
+      "";
+    const topMultiple = Boolean(det.multiple ?? raw.multiple);
+    const rawOptsSource = Array.isArray(det.options)
+      ? det.options
+      : Array.isArray(raw.options)
+        ? raw.options
+        : previewObj && Array.isArray(previewObj.options)
+          ? previewObj.options
+          : [];
+    let topOptions = rawOptsSource.map((o: unknown) => String(o ?? "").trim()).filter(Boolean);
+
+    const rawQuestionsSource = Array.isArray(det.questions)
+      ? det.questions
+      : Array.isArray(raw.questions)
+        ? raw.questions
+        : previewObj && Array.isArray(previewObj.questions)
+          ? previewObj.questions
+          : [];
+
+    const questions: ClarifyQuestionItem[] = [];
+    if (rawQuestionsSource.length > 0) {
+      rawQuestionsSource.forEach((item: any, idx: number) => {
+        if (item && typeof item === "object") {
+          const qText = String(item.question ?? item.title ?? item.prompt ?? "").trim();
+          if (!qText) return;
+          const opts = Array.isArray(item.options)
+            ? item.options.map((o: unknown) => String(o ?? "").trim()).filter(Boolean)
+            : [];
+          questions.push({
+            id: String(item.id || `q${idx + 1}`),
+            question: qText,
+            options: opts,
+            multiple: Boolean(item.multiple),
+            allow_custom: item.allow_custom !== false,
+            placeholder: typeof item.placeholder === "string" && item.placeholder.trim() ? item.placeholder.trim() : null,
+          });
+        } else if (typeof item === "string" && item.trim()) {
+          questions.push({
+            id: `q${idx + 1}`,
+            question: item.trim(),
+            options: [],
+            multiple: false,
+            allow_custom: true,
+            placeholder: null,
+          });
+        }
+      });
+    } else if (topOptions.length > 0 && looksLikeSubquestions(topOptions)) {
+      topOptions.forEach((text: string, idx: number) => {
+        questions.push({
+          id: `q${idx + 1}`,
+          question: text,
+          options: [],
+          multiple: false,
+          allow_custom: true,
+          placeholder: null,
+        });
+      });
+      topOptions = [];
+    }
+
+    if (questions.length === 0) {
+      questions.push({
+        id: "q1",
+        question: rawTopQuestion || "请补充更多信息以便继续。",
+        options: topOptions,
+        multiple: topMultiple,
+        allow_custom: det.allow_custom !== false,
+        placeholder: null,
+      });
+    }
+
+    return {
+      question: rawTopQuestion || (questions.length === 1 ? questions[0].question : "请补充以下信息以便继续："),
+      options: topOptions,
+      multiple: topMultiple,
+      questions,
+    };
+  }
+
   function hydratePendingControl(raw: any) {
     if (!raw || typeof raw !== "object") {
       pendingControl.value = null;
       return;
     }
     const kind = raw.kind === "approval" || raw.tool === "execute_code" ? "approval" : "clarify";
+    const detail = raw.detail && typeof raw.detail === "object" ? (raw.detail as Record<string, any>) : null;
     pendingControl.value = {
       kind,
       request_id: raw.request_id ?? raw.prompt_id ?? null,
       execution_generation: raw.execution_generation ?? null,
       tool: raw.tool,
       preview: formatControlPreview(raw),
+      detail,
+      clarify: kind === "clarify" ? normalizeClarifyDetail(raw) : null,
     };
   }
 
@@ -636,13 +743,7 @@ export const useChatStore = defineStore("chat", () => {
         { const a = assistant(); if (a) a.status = "waiting"; }
         break;
       case "clarify.request":
-        pendingControl.value = {
-          kind: "clarify",
-          request_id: d.request_id ?? null,
-          execution_generation: d.execution_generation ?? null,
-          tool: d.tool,
-          preview: formatControlPreview(d),
-        };
+        hydratePendingControl({ ...d, kind: "clarify" });
         { const a = assistant(); if (a) a.status = "waiting"; }
         break;
       case "workspace.file_created": {
@@ -1148,9 +1249,10 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
-  async function clarify(answer: string): Promise<boolean> {
+  async function clarify(payload: string | ClarifySubmitPayload): Promise<boolean> {
     const targetConvId = convId.value;
     if (!targetConvId || !pendingControl.value || submittingClarify.value) return false;
+    const body = typeof payload === "string" ? { answer: payload } : payload;
     const c = pendingControl.value;
     submittingClarify.value = true;
     try {
@@ -1160,7 +1262,8 @@ export const useChatStore = defineStore("chat", () => {
         {
           request_id: c.request_id,
           execution_generation: c.execution_generation,
-          answer,
+          answer: body.answer,
+          ...(body.answers?.length ? { answers: body.answers } : {}),
         },
         { headers },
       );

@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
+from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 
@@ -734,14 +735,45 @@ async def skill_view(
     return json.dumps({"error": f"未找到已启用的技能: {target}"}, ensure_ascii=False)
 
 
+class ClarifyQuestionItem(BaseModel):
+    id: str | None = Field(default=None, description="问题唯一标识，如 storage_type")
+    question: str = Field(description="要向用户确认的具体问题")
+    options: list[str] | None = Field(
+        default=None,
+        description="该问题的可选预设答案列表（仅放候选答案，不要放子问题）",
+    )
+    multiple: bool = Field(default=False, description="是否允许多选")
+    allow_custom: bool = Field(default=True, description="是否允许用户输入自定义文本补充")
+    placeholder: str | None = Field(default=None, description="输入框占位提示")
+
+
 @tool
 async def clarify(
-    question: str,
+    question: str = "",
     options: list[str] | None = None,
+    multiple: bool = False,
+    questions: list[ClarifyQuestionItem] | None = None,
 ) -> str:
-    """当需求存在关键歧义、缺少必要参数或需要用户做重要取舍时，暂停执行并向用户发起澄清追问。"""
+    """当需求存在关键歧义、缺少必要参数或需要用户做重要取舍时，暂停执行并向用户发起澄清追问。
+
+    使用规范：
+    - 单个问题：填写 `question`；如有预设候选答案，填写 `options`（仅放答案选项，不要把子问题放进 `options`）；可按需设置 `multiple=True` 支持多选。
+    - 多个问题：使用 `questions` 列表逐项列出每个问题及其可选的 `options`，`question` 可填写简要总引导语。
+    """
     # Handled inside hitl_gate node via LangGraph interrupt().
-    return json.dumps({"question": question, "options": options or []}, ensure_ascii=False)
+    serialized_questions = [
+        q.model_dump(exclude_none=True) if isinstance(q, BaseModel) else q
+        for q in (questions or [])
+    ]
+    return json.dumps(
+        {
+            "question": question,
+            "options": options or [],
+            "multiple": multiple,
+            "questions": serialized_questions,
+        },
+        ensure_ascii=False,
+    )
 
 
 @tool

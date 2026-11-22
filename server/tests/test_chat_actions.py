@@ -588,3 +588,105 @@ async def test_agent_status_and_topology_endpoints(register, client, monkeypatch
     assert topo.status_code == 200
     assert topo.json()["entry"] == "context_loader"
     assert len(topo.json()["nodes"]) == 2
+
+
+async def test_clarify_endpoint_single_and_multi_answers(register, client, db, monkeypatch):
+    reg = await register(email="clarify@test.local", display_name="ClarifyUser")
+    headers = auth_header(reg["access_token"])
+
+    conv_resp = await client.post("/api/conversations", json={"title": "澄清测试"}, headers=headers)
+    assert conv_resp.status_code in (200, 201)
+    conv_id = conv_resp.json()["id"]
+
+    conv = await db.get(Conversation, uuid.UUID(conv_id))
+    assistant_msg = Message(
+        conversation_id=conv.id,
+        role="assistant",
+        content="",
+        status="waiting",
+        run_id="run-clarify-1",
+    )
+    db.add(assistant_msg)
+    conv.active_run_id = "run-clarify-1"
+    conv.active_run_status = "waiting_for_clarify"
+    conv.pending_control = {
+        "kind": "clarify",
+        "request_id": "call_clarify_1",
+        "execution_generation": 1,
+        "tool": "clarify",
+        "preview": "请补充以下信息：",
+        "detail": {
+            "question": "请补充以下信息：",
+            "questions": [
+                {"id": "q1", "question": "目前使用什么对象存储？", "options": ["阿里云 OSS", "MinIO"]},
+                {"id": "q2", "question": "总数据量多大？", "options": []},
+            ],
+        },
+    }
+    await db.commit()
+
+    resume_calls: list[dict] = []
+
+    class MockClarifyAgent:
+        def __init__(self, namespace: str | None = None, api_key: str | None = None) -> None:
+            pass
+
+        async def resume_run(self, run_id: str, **kwargs) -> dict:
+            resume_calls.append({"run_id": run_id, **kwargs})
+            return {"id": run_id, "run_id": run_id, "status": "running"}
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr(chat_routes, "AgentClient", MockClarifyAgent)
+
+    async def _clarify_headers() -> dict[str, str]:
+        nonce = uuid.uuid4().hex[:16]
+        t_resp = await client.post(
+            f"/api/conversations/{conv_id}/tickets",
+            json={"action": "clarify", "nonce": nonce},
+            headers=headers,
+        )
+        assert t_resp.status_code == 200, t_resp.text
+        return {
+            **headers,
+            chat_tickets.TICKET_HEADER: t_resp.json()["ticket"],
+            chat_tickets.NONCE_HEADER: nonce,
+        }
+
+    # 1. Legacy single answer string must succeed without AttributeError
+    r1 = await client.post(
+        f"/api/conversations/{conv_id}/clarify",
+        json={"request_id": "call_clarify_1", "execution_generation": 1, "answer": "阿里云 OSS，约 2TB"},
+        headers=await _clarify_headers(),
+    )
+    assert r1.status_code == 200, r1.text
+    assert resume_calls[-1]["kind"] == "clarify"
+    assert resume_calls[-1]["answer"] == "阿里云 OSS，约 2TB"
+
+    await db.refresh(conv)
+    await db.refresh(assistant_msg)
+    assert conv.pending_control is None
+    assert conv.active_run_status == "running"
+    assert assistant_msg.status == "streaming"
+
+    # 2. Structured multi-question `answers` without explicit `answer` auto-formats summary
+    conv.active_run_status = "waiting_for_clarify"
+    assistant_msg.status = "waiting"
+    await db.commit()
+    r2 = await client.post(
+        f"/api/conversations/{conv_id}/clarify",
+        json={
+            "request_id": "call_clarify_1",
+            "execution_generation": 2,
+            "answers": [
+                {"id": "q1", "question": "目前使用什么对象存储？", "selected": ["阿里云 OSS"], "text": "标准存储"},
+                {"id": "q2", "question": "总数据量多大？", "selected": [], "text": "约 2TB"},
+            ],
+        },
+        headers=await _clarify_headers(),
+    )
+    assert r2.status_code == 200, r2.text
+    assert "阿里云 OSS" in resume_calls[-1]["answer"]
+    assert "约 2TB" in resume_calls[-1]["answer"]
+    assert len(resume_calls[-1]["answers"]) == 2

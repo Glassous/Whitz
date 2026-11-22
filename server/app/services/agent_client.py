@@ -223,6 +223,7 @@ class AgentClient:
         execution_generation: int | None = None,
         choice: str | None = None,
         answer: str | None = None,
+        answers: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"kind": kind}
         if request_id is not None:
@@ -233,6 +234,8 @@ class AgentClient:
             payload["choice"] = choice
         if answer is not None:
             payload["answer"] = answer
+        if answers is not None:
+            payload["answers"] = answers
         return (await self._request("POST", f"/v1/runs/{run_id}/resume", json=payload)).json()
 
     async def cancel_run(self, run_id: str) -> dict[str, Any]:

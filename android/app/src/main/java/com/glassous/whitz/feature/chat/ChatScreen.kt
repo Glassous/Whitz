@@ -1126,7 +1126,7 @@ fun ChatScreen(
                                     ClarifyCard(
                                         control = ctrl,
                                         submitting = ui.submittingClarify,
-                                        onSubmit = { vm.clarifyControl(it) },
+                                        onSubmit = { vm.clarifyControl(it.answer, it.answers) },
                                     )
                                 }
                             }

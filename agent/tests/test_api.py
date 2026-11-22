@@ -87,6 +87,25 @@ async def test_control_api_auth_runs_resume_cancel_events_and_delete():
             assert resumed.status_code == 200
             assert arq.jobs[-1][0] == "resume_run_job"
 
+            # Clarify resume with structured multi-question answers
+            meta = await load_run_meta(redis, run_id)
+            meta["status"] = "waiting_for_clarify"
+            meta["execution_generation"] = 2
+            await save_run_meta(redis, run_id, meta)
+            clarified = await client.post(
+                f"/v1/runs/{run_id}/resume",
+                json={
+                    "kind": "clarify",
+                    "execution_generation": 2,
+                    "answer": "1. 阿里云 OSS",
+                    "answers": [{"id": "q1", "question": "存储类型", "selected": ["阿里云 OSS"], "text": ""}],
+                },
+                headers=headers,
+            )
+            assert clarified.status_code == 200
+            assert arq.jobs[-1][0] == "resume_run_job"
+            assert arq.jobs[-1][1][1]["answers"][0]["selected"] == ["阿里云 OSS"]
+
             # Publish events & test SSE stream with Last-Event-ID
             id1 = await publish_event(redis, run_id, "run.started", {"run_id": run_id})
             await publish_event(redis, run_id, "message.delta", {"text": "Hi"})
