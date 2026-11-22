@@ -225,7 +225,7 @@ class WhitzCoreTests {
         assertEquals("a1", details.turnId)
         assertEquals("web_search", details.runningTool)
         assertEquals(1, computeStepsCount(details.plan, details.reasoning))
-        assertEquals("正在使用 web_search", computeLiveStepLabel(null, details.runningTool, details.plan))
+        assertEquals("正在使用 联网搜索", computeLiveStepLabel(null, details.runningTool, details.plan))
 
         val sections = partitionPlanSteps(
             plan = Plan(items = listOf(PlanItem(id = JsonPrimitive("s1"), content = "搜索资料", status = "in_progress"))),

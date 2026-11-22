@@ -1,21 +1,25 @@
 package com.glassous.whitz.core.network
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.DisposableHandle
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSource
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 data class SseEvent(
@@ -121,46 +125,69 @@ class SseClient(
             client
         }
 
-        var call = callClient.newCall(buildRequest())
-        var response = call.execute()
+        val parentJob = currentCoroutineContext()[Job]
+        var cancelHandle: DisposableHandle? = null
 
-        if (response.code == 401) {
-            response.close()
-            val refreshed = authManager.refreshOnce()
-            if (refreshed == RefreshResult.OK) {
-                call = callClient.newCall(buildRequest())
-                response = call.execute()
-            } else {
-                authManager.forceLogout(LogoutReason.EXPIRED)
-                throw ApiException(401, "登录已过期，请重新登录")
-            }
-        }
-
-        response.use { resp ->
-            if (!resp.isSuccessful) {
-                val errBody = resp.body?.string()
-                throw ApiException(resp.code, parseApiErrorBody(errBody, resp.message.ifBlank { "请求失败" }))
-            }
-            val source: BufferedSource = resp.body?.source()
-                ?: throw ApiException(resp.code, "空响应体")
-
-            val blockLines = mutableListOf<String>()
-            while (currentCoroutineContext().isActive) {
-                val line = source.readUtf8Line() ?: break
-                if (line.isEmpty()) {
-                    if (blockLines.isNotEmpty()) {
-                        val ev = SseParser.parseBlock(blockLines.joinToString("\n"))
-                        blockLines.clear()
-                        if (ev != null) emit(ev)
-                    }
-                } else {
-                    blockLines.add(line)
+        fun startCall(): Call {
+            cancelHandle?.dispose()
+            val nextCall = callClient.newCall(buildRequest())
+            cancelHandle = parentJob?.invokeOnCompletion { cause ->
+                if (cause != null) {
+                    nextCall.cancel()
                 }
             }
-            if (blockLines.isNotEmpty()) {
-                val ev = SseParser.parseBlock(blockLines.joinToString("\n"))
-                if (ev != null) emit(ev)
+            return nextCall
+        }
+
+        try {
+            var call = startCall()
+            var response = call.execute()
+
+            if (response.code == 401) {
+                response.close()
+                val refreshed = authManager.refreshOnce()
+                if (refreshed == RefreshResult.OK) {
+                    call = startCall()
+                    response = call.execute()
+                } else {
+                    authManager.forceLogout(LogoutReason.EXPIRED)
+                    throw ApiException(401, "登录已过期，请重新登录")
+                }
             }
+
+            response.use { resp ->
+                if (!resp.isSuccessful) {
+                    val errBody = resp.body?.string()
+                    throw ApiException(resp.code, parseApiErrorBody(errBody, resp.message.ifBlank { "请求失败" }))
+                }
+                val source: BufferedSource = resp.body?.source()
+                    ?: throw ApiException(resp.code, "空响应体")
+
+                val blockLines = mutableListOf<String>()
+                while (currentCoroutineContext().isActive) {
+                    val line = source.readUtf8Line() ?: break
+                    if (line.isEmpty()) {
+                        if (blockLines.isNotEmpty()) {
+                            val ev = SseParser.parseBlock(blockLines.joinToString("\n"))
+                            blockLines.clear()
+                            if (ev != null) emit(ev)
+                        }
+                    } else {
+                        blockLines.add(line)
+                    }
+                }
+                if (currentCoroutineContext().isActive && blockLines.isNotEmpty()) {
+                    val ev = SseParser.parseBlock(blockLines.joinToString("\n"))
+                    if (ev != null) emit(ev)
+                }
+            }
+        } catch (io: IOException) {
+            if (!currentCoroutineContext().isActive) {
+                throw CancellationException("SSE stream cancelled", io)
+            }
+            throw io
+        } finally {
+            cancelHandle?.dispose()
         }
     }.flowOn(Dispatchers.IO)
 }

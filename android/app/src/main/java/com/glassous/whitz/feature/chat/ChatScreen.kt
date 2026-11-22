@@ -117,6 +117,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -135,6 +136,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
@@ -411,6 +413,7 @@ fun ChatScreen(
     var deleteTarget by remember { mutableStateOf<Conversation?>(null) }
     var bottomOverlayHeightPx by remember { mutableIntStateOf(0) }
     var bottomBlurHeightPx by remember { mutableIntStateOf(0) }
+    var chatAreaHeightPx by remember { mutableIntStateOf(0) }
     var stageCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var chatAreaCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var composerRowCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
@@ -497,6 +500,11 @@ fun ChatScreen(
     }
 
     val visibleMessages = remember(ui.messages) { filterVisibleMessages(ui.messages) }
+    val activeAssistantHasContent = remember(visibleMessages, ui.activeAssistantId) {
+        val asstId = ui.activeAssistantId
+        if (asstId == null) false
+        else visibleMessages.lastOrNull { it.id == asstId }?.content?.isNotBlank() == true
+    }
     val runningToolName = remember(ui.messages, ui.streaming) {
         if (ui.streaming) computeRunningTool(ui.messages) else null
     }
@@ -511,6 +519,8 @@ fun ChatScreen(
         ui.stopping,
         ui.reconnecting,
         ui.waitingFirstByte,
+        ui.pendingControl,
+        activeAssistantHasContent,
     ) {
         if (ui.streaming) {
             computeLiveStepLabel(
@@ -520,6 +530,8 @@ fun ChatScreen(
                 stopping = ui.stopping,
                 reconnecting = ui.reconnecting,
                 waitingFirstByte = ui.waitingFirstByte,
+                pendingControlKind = ui.pendingControl?.kind,
+                hasContent = activeAssistantHasContent,
             )
         } else null
     }
@@ -541,42 +553,70 @@ fun ChatScreen(
         )
     }
 
-    // Top of the newest message must clear the floating header (status bar + button/avatar row),
-    // otherwise the first line of that message is hidden behind the floating header.
-    val revealTopOffsetPx = with(density) {
-        (WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + if (ui.isMainChat) 130.dp else 68.dp).roundToPx()
-    }
-    var revealedConversationKey by rememberSaveable { mutableStateOf<String?>(null) }
-    var lastScrolledMsgCount by rememberSaveable { mutableIntStateOf(0) }
-    var lastScrolledLastLen by rememberSaveable { mutableIntStateOf(0) }
-    var isInitialEffect by remember { mutableStateOf(true) }
+    val statusTopDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val navBottomDp = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val composerOverlayDp = with(density) { bottomOverlayHeightPx.toDp() }
+    val listTopPadding = statusTopDp + if (ui.isMainChat) 130.dp else 68.dp
+    val listBottomPadding = (if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottomDp) + 16.dp
+    val listTopPaddingPx = with(density) { listTopPadding.roundToPx() }
+    val listBottomPaddingPx = with(density) { listBottomPadding.roundToPx() }
+    val viewportUsableHeightPx = (chatAreaHeightPx - listTopPaddingPx - listBottomPaddingPx).coerceAtLeast(0)
+    val locateBreathingPx = with(density) { 12.dp.roundToPx() }
 
-    val lastMsgContentLen = visibleMessages.lastOrNull()?.content?.length ?: 0
-    LaunchedEffect(conversationScrollKey, visibleMessages.size, lastMsgContentLen) {
+    val latestUserIndex = remember(visibleMessages) {
+        visibleMessages.indexOfLast { it.role == "user" }
+    }
+    val latestUserKey = remember(visibleMessages, latestUserIndex, ui.stableKeys) {
+        visibleMessages.getOrNull(latestUserIndex)?.let { ui.stableKeys[it.id] ?: it.id }
+    }
+
+    val scrollController = rememberChatScrollController(
+        listState = listState,
+        conversationKey = conversationScrollKey,
+        streaming = ui.streaming,
+        hasMessages = visibleMessages.isNotEmpty(),
+        latestUserKey = latestUserKey,
+        viewportUsableHeightPx = viewportUsableHeightPx,
+        bottomOverlayHeightPx = bottomOverlayHeightPx,
+    )
+
+    var revealedConversationKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var handledTurnTriggerSeq by rememberSaveable { mutableLongStateOf(ui.latestTurnTriggerSeq) }
+    val haptic = LocalHapticFeedback.current
+
+    // Initial jump to bottom when entering a conversation; returning from Settings/TaskDetails
+    // preserves the user's exact scroll position.
+    LaunchedEffect(conversationScrollKey, visibleMessages.isNotEmpty()) {
         if (visibleMessages.isEmpty()) {
             revealedConversationKey = null
-            lastScrolledMsgCount = 0
-            lastScrolledLastLen = 0
-            isInitialEffect = false
+            scrollController.resetForConversation()
             return@LaunchedEffect
         }
-        val lastIndex = visibleMessages.lastIndex
-        // Entering a new conversation jumps straight to the top of the newest message.
-        // Returning from another page (steps or settings) preserves the reader's current scroll position.
         if (revealedConversationKey != conversationScrollKey) {
             revealedConversationKey = conversationScrollKey
-            lastScrolledMsgCount = visibleMessages.size
-            lastScrolledLastLen = lastMsgContentLen
-            isInitialEffect = false
-            listState.scrollToItem(lastIndex, scrollOffset = -revealTopOffsetPx)
-        } else if (isInitialEffect) {
-            lastScrolledMsgCount = visibleMessages.size
-            lastScrolledLastLen = lastMsgContentLen
-            isInitialEffect = false
-        } else if (visibleMessages.size != lastScrolledMsgCount || lastMsgContentLen != lastScrolledLastLen) {
-            lastScrolledMsgCount = visibleMessages.size
-            lastScrolledLastLen = lastMsgContentLen
-            listState.animateScrollToItem(lastIndex, scrollOffset = -revealTopOffsetPx)
+            handledTurnTriggerSeq = ui.latestTurnTriggerSeq
+            scrollController.resetForConversation()
+            scrollController.jumpToBottomImmediate(totalItemsCount = visibleMessages.size + 1)
+        }
+    }
+
+    // Explicit user turn start (send / regenerate / edit-resend): anchor the new user prompt
+    // below the floating header with a monotonic turn-reveal spacer and enable smooth auto-follow.
+    LaunchedEffect(ui.latestTurnTriggerSeq) {
+        val seq = ui.latestTurnTriggerSeq
+        if (seq > 0L && seq != handledTurnTriggerSeq) {
+            handledTurnTriggerSeq = seq
+            revealedConversationKey = conversationScrollKey
+            if (visibleMessages.isNotEmpty()) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                scrollController.onNewTurnStarted(
+                    latestUserIndex = latestUserIndex,
+                    latestUserKey = latestUserKey,
+                    viewportUsableHeightPx = viewportUsableHeightPx,
+                    hasPreviousMessages = latestUserIndex > 0,
+                    totalItemsCount = visibleMessages.size + 1,
+                )
+            }
         }
     }
 
@@ -584,7 +624,7 @@ fun ChatScreen(
         val idx = visibleMessages.indexOfFirst { it.id == msgId }
         if (idx >= 0) {
             scope.launch {
-                listState.animateScrollToItem(idx, scrollOffset = -revealTopOffsetPx)
+                scrollController.locateMessage(idx, locateBreathingPx)
             }
         }
     }
@@ -595,7 +635,7 @@ fun ChatScreen(
         val idx = visibleMessages.indexOfFirst { it.id == targetId }
         if (idx >= 0) {
             mainPanelOpen = false
-            listState.animateScrollToItem(idx, scrollOffset = -revealTopOffsetPx)
+            scrollController.locateMessage(idx, locateBreathingPx)
             highlightedMessageId = targetId
             vm.consumePendingFocusMessage()
             delay(2200)
@@ -687,14 +727,12 @@ fun ChatScreen(
                             .fillMaxSize()
                             .onGloballyPositioned { coords ->
                                 chatAreaCoords = coords
+                                chatAreaHeightPx = coords.size.height
                                 refreshBottomBlurHeight()
                             },
                     ) {
-                        val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-                        val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-                        val composerOverlayDp = with(density) { bottomOverlayHeightPx.toDp() }
-                        val listTopPadding = statusTop + if (ui.isMainChat) 130.dp else 68.dp
-                    val listBottomPadding = (if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottom) + 16.dp
+                        val statusTop = statusTopDp
+                        val navBottom = navBottomDp
 
                     // 1. Messages or Empty State (also the blur source for the floating header)
                     Box(
@@ -749,7 +787,10 @@ fun ChatScreen(
                             key(conversationScrollKey) {
                                 LazyColumn(
                                     state = listState,
-                                    modifier = Modifier.fillMaxSize(),
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .nestedScroll(scrollController.nestedScrollConnection)
+                                        .then(scrollController.touchObserverModifier),
                                     contentPadding = PaddingValues(
                                         start = if (isExpandedScreen) 32.dp else 16.dp,
                                         end = if (isExpandedScreen) 32.dp else 16.dp,
@@ -758,11 +799,21 @@ fun ChatScreen(
                                     ),
                                     verticalArrangement = Arrangement.spacedBy(16.dp),
                                 ) {
-                                    items(visibleMessages, key = { it.id }) { msg ->
+                                    items(
+                                        items = visibleMessages,
+                                        key = { ui.stableKeys[it.id] ?: it.id },
+                                    ) { msg ->
+                                        val isActiveStreamingItem = ui.streaming && msg.id == ui.activeAssistantId
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .animateItem(fadeOutSpec = null),
+                                                .then(
+                                                    if (isActiveStreamingItem) {
+                                                        Modifier
+                                                    } else {
+                                                        Modifier.animateItem(fadeOutSpec = null)
+                                                    },
+                                                ),
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             Box(modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth()) {
@@ -780,6 +831,7 @@ fun ChatScreen(
                                                     isSelectingText = msg.id == selectingTextMessageId,
                                                     showDislikeReasons = msg.id == dislikeReasonMessageId,
                                                     liveLabel = if (msg.id == ui.activeAssistantId && ui.streaming) liveStepLabel else null,
+                                                    pendingControl = if (msg.id == ui.activeAssistantId) ui.pendingControl else null,
                                                     turnPlan = if (isSelected) resolvedTurn.plan else null,
                                                     turnReasoning = if (isSelected) resolvedTurn.reasoning else null,
                                                     convFiles = ui.files,
@@ -825,6 +877,15 @@ fun ChatScreen(
                                                 )
                                             }
                                         }
+                                    }
+
+                                    item(key = CHAT_BOTTOM_ANCHOR_KEY) {
+                                        val spacerDp = with(density) { scrollController.turnRevealSpacerPx.toDp() }
+                                        Spacer(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(spacerDp + 1.dp),
+                                        )
                                     }
                                 }
                             }
@@ -1776,6 +1837,21 @@ fun ChatScreen(
                                 }
                             }
                         }
+
+                    ScrollToBottomButton(
+                        visible = visibleMessages.isNotEmpty() &&
+                            scrollController.showJumpToBottom &&
+                            !mainPanelOpen &&
+                            !plusMenuExpanded,
+                        streaming = ui.streaming,
+                        hazeState = headerHazeState,
+                        onClick = { scrollController.jumpToBottomAnimated() },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(
+                                bottom = (if (composerOverlayDp > 0.dp) composerOverlayDp else 108.dp + navBottom) + 10.dp,
+                            ),
+                    )
 
                     SnackbarHost(
                         hostState = snackbarHostState,

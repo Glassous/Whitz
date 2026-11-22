@@ -130,6 +130,8 @@ data class ChatUiState(
     val currentConvTitle: String = "主聊",
     val isNewSideDraft: Boolean = false,
     val messages: List<Message> = emptyList(),
+    val stableKeys: Map<String, String> = emptyMap(),
+    val latestTurnTriggerSeq: Long = 0L,
     val streaming: Boolean = false,
     val sendingMessage: Boolean = false,
     val waitingFirstByte: Boolean = false,
@@ -206,6 +208,64 @@ class ChatViewModel(
     private var openSeq = 0
     private var seq = 0
     private var initialLoaded = false
+
+    private val deltaCoalescer = StreamDeltaCoalescer(
+        scope = viewModelScope,
+        flushIntervalMs = 32L,
+        onFlush = ::applyCoalescedDeltaBatch,
+    )
+
+    private fun flushPendingDeltasNow() {
+        deltaCoalescer.flushNow()
+    }
+
+    private fun applyCoalescedDeltaBatch(batch: CoalescedDeltaBatch) {
+        if (batch.isEmpty) return
+        _ui.update { state ->
+            val asstId = state.activeAssistantId
+            var nextReasoning = state.reasoning
+            if (batch.reasoningDeltas.isNotEmpty()) {
+                val blocks = state.reasoning.toMutableList()
+                for (chunk in batch.reasoningDeltas) {
+                    val last = blocks.lastOrNull()
+                    if (last != null && last.step == chunk.step) {
+                        blocks[blocks.lastIndex] = last.copy(text = last.text + chunk.text)
+                    } else {
+                        blocks.add(ReasoningBlock(step = chunk.step, title = chunk.title, text = chunk.text))
+                    }
+                }
+                nextReasoning = blocks
+            }
+            val nextMsgs = if (asstId != null && (batch.contentDelta.isNotEmpty() || batch.reasoningDeltas.isNotEmpty())) {
+                state.messages.map { m ->
+                    if (m.id == asstId) {
+                        val updatedContent = if (batch.contentDelta.isNotEmpty()) {
+                            m.content + batch.contentDelta
+                        } else {
+                            m.content
+                        }
+                        val updatedPayload = if (batch.reasoningDeltas.isNotEmpty()) {
+                            (m.toolPayload ?: ToolPayload()).copy(
+                                reasoning = nextReasoning,
+                                plan = state.plan ?: m.toolPayload?.plan,
+                            )
+                        } else {
+                            m.toolPayload
+                        }
+                        m.copy(content = updatedContent, toolPayload = updatedPayload)
+                    } else {
+                        m
+                    }
+                }
+            } else {
+                state.messages
+            }
+            state.copy(
+                messages = nextMsgs,
+                reasoning = nextReasoning,
+            )
+        }
+    }
 
     private val activeStatusSet = setOf(
         "starting",
@@ -385,6 +445,7 @@ class ChatViewModel(
         pendingPollJob = null
         streamJob?.cancel()
         streamJob = null
+        deltaCoalescer.clear()
         pendingUserTargetId = null
         lastEventId = null
         _ui.update {
@@ -395,6 +456,7 @@ class ChatViewModel(
                 currentConvKind = "side",
                 currentConvTitle = "新旁聊",
                 messages = emptyList(),
+                stableKeys = emptyMap(),
                 streaming = false,
                 sendingMessage = false,
                 waitingFirstByte = false,
@@ -435,6 +497,7 @@ class ChatViewModel(
         pendingPollJob = null
         streamJob?.cancel()
         streamJob = null
+        deltaCoalescer.clear()
         _ui.update {
             it.copy(
                 isNewSideDraft = false,
@@ -475,6 +538,7 @@ class ChatViewModel(
         pendingPollJob = null
         streamJob?.cancel()
         streamJob = null
+        deltaCoalescer.clear()
         _ui.update {
             it.copy(
                 isNewSideDraft = false,
@@ -509,6 +573,7 @@ class ChatViewModel(
         pendingPollJob = null
         streamJob?.cancel()
         streamJob = null
+        deltaCoalescer.clear()
         lastEventId = null
         val lastReasoned = detail.messages.lastOrNull {
             it.role == "assistant" && !it.toolPayload?.reasoning.isNullOrEmpty()
@@ -525,6 +590,7 @@ class ChatViewModel(
                 switchingConversation = false,
                 showingCachedData = false,
                 messages = detail.messages,
+                stableKeys = emptyMap(),
                 plan = detail.plan,
                 reasoning = lastReasoned?.toolPayload?.reasoning ?: emptyList(),
                 selectedTurnId = lastAssistant?.id,
@@ -815,6 +881,7 @@ class ChatViewModel(
                 plan = null,
                 pendingControl = null,
                 messages = it.messages + userMsg + assistantMsg,
+                latestTurnTriggerSeq = it.latestTurnTriggerSeq + 1L,
                 activeAssistantId = assistantId,
                 selectedTurnId = assistantId,
                 streaming = true,
@@ -886,6 +953,7 @@ class ChatViewModel(
                 plan = null,
                 pendingControl = null,
                 messages = cutMessages + assistantMsg,
+                latestTurnTriggerSeq = it.latestTurnTriggerSeq + 1L,
                 activeAssistantId = assistantId,
                 selectedTurnId = assistantId,
                 streaming = true,
@@ -951,6 +1019,7 @@ class ChatViewModel(
                 plan = null,
                 pendingControl = null,
                 messages = state.messages.take(idx) + updatedUser + assistantMsg,
+                latestTurnTriggerSeq = it.latestTurnTriggerSeq + 1L,
                 activeAssistantId = assistantId,
                 selectedTurnId = assistantId,
                 streaming = true,
@@ -1148,6 +1217,7 @@ class ChatViewModel(
                 val cur = _ui.value
                 if (cur.currentConvId == convId && cur.stopping && cur.streaming) {
                     streamJob?.cancel()
+                    flushPendingDeltasNow()
                     _ui.update { st ->
                         st.copy(
                             messages = st.messages.map { m ->
@@ -1299,6 +1369,9 @@ class ChatViewModel(
         if (!ev.id.isNullOrBlank() && ev.id != "0-0") {
             lastEventId = ev.id
         }
+        if (ev.event != "message.delta" && ev.event != "reasoning.delta") {
+            flushPendingDeltasNow()
+        }
         if (ev.event !in setOf("run.started", "message.created", "run.reconnected")) {
             if (_ui.value.waitingFirstByte) {
                 _ui.update { it.copy(waitingFirstByte = false) }
@@ -1310,13 +1383,18 @@ class ChatViewModel(
                 val asstMsgId = d.str("assistant_message_id")
                 _ui.update { state ->
                     var updatedUser = false
+                    val nextStableKeys = state.stableKeys.toMutableMap()
                     val nextMsgs = state.messages.map { m ->
                         if (!updatedUser && userMsgId != null &&
                             (m.id.startsWith("temp-user") || (pendingUserTargetId != null && m.id == pendingUserTargetId))
                         ) {
                             updatedUser = true
+                            val stable = state.stableKeys[m.id] ?: m.id
+                            if (userMsgId != stable) nextStableKeys[userMsgId] = stable
                             m.copy(id = userMsgId)
                         } else if (asstMsgId != null && m.id == state.activeAssistantId) {
+                            val stable = state.stableKeys[m.id] ?: m.id
+                            if (asstMsgId != stable) nextStableKeys[asstMsgId] = stable
                             m.copy(id = asstMsgId)
                         } else {
                             m
@@ -1326,7 +1404,12 @@ class ChatViewModel(
                     val prevAsst = state.activeAssistantId
                     val nextAsst = asstMsgId ?: prevAsst
                     val nextSel = if (state.selectedTurnId == prevAsst) nextAsst else state.selectedTurnId
-                    state.copy(messages = nextMsgs, activeAssistantId = nextAsst, selectedTurnId = nextSel)
+                    state.copy(
+                        messages = nextMsgs,
+                        stableKeys = nextStableKeys,
+                        activeAssistantId = nextAsst,
+                        selectedTurnId = nextSel,
+                    )
                 }
             }
             "run.started" -> {
@@ -1408,8 +1491,10 @@ class ChatViewModel(
                         "running", "queued" -> "streaming"
                         else -> statusStr
                     }
-                    val nextMsgs = state.messages.map { m ->
+                    var matchedAsst = false
+                    val mappedMsgs = state.messages.map { m ->
                         if (m.id == nextAsst) {
+                            matchedAsst = true
                             val prevPayload = m.toolPayload ?: ToolPayload()
                             val mergedArtifacts = mergeById(prevPayload.artifacts ?: emptyList(), parsedArtifacts) { it.id }
                             m.copy(
@@ -1422,6 +1507,23 @@ class ChatViewModel(
                                 ),
                             )
                         } else m
+                    }
+                    val nextMsgs = if (!matchedAsst && !nextAsst.isNullOrBlank()) {
+                        mappedMsgs + Message(
+                            id = nextAsst,
+                            role = "assistant",
+                            content = output.orEmpty(),
+                            status = mappedStatus ?: "streaming",
+                            runId = runId ?: state.activeRunId,
+                            toolPayload = ToolPayload(
+                                reasoning = nextReasoning,
+                                plan = nextPlan,
+                                artifacts = parsedArtifacts.ifEmpty { null },
+                            ),
+                            createdAt = Instant.now().toString(),
+                        )
+                    } else {
+                        mappedMsgs
                     }
                     state.copy(
                         activeAssistantId = nextAsst,
@@ -1443,7 +1545,9 @@ class ChatViewModel(
                 val step = d.int("step")
                 val title = d.str("title") ?: ""
                 val delta = d.str("text") ?: ""
-                updateReasoningBlock(step, title) { it.copy(text = it.text + delta) }
+                if (delta.isNotEmpty()) {
+                    deltaCoalescer.appendReasoning(step, title, delta)
+                }
             }
             "reasoning.block" -> {
                 val step = d.int("step")
@@ -1466,14 +1570,8 @@ class ChatViewModel(
             }
             "message.delta" -> {
                 val delta = d.str("text") ?: ""
-                if (delta.isEmpty()) return
-                _ui.update { state ->
-                    val asstId = state.activeAssistantId
-                    state.copy(
-                        messages = state.messages.map {
-                            if (it.id == asstId) it.copy(content = it.content + delta) else it
-                        }
-                    )
+                if (delta.isNotEmpty()) {
+                    deltaCoalescer.appendContent(delta)
                 }
             }
             "commentary" -> {
@@ -1799,6 +1897,8 @@ class ChatViewModel(
     }
 
     private fun finishRun(markFailedIfStreaming: Boolean, errMsg: String?) {
+        flushPendingDeltasNow()
+        deltaCoalescer.clear()
         pendingUserTargetId = null
         lastEventId = null
         _ui.update { state ->
@@ -3062,6 +3162,7 @@ class ChatViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        deltaCoalescer.clear()
         pendingPollJob?.cancel()
         realtimeJob?.cancel()
         streamJob?.cancel()

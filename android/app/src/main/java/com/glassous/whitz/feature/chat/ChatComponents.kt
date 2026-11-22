@@ -1,12 +1,19 @@
 package com.glassous.whitz.feature.chat
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,6 +41,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -181,6 +192,7 @@ fun MessageBubble(
     isSelectingText: Boolean = false,
     showDislikeReasons: Boolean = false,
     liveLabel: String? = null,
+    pendingControl: PendingControl? = null,
     turnPlan: Plan? = null,
     turnReasoning: List<ReasoningBlock>? = null,
     convFiles: List<ConversationFile>,
@@ -548,6 +560,7 @@ fun MessageBubble(
             val effectiveReasoning = turnReasoning ?: message.toolPayload?.reasoning.orEmpty()
             val effectivePlan = turnPlan ?: message.toolPayload?.plan ?: derivePlanFromReasoning(effectiveReasoning)
             val isLive = isActiveTurn && streaming
+            val isWaitingControl = isLive && (message.status == "waiting" || pendingControl != null)
             val isFailureOrCancelled = !isLive && (message.status == "failed" || message.status == "cancelled")
             val stepsCount = computeStepsCount(effectivePlan, effectiveReasoning)
             val hasStepsOrReasoning = effectiveReasoning.isNotEmpty() || !effectivePlan?.items.isNullOrEmpty()
@@ -608,28 +621,50 @@ fun MessageBubble(
 
                 if (hasStepsOrReasoning || isLive) {
                     val primaryColor = MaterialTheme.colorScheme.primary
+                    val pillText = if (isLive) (liveLabel ?: "正在思考…") else "步骤查看"
                     Row(
                         modifier = Modifier
                             .padding(bottom = 10.dp)
                             .clip(RoundedCornerShape(999.dp))
-                            .background(if (isSelectedTurn) primaryColor.copy(alpha = 0.14f) else colors.surface)
+                            .background(
+                                when {
+                                    isWaitingControl -> colors.warningWeak
+                                    isSelectedTurn -> primaryColor.copy(alpha = 0.14f)
+                                    else -> colors.surface
+                                },
+                            )
                             .clickable { onOpenTurnDetails(message.id) }
                             .padding(horizontal = 13.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (isLive) {
-                            WhitzLoadingIndicator(size = 14.dp)
+                            WhitzLoadingIndicator(
+                                size = 14.dp,
+                                color = if (isWaitingControl) colors.warning else primaryColor,
+                            )
                             Spacer(modifier = Modifier.width(6.dp))
                         }
-                        Text(
-                            text = if (isLive) (liveLabel ?: "正在思考…") else "步骤查看",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = if (isSelectedTurn) primaryColor else colors.fgMuted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                        AnimatedContent(
+                            targetState = pillText,
+                            transitionSpec = {
+                                fadeIn(animationSpec = tween(160)) togetherWith fadeOut(animationSpec = tween(120))
+                            },
+                            label = "liveStepPillLabel",
                             modifier = Modifier.weight(1f, fill = false),
-                        )
+                        ) { label ->
+                            Text(
+                                text = label,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = when {
+                                    isWaitingControl -> colors.warning
+                                    isSelectedTurn -> primaryColor
+                                    else -> colors.fgMuted
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                         if (!isLive && stepsCount > 0) {
                             Text(
                                 text = " · $stepsCount",
@@ -642,17 +677,23 @@ fun MessageBubble(
                         Icon(
                             Icons.Default.ChevronRight,
                             contentDescription = null,
-                            tint = if (isSelectedTurn) primaryColor.copy(alpha = 0.8f) else colors.fgFaint,
+                            tint = when {
+                                isWaitingControl -> colors.warning.copy(alpha = 0.85f)
+                                isSelectedTurn -> primaryColor.copy(alpha = 0.8f)
+                                else -> colors.fgFaint
+                            },
                             modifier = Modifier.size(14.dp),
                         )
                     }
                 }
 
                 if (message.content.isNotBlank()) {
+                    val showLiveCursor = isLive && !isWaitingControl
                     if (isSelectingText) {
                         SelectionContainer {
                             MarkdownText(
                                 markdown = message.content,
+                                isStreaming = showLiveCursor,
                                 modifier = Modifier.fillMaxWidth(),
                                 onOpenDeliverable = onOpenDeliverable,
                             )
@@ -660,20 +701,35 @@ fun MessageBubble(
                     } else {
                         MarkdownText(
                             markdown = message.content,
+                            isStreaming = showLiveCursor,
                             modifier = Modifier.fillMaxWidth(),
                             onOpenDeliverable = onOpenDeliverable,
                         )
                     }
-                } else if (message.status == "streaming") {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
-                        WhitzLoadingIndicator(size = 16.dp)
-                        Spacer(modifier = Modifier.width(8.dp))
+                } else if (isLive || message.status == "streaming") {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    ) {
+                        StreamingTypingDots(
+                            color = if (isWaitingControl) colors.warning else MaterialTheme.colorScheme.primary,
+                        )
                         val statusText = when {
                             reconnecting -> "正在恢复实时输出…"
+                            isWaitingControl -> if (pendingControl?.kind == "approval") {
+                                "正在等待你的审批确认…"
+                            } else {
+                                "正在等待你的澄清回答，提交后将继续执行…"
+                            }
                             waitingFirstByte -> "助理已接收请求，正在准备回复…"
-                            else -> liveLabel ?: "正在组织回答…"
+                            else -> "正在组织回答…"
                         }
-                        Text(statusText, fontSize = 13.5.sp, color = colors.fgMuted)
+                        Text(
+                            text = statusText,
+                            fontSize = 13.5.sp,
+                            color = if (isWaitingControl) colors.warning else colors.fgFaint,
+                        )
                     }
                 } else if (message.status == "waiting") {
                     Text("等待你的确认...", fontSize = 13.5.sp, color = colors.warning)
@@ -1318,6 +1374,50 @@ fun SchedulePendingCard(
 }
 
 @Composable
+private fun StreamingTypingDots(
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    val transition = rememberInfiniteTransition(label = "streamingDots")
+    val dot1 by transition.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 560, delayMillis = 0),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dot1",
+    )
+    val dot2 by transition.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 560, delayMillis = 160),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dot2",
+    )
+    val dot3 by transition.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 560, delayMillis = 320),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dot3",
+    )
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(modifier = Modifier.size(5.dp).clip(CircleShape).background(color.copy(alpha = dot1)))
+        Box(modifier = Modifier.size(5.dp).clip(CircleShape).background(color.copy(alpha = dot2)))
+        Box(modifier = Modifier.size(5.dp).clip(CircleShape).background(color.copy(alpha = dot3)))
+    }
+}
+
+@Composable
 fun TaskStepsPane(
     plan: Plan?,
     reasoning: List<ReasoningBlock>,
@@ -1330,13 +1430,46 @@ fun TaskStepsPane(
     val colors = LocalWhitzColors.current
     val sections = remember(plan, reasoning) { partitionPlanSteps(plan, reasoning) }
     val toggledSteps = remember(turnKey) { mutableStateMapOf<String, Boolean>() }
+    val stepsListState = rememberLazyListState()
+    var followLiveSteps by remember(turnKey) { mutableStateOf(true) }
+
+    val stepsNestedScroll = remember(turnKey) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput) {
+                    if (ChatScrollPolicy.shouldDisengageOnUserPreScroll(available.y)) {
+                        followLiveSteps = false
+                    } else if (ChatScrollPolicy.isUserScrollingDown(available.y) && !stepsListState.canScrollForward) {
+                        followLiveSteps = true
+                    }
+                }
+                return Offset.Zero
+            }
+        }
+    }
 
     LaunchedEffect(streaming) {
-        if (streaming) toggledSteps.clear()
+        if (streaming) {
+            toggledSteps.clear()
+            followLiveSteps = true
+        }
+    }
+
+    val liveReasoningSignature = remember(reasoning, runningTool, sections.doneCount) {
+        "${reasoning.size}:${reasoning.lastOrNull()?.text?.length ?: 0}:${reasoning.lastOrNull()?.tools?.size ?: 0}:${runningTool.orEmpty()}:${sections.doneCount}"
+    }
+    LaunchedEffect(streaming, liveReasoningSignature) {
+        if (streaming && followLiveSteps && !stepsListState.isScrollInProgress) {
+            val total = stepsListState.layoutInfo.totalItemsCount
+            if (total > 0 && stepsListState.canScrollForward) {
+                stepsListState.animateScrollToItem(total - 1)
+            }
+        }
     }
 
     LazyColumn(
-        modifier = modifier,
+        state = stepsListState,
+        modifier = modifier.nestedScroll(stepsNestedScroll),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = bottomPadding),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {

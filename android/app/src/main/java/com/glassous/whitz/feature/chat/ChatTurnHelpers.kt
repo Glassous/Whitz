@@ -185,6 +185,41 @@ fun computeStepsCount(plan: Plan?, reasoning: List<ReasoningBlock>): Int {
         .count()
 }
 
+enum class StreamingPhase {
+    CONNECTING,
+    RECONNECTING,
+    STOPPING,
+    WAITING_APPROVAL,
+    WAITING_CLARIFY,
+    RUNNING_STEP,
+    RUNNING_TOOL,
+    THINKING,
+    GENERATING,
+}
+
+fun resolveStreamingPhase(
+    currentStep: CurrentStepInfo?,
+    runningTool: String?,
+    plan: Plan?,
+    stopping: Boolean = false,
+    reconnecting: Boolean = false,
+    waitingFirstByte: Boolean = false,
+    pendingControlKind: String? = null,
+    hasContent: Boolean = false,
+): StreamingPhase = when {
+    stopping -> StreamingPhase.STOPPING
+    reconnecting -> StreamingPhase.RECONNECTING
+    pendingControlKind == "approval" -> StreamingPhase.WAITING_APPROVAL
+    pendingControlKind == "clarify" -> StreamingPhase.WAITING_CLARIFY
+    currentStep != null -> StreamingPhase.RUNNING_STEP
+    !runningTool.isNullOrBlank() -> StreamingPhase.RUNNING_TOOL
+    waitingFirstByte -> StreamingPhase.CONNECTING
+    hasContent -> StreamingPhase.GENERATING
+    plan?.items.orEmpty().let { it.isNotEmpty() && it.all { item -> item.status == "completed" } } ->
+        StreamingPhase.GENERATING
+    else -> StreamingPhase.THINKING
+}
+
 fun computeLiveStepLabel(
     currentStep: CurrentStepInfo?,
     runningTool: String?,
@@ -192,25 +227,38 @@ fun computeLiveStepLabel(
     stopping: Boolean = false,
     reconnecting: Boolean = false,
     waitingFirstByte: Boolean = false,
+    pendingControlKind: String? = null,
+    hasContent: Boolean = false,
 ): String {
-    if (stopping) return "正在停止生成…"
-    if (reconnecting) return "网络重连中，正在恢复进度…"
-    if (currentStep != null) {
-        return if (currentStep.title.isNotBlank()) {
-            "步骤 ${currentStep.index}/${currentStep.total} · ${currentStep.title}"
-        } else {
-            "步骤 ${currentStep.index}/${currentStep.total}"
+    return when (
+        resolveStreamingPhase(
+            currentStep = currentStep,
+            runningTool = runningTool,
+            plan = plan,
+            stopping = stopping,
+            reconnecting = reconnecting,
+            waitingFirstByte = waitingFirstByte,
+            pendingControlKind = pendingControlKind,
+            hasContent = hasContent,
+        )
+    ) {
+        StreamingPhase.STOPPING -> "正在停止生成…"
+        StreamingPhase.RECONNECTING -> "网络重连中，正在恢复进度…"
+        StreamingPhase.WAITING_APPROVAL -> "等待你的批准"
+        StreamingPhase.WAITING_CLARIFY -> "等待你补充信息"
+        StreamingPhase.RUNNING_STEP -> {
+            val step = currentStep!!
+            if (step.title.isNotBlank()) {
+                "步骤 ${step.index}/${step.total} · ${step.title}"
+            } else {
+                "步骤 ${step.index}/${step.total}"
+            }
         }
+        StreamingPhase.RUNNING_TOOL -> "正在使用 ${toolDisplayName(runningTool!!)}"
+        StreamingPhase.CONNECTING -> "正在连接助理…"
+        StreamingPhase.GENERATING -> "正在生成回答…"
+        StreamingPhase.THINKING -> "正在思考…"
     }
-    if (!runningTool.isNullOrBlank()) {
-        return "正在使用 $runningTool"
-    }
-    if (waitingFirstByte) return "正在连接助理…"
-    val items = plan?.items.orEmpty()
-    if (items.isNotEmpty() && items.all { it.status == "completed" }) {
-        return "正在生成回答…"
-    }
-    return "正在思考…"
 }
 
 fun planStatusLabel(status: String): String =
