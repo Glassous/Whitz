@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import type { WorkAttachment } from "@shared/work-types";
 import { useRuntimeStore } from "../stores/runtime";
@@ -10,6 +10,7 @@ import WorkComposer from "../components/work/WorkComposer.vue";
 import WorkInspectorPanel from "../components/work/WorkInspectorPanel.vue";
 import ApprovalSheet from "../components/work/ApprovalSheet.vue";
 import BaseButton from "@web/components/ui/BaseButton.vue";
+import ScrollToBottomButton from "@web/components/ui/ScrollToBottomButton.vue";
 
 const PANEL_WIDTH_STORAGE_KEY = "whitz_work_panel_width";
 const DEFAULT_PANEL_WIDTH = 360;
@@ -22,6 +23,9 @@ const work = useWorkStore();
 
 const composerRef = ref<InstanceType<typeof WorkComposer> | null>(null);
 const messageListRef = ref<InstanceType<typeof WorkMessageList> | null>(null);
+const bottomOverlayRef = ref<HTMLElement | null>(null);
+const bottomOverlayHeight = ref(0);
+let bottomOverlayObserver: ResizeObserver | null = null;
 
 const isDesktop = ref(typeof window !== "undefined" ? window.innerWidth >= 768 : true);
 const sidebarOpen = ref(false);
@@ -231,7 +235,27 @@ onMounted(async () => {
   }
 });
 
+watch(bottomOverlayRef, (el, prev) => {
+  if (prev && bottomOverlayObserver) bottomOverlayObserver.unobserve(prev);
+  if (el) {
+    bottomOverlayHeight.value = el.offsetHeight;
+    if (typeof ResizeObserver !== "undefined") {
+      if (!bottomOverlayObserver) {
+        bottomOverlayObserver = new ResizeObserver((entries) => {
+          const h = entries[0]?.borderBoxSize?.[0]?.blockSize ?? el.offsetHeight;
+          bottomOverlayHeight.value = Math.round(h);
+        });
+      }
+      bottomOverlayObserver.observe(el);
+    }
+  } else {
+    bottomOverlayHeight.value = 0;
+  }
+});
+
 onBeforeUnmount(() => {
+  bottomOverlayObserver?.disconnect();
+  bottomOverlayObserver = null;
   mediaQuery?.removeEventListener("change", onMediaChange);
 });
 </script>
@@ -342,6 +366,7 @@ onBeforeUnmount(() => {
           :streaming="work.streaming"
           :reverted-count="work.current?.reverted_count ?? 0"
           :project-name="currentProjectName"
+          :bottom-inset="bottomOverlayHeight"
           @open-file="work.openFilePreview"
           @revert="handleRevert"
           @unrevert="work.unrevert()"
@@ -349,10 +374,22 @@ onBeforeUnmount(() => {
           @steps="handleOpenSteps"
         />
 
-        <!-- Progressive Blur Bottom + Inline Approvals + Error + Composer (Aligned with ChatView.vue) -->
+        <!-- Progressive Blur Bottom + ScrollToBottom + Inline Approvals + Error + Composer -->
         <div class="progressive-blur-bottom pointer-events-none absolute inset-x-0 bottom-0 z-10 h-24 sm:h-28" />
         <div class="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-transparent px-3 pb-4 pt-2 sm:px-6 sm:pb-5">
-          <div class="pointer-events-auto mx-auto w-full max-w-4xl space-y-2.5">
+          <div class="mx-auto flex w-full max-w-4xl flex-col gap-2.5">
+            <div class="pointer-events-none flex justify-center">
+              <div class="pointer-events-auto">
+                <ScrollToBottomButton
+                  :visible="Boolean(work.messages.length && messageListRef?.showJumpToBottom)"
+                  :streaming="work.streaming"
+                  :scroll-container="messageListRef?.scrollContainer ?? null"
+                  @click="messageListRef?.jumpToBottom()"
+                />
+              </div>
+            </div>
+
+            <div ref="bottomOverlayRef" class="pointer-events-auto w-full space-y-2.5">
             <ApprovalSheet
               v-if="work.pendingControl"
               :kind="work.pendingControl.kind"
@@ -386,6 +423,7 @@ onBeforeUnmount(() => {
               @shell="handleShell"
               @update:prefs="work.setSessionPrefs"
             />
+            </div>
           </div>
         </div>
       </div>

@@ -6,7 +6,7 @@ import katex from "katex";
 
 import type { DeliverableTarget } from "../../types";
 
-const props = defineProps<{ content: string }>();
+const props = defineProps<{ content: string; streaming?: boolean }>();
 
 const emit = defineEmits<{
   "preview-html": [html: string];
@@ -14,6 +14,9 @@ const emit = defineEmits<{
 }>();
 
 const containerRef = ref<HTMLElement | null>(null);
+const renderedNodeHtml = new WeakMap<Element, string>();
+let pendingRenderTimer: number | null = null;
+let pendingRenderRaf: number | null = null;
 
 let domPurifyPromise: Promise<typeof import("dompurify").default> | undefined;
 let cachedDOMPurify: typeof import("dompurify").default | null = null;
@@ -507,6 +510,15 @@ async function renderSingleMermaidBlock(block: HTMLElement, seq: number, themeKe
   const errorEl = block.querySelector<HTMLElement>(".md-mermaid-error");
   if (!diagramEl || !errorEl) return;
 
+  if (block.dataset.streamingUnclosed === "true") {
+    block.dataset.state = "loading";
+    block.dataset.view = "diagram";
+    errorEl.textContent = "";
+    const loadingEl = diagramEl.querySelector<HTMLElement>(".md-mermaid-loading");
+    if (loadingEl) loadingEl.textContent = "正在生成图表代码…";
+    return;
+  }
+
   const idxNum = Number(block.dataset.mermaidIndex ?? "0");
   const preferredView = mermaidViewOverrides.get(idxNum) ?? "diagram";
   const toggleBtn = block.querySelector<HTMLButtonElement>(".md-mermaid-toggle");
@@ -520,11 +532,17 @@ async function renderSingleMermaidBlock(block: HTMLElement, seq: number, themeKe
   }
 
   const cacheKey = `${themeKey}:${source}`;
+  if (block.dataset.state === "ready" && block.dataset.mermaidKey === cacheKey) {
+    block.dataset.view = preferredView;
+    toggleBtn?.setAttribute("aria-pressed", String(preferredView === "source"));
+    return;
+  }
   const cached = mermaidSvgCache.get(cacheKey);
   if (cached) {
     diagramEl.innerHTML = cached;
     errorEl.textContent = "";
     block.dataset.state = "ready";
+    block.dataset.mermaidKey = cacheKey;
     block.dataset.view = preferredView;
     toggleBtn?.setAttribute("aria-pressed", String(preferredView === "source"));
     return;
@@ -553,6 +571,7 @@ async function renderSingleMermaidBlock(block: HTMLElement, seq: number, themeKe
     bindFunctions?.(diagramEl);
     errorEl.textContent = "";
     block.dataset.state = "ready";
+    block.dataset.mermaidKey = cacheKey;
     const resolvedView = mermaidViewOverrides.get(idxNum) ?? "diagram";
     block.dataset.view = resolvedView;
     toggleBtn?.setAttribute("aria-pressed", String(resolvedView === "source"));
@@ -641,23 +660,117 @@ function onContainerClick(event: MouseEvent) {
   }
 }
 
+function detectUnclosedTrailingFence(src: string): string | null {
+  let openLang: string | null = null;
+  for (const rawLine of src.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (trimmed.startsWith("```")) {
+      if (openLang === null) {
+        openLang = trimmed.slice(3).trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+      } else {
+        openLang = null;
+      }
+    }
+  }
+  return openLang;
+}
+
+function patchDirectChildren(liveEl: HTMLElement, nextEl: HTMLElement) {
+  const nextChildren = Array.from(nextEl.children);
+  for (let i = 0; i < nextChildren.length; i++) {
+    const nextChild = nextChildren[i];
+    const nextHtml = nextChild.outerHTML;
+    const liveChild = liveEl.children[i];
+    if (liveChild && renderedNodeHtml.get(liveChild) === nextHtml) {
+      continue;
+    }
+    const prevScrollLeft =
+      liveChild?.classList.contains("md-code-block")
+        ? (liveChild.querySelector<HTMLElement>(".md-code-pre")?.scrollLeft ?? 0)
+        : 0;
+    renderedNodeHtml.set(nextChild, nextHtml);
+    if (liveChild) {
+      liveEl.replaceChild(nextChild, liveChild);
+    } else {
+      liveEl.appendChild(nextChild);
+    }
+    if (prevScrollLeft > 0) {
+      const nextPre = nextChild.querySelector<HTMLElement>(".md-code-pre");
+      if (nextPre) nextPre.scrollLeft = prevScrollLeft;
+    }
+  }
+  while (liveEl.children.length > nextChildren.length) {
+    liveEl.lastElementChild?.remove();
+  }
+}
+
+function cancelScheduledRender() {
+  if (pendingRenderTimer !== null) {
+    window.clearTimeout(pendingRenderTimer);
+    pendingRenderTimer = null;
+  }
+  if (pendingRenderRaf !== null) {
+    window.cancelAnimationFrame(pendingRenderRaf);
+    pendingRenderRaf = null;
+  }
+}
+
 async function renderContent() {
   const el = containerRef.value;
   if (!el) return;
   const seq = ++renderSeq;
-  const rendered = md.render(props.content ?? "");
+  const raw = props.content ?? "";
+  const rendered = md.render(raw);
 
   const DOMPurify = cachedDOMPurify ?? (await loadDOMPurify());
   if (seq !== renderSeq || !containerRef.value) return;
 
-  el.innerHTML = DOMPurify.sanitize(rendered, DOMPURIFY_CONFIG);
+  const staging = document.createElement("div");
+  staging.innerHTML = DOMPurify.sanitize(rendered, DOMPURIFY_CONFIG);
 
-  for (const anchor of el.querySelectorAll("a")) {
+  for (const anchor of staging.querySelectorAll("a")) {
     anchor.setAttribute("target", "_blank");
     anchor.setAttribute("rel", "noopener noreferrer");
   }
 
+  if (props.streaming) {
+    const unclosedLang = detectUnclosedTrailingFence(raw);
+    if (unclosedLang !== null) {
+      const codeBlocks = staging.querySelectorAll<HTMLElement>(".md-code-block");
+      const lastCode = codeBlocks[codeBlocks.length - 1];
+      if (lastCode) {
+        if (unclosedLang === "mermaid" && lastCode.classList.contains("md-mermaid-block")) {
+          lastCode.dataset.streamingUnclosed = "true";
+        }
+        const langEl = lastCode.querySelector<HTMLElement>(".md-code-lang");
+        if (langEl && !langEl.querySelector(".md-code-streaming-badge")) {
+          const badge = document.createElement("span");
+          badge.className = "md-code-streaming-badge";
+          badge.innerHTML = '<span class="md-code-streaming-dot" aria-hidden="true"></span><span>生成中…</span>';
+          langEl.appendChild(badge);
+        }
+      }
+    }
+  }
+
+  patchDirectChildren(el, staging);
   await renderMermaidBlocks(el, seq);
+}
+
+function scheduleRender(immediate = false) {
+  if (immediate || !props.streaming) {
+    cancelScheduledRender();
+    void renderContent();
+    return;
+  }
+  if (pendingRenderTimer !== null || pendingRenderRaf !== null) return;
+  pendingRenderTimer = window.setTimeout(() => {
+    pendingRenderTimer = null;
+    pendingRenderRaf = window.requestAnimationFrame(() => {
+      pendingRenderRaf = null;
+      void renderContent();
+    });
+  }, 32);
 }
 
 watch(
@@ -666,7 +779,16 @@ watch(
     if (!prev || !next.startsWith(prev.slice(0, Math.min(24, prev.length)))) {
       mermaidViewOverrides.clear();
     }
-    void renderContent();
+    scheduleRender(!props.streaming);
+  },
+);
+
+watch(
+  () => props.streaming,
+  (nowStreaming, wasStreaming) => {
+    if (wasStreaming && !nowStreaming) {
+      scheduleRender(true);
+    }
   },
 );
 
@@ -689,6 +811,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  cancelScheduledRender();
   themeObserver?.disconnect();
   themeObserver = null;
   for (const timer of copyTimers.values()) {
@@ -699,5 +822,5 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="containerRef" class="markdown-body" @click="onContainerClick" />
+  <div ref="containerRef" class="markdown-body" :class="{ 'is-streaming': streaming }" @click="onContainerClick" />
 </template>

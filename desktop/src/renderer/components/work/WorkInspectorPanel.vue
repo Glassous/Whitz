@@ -4,11 +4,10 @@ import { useRouter } from "vue-router";
 import type { WorkTimelineItem } from "@shared/work-types";
 import { useRuntimeStore } from "../../stores/runtime";
 import { useWorkStore, type WorkInspectorTab } from "../../stores/work";
+import { useSmartStreamScroll } from "@web/composables/useSmartStreamScroll";
 import BaseButton from "@web/components/ui/BaseButton.vue";
 import WorkspaceTreeNode from "./WorkspaceTreeNode.vue";
 import WorkFilePreview from "./WorkFilePreview.vue";
-
-const NEAR_BOTTOM_PX = 120;
 
 const emit = defineEmits<{
   insertPath: [string];
@@ -22,8 +21,7 @@ const work = useWorkStore();
 const diffScope = ref<"session" | "git">("session");
 const selectedSessionDiffFile = ref<string | null>(null);
 const stepsScroller = ref<HTMLElement | null>(null);
-const stepsAutoFollow = ref(true);
-let stepsProgrammaticUntil = 0;
+const stepsScroll = useSmartStreamScroll(stepsScroller);
 
 const tabs: Array<{ key: WorkInspectorTab; label: string }> = [
   { key: "steps", label: "步骤" },
@@ -143,16 +141,6 @@ function switchTurn(delta: number) {
   work.selectedTurnId = assistantTurns.value[next].id;
 }
 
-function onStepsScroll() {
-  const el = stepsScroller.value;
-  if (!el || performance.now() < stepsProgrammaticUntil) return;
-  stepsAutoFollow.value = el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
-}
-
-function onStepsWheel(e: WheelEvent) {
-  if (e.deltaY < 0) stepsAutoFollow.value = false;
-}
-
 watch(
   () => {
     const last = selectedTimeline.value[selectedTimeline.value.length - 1];
@@ -164,16 +152,12 @@ watch(
       work.inspectorTab,
     ] as const;
   },
-  ([turnId, , , , tab], prev) => {
+  async ([turnId, , , , tab], prev) => {
     if (tab !== "steps") return;
-    if (prev && turnId !== prev[0]) stepsAutoFollow.value = true;
-    if (!stepsAutoFollow.value) return;
-    void nextTick(() => {
-      const el = stepsScroller.value;
-      if (!el || !stepsAutoFollow.value) return;
-      stepsProgrammaticUntil = performance.now() + 45;
-      el.scrollTop = el.scrollHeight;
-    });
+    if (prev && turnId !== prev[0]) stepsScroll.autoFollow.value = true;
+    if (!stepsScroll.autoFollow.value) return;
+    await nextTick();
+    stepsScroll.followBottomSmooth();
   },
   { flush: "post" },
 );
@@ -289,8 +273,6 @@ watch(
       v-if="work.inspectorTab === 'steps'"
       ref="stepsScroller"
       class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto custom-scrollbar p-3"
-      @scroll.passive="onStepsScroll"
-      @wheel.passive="onStepsWheel"
     >
       <!-- Turn switcher when conversation has multiple turns -->
       <div

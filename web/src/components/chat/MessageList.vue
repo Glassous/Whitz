@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from "vue";
 import type { ConversationFile, DeliverableTarget, Message } from "../../types";
+import { useChatStore } from "../../stores/chat";
+import { useSmartStreamScroll } from "../../composables/useSmartStreamScroll";
 import MessageBubble from "./MessageBubble.vue";
 
 const props = defineProps<{
   messages: Message[];
   focusMessageId?: string | null;
   downloadingFileId?: string | null;
+  bottomInset?: number;
 }>();
 const emit = defineEmits<{
   steps: [id: string];
@@ -21,16 +24,22 @@ const emit = defineEmits<{
 }>();
 
 const TOP_CLEARANCE = 88;
-const MIN_BOTTOM_GAP = 148;
+const DEFAULT_BOTTOM_GAP = 148;
 
+const chat = useChatStore();
 const container = ref<HTMLElement | null>(null);
 const wrapper = ref<HTMLElement | null>(null);
 const itemRefs = ref<(HTMLElement | null)[]>([]);
-const spacerHeight = ref(MIN_BOTTOM_GAP);
+const baseBottomGap = computed(() => Math.max(DEFAULT_BOTTOM_GAP, (props.bottomInset ?? 0) + 20));
+const extraTurnSpacer = ref(0);
 const highlightedId = ref<string | null>(null);
 
+let turnRevealActive = false;
+let turnRevealInitialized = false;
 let resizeObserver: ResizeObserver | null = null;
 let highlightTimer: number | null = null;
+
+const smartScroll = useSmartStreamScroll(container);
 
 const visibleMessages = computed(() => props.messages.filter((m) => m.role !== "tool"));
 
@@ -50,65 +59,71 @@ function setItemRef(index: number, el: HTMLElement | null) {
   itemRefs.value[index] = el;
 }
 
-function measureLatestTurn(): { el: HTMLElement; targetTop: number } | null {
+function measureTurnSpacer(): { el: HTMLElement; targetTop: number } | null {
   const el = container.value;
   const idx = latestTurnStartIndex.value;
   const startEl = idx >= 0 ? itemRefs.value[idx] : null;
   const lastEl = itemRefs.value[visibleMessages.value.length - 1];
   if (!el || !startEl || !lastEl) {
-    spacerHeight.value = MIN_BOTTOM_GAP;
+    extraTurnSpacer.value = 0;
+    turnRevealActive = false;
     return null;
   }
   const targetTop = startEl.offsetTop;
+  if (!turnRevealActive) {
+    return { el, targetTop };
+  }
   const contentBottom = lastEl.offsetTop + lastEl.offsetHeight;
   const latestTurnHeight = Math.max(0, contentBottom - targetTop);
-  const neededFromTarget = Math.max(0, el.clientHeight - TOP_CLEARANCE);
-  const nextSpacer = Math.max(MIN_BOTTOM_GAP, neededFromTarget - latestTurnHeight);
-  if (Math.abs(spacerHeight.value - nextSpacer) > 0.5) {
-    spacerHeight.value = nextSpacer;
+  const usableHeight = Math.max(0, el.clientHeight - TOP_CLEARANCE - baseBottomGap.value);
+  const needed = Math.max(0, usableHeight - latestTurnHeight);
+  const nextExtra = turnRevealInitialized ? Math.min(extraTurnSpacer.value, needed) : needed;
+  turnRevealInitialized = true;
+  if (Math.abs(extraTurnSpacer.value - nextExtra) > 0.5) {
+    extraTurnSpacer.value = nextExtra;
+  }
+  if (nextExtra <= 0.5) {
+    extraTurnSpacer.value = 0;
+    turnRevealActive = false;
   }
   return { el, targetTop };
 }
 
-function nearBottom(): boolean {
-  const el = container.value;
-  if (!el) return true;
-  return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-}
-
-function scrollToBottom() {
-  const el = container.value;
-  if (el) el.scrollTop = el.scrollHeight;
-}
-
 async function scrollToLatestTurnTop() {
+  turnRevealActive = latestTurnStartIndex.value > 0;
+  turnRevealInitialized = false;
+  smartScroll.autoFollow.value = true;
   await nextTick();
-  const measured = measureLatestTurn();
+  const measured = measureTurnSpacer();
   await nextTick();
   if (!measured) return;
-  measured.el.scrollTop = Math.max(0, measured.targetTop - TOP_CLEARANCE);
+  if (turnRevealActive) {
+    smartScroll.scrollToTopPosition(Math.max(0, measured.targetTop - TOP_CLEARANCE));
+  } else {
+    smartScroll.jumpToBottom("smooth");
+  }
 }
 
 async function scrollToMessage(id: string) {
-  await nextTick();
-  measureLatestTurn();
+  smartScroll.disengage();
+  turnRevealActive = false;
   await nextTick();
   const el = container.value;
   const idx = visibleMessages.value.findIndex((m) => m.id === id);
   const targetEl = idx >= 0 ? itemRefs.value[idx] : null;
   if (!el || !targetEl) {
-    await scrollToLatestTurnTop();
+    smartScroll.jumpToBottom("instant");
     return;
   }
-  const neededBelow = Math.max(0, el.clientHeight - TOP_CLEARANCE);
+  const usableHeight = Math.max(0, el.clientHeight - TOP_CLEARANCE - baseBottomGap.value);
   const lastEl = itemRefs.value[visibleMessages.value.length - 1];
   const contentFromTarget = lastEl ? Math.max(0, lastEl.offsetTop + lastEl.offsetHeight - targetEl.offsetTop) : 0;
-  const minSpacerForTarget = Math.max(MIN_BOTTOM_GAP, neededBelow - contentFromTarget);
-  if (minSpacerForTarget > spacerHeight.value) {
-    spacerHeight.value = minSpacerForTarget;
+  const neededExtra = Math.max(0, usableHeight - contentFromTarget);
+  if (neededExtra > extraTurnSpacer.value) {
+    extraTurnSpacer.value = neededExtra;
     await nextTick();
   }
-  el.scrollTop = Math.max(0, targetEl.offsetTop - TOP_CLEARANCE);
+  smartScroll.scrollToTopPosition(Math.max(0, targetEl.offsetTop - TOP_CLEARANCE));
   highlightedId.value = id;
   if (highlightTimer) window.clearTimeout(highlightTimer);
   highlightTimer = window.setTimeout(() => {
@@ -118,35 +133,63 @@ async function scrollToMessage(id: string) {
   emit("focus-handled");
 }
 
-const scrollSignature = () => {
+// Switch conversation -> reset turn spacer and land cleanly at bottom
+watch(
+  () => chat.convId,
+  async () => {
+    turnRevealActive = false;
+    turnRevealInitialized = false;
+    extraTurnSpacer.value = 0;
+    await nextTick();
+    if (!props.focusMessageId) {
+      smartScroll.jumpToBottom("instant");
+    }
+  },
+);
+
+// Explicit new turn (send / regenerate / edit-resend) -> Top-anchored turn reveal
+watch(
+  () => chat.latestTurnTriggerSeq,
+  async (seq) => {
+    if (seq > 0) {
+      await scrollToLatestTurnTop();
+    }
+  },
+);
+
+// Streaming growth -> monotonically shrink spacer, then smoothly follow bottom if user didn't scroll away
+const streamSignature = computed(() => {
   const last = visibleMessages.value[visibleMessages.value.length - 1];
   return `${visibleMessages.value.length}:${last?.content.length ?? 0}:${last?.status ?? ""}`;
-};
-
-let lastLength = visibleMessages.value.length;
+});
 
 watch(
-  scrollSignature,
+  streamSignature,
   async () => {
-    const currentLength = visibleMessages.value.length;
-    if (currentLength !== lastLength) {
-      lastLength = currentLength;
-      return;
+    await nextTick();
+    measureTurnSpacer();
+    await nextTick();
+    if (smartScroll.autoFollow.value) {
+      smartScroll.followBottomSmooth();
+    } else {
+      smartScroll.syncVisibility();
     }
-    const shouldFollow = nearBottom();
-    await nextTick();
-    measureLatestTurn();
-    await nextTick();
-    if (shouldFollow) scrollToBottom();
   },
   { flush: "post" },
 );
 
+// Bottom overlay height change (ApprovalCard / ClarifyCard / multi-line composer) -> keep bottom clear
 watch(
-  () => visibleMessages.value.length,
+  baseBottomGap,
   async () => {
-    await scrollToLatestTurnTop();
+    await nextTick();
+    if (smartScroll.autoFollow.value) {
+      smartScroll.followBottomSmooth();
+    } else {
+      smartScroll.syncVisibility();
+    }
   },
+  { flush: "post" },
 );
 
 watch(
@@ -160,11 +203,17 @@ onMounted(async () => {
   if (props.focusMessageId) {
     await scrollToMessage(props.focusMessageId);
   } else {
-    await scrollToLatestTurnTop();
+    await nextTick();
+    smartScroll.jumpToBottom("instant");
   }
   if (typeof ResizeObserver !== "undefined") {
     resizeObserver = new ResizeObserver(() => {
-      measureLatestTurn();
+      measureTurnSpacer();
+      if (smartScroll.autoFollow.value && !smartScroll.isUserInteracting.value) {
+        smartScroll.followBottomSmooth();
+      } else {
+        smartScroll.syncVisibility();
+      }
     });
     if (container.value) resizeObserver.observe(container.value);
     if (wrapper.value) resizeObserver.observe(wrapper.value);
@@ -176,14 +225,20 @@ onBeforeUnmount(() => {
   resizeObserver = null;
   if (highlightTimer) window.clearTimeout(highlightTimer);
 });
+
+defineExpose({
+  showJumpToBottom: smartScroll.showJumpToBottom,
+  jumpToBottom: () => smartScroll.jumpToBottom("smooth"),
+  scrollContainer: container,
+});
 </script>
 
 <template>
-  <div ref="container" v-scrollbar class="custom-scrollbar h-full overflow-y-auto">
+  <div ref="container" v-scrollbar tabindex="-1" class="custom-scrollbar h-full overflow-y-auto outline-none">
     <div ref="wrapper" class="relative mx-auto flex w-full max-w-4xl flex-col gap-5 px-4 pt-[88px] sm:px-6">
       <div
         v-for="(m, idx) in visibleMessages"
-        :key="m.id"
+        :key="chat.stableKeyOf(m.id)"
         :ref="(el) => setItemRef(idx, el as HTMLElement | null)"
         class="-mx-2 rounded-2xl px-2 py-1 transition-colors duration-700"
         :class="[
@@ -204,7 +259,11 @@ onBeforeUnmount(() => {
           @download-file="emit('download-file', $event)"
         />
       </div>
-      <div aria-hidden="true" class="shrink-0" :style="{ height: `${spacerHeight}px` }" />
+      <div
+        aria-hidden="true"
+        class="shrink-0"
+        :style="{ height: `${Math.round(baseBottomGap + extraTurnSpacer)}px` }"
+      />
     </div>
   </div>
 </template>

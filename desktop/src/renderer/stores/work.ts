@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { useCreditsStore } from "@web/stores/credits";
+import { createDeltaCoalescer, type DeltaCoalescer } from "@web/lib/streamDeltaCoalescer";
 import { useRuntimeStore } from "./runtime";
 import type {
   WorkActiveRunSnapshot,
@@ -123,8 +124,114 @@ export const useWorkStore = defineStore("work", () => {
   );
   const inspectorTab = ref<WorkInspectorTab>("steps");
   const selectedTurnId = ref<string | null>(null);
+  const stableKeys = ref<Record<string, string>>({});
+  const latestTurnTriggerSeq = ref(0);
 
   let started = false;
+
+  function stableKeyOf(id: string): string {
+    return stableKeys.value[id] ?? id;
+  }
+
+  type WorkDeltaChunk =
+    | { kind: "content"; messageId: string | null; text: string }
+    | { kind: "timeline"; messageId: string | null; itemId: string; itemKind: WorkTimelineItem["kind"]; title: string; delta: string };
+
+  interface WorkDeltaBatch {
+    contentByMsg: Map<string, string>;
+    timelineByKey: Map<string, { messageId: string | null; itemId: string; itemKind: WorkTimelineItem["kind"]; title: string; delta: string }>;
+  }
+
+  const coalescersByConv = new Map<string, DeltaCoalescer<WorkDeltaChunk>>();
+
+  function applyWorkDeltaBatch(conversationId: string, batch: WorkDeltaBatch) {
+    const run = runsByConversation.value[conversationId];
+    const detail = getDetailTarget(conversationId);
+    if (!run || !detail) return;
+
+    for (const [keyMsgId, text] of batch.contentByMsg.entries()) {
+      const targetId = keyMsgId || run.activeAssistantId;
+      const assistant = targetId ? detail.messages.find((m) => m.id === targetId) : undefined;
+      if (!assistant) continue;
+      // Only touch timeline if there is actually a running thinking entry to close
+      const rawTimeline = assistant.tool_payload?.timeline;
+      if (Array.isArray(rawTimeline) && rawTimeline.some((e) => (e as WorkTimelineItem).kind === "thinking" && (e as WorkTimelineItem).status === "running")) {
+        const list = ensureMessageTimeline(assistant);
+        for (const entry of list) {
+          if (entry.kind === "thinking" && entry.status === "running") {
+            entry.status = "completed";
+          }
+        }
+        saveMessageTimeline(assistant, list, run.plan);
+      }
+      assistant.content += text;
+    }
+
+    for (const entry of batch.timelineByKey.values()) {
+      const targetId = entry.messageId || run.activeAssistantId;
+      if (targetId) run.activeAssistantId = targetId;
+      const assistant = targetId ? detail.messages.find((m) => m.id === targetId) : undefined;
+      if (!assistant) continue;
+      const list = ensureMessageTimeline(assistant);
+      let item = list.find((it) => it.id === entry.itemId);
+      if (!item) {
+        item = {
+          id: entry.itemId,
+          kind: entry.itemKind,
+          title: entry.title,
+          text: entry.delta,
+          status: "running",
+        };
+        list.push(item);
+      } else {
+        item.text = `${item.text ?? ""}${entry.delta}`;
+        item.status = "running";
+      }
+      saveMessageTimeline(assistant, list, run.plan);
+    }
+  }
+
+  function getCoalescer(conversationId: string): DeltaCoalescer<WorkDeltaChunk> {
+    let c = coalescersByConv.get(conversationId);
+    if (!c) {
+      c = createDeltaCoalescer<WorkDeltaChunk, WorkDeltaBatch>({
+        intervalMs: 32,
+        createEmpty: () => ({ contentByMsg: new Map(), timelineByKey: new Map() }),
+        append: (batch, chunk) => {
+          if (chunk.kind === "content") {
+            const key = chunk.messageId ?? "";
+            batch.contentByMsg.set(key, (batch.contentByMsg.get(key) ?? "") + chunk.text);
+          } else {
+            const key = `${chunk.messageId ?? ""}::${chunk.itemId}`;
+            const existing = batch.timelineByKey.get(key);
+            if (existing) {
+              existing.delta += chunk.delta;
+            } else {
+              batch.timelineByKey.set(key, {
+                messageId: chunk.messageId,
+                itemId: chunk.itemId,
+                itemKind: chunk.itemKind,
+                title: chunk.title,
+                delta: chunk.delta,
+              });
+            }
+          }
+        },
+        isEmpty: (batch) => batch.contentByMsg.size === 0 && batch.timelineByKey.size === 0,
+        onFlush: (batch) => applyWorkDeltaBatch(conversationId, batch),
+      });
+      coalescersByConv.set(conversationId, c);
+    }
+    return c;
+  }
+
+  function flushDeltas(conversationId: string) {
+    coalescersByConv.get(conversationId)?.flushNow();
+  }
+
+  function clearDeltas(conversationId: string) {
+    coalescersByConv.get(conversationId)?.clear();
+  }
 
   const activeConversationId = computed(() => current.value?.conversation.id ?? null);
   const messages = computed<WorkMessage[]>(() => current.value?.messages ?? []);
@@ -565,6 +672,8 @@ export const useWorkStore = defineStore("work", () => {
   }
 
   async function remove(id: string) {
+    clearDeltas(id);
+    coalescersByConv.delete(id);
     await bridge().work.delete(id);
     delete detailCache.value[id];
     delete runsByConversation.value[id];
@@ -758,6 +867,7 @@ export const useWorkStore = defineStore("work", () => {
     run.sending = true;
     if (conversationId === activeConversationId.value) {
       selectedTurnId.value = assistantMessage.id;
+      latestTurnTriggerSeq.value += 1;
     }
     return { run, assistantMessage };
   }
@@ -859,6 +969,7 @@ export const useWorkStore = defineStore("work", () => {
   async function revert(messageId: string) {
     if (!current.value) return null;
     const id = current.value.conversation.id;
+    clearDeltas(id);
     const detail = await bridge().work.revert(id, messageId);
     detailCache.value[id] = detail;
     current.value = detail;
@@ -911,12 +1022,17 @@ export const useWorkStore = defineStore("work", () => {
       run_id: null,
       created_at: new Date().toISOString(),
     });
+    latestTurnTriggerSeq.value += 1;
   }
 
   function handleEvent(conversationId: string, event: WorkEvent) {
     const run = ensureRun(conversationId);
     const detail = getDetailTarget(conversationId);
     const data = event.data;
+
+    if (event.event !== "message.delta" && event.event !== "timeline.delta") {
+      flushDeltas(conversationId);
+    }
 
     switch (event.event) {
       case "message.created": {
@@ -940,10 +1056,16 @@ export const useWorkStore = defineStore("work", () => {
         }
         if (detail) {
           const tempUser = [...detail.messages].reverse().find((m) => m.role === "user" && m.id.startsWith("temp-"));
-          if (tempUser && typeof data.user_message_id === "string") tempUser.id = data.user_message_id;
+          if (tempUser && typeof data.user_message_id === "string") {
+            const stable = stableKeyOf(tempUser.id);
+            if (data.user_message_id !== stable) stableKeys.value[data.user_message_id] = stable;
+            tempUser.id = data.user_message_id;
+          }
           const prevAssistantId = run.activeAssistantId;
           const assistant = detail.messages.find((m) => m.id === prevAssistantId);
           if (assistant && typeof data.assistant_message_id === "string") {
+            const stable = stableKeyOf(assistant.id);
+            if (data.assistant_message_id !== stable) stableKeys.value[data.assistant_message_id] = stable;
             assistant.id = data.assistant_message_id;
             run.activeAssistantId = data.assistant_message_id;
             if (selectedTurnId.value === prevAssistantId) {
@@ -977,20 +1099,9 @@ export const useWorkStore = defineStore("work", () => {
       }
       case "message.delta": {
         const text = String(data.text ?? "");
+        if (!text) return;
         const targetId = typeof data.message_id === "string" ? data.message_id : run.activeAssistantId;
-        const assistant = targetId ? detail?.messages.find((m) => m.id === targetId) : undefined;
-        if (assistant) {
-          const list = ensureMessageTimeline(assistant);
-          let updated = false;
-          for (const entry of list) {
-            if (entry.kind === "thinking" && entry.status === "running") {
-              entry.status = "completed";
-              updated = true;
-            }
-          }
-          if (updated) saveMessageTimeline(assistant, list, run.plan);
-          assistant.content += text;
-        }
+        getCoalescer(conversationId).push({ kind: "content", messageId: targetId, text });
         return;
       }
       case "content.reset": {
@@ -1000,28 +1111,17 @@ export const useWorkStore = defineStore("work", () => {
         return;
       }
       case "timeline.delta": {
-        const targetId = typeof data.message_id === "string" ? data.message_id : run.activeAssistantId;
-        if (targetId) run.activeAssistantId = targetId;
-        const assistant = targetId ? detail?.messages.find((m) => m.id === targetId) : undefined;
-        if (!assistant) return;
-        const list = ensureMessageTimeline(assistant);
-        const itemId = String(data.id ?? "think");
         const delta = String(data.delta ?? "");
-        let item = list.find((entry) => entry.id === itemId);
-        if (!item) {
-          item = {
-            id: itemId,
-            kind: (data.kind as WorkTimelineItem["kind"]) || "thinking",
-            title: typeof data.title === "string" ? data.title : "深度思考",
-            text: delta,
-            status: "running",
-          };
-          list.push(item);
-        } else {
-          item.text = `${item.text ?? ""}${delta}`;
-          item.status = "running";
-        }
-        saveMessageTimeline(assistant, list, run.plan);
+        if (!delta) return;
+        const targetId = typeof data.message_id === "string" ? data.message_id : run.activeAssistantId;
+        getCoalescer(conversationId).push({
+          kind: "timeline",
+          messageId: targetId,
+          itemId: String(data.id ?? "think"),
+          itemKind: (data.kind as WorkTimelineItem["kind"]) || "thinking",
+          title: typeof data.title === "string" ? data.title : "深度思考",
+          delta,
+        });
         return;
       }
       case "timeline.item": {
@@ -1220,6 +1320,7 @@ export const useWorkStore = defineStore("work", () => {
 
   async function refreshConversation(conversationId: string) {
     try {
+      flushDeltas(conversationId);
       const detail = await bridge().work.get(conversationId);
       detailCache.value[conversationId] = detail;
       if (current.value?.conversation.id === conversationId) {
@@ -1268,6 +1369,9 @@ export const useWorkStore = defineStore("work", () => {
   }
 
   function reset() {
+    for (const c of coalescersByConv.values()) c.clear();
+    coalescersByConv.clear();
+    stableKeys.value = {};
     current.value = null;
     conversations.value = [];
     detailCache.value = {};
@@ -1280,6 +1384,9 @@ export const useWorkStore = defineStore("work", () => {
     conversations,
     current,
     messages,
+    stableKeys,
+    stableKeyOf,
+    latestTurnTriggerSeq,
     streaming,
     sending,
     error,

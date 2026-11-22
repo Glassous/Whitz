@@ -227,6 +227,41 @@ const isFailureOrCancelled = computed(
   () => !isLive.value && (props.message.status === "failed" || props.message.status === "cancelled"),
 );
 
+const TOOL_LABELS: Record<string, string> = {
+  todo_list: "更新任务清单",
+  tool_search: "检索工具",
+  tool_describe: "查看工具说明",
+  skill_view: "查看技能",
+  web_search: "联网搜索",
+  web_extract: "读取网页",
+  memory: "记忆",
+  skill: "技能",
+  rag_search_workspace: "检索工作区",
+  memory_search: "检索长期记忆",
+  memory_propose: "提议写入记忆",
+  execute_code: "沙盒代码执行",
+  delegate_subtask: "子智能体协作",
+  request_deep_thinking: "开启深度思考",
+  list_workspace_files: "查看工作区文件",
+  read_workspace_file: "读取工作区文件",
+  search_workspace_files: "检索工作区文件",
+  write_workspace_file: "写入工作区文件",
+  edit_workspace_file: "编辑工作区文件",
+  list_user_skills: "查看可用技能",
+  preview_github_skill: "预览 GitHub 技能",
+  install_github_skill: "安装 GitHub 技能",
+  create_user_skill: "创建自定义技能",
+  mcp__whitz_files__list_workspace_files: "查看工作区文件",
+  mcp__whitz_files__read_workspace_file: "读取工作区文件",
+  mcp__whitz_files__search_workspace_files: "检索工作区文件",
+  mcp__whitz_files__write_workspace_file: "写入工作区文件",
+  mcp__whitz_files__edit_workspace_file: "编辑工作区文件",
+  mcp__whitz_skills__list_user_skills: "查看可用技能",
+  mcp__whitz_skills__preview_github_skill: "预览 GitHub 技能",
+  mcp__whitz_skills__install_github_skill: "安装 GitHub 技能",
+  mcp__whitz_skills__create_user_skill: "创建自定义技能",
+};
+
 const liveLabel = computed(() => {
   if (chat.stopping) return "正在停止生成…";
   if (chat.reconnecting) return "网络重连中，正在恢复进度…";
@@ -237,8 +272,9 @@ const liveLabel = computed(() => {
     const step = chat.currentStep;
     return step.title ? `步骤 ${step.index}/${step.total} · ${step.title}` : `步骤 ${step.index}/${step.total}`;
   }
-  if (chat.runningTool) return `正在使用 ${chat.runningTool}`;
+  if (chat.runningTool) return `正在使用 ${TOOL_LABELS[chat.runningTool] ?? chat.runningTool}`;
   if (chat.waitingFirstByte) return "正在连接助理…";
+  if (props.message.content.trim()) return "正在生成回答…";
   const items = chat.plan?.items ?? [];
   if (items.length && items.every((item) => item.status === "completed")) return "正在生成回答…";
   return "正在思考…";
@@ -719,6 +755,7 @@ const resolvedArtifacts = computed(() =>
     <MarkdownRenderer
       v-else
       :content="message.content"
+      :streaming="isLive && !isWaitingControl"
       @preview-html="emit('preview-html', $event)"
       @open-deliverable="emit('open-deliverable', $event)"
     />

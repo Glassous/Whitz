@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from "vue";
 import type { WorkMessage, WorkTokenUsage } from "@shared/work-types";
 import { useWorkStore } from "../../stores/work";
+import { useSmartStreamScroll } from "@web/composables/useSmartStreamScroll";
 import MarkdownRenderer from "@web/components/chat/MarkdownRenderer.vue";
 
-const NEAR_BOTTOM_PX = 120;
+const TOP_CLEARANCE = 16;
+const DEFAULT_BOTTOM_GAP = 160;
 
 const props = defineProps<{
   conversationId: string | null;
@@ -14,6 +16,7 @@ const props = defineProps<{
   streaming: boolean;
   revertedCount?: number;
   projectName?: string | null;
+  bottomInset?: number;
 }>();
 
 const emit = defineEmits<{
@@ -26,10 +29,18 @@ const emit = defineEmits<{
 
 const work = useWorkStore();
 const scroller = ref<HTMLElement | null>(null);
+const wrapper = ref<HTMLElement | null>(null);
+const itemRefs = ref<(HTMLElement | null)[]>([]);
 const copiedId = ref<string | null>(null);
 const expandedUserIds = ref<Set<string>>(new Set());
-const autoFollow = ref(true);
-let programmaticUntil = 0;
+
+const baseBottomGap = computed(() => Math.max(DEFAULT_BOTTOM_GAP, (props.bottomInset ?? 0) + 24));
+const extraTurnSpacer = ref(0);
+let turnRevealActive = false;
+let turnRevealInitialized = false;
+let resizeObserver: ResizeObserver | null = null;
+
+const smartScroll = useSmartStreamScroll(scroller);
 
 function isLongUserInput(content: string): boolean {
   if (!content) return false;
@@ -49,6 +60,22 @@ function toggleUserExpand(id: string) {
 }
 
 const visibleMessages = computed(() => props.messages.filter((m) => m.role !== "tool"));
+
+const latestTurnStartIndex = computed(() => {
+  const msgs = visibleMessages.value;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === "user") return i;
+  }
+  return msgs.length > 0 ? msgs.length - 1 : -1;
+});
+
+onBeforeUpdate(() => {
+  itemRefs.value = [];
+});
+
+function setItemRef(index: number, el: HTMLElement | null) {
+  itemRefs.value[index] = el;
+}
 
 function attachmentsOf(message: WorkMessage): Array<{ name: string; kind: string }> {
   const value = message.tool_payload?.attachments;
@@ -92,41 +119,80 @@ async function copyText(id: string, content: string) {
   }
 }
 
-function isNearBottom(el: HTMLElement): boolean {
-  return el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
-}
-
-function onScrollerScroll() {
+function measureTurnSpacer(): { el: HTMLElement; targetTop: number } | null {
   const el = scroller.value;
-  if (!el) return;
-  if (performance.now() < programmaticUntil) return;
-  autoFollow.value = isNearBottom(el);
+  const idx = latestTurnStartIndex.value;
+  const startEl = idx >= 0 ? itemRefs.value[idx] : null;
+  const lastEl = itemRefs.value[visibleMessages.value.length - 1];
+  if (!el || !startEl || !lastEl) {
+    extraTurnSpacer.value = 0;
+    turnRevealActive = false;
+    return null;
+  }
+  const targetTop = startEl.offsetTop;
+  if (!turnRevealActive) {
+    return { el, targetTop };
+  }
+  const contentBottom = lastEl.offsetTop + lastEl.offsetHeight;
+  const latestTurnHeight = Math.max(0, contentBottom - targetTop);
+  const usableHeight = Math.max(0, el.clientHeight - TOP_CLEARANCE - baseBottomGap.value);
+  const needed = Math.max(0, usableHeight - latestTurnHeight);
+  const nextExtra = turnRevealInitialized ? Math.min(extraTurnSpacer.value, needed) : needed;
+  turnRevealInitialized = true;
+  if (Math.abs(extraTurnSpacer.value - nextExtra) > 0.5) {
+    extraTurnSpacer.value = nextExtra;
+  }
+  if (nextExtra <= 0.5) {
+    extraTurnSpacer.value = 0;
+    turnRevealActive = false;
+  }
+  return { el, targetTop };
 }
 
-function onScrollerWheel(e: WheelEvent) {
-  if (e.deltaY < 0) {
-    autoFollow.value = false;
+async function scrollToLatestTurnTop() {
+  turnRevealActive = latestTurnStartIndex.value > 0;
+  turnRevealInitialized = false;
+  smartScroll.autoFollow.value = true;
+  await nextTick();
+  const measured = measureTurnSpacer();
+  await nextTick();
+  if (!measured) return;
+  if (turnRevealActive) {
+    smartScroll.scrollToTopPosition(Math.max(0, measured.targetTop - TOP_CLEARANCE));
+  } else {
+    smartScroll.jumpToBottom("smooth");
   }
 }
 
 function scrollToBottom(force = false) {
-  if (force) autoFollow.value = true;
-  if (!autoFollow.value) return;
-  void nextTick(() => {
-    const el = scroller.value;
-    if (!el || (!force && !autoFollow.value)) return;
-    programmaticUntil = performance.now() + 45;
-    el.scrollTop = el.scrollHeight;
-  });
+  if (force) {
+    smartScroll.jumpToBottom("smooth");
+  } else if (smartScroll.autoFollow.value) {
+    smartScroll.followBottomSmooth();
+  }
 }
 
+// Switch conversation -> reset spacer & land cleanly at bottom
 watch(
   () => props.conversationId,
-  () => {
-    autoFollow.value = true;
-    scrollToBottom(true);
+  async () => {
+    turnRevealActive = false;
+    turnRevealInitialized = false;
+    extraTurnSpacer.value = 0;
+    await nextTick();
+    smartScroll.jumpToBottom("instant");
   },
   { immediate: true },
+);
+
+// Explicit new turn (send / slash / shell / steer) -> Top-anchored turn reveal
+watch(
+  () => work.latestTurnTriggerSeq,
+  async (seq) => {
+    if (seq > 0) {
+      await scrollToLatestTurnTop();
+    }
+  },
 );
 
 watch(
@@ -141,29 +207,69 @@ watch(
       stepLen,
     ] as const;
   },
-  ([len], prev) => {
-    const last = visibleMessages.value[len - 1];
-    if (prev && len > prev[0] && last?.role === "user") {
-      scrollToBottom(true);
-      return;
+  async () => {
+    await nextTick();
+    measureTurnSpacer();
+    await nextTick();
+    if (smartScroll.autoFollow.value) {
+      smartScroll.followBottomSmooth();
+    } else {
+      smartScroll.syncVisibility();
     }
-    scrollToBottom(false);
   },
   { flush: "post" },
 );
 
-defineExpose({ scrollToBottom });
+// Bottom overlay height changes (ApprovalSheet popping up, error banner, expanding composer)
+watch(
+  baseBottomGap,
+  async () => {
+    await nextTick();
+    if (smartScroll.autoFollow.value) {
+      smartScroll.followBottomSmooth();
+    } else {
+      smartScroll.syncVisibility();
+    }
+  },
+  { flush: "post" },
+);
+
+onMounted(() => {
+  if (typeof ResizeObserver !== "undefined") {
+    resizeObserver = new ResizeObserver(() => {
+      measureTurnSpacer();
+      if (smartScroll.autoFollow.value && !smartScroll.isUserInteracting.value) {
+        smartScroll.followBottomSmooth();
+      } else {
+        smartScroll.syncVisibility();
+      }
+    });
+    if (scroller.value) resizeObserver.observe(scroller.value);
+    if (wrapper.value) resizeObserver.observe(wrapper.value);
+  }
+});
+
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+});
+
+defineExpose({
+  scrollToBottom,
+  showJumpToBottom: smartScroll.showJumpToBottom,
+  jumpToBottom: () => smartScroll.jumpToBottom("smooth"),
+  scrollContainer: scroller,
+});
 </script>
 
 <template>
   <div
     ref="scroller"
-    class="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-4 pb-44 pt-3 sm:px-6"
-    @scroll.passive="onScrollerScroll"
-    @wheel.passive="onScrollerWheel"
+    tabindex="-1"
+    class="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-4 pt-3 outline-none sm:px-6"
   >
     <!-- Empty State Matching Web Chat Centerpiece -->
-    <div v-if="!visibleMessages.length" class="flex min-h-full flex-col items-center justify-center py-20 text-center">
+    <div v-if="!visibleMessages.length" class="flex min-h-full flex-col items-center justify-center pb-36 pt-20 text-center">
       <div class="w-full max-w-2xl">
         <h2 class="text-[30px] font-semibold tracking-tight text-fg sm:text-[36px]">
           {{ projectName ? `在 ${projectName} 中协作` : "OpenCode 工作台" }}
@@ -176,11 +282,12 @@ defineExpose({ scrollToBottom });
       </div>
     </div>
 
-    <template v-else>
+    <div v-else ref="wrapper" class="relative mx-auto flex w-full max-w-4xl flex-col gap-5">
       <article
-        v-for="message in visibleMessages"
-        :key="message.id"
-        class="mx-auto mb-5 max-w-4xl"
+        v-for="(message, idx) in visibleMessages"
+        :key="work.stableKeyOf(message.id)"
+        :ref="(el) => setItemRef(idx, el as HTMLElement | null)"
+        class="w-full"
         :class="message.role === 'user' ? 'group/user flex flex-col items-end' : 'group/assistant'"
       >
         <!-- User Message Bubble (Aligned with MessageBubble.vue) -->
@@ -188,8 +295,8 @@ defineExpose({ scrollToBottom });
           <div class="flex max-w-[82%] flex-col items-end space-y-1.5">
             <div v-if="attachmentsOf(message).length" class="flex flex-wrap justify-end gap-1.5">
               <span
-                v-for="(att, idx) in attachmentsOf(message)"
-                :key="idx"
+                v-for="(att, attIdx) in attachmentsOf(message)"
+                :key="attIdx"
                 class="rounded-xl bg-surface px-2.5 py-1 text-[11.5px] text-fg-muted"
               >
                 {{ att.kind === "image" ? "🖼" : "📄" }} {{ att.name }}
@@ -286,7 +393,20 @@ defineExpose({ scrollToBottom });
             </button>
 
             <div v-if="message.content" class="markdown-body">
-              <MarkdownRenderer :content="message.content" />
+              <MarkdownRenderer :content="message.content" :streaming="message.status === 'streaming'" />
+            </div>
+            <div
+              v-else-if="message.status === 'streaming'"
+              class="flex items-center gap-2 py-1.5 text-[13px] text-fg-faint"
+              role="status"
+              aria-live="polite"
+            >
+              <span class="inline-flex items-center gap-1" aria-hidden="true">
+                <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent/80" />
+                <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent/60 [animation-delay:150ms]" />
+                <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent/40 [animation-delay:300ms]" />
+              </span>
+              <span>{{ liveLabelOf(message) }}</span>
             </div>
             <p v-else-if="message.status === 'waiting'" class="text-[12.5px] text-warning">等待你的确认后继续</p>
             <p v-else-if="message.status === 'failed'" class="text-[12.5px] text-danger">本轮执行失败</p>
@@ -326,7 +446,7 @@ defineExpose({ scrollToBottom });
       <!-- Redo banner when messages were undone via /undo -->
       <div
         v-if="revertedCount && revertedCount > 0"
-        class="mx-auto mt-2 flex max-w-4xl items-center justify-between rounded-2xl bg-surface/75 px-4 py-2 text-[12.5px] text-fg-muted"
+        class="mt-2 flex items-center justify-between rounded-2xl bg-surface/75 px-4 py-2 text-[12.5px] text-fg-muted"
       >
         <span>已撤回 {{ revertedCount }} 条消息及关联文件快照</span>
         <button
@@ -337,6 +457,12 @@ defineExpose({ scrollToBottom });
           重做恢复 (/redo)
         </button>
       </div>
-    </template>
+
+      <div
+        aria-hidden="true"
+        class="shrink-0"
+        :style="{ height: `${Math.round(baseBottomGap + extraTurnSpacer)}px` }"
+      />
+    </div>
   </div>
 </template>

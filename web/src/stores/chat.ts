@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { api } from "../api/client";
 import { chatTicketHeaders } from "../api/chatTickets";
 import { streamSSE, streamSSEGet, type SSEEvent } from "../api/sse";
+import { createDeltaCoalescer } from "../lib/streamDeltaCoalescer";
 import type {
   ClarifyDetail,
   ClarifyQuestionItem,
@@ -55,10 +56,56 @@ export const useChatStore = defineStore("chat", () => {
   const pendingSchedules = ref<ScheduledTaskPendingItem[]>([]);
   const error = ref<string | null>(null);
   const selectedTurnId = ref<string | null>(null);
+  const stableKeys = ref<Record<string, string>>({});
+  const latestTurnTriggerSeq = ref(0);
   let controller: AbortController | null = null;
   let pendingUserTargetId: string | null = null;
   let lastEventId: string | null = null;
   let pendingPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function stableKeyOf(id: string): string {
+    return stableKeys.value[id] ?? id;
+  }
+
+  type ChatDeltaChunk =
+    | { kind: "content"; text: string }
+    | { kind: "reasoning"; step: number | null; title: string; text: string };
+
+  interface ChatDeltaBatch {
+    content: string;
+    reasoning: Array<{ step: number | null; title: string; text: string }>;
+  }
+
+  const deltaCoalescer = createDeltaCoalescer<ChatDeltaChunk, ChatDeltaBatch>({
+    intervalMs: 32,
+    createEmpty: () => ({ content: "", reasoning: [] }),
+    append: (batch, chunk) => {
+      if (chunk.kind === "content") {
+        batch.content += chunk.text;
+        return;
+      }
+      const last = batch.reasoning[batch.reasoning.length - 1];
+      if (last && last.step === chunk.step) {
+        last.text += chunk.text;
+      } else {
+        batch.reasoning.push({ step: chunk.step, title: chunk.title, text: chunk.text });
+      }
+    },
+    isEmpty: (batch) => batch.content.length === 0 && batch.reasoning.length === 0,
+    onFlush: (batch) => {
+      if (batch.content) {
+        const a = assistant();
+        if (a) a.content += batch.content;
+      }
+      if (batch.reasoning.length) {
+        for (const r of batch.reasoning) {
+          const block = reasoningBlock(r.step, r.title);
+          block.text += r.text;
+        }
+        syncTurnToMessage();
+      }
+    },
+  });
 
   const currentStep = computed(() => {
     const items = plan.value?.items ?? [];
@@ -347,10 +394,12 @@ export const useChatStore = defineStore("chat", () => {
 
   function loadFromConversation(detail: ConversationDetail) {
     clearPendingPoll();
+    deltaCoalescer.clear();
     controller?.abort();
     controller = null;
     convId.value = detail.id;
     messages.value = detail.messages.map((m) => ({ ...m }));
+    stableKeys.value = {};
     plan.value = detail.plan;
     const lastReasoned = detail.messages.findLast(
       (m) => m.role === "assistant" && Array.isArray(m.tool_payload?.reasoning) && m.tool_payload.reasoning.length,
@@ -385,10 +434,12 @@ export const useChatStore = defineStore("chat", () => {
 
   function reset() {
     clearPendingPoll();
+    deltaCoalescer.clear();
     controller?.abort();
     controller = null;
     convId.value = null;
     messages.value = [];
+    stableKeys.value = {};
     streaming.value = false;
     waitingFirstByte.value = false;
     stopping.value = false;
@@ -519,6 +570,9 @@ export const useChatStore = defineStore("chat", () => {
     if (ev.id && ev.id !== "0-0") {
       lastEventId = ev.id;
     }
+    if (ev.event !== "message.delta" && ev.event !== "reasoning.delta") {
+      deltaCoalescer.flushNow();
+    }
     if (ev.event !== "run.started" && ev.event !== "message.created" && ev.event !== "run.reconnected") {
       waitingFirstByte.value = false;
     }
@@ -527,11 +581,17 @@ export const useChatStore = defineStore("chat", () => {
         const userMsg = messages.value.find(
           (m) => m.id.startsWith("temp-user") || (pendingUserTargetId !== null && m.id === pendingUserTargetId),
         );
-        if (userMsg && d.user_message_id) userMsg.id = d.user_message_id;
+        if (userMsg && d.user_message_id) {
+          const stable = stableKeyOf(userMsg.id);
+          if (d.user_message_id !== stable) stableKeys.value[d.user_message_id] = stable;
+          userMsg.id = d.user_message_id;
+        }
         pendingUserTargetId = null;
         const a = assistant();
         if (a && d.assistant_message_id) {
           const previousId = a.id;
+          const stable = stableKeyOf(previousId);
+          if (d.assistant_message_id !== stable) stableKeys.value[d.assistant_message_id] = stable;
           a.id = d.assistant_message_id;
           activeAssistantId.value = d.assistant_message_id;
           if (selectedTurnId.value === previousId) selectedTurnId.value = d.assistant_message_id;
@@ -572,7 +632,21 @@ export const useChatStore = defineStore("chat", () => {
         if (typeof d.last_event_id === "string" && d.last_event_id !== "0-0") {
           lastEventId = d.last_event_id;
         }
-        const a = assistant();
+        let a = assistant();
+        if (!a && activeAssistantId.value) {
+          const created: Message = {
+            id: activeAssistantId.value,
+            role: "assistant",
+            content: typeof d.output === "string" ? d.output : "",
+            tool_name: null,
+            tool_payload: null,
+            status: "streaming",
+            run_id: activeRunId.value,
+            created_at: new Date().toISOString(),
+          };
+          messages.value.push(created);
+          a = created;
+        }
         if (a) {
           if (typeof d.output === "string") a.content = d.output;
           if (typeof d.status === "string") {
@@ -615,10 +689,10 @@ export const useChatStore = defineStore("chat", () => {
         break;
       }
       case "reasoning.delta": {
+        const text = typeof d.text === "string" ? d.text : "";
+        if (!text) break;
         const step = typeof d.step === "number" ? d.step : null;
-        const block = reasoningBlock(step, typeof d.title === "string" ? d.title : "");
-        block.text += d.text ?? "";
-        syncTurnToMessage();
+        deltaCoalescer.push({ kind: "reasoning", step, title: typeof d.title === "string" ? d.title : "", text });
         break;
       }
       case "reasoning.block": {
@@ -635,8 +709,8 @@ export const useChatStore = defineStore("chat", () => {
         break;
       }
       case "message.delta": {
-        const a = assistant();
-        if (a) a.content += d.text ?? "";
+        const text = typeof d.text === "string" ? d.text : "";
+        if (text) deltaCoalescer.push({ kind: "content", text });
         break;
       }
       case "commentary": {
@@ -825,6 +899,8 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function finishRun() {
+    deltaCoalescer.flushNow();
+    deltaCoalescer.clear();
     streaming.value = false;
     waitingFirstByte.value = false;
     stopping.value = false;
@@ -975,6 +1051,7 @@ export const useChatStore = defineStore("chat", () => {
     });
     activeAssistantId.value = assistantId;
     selectedTurnId.value = assistantId;
+    latestTurnTriggerSeq.value += 1;
     return assistantId;
   }
 
@@ -1333,12 +1410,14 @@ export const useChatStore = defineStore("chat", () => {
 
   function abort() {
     clearPendingPoll();
+    deltaCoalescer.clear();
     controller?.abort();
     controller = null;
   }
 
   return {
-    convId, messages, streaming, waitingFirstByte, stopping, reconnecting, approvingChoice, submittingClarify,
+    convId, messages, stableKeys, stableKeyOf, latestTurnTriggerSeq,
+    streaming, waitingFirstByte, stopping, reconnecting, approvingChoice, submittingClarify,
     activeAssistantId, activeRunId, plan, reasoning, currentStep, runningTool,
     selectedTurnId, selectedTurn, assistantTurns, viewPlan, viewReasoning, viewStreaming, viewCurrentStep,
     viewRunningTool, selectTurn,

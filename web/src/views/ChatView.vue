@@ -11,6 +11,7 @@ import { api } from "../api/client";
 import type { AgentStatus, ConversationFile, DeliverableTarget, PreviewTarget, TaskPanelTab } from "../types";
 import ConversationSidebar from "../components/chat/ConversationSidebar.vue";
 import MessageList from "../components/chat/MessageList.vue";
+import ScrollToBottomButton from "../components/ui/ScrollToBottomButton.vue";
 import ChatInput from "../components/chat/ChatInput.vue";
 import PlanPanel from "../components/chat/PlanPanel.vue";
 import ApprovalCard from "../components/chat/ApprovalCard.vue";
@@ -107,6 +108,10 @@ const lightboxOpen = ref(false);
 const lightboxImages = ref<ConversationFile[]>([]);
 const lightboxIndex = ref(0);
 const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null);
+const messageListRef = ref<InstanceType<typeof MessageList> | null>(null);
+const bottomOverlayRef = ref<HTMLElement | null>(null);
+const bottomOverlayHeight = ref(0);
+let bottomOverlayObserver: ResizeObserver | null = null;
 const panelWidth = ref<number>(loadInitialPanelWidth());
 const isResizingPanel = ref(false);
 let prePreviewPanelWidth: number | null = null;
@@ -796,7 +801,27 @@ onMounted(async () => {
   }
 });
 
+watch(bottomOverlayRef, (el, prev) => {
+  if (prev && bottomOverlayObserver) bottomOverlayObserver.unobserve(prev);
+  if (el) {
+    bottomOverlayHeight.value = el.offsetHeight;
+    if (typeof ResizeObserver !== "undefined") {
+      if (!bottomOverlayObserver) {
+        bottomOverlayObserver = new ResizeObserver((entries) => {
+          const h = entries[0]?.borderBoxSize?.[0]?.blockSize ?? el.offsetHeight;
+          bottomOverlayHeight.value = Math.round(h);
+        });
+      }
+      bottomOverlayObserver.observe(el);
+    }
+  } else {
+    bottomOverlayHeight.value = 0;
+  }
+});
+
 onBeforeUnmount(() => {
+  bottomOverlayObserver?.disconnect();
+  bottomOverlayObserver = null;
   window.removeEventListener("keydown", onGlobalKeydown);
   window.removeEventListener("resize", onWindowResize);
   window.removeEventListener("online", onOnlineRecovery);
@@ -957,10 +982,12 @@ onBeforeUnmount(() => {
         <div class="relative min-h-0 flex-1">
           <MessageList
             v-if="chat.messages.length"
+            ref="messageListRef"
             :key="chat.convId ?? 'draft'"
             :messages="chat.messages"
             :focus-message-id="focusMessageId"
             :downloading-file-id="downloadingFileId"
+            :bottom-inset="bottomOverlayHeight"
             @steps="onViewSteps"
             @focus-handled="focusMessageId = null"
             @regenerate="onRegenerate"
@@ -999,8 +1026,22 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="progressive-blur-bottom pointer-events-none absolute inset-x-0 bottom-0 z-10 h-24 sm:h-28" />
-        <div class="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-transparent px-3 pb-4 pt-2 sm:px-6 sm:pb-5">
-          <div class="pointer-events-auto mx-auto w-full max-w-4xl space-y-3">
+        <div
+          class="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-transparent px-3 pb-4 pt-2 sm:px-6 sm:pb-5"
+        >
+          <div class="mx-auto flex w-full max-w-4xl flex-col gap-3">
+            <div class="pointer-events-none flex justify-center">
+              <div class="pointer-events-auto">
+                <ScrollToBottomButton
+                  :visible="Boolean(chat.messages.length && messageListRef?.showJumpToBottom)"
+                  :streaming="chat.streaming"
+                  :scroll-container="messageListRef?.scrollContainer ?? null"
+                  @click="messageListRef?.jumpToBottom()"
+                />
+              </div>
+            </div>
+
+            <div ref="bottomOverlayRef" class="pointer-events-auto w-full space-y-3">
             <Transition
               mode="out-in"
               enter-active-class="transition duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]"
@@ -1115,6 +1156,7 @@ onBeforeUnmount(() => {
               @retry-upload="onRetryUpload"
               @detach-file="filesStore.detachFile"
             />
+            </div>
           </div>
         </div>
       </div>

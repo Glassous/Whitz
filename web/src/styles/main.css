@@ -1217,3 +1217,40 @@ progress.upload-progress:indeterminate {
 .markdown-body .md-deliverable-card:hover .md-deliverable-cta {
   background: var(--hover);
 }
+
+/* ===== Streaming Live Cursor & Unclosed Code Indicator ===== */
+@keyframes whitz-stream-cursor-pulse {
+  0%, 100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.92;
+  }
+}
+
+.markdown-body.is-streaming > :is(p, h1, h2, h3, h4, h5, h6):last-child::after,
+.markdown-body.is-streaming > :is(ul, ol):last-child > li:last-child::after,
+.markdown-body.is-streaming > blockquote:last-child > p:last-child::after {
+  content: " ●";
+  font-size: 0.68em;
+  vertical-align: 0.1em;
+  color: var(--primary);
+  animation: whitz-stream-cursor-pulse 1.05s ease-in-out infinite;
+}
+
+.markdown-body .md-code-streaming-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.5rem;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+.markdown-body .md-code-streaming-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: var(--accent);
+  animation: whitz-stream-cursor-pulse 1.05s ease-in-out infinite;
+}
