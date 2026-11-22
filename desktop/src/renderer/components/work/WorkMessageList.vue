@@ -27,8 +27,26 @@ const emit = defineEmits<{
 const work = useWorkStore();
 const scroller = ref<HTMLElement | null>(null);
 const copiedId = ref<string | null>(null);
+const expandedUserIds = ref<Set<string>>(new Set());
 const autoFollow = ref(true);
 let programmaticUntil = 0;
+
+function isLongUserInput(content: string): boolean {
+  if (!content) return false;
+  if (content.length >= 320) return true;
+  return content.split("\n").length >= 7;
+}
+
+function isUserExpanded(id: string): boolean {
+  return expandedUserIds.value.has(id);
+}
+
+function toggleUserExpand(id: string) {
+  const next = new Set(expandedUserIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedUserIds.value = next;
+}
 
 const visibleMessages = computed(() => props.messages.filter((m) => m.role !== "tool"));
 
@@ -177,8 +195,46 @@ defineExpose({ scrollToBottom });
                 {{ att.kind === "image" ? "🖼" : "📄" }} {{ att.name }}
               </span>
             </div>
-            <div class="w-fit max-w-full whitespace-pre-wrap rounded-[22px] bg-surface px-4 py-2.5 text-[15px] leading-relaxed text-fg">
-              {{ message.content }}
+            <div class="w-fit max-w-full rounded-[22px] bg-surface px-4 py-2.5 text-[15px] leading-relaxed text-fg">
+              <div
+                class="relative whitespace-pre-wrap break-words"
+                :class="
+                  isLongUserInput(message.content)
+                    ? ['user-input-clamp', { 'is-expanded': isUserExpanded(message.id) }]
+                    : ''
+                "
+              >
+                {{ message.content }}
+                <div
+                  v-if="isLongUserInput(message.content) && !isUserExpanded(message.id)"
+                  aria-hidden="true"
+                  class="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-surface to-transparent"
+                />
+              </div>
+              <div
+                v-if="isLongUserInput(message.content)"
+                class="mt-1.5 flex justify-end border-t border-line/45 pt-1.5"
+              >
+                <button
+                  type="button"
+                  class="focus-ring inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+                  :aria-expanded="isUserExpanded(message.id)"
+                  @click="toggleUserExpand(message.id)"
+                >
+                  <span>{{ isUserExpanded(message.id) ? "收起" : "展开全文" }}</span>
+                  <svg
+                    class="h-3.5 w-3.5 transition-transform duration-200"
+                    :class="isUserExpanded(message.id) ? 'rotate-180' : ''"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    aria-hidden="true"
+                  >
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6" />
+                  </svg>
+                </button>
+              </div>
             </div>
 
             <div

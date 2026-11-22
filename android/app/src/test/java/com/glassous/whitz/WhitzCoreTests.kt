@@ -12,7 +12,9 @@ import com.glassous.whitz.core.model.ReasoningBlock
 import com.glassous.whitz.core.model.ReasoningTool
 import com.glassous.whitz.core.model.ToolPayload
 import com.glassous.whitz.core.model.User
+import com.glassous.whitz.core.model.displaySideTitle
 import com.glassous.whitz.core.model.formatCredits
+import com.glassous.whitz.core.model.isScheduledSide
 import com.glassous.whitz.core.model.resolveServerAssetUrl
 import com.glassous.whitz.core.model.resolvedAssistantName
 import com.glassous.whitz.core.network.SseParser
@@ -23,11 +25,14 @@ import com.glassous.whitz.feature.chat.computeStepsCount
 import com.glassous.whitz.feature.chat.filterVisibleMessages
 import com.glassous.whitz.feature.chat.partitionPlanSteps
 import com.glassous.whitz.feature.chat.resolveTurnDetails
+import com.glassous.whitz.feature.chat.toolDisplayName
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WhitzCoreTests {
@@ -359,5 +364,34 @@ class WhitzCoreTests {
         assertEquals("每周五 18:00", overview.pending.first().scheduleDescription)
         assertEquals(10, overview.quota.maxActiveTasks)
         assertEquals(15, overview.quota.minIntervalMinutes)
+    }
+
+    @Test
+    fun scheduledConversationHelpers_andSearchProviderLabels() {
+        val scheduledByFlag = Conversation(id = "c1", kind = "side", title = "每日早报", isScheduled = true)
+        val scheduledByPrefix = Conversation(id = "c2", kind = "side", title = "[定时] 每周汇总", isScheduled = false)
+        val normalSide = Conversation(id = "c3", kind = "side", title = "普通旁聊", isScheduled = false)
+        val mainChat = Conversation(id = "c4", kind = "main", title = "[定时] 主聊", isScheduled = true)
+
+        assertTrue(scheduledByFlag.isScheduledSide())
+        assertEquals("每日早报", scheduledByFlag.displaySideTitle())
+        assertTrue(scheduledByPrefix.isScheduledSide())
+        assertEquals("每周汇总", scheduledByPrefix.displaySideTitle())
+        assertFalse(normalSide.isScheduledSide())
+        assertEquals("普通旁聊", normalSide.displaySideTitle())
+        assertFalse(mainChat.isScheduledSide())
+
+        val bochaTool = ReasoningTool(
+            name = "web_search",
+            args = """{"query":"国内AI动态","provider":"bocha"}""",
+            result = """{"ok":true,"provider":"bocha","result_count":2}""",
+        )
+        val tavilyTool = ReasoningTool(
+            name = "web_search",
+            args = """{"query":"LangGraph docs","provider":"tavily"}""",
+            result = """{"ok":true,"provider":"tavily","result_count":3}""",
+        )
+        assertEquals("联网搜索 · 博查", toolDisplayName(bochaTool))
+        assertEquals("联网搜索 · Tavily", toolDisplayName(tavilyTool))
     }
 }

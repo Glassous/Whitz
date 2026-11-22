@@ -446,3 +446,18 @@ async def test_subgraph_emits_tool_events_to_runner_stream(monkeypatch):
     ]
     assert "web_search" in completed_tools
     assert "delegate_subtask" in completed_tools
+
+
+@pytest.mark.asyncio
+async def test_runtime_config_scales_recursion_and_tool_limits():
+    cfg = await runner._build_runtime_config(
+        {"conversation_id": "conv-1", "max_tool_iterations": 200},
+        run_id="run-pro",
+        redis=FakeRedis(),
+        pool=None,
+        store=None,
+        settings=AgentSettings(internal_mcp_base_url=""),
+    )
+    assert cfg["configurable"]["max_tool_iterations"] == 200
+    assert cfg["configurable"]["max_subagent_iterations"] == 25
+    assert cfg["recursion_limit"] >= 600

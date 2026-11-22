@@ -219,6 +219,23 @@ fun planStatusLabel(status: String): String =
 fun toolDisplayName(name: String): String =
     TOOL_LABELS[name] ?: name
 
+private val SEARCH_PROVIDER_LABELS = mapOf(
+    "bocha" to "博查",
+    "tavily" to "Tavily",
+    "duckduckgo" to "DuckDuckGo",
+)
+
+fun toolDisplayName(tool: ReasoningTool): String {
+    val base = toolDisplayName(tool.name)
+    if (tool.name != "web_search") return base
+    val resultObj = parsePayloadJson(tool.result) as? JsonObject
+    val resProvider = (resultObj?.get("provider") as? JsonPrimitive)?.contentOrNull?.lowercase().orEmpty()
+    val argObj = parseArgsJson(tool.args) as? JsonObject
+    val argProvider = (argObj?.get("provider") as? JsonPrimitive)?.contentOrNull?.lowercase().orEmpty()
+    val providerLabel = SEARCH_PROVIDER_LABELS[resProvider] ?: SEARCH_PROVIDER_LABELS[argProvider]
+    return if (providerLabel != null) "$base · $providerLabel" else base
+}
+
 private fun JsonElement?.asIdString(): String? =
     (this as? JsonPrimitive)?.contentOrNull ?: this?.toString()?.takeIf { it != "null" }
 

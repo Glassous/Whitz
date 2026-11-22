@@ -191,6 +191,7 @@ const STATUS_BUCKET_LABELS: Record<string, string> = {
 };
 
 const PROVIDER_LABELS: Record<string, string> = {
+  bocha: "博查 AI",
   tavily: "Tavily",
   duckduckgo: "DuckDuckGo (兜底/免费)",
   http: "直连 HTTP",
@@ -702,7 +703,7 @@ onBeforeUnmount(() => {
           <h2 class="text-[15px] font-semibold text-fg">联网搜索看板 (web_search)</h2>
         </div>
         <span class="text-[12px] text-fg-muted">
-          统计 Tavily / DuckDuckGo 搜索次数、成功率、有效命中率与引擎降级情况
+          统计 博查 / Tavily / DuckDuckGo 搜索次数、成功率、有效命中率与引擎降级情况
         </span>
       </div>
 
@@ -739,7 +740,7 @@ onBeforeUnmount(() => {
           >
             {{ webSearch.summary.fallback_count }}
           </p>
-          <p class="mt-0.5 text-[11px] text-fg-faint">Tavily 异常回退 DuckDuckGo</p>
+          <p class="mt-0.5 text-[11px] text-fg-faint">主引擎异常跨引擎或 DuckDuckGo 回退</p>
         </div>
         <div class="rounded-2xl border border-line bg-surface p-4">
           <p class="text-[12px] text-fg-muted">平均搜索耗时</p>

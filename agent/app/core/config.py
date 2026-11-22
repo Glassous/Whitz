@@ -72,8 +72,10 @@ class AgentSettings(BaseSettings):
     sandbox_timeout_seconds: int = 30
     e2b_api_key: str = ""
 
-    # Search
+    # Search (Tavily + Bocha AI)
     search_api_key: str = ""
+    bocha_api_key: str = ""
+    bocha_search_url: str = "https://api.bochaai.com/v1/web-search"
 
     # Run limits & worker settings
     run_max_seconds: int = 1200

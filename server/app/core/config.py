@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     rerank_top_n: int = 8
 
     search_api_key: str = ""
+    bocha_api_key: str = ""
 
     agent_base_url: str = "http://localhost:8642"
     agent_internal_token: str = "dev-agent-token"

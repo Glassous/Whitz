@@ -207,94 +207,229 @@ async def todo_list(
     return json.dumps({"items": normalized}, ensure_ascii=False)
 
 
+_CJK_QUERY_RE = re.compile(r"[\u4e00-\u9fff]")
+_TAVILY_TIME_RANGE = {
+    "oneDay": "day",
+    "oneWeek": "week",
+    "oneMonth": "month",
+    "oneYear": "year",
+}
+_VALID_FRESHNESS = frozenset({"noLimit", "oneDay", "oneWeek", "oneMonth", "oneYear"})
+
+
+def _resolve_search_order(
+    query: str,
+    provider: str,
+    *,
+    has_bocha: bool,
+    has_tavily: bool,
+) -> list[str]:
+    """Order configured search engines by AI choice or query-language heuristic."""
+    choice = (provider or "auto").strip().lower()
+    order: list[str] = []
+    if choice == "bocha":
+        if has_bocha:
+            order.append("bocha")
+        if has_tavily:
+            order.append("tavily")
+    elif choice == "tavily":
+        if has_tavily:
+            order.append("tavily")
+        if has_bocha:
+            order.append("bocha")
+    else:
+        prefer_bocha = bool(_CJK_QUERY_RE.search(query or ""))
+        candidates = ("bocha", "tavily") if prefer_bocha else ("tavily", "bocha")
+        for eng in candidates:
+            if eng == "bocha" and has_bocha:
+                order.append("bocha")
+            elif eng == "tavily" and has_tavily:
+                order.append("tavily")
+    return order
+
+
+async def _search_bocha(
+    query: str,
+    limit: int,
+    api_key: str,
+    search_url: str,
+    freshness: str,
+) -> dict[str, Any]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    body: dict[str, Any] = {
+        "query": query,
+        "freshness": freshness if freshness in _VALID_FRESHNESS else "noLimit",
+        "summary": True,
+        "count": limit,
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+        resp = await client.post(search_url or "https://api.bochaai.com/v1/web-search", headers=headers, json=body)
+        resp.raise_for_status()
+        data = resp.json()
+    code = data.get("code")
+    if code is not None and int(code) != 200:
+        raise RuntimeError(str(data.get("msg") or f"Bocha error code {code}"))
+    payload_data = data.get("data") if isinstance(data.get("data"), dict) else data
+    web_pages = payload_data.get("webPages") if isinstance(payload_data.get("webPages"), dict) else {}
+    raw_items = web_pages.get("value") if isinstance(web_pages.get("value"), list) else []
+    results: list[dict[str, str]] = []
+    for r in raw_items[:limit]:
+        if not isinstance(r, dict):
+            continue
+        snippet = str(r.get("summary") or r.get("snippet") or "")[:800]
+        entry: dict[str, str] = {
+            "title": str(r.get("name") or r.get("title") or "")[:200],
+            "url": str(r.get("url") or "")[:500],
+            "snippet": snippet,
+        }
+        if r.get("siteName"):
+            entry["site_name"] = str(r["siteName"])[:80]
+        if r.get("publishTime") or r.get("dateLastCrawled"):
+            entry["published_at"] = str(r.get("publishTime") or r.get("dateLastCrawled"))[:40]
+        results.append(entry)
+    return {
+        "ok": True,
+        "provider": "bocha",
+        "result_count": len(results),
+        "results": results,
+    }
+
+
+async def _search_tavily(
+    query: str,
+    limit: int,
+    api_key: str,
+    freshness: str,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": limit,
+        "include_answer": True,
+    }
+    if freshness in _TAVILY_TIME_RANGE:
+        body["time_range"] = _TAVILY_TIME_RANGE[freshness]
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        resp = await client.post("https://api.tavily.com/search", json=body)
+        resp.raise_for_status()
+        data = resp.json()
+    results = [
+        {
+            "title": str(r.get("title") or "")[:200],
+            "url": str(r.get("url") or "")[:500],
+            "snippet": str(r.get("content") or "")[:800],
+        }
+        for r in (data.get("results") or [])[:limit]
+    ]
+    return {
+        "ok": True,
+        "provider": "tavily",
+        "result_count": len(results),
+        "answer": data.get("answer"),
+        "results": results,
+    }
+
+
+async def _search_duckduckgo(query: str, limit: int) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+        resp = await client.get(
+            "https://api.duckduckgo.com/",
+            params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    results: list[dict[str, str]] = []
+    if data.get("AbstractText"):
+        results.append(
+            {
+                "title": str(data.get("Heading") or query),
+                "url": str(data.get("AbstractURL") or ""),
+                "snippet": str(data.get("AbstractText") or "")[:800],
+            }
+        )
+    for topic in data.get("RelatedTopics") or []:
+        if isinstance(topic, dict) and topic.get("Text"):
+            results.append(
+                {
+                    "title": str(topic.get("Text") or "")[:100],
+                    "url": str(topic.get("FirstURL") or ""),
+                    "snippet": str(topic.get("Text") or "")[:600],
+                }
+            )
+        if len(results) >= limit:
+            break
+    return {
+        "ok": True,
+        "provider": "duckduckgo",
+        "result_count": len(results),
+        "results": results,
+    }
+
+
 @tool
 async def web_search(
     query: str,
     max_results: int = 5,
+    provider: Literal["auto", "bocha", "tavily"] = "auto",
+    freshness: Literal["noLimit", "oneDay", "oneWeek", "oneMonth", "oneYear"] = "noLimit",
     config: RunnableConfig = None,  # type: ignore[assignment]
 ) -> str:
-    """在互联网上搜索最新信息、文档或新闻。"""
+    """在互联网上搜索最新信息、文档或新闻。
+
+    支持双搜索引擎并行选择，请根据查询内容自主决定 `provider`：
+    - `"bocha"`：博查 AI 搜索，响应速度快，主要适合国内新闻、中文资料、国内企业/政策与中文技术文档；
+    - `"tavily"`：Tavily 搜索，响应相对较慢，但适合国外英文资料、国际新闻、海外开源社区与英文学术/文档检索；
+    - `"auto"`：自动选择（中文查询优先博查，英文/海外查询优先 Tavily）；若需同时对照国内外资料，可并行调用两次本工具分别指定 `"bocha"` 与 `"tavily"`。
+    """
     settings = get_settings()
     limit = max(1, min(int(max_results or 5), 10))
-    api_key = (settings.search_api_key or "").strip()
+    tavily_key = (settings.search_api_key or "").strip()
+    bocha_key = (settings.bocha_api_key or "").strip()
+    bocha_url = (getattr(settings, "bocha_search_url", "") or "https://api.bochaai.com/v1/web-search").strip()
+
+    order = _resolve_search_order(
+        query,
+        provider,
+        has_bocha=bool(bocha_key),
+        has_tavily=bool(tavily_key),
+    )
+
     fallback_from: str | None = None
     fallback_reason: str | None = None
+    req_choice = (provider or "auto").strip().lower()
+    if req_choice in ("bocha", "tavily") and (
+        (req_choice == "bocha" and not bocha_key) or (req_choice == "tavily" and not tavily_key)
+    ):
+        fallback_from = req_choice
+        fallback_reason = f"{req_choice}_unconfigured"
 
-    if api_key:
+    for engine in order:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-                resp = await client.post(
-                    "https://api.tavily.com/search",
-                    json={
-                        "api_key": api_key,
-                        "query": query,
-                        "max_results": limit,
-                        "include_answer": True,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            results = [
-                {
-                    "title": str(r.get("title") or "")[:200],
-                    "url": str(r.get("url") or "")[:500],
-                    "snippet": str(r.get("content") or "")[:800],
-                }
-                for r in (data.get("results") or [])[:limit]
-            ]
-            return json.dumps(
-                {
-                    "ok": True,
-                    "provider": "tavily",
-                    "result_count": len(results),
-                    "answer": data.get("answer"),
-                    "results": results,
-                },
-                ensure_ascii=False,
-            )
+            if engine == "bocha":
+                payload = await _search_bocha(query, limit, bocha_key, bocha_url, freshness)
+            else:
+                payload = await _search_tavily(query, limit, tavily_key, freshness)
+            if fallback_from and fallback_from != engine:
+                payload["fallback_from"] = fallback_from
+                if fallback_reason:
+                    payload["fallback_reason"] = fallback_reason
+            return json.dumps(payload, ensure_ascii=False)
         except Exception as exc:
-            fallback_from = "tavily"
-            fallback_reason = str(exc)[:200]
-            logger.warning("Tavily web_search failed (%s); falling back", exc)
+            if fallback_from is None:
+                fallback_from = engine
+                fallback_reason = str(exc)[:200]
+            logger.warning("%s web_search failed (%s); falling back", engine, exc)
 
     # Free fallback via DuckDuckGo Instant Answer API
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-            resp = await client.get(
-                "https://api.duckduckgo.com/",
-                params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        results: list[dict[str, str]] = []
-        if data.get("AbstractText"):
-            results.append(
-                {
-                    "title": str(data.get("Heading") or query),
-                    "url": str(data.get("AbstractURL") or ""),
-                    "snippet": str(data.get("AbstractText") or "")[:800],
-                }
-            )
-        for topic in data.get("RelatedTopics") or []:
-            if isinstance(topic, dict) and topic.get("Text"):
-                results.append(
-                    {
-                        "title": str(topic.get("Text") or "")[:100],
-                        "url": str(topic.get("FirstURL") or ""),
-                        "snippet": str(topic.get("Text") or "")[:600],
-                    }
-                )
-            if len(results) >= limit:
-                break
-        payload: dict[str, Any] = {
-            "ok": True,
-            "provider": "duckduckgo",
-            "result_count": len(results),
-            "results": results,
-        }
+        payload = await _search_duckduckgo(query, limit)
         if fallback_from:
             payload["fallback_from"] = fallback_from
-            payload["fallback_reason"] = fallback_reason
+            if fallback_reason:
+                payload["fallback_reason"] = fallback_reason
         return json.dumps(payload, ensure_ascii=False)
     except Exception as exc:
         err_payload: dict[str, Any] = {
@@ -306,7 +441,8 @@ async def web_search(
         }
         if fallback_from:
             err_payload["fallback_from"] = fallback_from
-            err_payload["fallback_reason"] = fallback_reason
+            if fallback_reason:
+                err_payload["fallback_reason"] = fallback_reason
         return json.dumps(err_payload, ensure_ascii=False)
 
 

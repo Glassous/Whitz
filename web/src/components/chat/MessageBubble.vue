@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { ConversationFile, DeliverableTarget, FileAttachmentMeta, Message, UserReactionType, WorkspaceArtifactMeta } from "../../types";
 import { useAuthStore } from "../../stores/auth";
 import { useChatStore } from "../../stores/chat";
@@ -103,6 +103,48 @@ const editing = ref(false);
 const editText = ref("");
 const editTextareaRef = ref<HTMLTextAreaElement | null>(null);
 
+const USER_COLLAPSE_THRESHOLD_PX = 192;
+const userExpanded = ref(false);
+const isLongUserInput = ref(false);
+const userContentRef = ref<HTMLElement | null>(null);
+let userResizeObserver: ResizeObserver | null = null;
+
+function measureUserContent() {
+  const el = userContentRef.value;
+  if (!el) {
+    isLongUserInput.value = false;
+    return;
+  }
+  isLongUserInput.value = el.scrollHeight > USER_COLLAPSE_THRESHOLD_PX;
+}
+
+watch(
+  () => [props.message.id, props.message.content, editing.value] as const,
+  ([newId], oldVal) => {
+    if (oldVal && newId !== oldVal[0]) {
+      userExpanded.value = false;
+    }
+    void nextTick(measureUserContent);
+  },
+);
+
+watch(userContentRef, (el, prev) => {
+  if (prev && userResizeObserver) {
+    userResizeObserver.unobserve(prev);
+  }
+  if (el) {
+    if (typeof ResizeObserver !== "undefined") {
+      if (!userResizeObserver) {
+        userResizeObserver = new ResizeObserver(() => measureUserContent());
+      }
+      userResizeObserver.observe(el);
+    }
+    void nextTick(measureUserContent);
+  } else {
+    isLongUserInput.value = false;
+  }
+});
+
 const failedImgIds = ref<Set<string>>(new Set());
 const refreshedImgIds = new Set<string>();
 
@@ -165,10 +207,13 @@ function onEditKeydown(e: KeyboardEvent) {
 onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
   document.addEventListener("keydown", onDocumentKeydown);
+  void nextTick(measureUserContent);
 });
 
 onBeforeUnmount(() => {
   if (copyTimer) window.clearTimeout(copyTimer);
+  userResizeObserver?.disconnect();
+  userResizeObserver = null;
   document.removeEventListener("pointerdown", onDocumentPointerDown);
   document.removeEventListener("keydown", onDocumentKeydown);
 });
@@ -471,42 +516,75 @@ const resolvedArtifacts = computed(() =>
       <!-- Normal User Message Bubble (with inline file cards & pure image thumbnails) -->
       <div
         v-else
-        class="w-fit max-w-full whitespace-pre-wrap rounded-[22px] bg-surface px-4 py-2.5 text-[15px] leading-relaxed text-fg"
+        class="w-fit max-w-full rounded-[22px] bg-surface px-4 py-2.5 text-[15px] leading-relaxed text-fg"
       >
-        <template v-if="hasInlineFiles">
-          <template v-for="(seg, idx) in inlineSegments" :key="idx">
-            <template v-if="seg.type === 'text'">{{ seg.text }}</template>
-            <template v-else>
-              <button
-                v-if="imageThumbUrl(resolveInlineFile(seg.fileId, seg.filename))"
-                type="button"
-                class="focus-ring mx-0.5 my-0.5 inline-block overflow-hidden rounded-xl align-middle transition-transform hover:scale-[1.03]"
-                :title="seg.filename"
-                @click="onFileClick(resolveInlineFile(seg.fileId, seg.filename))"
-              >
-                <img
-                  :src="imageThumbUrl(resolveInlineFile(seg.fileId, seg.filename))!"
-                  :alt="seg.filename"
-                  class="block h-16 max-w-[120px] rounded-xl object-cover"
-                  @error="onThumbError(resolveInlineFile(seg.fileId, seg.filename))"
-                />
-              </button>
-              <button
-                v-else
-                type="button"
-                class="focus-ring mx-0.5 inline-flex max-w-[220px] items-center gap-1 rounded-lg border border-line/80 bg-canvas/90 px-2 py-0.5 align-middle text-[12.5px] font-medium text-fg transition-colors hover:bg-hover"
-                :title="`${seg.filename} — 点击查看`"
-                @click="onFileClick(resolveInlineFile(seg.fileId, seg.filename))"
-              >
-                <span class="shrink-0 rounded bg-surface px-1 text-[10px] font-medium text-fg-muted">
-                  {{ categoryLabel(resolveInlineFile(seg.fileId, seg.filename).category, resolveInlineFile(seg.fileId, seg.filename).ext) }}
-                </span>
-                <span class="truncate">{{ seg.filename }}</span>
-              </button>
+        <div
+          ref="userContentRef"
+          class="relative whitespace-pre-wrap break-words"
+          :class="isLongUserInput ? ['user-input-clamp', { 'is-expanded': userExpanded }] : ''"
+        >
+          <template v-if="hasInlineFiles">
+            <template v-for="(seg, idx) in inlineSegments" :key="idx">
+              <template v-if="seg.type === 'text'">{{ seg.text }}</template>
+              <template v-else>
+                <button
+                  v-if="imageThumbUrl(resolveInlineFile(seg.fileId, seg.filename))"
+                  type="button"
+                  class="focus-ring mx-0.5 my-0.5 inline-block overflow-hidden rounded-xl align-middle transition-transform hover:scale-[1.03]"
+                  :title="seg.filename"
+                  @click="onFileClick(resolveInlineFile(seg.fileId, seg.filename))"
+                >
+                  <img
+                    :src="imageThumbUrl(resolveInlineFile(seg.fileId, seg.filename))!"
+                    :alt="seg.filename"
+                    class="block h-16 max-w-[120px] rounded-xl object-cover"
+                    @error="onThumbError(resolveInlineFile(seg.fileId, seg.filename))"
+                  />
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  class="focus-ring mx-0.5 inline-flex max-w-[220px] items-center gap-1 rounded-lg border border-line/80 bg-canvas/90 px-2 py-0.5 align-middle text-[12.5px] font-medium text-fg transition-colors hover:bg-hover"
+                  :title="`${seg.filename} — 点击查看`"
+                  @click="onFileClick(resolveInlineFile(seg.fileId, seg.filename))"
+                >
+                  <span class="shrink-0 rounded bg-surface px-1 text-[10px] font-medium text-fg-muted">
+                    {{ categoryLabel(resolveInlineFile(seg.fileId, seg.filename).category, resolveInlineFile(seg.fileId, seg.filename).ext) }}
+                  </span>
+                  <span class="truncate">{{ seg.filename }}</span>
+                </button>
+              </template>
             </template>
           </template>
-        </template>
-        <template v-else>{{ message.content }}</template>
+          <template v-else>{{ message.content }}</template>
+          <div
+            v-if="isLongUserInput && !userExpanded"
+            aria-hidden="true"
+            class="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-surface to-transparent"
+          />
+        </div>
+
+        <div v-if="isLongUserInput" class="mt-1.5 flex justify-end border-t border-line/45 pt-1.5">
+          <button
+            type="button"
+            class="focus-ring inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+            :aria-expanded="userExpanded"
+            @click="userExpanded = !userExpanded"
+          >
+            <span>{{ userExpanded ? "收起" : "展开全文" }}</span>
+            <svg
+              class="h-3.5 w-3.5 transition-transform duration-200"
+              :class="userExpanded ? 'rotate-180' : ''"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              aria-hidden="true"
+            >
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <!-- AI Positive Reaction Badge on User Message -->

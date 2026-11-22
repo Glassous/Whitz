@@ -53,6 +53,7 @@ export interface MembershipPlan {
   max_runs_per_user: number;
   chat_per_minute: number;
   run_max_seconds: number;
+  max_tool_iterations?: number;
   summary: string;
 }
 

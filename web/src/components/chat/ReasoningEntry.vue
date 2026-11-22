@@ -147,8 +147,29 @@ function todoChanges(tool: ReasoningTool): string[] {
     .filter(Boolean);
 }
 
+const SEARCH_PROVIDER_LABELS: Record<string, string> = {
+  bocha: "博查",
+  tavily: "Tavily",
+  duckduckgo: "DuckDuckGo",
+};
+
+function webSearchProviderLabel(tool: ReasoningTool): string {
+  if (tool.name !== "web_search") return "";
+  const payload = parsePayload(tool.result);
+  const resProvider = typeof payload?.provider === "string" ? payload.provider.toLowerCase() : "";
+  if (resProvider && SEARCH_PROVIDER_LABELS[resProvider]) return SEARCH_PROVIDER_LABELS[resProvider];
+  const args = parseArgs(tool.args);
+  const argProvider = typeof args?.provider === "string" ? args.provider.toLowerCase() : "";
+  return SEARCH_PROVIDER_LABELS[argProvider] ?? "";
+}
+
 function toolLabel(tool: ReasoningTool): string {
-  return TOOL_LABELS[tool.name] ?? tool.name;
+  const base = TOOL_LABELS[tool.name] ?? tool.name;
+  if (tool.name === "web_search") {
+    const providerLabel = webSearchProviderLabel(tool);
+    if (providerLabel) return `${base} · ${providerLabel}`;
+  }
+  return base;
 }
 
 function toolSummary(tool: ReasoningTool): string {

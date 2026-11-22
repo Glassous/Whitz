@@ -1,3 +1,5 @@
 <resources>
-    <style name="Theme.Whitz" parent="Theme.Material3.DayNight.NoActionBar" />
+    <style name="Theme.Whitz" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
 </resources>

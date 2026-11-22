@@ -279,6 +279,7 @@ class ConversationOut(BaseModel):
     title: str
     is_pinned: bool = False
     pinned_at: datetime | None = None
+    is_scheduled: bool = False
     plan: dict | None
     active_run_id: str | None
     active_run_status: str | None
@@ -296,6 +297,7 @@ class ConversationSearchHit(BaseModel):
     conversation_id: uuid.UUID
     conversation_kind: ConversationKind = "side"
     conversation_title: str
+    is_scheduled: bool = False
     message_id: uuid.UUID | None = None
     role: str | None = None
     snippet: str
@@ -443,6 +445,7 @@ class MembershipPlanOut(BaseModel):
     max_runs_per_user: int
     chat_per_minute: int
     run_max_seconds: int
+    max_tool_iterations: int = 30
     summary: str
 
 

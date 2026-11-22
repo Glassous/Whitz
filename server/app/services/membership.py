@@ -47,6 +47,7 @@ class Plan:
     max_runs_per_user: int
     chat_per_minute: int
     run_max_seconds: int
+    max_tool_iterations: int
     summary: str
 
 
@@ -59,27 +60,30 @@ PLANS: dict[str, Plan] = {
         max_runs_per_user=1,
         chat_per_minute=10,
         run_max_seconds=600,
+        max_tool_iterations=30,
         summary="每周 100 积分，5 小时最多 20 积分",
     ),
     PLUS: Plan(
         tier=PLUS,
         label="Plus",
-        weekly_credits=500,
-        five_hour_credits=100,
+        weekly_credits=1500,
+        five_hour_credits=300,
         max_runs_per_user=1,
         chat_per_minute=20,
         run_max_seconds=900,
-        summary="每周 500 积分，5 小时最多 100 积分",
+        max_tool_iterations=60,
+        summary="每周 1500 积分，5 小时最多 300 积分",
     ),
     PRO: Plan(
         tier=PRO,
         label="Pro",
-        weekly_credits=1250,
+        weekly_credits=25000,
         five_hour_credits=None,
         max_runs_per_user=2,
         chat_per_minute=30,
         run_max_seconds=1200,
-        summary="每周 1250 积分，无 5 小时限制",
+        max_tool_iterations=200,
+        summary="每周 25000 积分，无 5 小时限制",
     ),
 }
 
@@ -189,6 +193,7 @@ def plan_payload(plan: Plan) -> dict:
         "max_runs_per_user": plan.max_runs_per_user,
         "chat_per_minute": plan.chat_per_minute,
         "run_max_seconds": plan.run_max_seconds,
+        "max_tool_iterations": plan.max_tool_iterations,
         "summary": plan.summary,
     }
 

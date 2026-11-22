@@ -15,7 +15,7 @@ from langgraph.types import Command
 
 from app.core.config import AgentSettings, get_settings
 from app.core.models import EmbeddingClient, ModelRouter, RerankClient
-from app.graph.builder import _extract_text, build_agent_graph
+from app.graph.builder import DEFAULT_MAX_TOOL_ITERATIONS, _extract_text, build_agent_graph
 from app.graph.topology import GRAPH_NODES
 from app.memory.store import MemoryManager
 from app.rag.hybrid_retriever import HybridRetriever
@@ -287,7 +287,11 @@ async def _build_runtime_config(
 
     base_thread = str(payload.get("thread_id") or payload.get("conversation_id") or run_id)
     scoped_thread = checkpoint_thread_id(base_thread, run_id)
+    max_tool_iters = max(1, int(payload.get("max_tool_iterations") or DEFAULT_MAX_TOOL_ITERATIONS))
+    max_subagent_iters = max(8, min(25, max_tool_iters // 5))
+    recursion_limit = max(50, max_tool_iters * 3 + max_subagent_iters + 30)
     return {
+        "recursion_limit": recursion_limit,
         "configurable": {
             "thread_id": scoped_thread,
             "run_id": run_id,
@@ -300,6 +304,8 @@ async def _build_runtime_config(
             "memory_require_confirm": bool(payload.get("memory_require_confirm", True)),
             "ai_reactions_enabled": bool(payload.get("ai_reactions_enabled", True)),
             "allow_hitl": bool(payload.get("allow_hitl", True)),
+            "max_tool_iterations": max_tool_iters,
+            "max_subagent_iterations": max_subagent_iters,
             "requested_route": str(payload.get("model_route") or "auto"),
             "timezone": str(payload.get("timezone") or "Asia/Shanghai"),
             "skills_catalog": skills_catalog,
@@ -944,6 +950,7 @@ async def execute_run(
             "memory_require_confirm": bool(payload.get("memory_require_confirm", True)),
             "ai_reactions_enabled": bool(payload.get("ai_reactions_enabled", True)),
             "allow_hitl": bool(payload.get("allow_hitl", True)),
+            "max_tool_iterations": max(1, int(payload.get("max_tool_iterations") or DEFAULT_MAX_TOOL_ITERATIONS)),
             "requested_route": str(payload.get("model_route") or "auto"),
         }
         await _stream_graph(

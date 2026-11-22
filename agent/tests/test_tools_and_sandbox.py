@@ -308,3 +308,88 @@ async def test_web_search_fallback_metadata_and_parse_tool_error():
         assert res["provider"] == "duckduckgo"
         assert res["fallback_from"] == "tavily"
         assert res["result_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_web_search_bocha_and_tavily_selection():
+    calls: list[str] = []
+
+    def handler_dual(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "bochaai.com" in url:
+            calls.append("bocha")
+            assert request.headers.get("Authorization") == "Bearer bocha-key"
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["summary"] is True
+            return httpx.Response(
+                200,
+                json={
+                    "code": 200,
+                    "data": {
+                        "webPages": {
+                            "value": [
+                                {
+                                    "name": "国内动态",
+                                    "url": "https://news.example.cn/1",
+                                    "snippet": "简短摘要",
+                                    "summary": "博查详细正文摘要",
+                                    "siteName": "新华网",
+                                }
+                            ]
+                        }
+                    },
+                },
+            )
+        if "tavily.com" in url:
+            calls.append("tavily")
+            return httpx.Response(
+                200,
+                json={
+                    "answer": "Tavily answer",
+                    "results": [
+                        {
+                            "title": "Global Docs",
+                            "url": "https://docs.example.com/en",
+                            "content": "English technical doc",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler_dual)
+    real_async_client = httpx.AsyncClient
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    dual_settings = AgentSettings(search_api_key="tvly-key", bocha_api_key="bocha-key")
+    with (
+        patch("app.tools.builtin_tools.get_settings", return_value=dual_settings),
+        patch("app.tools.builtin_tools.httpx.AsyncClient", side_effect=client_factory),
+    ):
+        # Explicit Bocha
+        res_bocha = json.loads(
+            await web_search.ainvoke({"query": "国内 AI 政策", "provider": "bocha", "max_results": 3})
+        )
+        assert res_bocha["ok"] is True
+        assert res_bocha["provider"] == "bocha"
+        assert res_bocha["results"][0]["title"] == "国内动态"
+        assert res_bocha["results"][0]["snippet"] == "博查详细正文摘要"
+
+        # Explicit Tavily even with Chinese query
+        res_tavily = json.loads(
+            await web_search.ainvoke({"query": "LangGraph docs", "provider": "tavily", "max_results": 3})
+        )
+        assert res_tavily["ok"] is True
+        assert res_tavily["provider"] == "tavily"
+        assert res_tavily["results"][0]["title"] == "Global Docs"
+
+        # Auto picks Bocha for Chinese and Tavily for English
+        calls.clear()
+        auto_zh = json.loads(await web_search.ainvoke({"query": "今天北京天气"}))
+        auto_en = json.loads(await web_search.ainvoke({"query": "Python 3.13 release notes"}))
+        assert auto_zh["provider"] == "bocha"
+        assert auto_en["provider"] == "tavily"
+        assert calls == ["bocha", "tavily"]

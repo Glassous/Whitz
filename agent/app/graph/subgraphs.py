@@ -25,7 +25,7 @@ from app.tools.builtin_tools import (
 
 logger = logging.getLogger("whitz.agent.subgraphs")
 
-MAX_SUBAGENT_ITERATIONS = 5
+MAX_SUBAGENT_ITERATIONS = 8
 
 _RESEARCHER_ALLOWED_MCP = frozenset(
     {"list_workspace_files", "read_workspace_file", "search_workspace_files", "list_user_skills"}
@@ -187,16 +187,19 @@ async def _invoke_tools_for_message(
 def _build_specialist_subgraph(role: str):
     system_prompt = (
         "你是 Whitz 的 Researcher 深度研究子智能体。专注于多跳检索工作区文档、记忆与联网信息，"
-        "提供准确、可验证、带引用出处的结构化研究结论。"
+        "提供准确、可验证、带引用出处的结构化研究结论。调用 `web_search` 时可根据查询对象自主选择 "
+        "`provider=\"bocha\"`（博查 AI 搜索，速度快，擅长国内/中文资料）或 `provider=\"tavily\"`（适合国外/英文资料）。"
         if role == "researcher"
         else "你是 Whitz 的 Coder 工程与数据分析子智能体。专注于阅读工作区数据/代码、编写高质量代码、"
-        "产出工作区文件并给出清晰实现说明（如需沙箱运行请在结论中附上建议执行的代码）。"
+        "产出工作区文件并给出清晰实现说明（如需沙箱运行请在结论中附上建议执行的代码）。调用 `web_search` 时"
+        "可根据资料来源自主选择 `provider=\"bocha\"`（国内/中文）或 `provider=\"tavily\"`（海外/英文）。"
     )
     task_hint = "code" if role == "coder" else "research"
 
     async def worker_node(state: SubagentState, config: RunnableConfig) -> dict[str, Any]:
         cfg = dict(config.get("configurable") or {})
         router: ModelRouter = cfg.get("model_router") or ModelRouter()
+        max_iters = max(1, int(state.get("max_iterations") or cfg.get("max_subagent_iterations") or MAX_SUBAGENT_ITERATIONS))
         tools = _select_subagent_tools(role, config)
         orig_messages = list(state.get("messages") or [])
         seed_added = not orig_messages
@@ -237,6 +240,7 @@ def _build_specialist_subgraph(role: str):
                 return {
                     "messages": [*messages, resp] if seed_added else [resp],
                     "iterations": int(state.get("iterations") or 0) + 1,
+                    "max_iterations": max_iters,
                     "usage": _merge_usage(state.get("usage"), resp),
                 }
             except Exception as exc:
@@ -246,6 +250,7 @@ def _build_specialist_subgraph(role: str):
         return {
             "messages": [*messages, fallback_msg] if seed_added else [fallback_msg],
             "iterations": int(state.get("iterations") or 0) + 1,
+            "max_iterations": max_iters,
         }
 
     async def tools_node(state: SubagentState, config: RunnableConfig) -> dict[str, Any]:
@@ -272,7 +277,8 @@ def _build_specialist_subgraph(role: str):
         messages = list(state.get("messages") or [])
         last_msg = messages[-1] if messages else None
         iterations = int(state.get("iterations") or 0)
-        if isinstance(last_msg, AIMessage) and last_msg.tool_calls and iterations < MAX_SUBAGENT_ITERATIONS:
+        max_iters = max(1, int(state.get("max_iterations") or MAX_SUBAGENT_ITERATIONS))
+        if isinstance(last_msg, AIMessage) and last_msg.tool_calls and iterations < max_iters:
             return "tools"
         return "synthesizer"
 

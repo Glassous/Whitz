@@ -104,6 +104,8 @@ export const useRealtimeStore = defineStore("realtime", () => {
       const action = typeof d.action === "string" ? d.action : "";
       if (action === "deleted" && cid) {
         convs.conversations = convs.conversations.filter((c) => c.id !== cid);
+      } else if (action === "created" && cid && !convs.conversations.some((c) => c.id === cid)) {
+        void convs.fetchList();
       } else if (typeof d.title === "string" && cid) {
         convs.applyTitle(cid, d.title);
         if (typeof d.is_pinned === "boolean") {

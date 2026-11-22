@@ -85,6 +85,7 @@ class CreateRunRequest(BaseModel):
     memory_require_confirm: bool = True
     ai_reactions_enabled: bool = True
     allow_hitl: bool = True
+    max_tool_iterations: int | None = None
     model_route: str = "auto"
     idempotency_key: str | None = None
 

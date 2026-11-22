@@ -40,27 +40,27 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.NoteAdd
+import com.glassous.whitz.ui.theme.NoteAdd
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.AutoAwesome
+import com.glassous.whitz.ui.theme.AttachFile
+import com.glassous.whitz.ui.theme.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.ChevronRight
+import com.glassous.whitz.ui.theme.ChevronRight
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
+import com.glassous.whitz.ui.theme.ContentCopy
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
+import com.glassous.whitz.ui.theme.Download
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Image
+import com.glassous.whitz.ui.theme.ErrorOutline
+import com.glassous.whitz.ui.theme.FolderOpen
+import com.glassous.whitz.ui.theme.Image
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.MyLocation
+import com.glassous.whitz.ui.theme.MyLocation
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.SentimentSatisfied
-import androidx.compose.material.icons.filled.Terminal
+import com.glassous.whitz.ui.theme.SentimentSatisfied
+import com.glassous.whitz.ui.theme.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -88,8 +88,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -128,8 +130,12 @@ import com.glassous.whitz.core.model.ReasoningTool
 import com.glassous.whitz.core.model.ScheduledTaskPendingItem
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
+import com.glassous.whitz.core.model.displaySideTitle
+import com.glassous.whitz.core.model.displayTitle
+import com.glassous.whitz.core.model.isScheduledSide
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
+import com.glassous.whitz.ui.theme.Schedule
 import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
 import com.glassous.whitz.ui.theme.WhitzTextField
@@ -377,6 +383,11 @@ fun MessageBubble(
                         }
                     }
                     if (inlineSegments.isNotEmpty()) {
+                        val isLongUserInput = remember(message.content) {
+                            message.content.length >= 200 || message.content.count { it == '\n' } >= 6
+                        }
+                        var isUserExpanded by remember(message.id) { mutableStateOf(false) }
+                        val collapseActive = isLongUserInput && !isUserExpanded && !isSelectingText
                         val contentBlock: @Composable () -> Unit = {
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 inlineSegments.forEach { seg ->
@@ -434,10 +445,62 @@ fun MessageBubble(
                                 }
                             }
                         }
-                        if (isSelectingText) {
-                            SelectionContainer { contentBlock() }
-                        } else {
-                            contentBlock()
+                        Box(
+                            modifier = if (collapseActive) {
+                                Modifier.heightIn(max = 168.dp).clipToBounds()
+                            } else {
+                                Modifier
+                            },
+                        ) {
+                            if (isSelectingText) {
+                                SelectionContainer { contentBlock() }
+                            } else {
+                                contentBlock()
+                            }
+                            if (collapseActive) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .fillMaxWidth()
+                                        .height(34.dp)
+                                        .background(
+                                            Brush.verticalGradient(
+                                                colors = listOf(
+                                                    Color.Transparent,
+                                                    MaterialTheme.colorScheme.primary,
+                                                ),
+                                            ),
+                                        ),
+                                )
+                            }
+                        }
+                        if (isLongUserInput && !isSelectingText) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier
+                                    .align(Alignment.End)
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.14f))
+                                    .clickable { isUserExpanded = !isUserExpanded }
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(
+                                    text = if (isUserExpanded) "收起" else "展开全文",
+                                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.92f),
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.ChevronRight,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.92f),
+                                    modifier = Modifier
+                                        .size(13.dp)
+                                        .rotate(if (isUserExpanded) -90f else 90f),
+                                )
+                            }
                         }
                     }
                 }
@@ -1977,7 +2040,7 @@ private fun ToolCallRow(tool: ReasoningTool) {
             }
             Spacer(modifier = Modifier.width(6.dp))
             Text(
-                text = toolDisplayName(tool.name),
+                text = toolDisplayName(tool),
                 fontSize = 12.5.sp,
                 fontWeight = FontWeight.Medium,
                 color = if (isFailed) colors.danger else colors.fgMuted,
@@ -2180,7 +2243,7 @@ fun SearchDialog(
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
-                                        text = if (c.kind == "main") assistantName else c.title,
+                                        text = if (c.kind == "main") assistantName else c.displaySideTitle(),
                                         fontWeight = FontWeight.Medium,
                                         fontSize = 14.sp,
                                         color = colors.fg,
@@ -2197,6 +2260,24 @@ fun SearchDialog(
                                                 .padding(horizontal = 6.dp, vertical = 2.dp),
                                         ) {
                                             Text("主聊", fontSize = 10.sp, color = colors.fgMuted)
+                                        }
+                                    } else if (c.isScheduledSide()) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Row(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(colors.surface)
+                                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Schedule,
+                                                contentDescription = null,
+                                                tint = colors.fgMuted,
+                                                modifier = Modifier.size(10.dp),
+                                            )
+                                            Text("定时", fontSize = 10.sp, color = colors.fgMuted)
                                         }
                                     }
                                     Spacer(modifier = Modifier.weight(1f))
@@ -2231,7 +2312,7 @@ fun SearchDialog(
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        text = if (hit.conversationKind == "main") assistantName else hit.conversationTitle.ifBlank { "无标题聊天" },
+                                        text = hit.displayTitle(assistantName),
                                         fontWeight = FontWeight.Medium,
                                         fontSize = 14.sp,
                                         color = colors.fg,
@@ -2247,6 +2328,24 @@ fun SearchDialog(
                                                 .padding(horizontal = 6.dp, vertical = 2.dp),
                                         ) {
                                             Text("主聊", fontSize = 10.sp, color = colors.fgMuted)
+                                        }
+                                    } else if (hit.isScheduledSide()) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Row(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(colors.surface)
+                                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Schedule,
+                                                contentDescription = null,
+                                                tint = colors.fgMuted,
+                                                modifier = Modifier.size(10.dp),
+                                            )
+                                            Text("定时", fontSize = 10.sp, color = colors.fgMuted)
                                         }
                                     }
                                     Spacer(modifier = Modifier.width(6.dp))

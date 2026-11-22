@@ -304,13 +304,29 @@ onBeforeUnmount(() => {
                 >
                   <span class="flex min-w-0 items-center gap-2">
                     <span class="truncate text-[14.5px] font-medium text-fg">
-                      {{ c.kind === "main" ? assistantName : c.title }}
+                      {{
+                        c.kind === "main"
+                          ? assistantName
+                          : c.is_scheduled || c.title.startsWith("[定时]")
+                            ? c.title.replace(/^\[定时\]\s*/, "").trim() || c.title
+                            : c.title
+                      }}
                     </span>
                     <span
                       v-if="c.kind === 'main'"
                       class="shrink-0 rounded-full bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted"
                     >
                       主聊
+                    </span>
+                    <span
+                      v-else-if="c.is_scheduled || c.title.startsWith('[定时]')"
+                      class="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted"
+                    >
+                      <svg class="h-2.5 w-2.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 2" />
+                      </svg>
+                      <span>定时</span>
                     </span>
                   </span>
                   <span class="shrink-0 text-[12px] tabular-nums text-fg-faint">

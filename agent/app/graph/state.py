@@ -49,4 +49,5 @@ class SubagentState(TypedDict, total=False):
     context: str
     result: str
     iterations: int
+    max_iterations: int
     usage: dict[str, int]

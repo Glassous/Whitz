@@ -46,6 +46,7 @@ export interface MembershipPlan {
   max_runs_per_user: number;
   chat_per_minute: number;
   run_max_seconds: number;
+  max_tool_iterations?: number;
   summary: string;
 }
 
@@ -103,6 +104,7 @@ export interface Conversation {
   pending_control?: Record<string, any> | null;
   is_pinned: boolean;
   pinned_at: string | null;
+  is_scheduled?: boolean;
   created_at: string;
   updated_at: string;
   last_message_at: string | null;
@@ -112,6 +114,7 @@ export interface ConversationSearchHit {
   conversation_id: string;
   conversation_kind?: ConversationKind;
   conversation_title: string;
+  is_scheduled?: boolean;
   message_id: string | null;
   role: "user" | "assistant" | null;
   snippet: string;

@@ -180,6 +180,7 @@ async def send_message(
         skill_names=body.skill_names,
         model_route=body.model_route,
         max_seconds=plan.run_max_seconds,
+        max_tool_iterations=plan.max_tool_iterations,
         run_slot=run_slot,
         idempotency_key=idemp,
     )
@@ -235,6 +236,7 @@ async def regenerate_message(
         message_id,
         model_route=route,
         max_seconds=plan.run_max_seconds,
+        max_tool_iterations=plan.max_tool_iterations,
         run_slot=run_slot,
         idempotency_key=idemp,
     )
@@ -284,6 +286,7 @@ async def edit_and_resend_message(
         skill_names=body.skill_names,
         model_route=body.model_route,
         max_seconds=plan.run_max_seconds,
+        max_tool_iterations=plan.max_tool_iterations,
         run_slot=run_slot,
         idempotency_key=idemp,
     )

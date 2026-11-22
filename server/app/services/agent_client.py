@@ -160,6 +160,7 @@ class AgentClient:
         memory_require_confirm: bool = True,
         ai_reactions_enabled: bool = True,
         allow_hitl: bool = True,
+        max_tool_iterations: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -179,6 +180,8 @@ class AgentClient:
             "ai_reactions_enabled": bool(ai_reactions_enabled),
             "allow_hitl": bool(allow_hitl),
         }
+        if max_tool_iterations is not None:
+            payload["max_tool_iterations"] = int(max_tool_iterations)
         if rolling_summary:
             payload["rolling_summary"] = rolling_summary
         if cross_chat_context:

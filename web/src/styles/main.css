@@ -771,10 +771,22 @@ details.disclosure-card[open]::details-content {
   block-size: auto;
 }
 
+.user-input-clamp {
+  interpolate-size: allow-keywords;
+  overflow: hidden;
+  block-size: 9.75em;
+  transition: block-size 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.user-input-clamp.is-expanded {
+  block-size: auto;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-textarea,
   .collapse-panel,
-  .clamp-expandable {
+  .clamp-expandable,
+  .user-input-clamp {
     transition: none !important;
   }
 }

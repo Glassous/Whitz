@@ -46,11 +46,20 @@ const activeView = ref<"chat" | "library" | "schedules">("chat");
 const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
 const assistantAvatarUrl = computed(() => auth.user?.assistant_avatar_url ?? null);
 const isMainChat = computed(() => conversations.current?.kind === "main");
+const isCurrentScheduled = computed(() => {
+  const cur = conversations.current;
+  if (!cur || cur.kind === "main") return false;
+  return Boolean(cur.is_scheduled || (cur.title || "").startsWith("[定时]"));
+});
 const headerTitle = computed(() => {
   if (activeView.value === "library") return "资料库";
   if (activeView.value === "schedules") return "定时任务";
   if (isMainChat.value) return "主要聊天";
-  return conversations.current?.title ?? "新旁聊";
+  const raw = conversations.current?.title ?? "新旁聊";
+  if (isCurrentScheduled.value) {
+    return raw.replace(/^\[定时\]\s*/, "").trim() || raw;
+  }
+  return raw;
 });
 
 const PANEL_WIDTH_STORAGE_KEY = "whitz_task_panel_width";
@@ -933,6 +942,16 @@ onBeforeUnmount(() => {
           <h1 class="min-w-0 truncate text-[15.5px] font-semibold text-fg">
             {{ headerTitle }}
           </h1>
+          <span
+            v-if="activeView === 'chat' && isCurrentScheduled"
+            class="inline-flex shrink-0 items-center gap-1 rounded-full bg-surface px-2 py-0.5 text-[11px] font-medium text-fg-muted"
+          >
+            <svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 2" />
+            </svg>
+            <span>定时</span>
+          </span>
         </div>
 
         <div class="relative min-h-0 flex-1">

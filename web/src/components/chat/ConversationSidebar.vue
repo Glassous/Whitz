@@ -493,6 +493,18 @@ function isRunning(c: Conversation | null | undefined): boolean {
   return Boolean(c?.active_run_status && ACTIVE_RUN_STATUSES.has(c.active_run_status));
 }
 
+function isScheduledSide(c: Conversation | null | undefined): boolean {
+  if (!c || c.kind === "main") return false;
+  return Boolean(c.is_scheduled || (c.title || "").startsWith("[定时]"));
+}
+
+function displaySideTitle(c: Conversation): string {
+  const raw = c.title || "新旁聊";
+  if (!isScheduledSide(c)) return raw;
+  const stripped = raw.replace(/^\[定时\]\s*/, "").trim();
+  return stripped || raw;
+}
+
 const isMainActive = computed(
   () => props.activeView === "chat" && Boolean(props.mainConversation && props.currentId === props.mainConversation.id),
 );
@@ -818,7 +830,18 @@ const isMainActive = computed(
                           d="M12 17v5M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 2 2 0 000-4H8a2 2 0 000 4 1 1 0 011 1v3.76z"
                         />
                       </svg>
-                      <span class="truncate">{{ c.title }}</span>
+                      <span class="min-w-0 flex-1 truncate">{{ displaySideTitle(c) }}</span>
+                      <span
+                        v-if="isScheduledSide(c)"
+                        class="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-surface px-1.5 py-0.5 text-[10.5px] font-medium leading-none text-fg-muted dark:bg-canvas/70"
+                        title="定时任务旁聊"
+                      >
+                        <svg class="h-2.5 w-2.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                          <circle cx="12" cy="12" r="9" />
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 2" />
+                        </svg>
+                        <span>定时</span>
+                      </span>
                     </button>
 
                     <button

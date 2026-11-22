@@ -654,7 +654,13 @@ async def _resolve_or_create_target_conversation(
     await realtime_bus.publish_user_event(
         user.id,
         "conversation.updated",
-        {"action": "created", "conversation_id": str(conv.id), "title": conv.title, "kind": conv.kind},
+        {
+            "action": "created",
+            "conversation_id": str(conv.id),
+            "title": conv.title,
+            "kind": conv.kind,
+            "is_scheduled": True,
+        },
     )
     return conv
 
@@ -820,6 +826,7 @@ async def _execute_claimed_task_run(
                     conversation_history=history or None,
                     model_route=task.model_route or "auto",
                     max_seconds=plan.run_max_seconds,
+                    max_tool_iterations=plan.max_tool_iterations,
                     run_slot=run_slot,
                     idempotency_key=f"sched-{task_run.id}",
                     allow_hitl=False,

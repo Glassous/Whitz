@@ -35,19 +35,19 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.automirrored.filled.Logout
+import com.glassous.whitz.ui.theme.Logout
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.CreditCard
+import com.glassous.whitz.ui.theme.AutoAwesome
+import com.glassous.whitz.ui.theme.CreditCard
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Devices
+import com.glassous.whitz.ui.theme.Devices
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Folder
+import com.glassous.whitz.ui.theme.Folder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.RateReview
-import androidx.compose.material.icons.filled.SmartToy
+import com.glassous.whitz.ui.theme.Psychology
+import com.glassous.whitz.ui.theme.RateReview
+import com.glassous.whitz.ui.theme.SmartToy
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -1210,6 +1210,11 @@ fun MembershipSettingsScreen(
                         ) {
                             Text(p.label, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = colors.fg)
                             Text(p.summary, fontSize = 13.sp, color = colors.fgMuted)
+                            Text(
+                                "最大并发 ${p.maxRunsPerUser} 个 · 单轮工具调用上限 ${p.maxToolIterations} 次",
+                                fontSize = 12.sp,
+                                color = colors.fgFaint,
+                            )
                         }
                     }
                 }

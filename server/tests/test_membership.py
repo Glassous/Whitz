@@ -28,9 +28,9 @@ def test_plan_matrix():
     free = membership.plan_for("free")
     plus = membership.plan_for("plus")
     pro = membership.plan_for("pro")
-    assert (free.weekly_credits, free.five_hour_credits) == (100, 20)
-    assert (plus.weekly_credits, plus.five_hour_credits) == (500, 100)
-    assert (pro.weekly_credits, pro.five_hour_credits) == (1250, None)
+    assert (free.weekly_credits, free.five_hour_credits, free.max_tool_iterations) == (100, 20, 30)
+    assert (plus.weekly_credits, plus.five_hour_credits, plus.max_tool_iterations) == (1500, 300, 60)
+    assert (pro.weekly_credits, pro.five_hour_credits, pro.max_tool_iterations) == (25000, None, 200)
     assert len(membership.plans_payload()) == 3
 
 

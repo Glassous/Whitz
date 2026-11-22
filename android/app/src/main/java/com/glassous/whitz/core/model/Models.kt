@@ -55,6 +55,7 @@ data class MembershipPlan(
     @SerialName("max_runs_per_user") val maxRunsPerUser: Int = 1,
     @SerialName("chat_per_minute") val chatPerMinute: Int = 30,
     @SerialName("run_max_seconds") val runMaxSeconds: Int = 900,
+    @SerialName("max_tool_iterations") val maxToolIterations: Int = 30,
     val summary: String = "",
 )
 
@@ -114,6 +115,7 @@ data class Conversation(
     @SerialName("pending_control") val pendingControl: JsonObject? = null,
     @SerialName("is_pinned") val isPinned: Boolean = false,
     @SerialName("pinned_at") val pinnedAt: String? = null,
+    @SerialName("is_scheduled") val isScheduled: Boolean = false,
     @SerialName("created_at") val createdAt: String = "",
     @SerialName("updated_at") val updatedAt: String = "",
     @SerialName("last_message_at") val lastMessageAt: String? = null,
@@ -130,6 +132,7 @@ data class ConversationDetail(
     @SerialName("pending_control") val pendingControl: JsonObject? = null,
     @SerialName("is_pinned") val isPinned: Boolean = false,
     @SerialName("pinned_at") val pinnedAt: String? = null,
+    @SerialName("is_scheduled") val isScheduled: Boolean = false,
     @SerialName("created_at") val createdAt: String = "",
     @SerialName("updated_at") val updatedAt: String = "",
     @SerialName("last_message_at") val lastMessageAt: String? = null,
@@ -141,6 +144,7 @@ data class ConversationSearchHit(
     @SerialName("conversation_id") val conversationId: String,
     @SerialName("conversation_kind") val conversationKind: String = "side",
     @SerialName("conversation_title") val conversationTitle: String = "",
+    @SerialName("is_scheduled") val isScheduled: Boolean = false,
     @SerialName("message_id") val messageId: String? = null,
     val role: String? = null,
     val snippet: String = "",
@@ -590,6 +594,25 @@ data class UploadTask(
 )
 
 fun User.resolvedAssistantName(): String = assistantName.trim().ifEmpty { "Whitz" }
+
+fun Conversation.isScheduledSide(): Boolean =
+    kind != "main" && (isScheduled || title.startsWith("[定时]"))
+
+fun Conversation.displaySideTitle(): String {
+    val raw = title.ifBlank { "新旁聊" }
+    if (!isScheduledSide()) return raw
+    return raw.replace(Regex("^\\[定时\\]\\s*"), "").trim().ifEmpty { raw }
+}
+
+fun ConversationSearchHit.isScheduledSide(): Boolean =
+    conversationKind != "main" && (isScheduled || conversationTitle.startsWith("[定时]"))
+
+fun ConversationSearchHit.displayTitle(assistantName: String): String {
+    if (conversationKind == "main") return assistantName
+    val raw = conversationTitle.ifBlank { "无标题聊天" }
+    if (!isScheduledSide()) return raw
+    return raw.replace(Regex("^\\[定时\\]\\s*"), "").trim().ifEmpty { raw }
+}
 
 fun resolveServerAssetUrl(apiBaseUrl: String, pathOrUrl: String?): String? {
     val raw = pathOrUrl?.trim()?.takeIf { it.isNotEmpty() } ?: return null

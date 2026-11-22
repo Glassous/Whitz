@@ -1331,6 +1331,7 @@ async def _launch_supervised_turn(
     conversation_history: list[dict[str, str]] | None = None,
     model_route: str = "auto",
     max_seconds: int | None = None,
+    max_tool_iterations: int | None = None,
     run_slot: str | None = None,
     idempotency_key: str | None = None,
     allow_hitl: bool = True,
@@ -1365,6 +1366,7 @@ async def _launch_supervised_turn(
         memory_require_confirm=bool(turn_ctx.get("memory_require_confirm", True)),
         ai_reactions_enabled=bool(turn_ctx.get("ai_reactions_enabled", True)),
         allow_hitl=allow_hitl,
+        max_tool_iterations=max_tool_iterations,
         idempotency_key=idempotency_key or uuid.uuid4().hex,
     )
     run_id = str(run.get("run_id") or run.get("id"))
@@ -1405,6 +1407,7 @@ async def stream_chat(
     skill_names: list[str] | None = None,
     model_route: str = "auto",
     max_seconds: int | None = None,
+    max_tool_iterations: int | None = None,
     run_slot: str | None = None,
     idempotency_key: str | None = None,
 ) -> AsyncIterator[dict]:
@@ -1494,6 +1497,7 @@ async def stream_chat(
                 conversation_history=history or None,
                 model_route=model_route,
                 max_seconds=max_seconds,
+                max_tool_iterations=max_tool_iterations,
                 run_slot=run_slot,
                 idempotency_key=idempotency_key,
             )
@@ -1540,6 +1544,7 @@ async def stream_regenerate(
     target_message_id: uuid.UUID,
     model_route: str = "auto",
     max_seconds: int | None = None,
+    max_tool_iterations: int | None = None,
     run_slot: str | None = None,
     idempotency_key: str | None = None,
 ) -> AsyncIterator[dict]:
@@ -1675,6 +1680,7 @@ async def stream_regenerate(
                 conversation_history=history or None,
                 model_route=model_route,
                 max_seconds=max_seconds,
+                max_tool_iterations=max_tool_iterations,
                 run_slot=run_slot,
                 idempotency_key=idempotency_key,
             )
@@ -1722,6 +1728,7 @@ async def stream_edit(
     skill_names: list[str] | None = None,
     model_route: str = "auto",
     max_seconds: int | None = None,
+    max_tool_iterations: int | None = None,
     run_slot: str | None = None,
     idempotency_key: str | None = None,
 ) -> AsyncIterator[dict]:
@@ -1842,6 +1849,7 @@ async def stream_edit(
                 conversation_history=history or None,
                 model_route=model_route,
                 max_seconds=max_seconds,
+                max_tool_iterations=max_tool_iterations,
                 run_slot=run_slot,
                 idempotency_key=idempotency_key,
             )

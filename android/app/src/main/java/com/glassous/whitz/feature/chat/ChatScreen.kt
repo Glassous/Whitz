@@ -67,26 +67,26 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material.icons.automirrored.filled.NoteAdd
+import com.glassous.whitz.ui.theme.NoteAdd
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.AutoAwesome
+import com.glassous.whitz.ui.theme.AttachFile
+import com.glassous.whitz.ui.theme.AutoAwesome
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.CloseFullscreen
-import androidx.compose.material.icons.filled.ContentCopy
+import com.glassous.whitz.ui.theme.CloseFullscreen
+import com.glassous.whitz.ui.theme.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.MyLocation
-import androidx.compose.material.icons.filled.OpenInFull
-import androidx.compose.material.icons.filled.PushPin
+import com.glassous.whitz.ui.theme.FolderOpen
+import com.glassous.whitz.ui.theme.Image
+import com.glassous.whitz.ui.theme.MyLocation
+import com.glassous.whitz.ui.theme.OpenInFull
+import com.glassous.whitz.ui.theme.PushPin
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Schedule
+import com.glassous.whitz.ui.theme.Schedule
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.SelectAll
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.UploadFile
+import com.glassous.whitz.ui.theme.SelectAll
+import com.glassous.whitz.ui.theme.Stop
+import com.glassous.whitz.ui.theme.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -174,6 +174,8 @@ import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.Message
 import com.glassous.whitz.core.model.UploadTaskStatus
 import com.glassous.whitz.core.model.User
+import com.glassous.whitz.core.model.displaySideTitle
+import com.glassous.whitz.core.model.isScheduledSide
 import com.glassous.whitz.core.model.quotaPercentLabel
 import com.glassous.whitz.core.model.resolvedAssistantName
 import com.glassous.whitz.ui.theme.LocalWhitzColors
@@ -2541,7 +2543,7 @@ private fun ConversationRow(
             Spacer(modifier = Modifier.width(6.dp))
         }
         Text(
-            text = conv.title.ifBlank { "新旁聊" },
+            text = conv.displaySideTitle(),
             fontSize = 14.sp,
             fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
             color = if (selected) colors.fg else colors.fgMuted,
@@ -2549,6 +2551,30 @@ private fun ConversationRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
+        if (conv.isScheduledSide()) {
+            Spacer(modifier = Modifier.width(6.dp))
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(colors.surface)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Schedule,
+                    contentDescription = null,
+                    tint = colors.fgMuted,
+                    modifier = Modifier.size(10.dp),
+                )
+                Text(
+                    text = "定时",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = colors.fgMuted,
+                )
+            }
+        }
     }
 }
 

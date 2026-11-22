@@ -16,12 +16,30 @@ from app.api.schemas import (
     ConversationSearchHit,
     ConversationUpdate,
 )
-from app.db.models import Conversation, ConversationFile, FileChunk, Message, User
+from app.db.models import Conversation, ConversationFile, FileChunk, Message, ScheduledTask, User
 from app.db.session import get_db
 from app.services import audit, cross_chat_memory, realtime_bus, titles
 from app.services.agent_client import AgentClient, AgentError
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+
+
+async def _scheduled_conversation_ids(db: AsyncSession, user_id: uuid.UUID) -> set[uuid.UUID]:
+    rows = await db.execute(
+        select(ScheduledTask.conversation_id).where(
+            ScheduledTask.user_id == user_id,
+            ScheduledTask.conversation_id.is_not(None),
+        )
+    )
+    return {cid for cid in rows.scalars() if cid is not None}
+
+
+def _apply_scheduled_flag(convs: list[Conversation], scheduled_ids: set[uuid.UUID]) -> None:
+    for conv in convs:
+        is_sched = conv.kind != "main" and (
+            conv.id in scheduled_ids or (conv.title or "").startswith("[定时]")
+        )
+        setattr(conv, "is_scheduled", is_sched)
 
 
 @router.get("", response_model=list[ConversationOut])
@@ -41,7 +59,10 @@ async def list_conversations(
             Conversation.created_at.desc(),
         )
     )
-    return list(result.scalars().all())
+    convs = list(result.scalars().all())
+    scheduled_ids = await _scheduled_conversation_ids(db, user.id)
+    _apply_scheduled_flag(convs, scheduled_ids)
+    return convs
 
 
 @router.get("/main", response_model=ConversationDetail)
@@ -108,6 +129,7 @@ async def search_conversations(
     per_conv_counts: dict[uuid.UUID, int] = {}
     matched_conv_ids: set[uuid.UUID] = set()
     assistant_label = (user.assistant_name or "").strip() or "Whitz"
+    scheduled_ids = await _scheduled_conversation_ids(db, user.id)
 
     for msg, conv_title, conv_kind in msg_rows:
         cnt = per_conv_counts.get(msg.conversation_id, 0)
@@ -119,11 +141,15 @@ async def search_conversations(
         per_conv_counts[msg.conversation_id] = cnt + 1
         matched_conv_ids.add(msg.conversation_id)
         display_title = assistant_label if conv_kind == "main" else conv_title
+        is_sched = conv_kind != "main" and (
+            msg.conversation_id in scheduled_ids or (conv_title or "").startswith("[定时]")
+        )
         hits.append(
             ConversationSearchHit(
                 conversation_id=msg.conversation_id,
                 conversation_kind="main" if conv_kind == "main" else "side",
                 conversation_title=display_title,
+                is_scheduled=is_sched,
                 message_id=msg.id,
                 role=msg.role,
                 snippet=snippet,
@@ -151,11 +177,15 @@ async def search_conversations(
             if conv.id in matched_conv_ids:
                 continue
             display_title = assistant_label if conv.kind == "main" else conv.title
+            is_sched = conv.kind != "main" and (
+                conv.id in scheduled_ids or (conv.title or "").startswith("[定时]")
+            )
             hits.append(
                 ConversationSearchHit(
                     conversation_id=conv.id,
                     conversation_kind="main" if conv.kind == "main" else "side",
                     conversation_title=display_title,
+                    is_scheduled=is_sched,
                     message_id=None,
                     role=None,
                     snippet="",
@@ -198,7 +228,9 @@ async def create_conversation(
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
 async def get_conversation(
-    conv: Conversation = Depends(get_owned_conversation), db: AsyncSession = Depends(get_db)
+    conv: Conversation = Depends(get_owned_conversation),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> Conversation:
     result = await db.execute(
         select(Conversation)
@@ -208,6 +240,8 @@ async def get_conversation(
     conv = result.scalar_one()
     role_order = {"user": 0, "assistant": 1, "tool": 2}
     conv.messages.sort(key=lambda m: (m.created_at, role_order.get(m.role, 3), str(m.id)))
+    scheduled_ids = await _scheduled_conversation_ids(db, user.id)
+    _apply_scheduled_flag([conv], scheduled_ids)
     return conv
 
 
@@ -271,6 +305,8 @@ async def rename_conversation(
             request=request,
             metadata={"is_pinned": conv.is_pinned},
         )
+    scheduled_ids = await _scheduled_conversation_ids(db, user.id)
+    _apply_scheduled_flag([conv], scheduled_ids)
     return conv
 
 
