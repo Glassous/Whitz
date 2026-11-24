@@ -68,6 +68,7 @@ class CreateRunRequest(BaseModel):
     assistant_name: str = "Whitz"
     rolling_summary: str = ""
     cross_chat_context: str = ""
+    memory_index: str = ""
     user_id: str
     agent_namespace: str = ""
     agent_api_key: str = ""

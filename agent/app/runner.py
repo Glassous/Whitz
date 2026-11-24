@@ -275,7 +275,12 @@ async def _build_runtime_config(
     rerank_client = RerankClient(settings=settings, redis_client=redis)
     model_router = ModelRouter(settings=settings, redis_client=redis)
     hybrid_retriever = HybridRetriever(pool=pool, embedding_client=emb_client, rerank_client=rerank_client)
-    memory_manager = MemoryManager(store=store, pool=pool, embedding_client=emb_client)
+    memory_manager = MemoryManager(
+        store=store,
+        pool=pool,
+        embedding_client=emb_client,
+        rerank_client=rerank_client,
+    )
     sandbox_executor = get_sandbox_executor(settings=settings)
 
     skills_list = payload.get("skills") or []
@@ -937,6 +942,7 @@ async def execute_run(
             "assistant_name": str(payload.get("assistant_name") or "").strip() or "Whitz",
             "rolling_summary": str(payload.get("rolling_summary") or ""),
             "cross_chat_context": str(payload.get("cross_chat_context") or ""),
+            "memory_index": str(payload.get("memory_index") or ""),
             "user_id": meta["user_id"],
             "agent_namespace": str(payload.get("agent_namespace") or ""),
             "persona": str(payload.get("persona") or ""),

@@ -591,18 +591,64 @@ class MemorySettingsUpdateRequest(BaseModel):
     consent: bool = False
 
 
+class MemoryCollectionOut(BaseModel):
+    id: str
+    slug: str
+    name: str
+    description: str = ""
+    kind: str = "custom"
+    enabled: bool = True
+    entry_count: int = 0
+    char_count: int = 0
+    char_limit: int = 12000
+    max_entries: int = 200
+    sort_order: int = 100
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class MemoryCollectionCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    slug: str | None = Field(default=None, max_length=64)
+    description: str = Field(default="", max_length=300)
+    char_limit: int = Field(default=12000, ge=2000, le=50000)
+
+    @field_validator("name")
+    @classmethod
+    def check_name(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("记忆集名称不能为空")
+        return cleaned
+
+
+class MemoryCollectionUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=300)
+    enabled: bool | None = None
+    char_limit: int | None = Field(default=None, ge=2000, le=50000)
+    sort_order: int | None = Field(default=None, ge=0, le=10000)
+
+
 class MemoryEntryOut(BaseModel):
     id: str
+    collection_id: str | None = None
+    collection_name: str | None = None
     target: str = "memory"
+    title: str = ""
     content: str
+    tags: list[str] = Field(default_factory=list)
     source: str = "manual"
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
 
 class MemoryEntryCreateRequest(BaseModel):
-    target: Literal["memory", "user"] = "memory"
-    content: str = Field(min_length=1, max_length=2000)
+    target: str = Field(default="memory", max_length=64)
+    collection_id: str | None = None
+    title: str = Field(default="", max_length=120)
+    content: str = Field(min_length=1, max_length=4000)
+    tags: list[str] = Field(default_factory=list)
 
     @field_validator("content")
     @classmethod
@@ -614,8 +660,11 @@ class MemoryEntryCreateRequest(BaseModel):
 
 
 class MemoryEntryUpdateRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=2000)
-    target: Literal["memory", "user"] | None = None
+    content: str = Field(min_length=1, max_length=4000)
+    target: str | None = Field(default=None, max_length=64)
+    collection_id: str | None = None
+    title: str | None = Field(default=None, max_length=120)
+    tags: list[str] | None = None
 
     @field_validator("content")
     @classmethod
@@ -628,7 +677,10 @@ class MemoryEntryUpdateRequest(BaseModel):
 
 class MemoryPendingOut(BaseModel):
     id: str
+    collection_id: str | None = None
     target: str = "memory"
+    title: str = ""
+    tags: list[str] = Field(default_factory=list)
     action: str = "add"
     content: str
     old_content: str | None = None
@@ -638,21 +690,50 @@ class MemoryPendingOut(BaseModel):
 
 class MemoryPendingResolveRequest(BaseModel):
     action: Literal["approve", "reject"]
-    content: str | None = Field(default=None, max_length=2000)
+    content: str | None = Field(default=None, max_length=4000)
+
+
+class MemorySearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    collection: str | None = Field(default=None, max_length=64)
+    limit: int = Field(default=12, ge=1, le=50)
+
+
+class MemorySearchHitOut(BaseModel):
+    id: str
+    collection_id: str | None = None
+    target: str = "memory"
+    collection_name: str = ""
+    title: str = ""
+    content: str
+    tags: list[str] = Field(default_factory=list)
+    source: str = "manual"
+    score: float = 0.0
+
+
+class MemorySearchResponse(BaseModel):
+    query: str
+    collection: str | None = None
+    count: int = 0
+    results: list[MemorySearchHitOut] = Field(default_factory=list)
 
 
 class MemoryOverviewOut(BaseModel):
     memory_enabled: bool
     memory_consented_at: datetime | None = None
     memory_require_confirm: bool
+    collections: list[MemoryCollectionOut] = Field(default_factory=list)
     entries: list[MemoryEntryOut] = Field(default_factory=list)
     pending: list[MemoryPendingOut] = Field(default_factory=list)
     char_count: int = 0
-    char_limit: int = 2200
+    char_limit: int = 12000
     memory_char_count: int = 0
-    memory_char_limit: int = 2200
+    memory_char_limit: int = 12000
     user_char_count: int = 0
-    user_char_limit: int = 1375
+    user_char_limit: int = 8000
+    total_char_count: int = 0
+    total_char_limit: int = 200000
+    collection_limit: int = 50
 
 
 class SkillOut(BaseModel):
@@ -780,6 +861,8 @@ class AdminUserDetailOut(AdminUserOut):
     memory_enabled: bool = True
     memory_consented_at: datetime | None = None
     memory_require_confirm: bool = False
+    memory_collection_count: int = 0
+    memory_entry_count: int = 0
     conversation_count: int = 0
     message_count: int = 0
     file_count: int = 0

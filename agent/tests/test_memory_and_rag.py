@@ -145,6 +145,75 @@ async def test_memory_manager_defaults_enabled_without_confirm_for_write_read_mo
     assert await mgr.search(user_id=uid, agent_namespace="u_default", query="LazyVim") == []
 
 
+@pytest.mark.asyncio
+async def test_memory_collections_auto_create_filter_and_rrf_rerank():
+    from app.memory.store import _mmr_select_memories, _rrf_fuse_memories, normalize_collection_slug
+
+    assert normalize_collection_slug("Project Whitz!") == "project-whitz"
+    assert normalize_collection_slug("user.md") == "user"
+    assert normalize_collection_slug("work") == "projects"
+
+    store = FakeStore()
+    emb = EmbeddingClient(AgentSettings(embedding_model=""))
+    mgr = MemoryManager(store=store, pool=None, embedding_client=emb)
+    uid = str(uuid.uuid4())
+    cid = str(uuid.uuid4())
+
+    res1 = await mgr.propose(
+        user_id=uid,
+        agent_namespace="u_multi",
+        conversation_id=cid,
+        target="project-whitz",
+        action="add",
+        title="Backend Stack",
+        tags=["python", "fastapi"],
+        collection_name="Whitz 项目",
+        content="Whitz uses FastAPI + LangGraph + PostgreSQL 17",
+    )
+    assert res1["status"] == "saved"
+    assert res1["collection"] == "project-whitz"
+    assert res1["collection_name"] == "Whitz 项目"
+
+    res2 = await mgr.propose(
+        user_id=uid,
+        agent_namespace="u_multi",
+        conversation_id=cid,
+        target="user",
+        action="add",
+        title="Reply Style",
+        content="Prefers concise Chinese answers",
+    )
+    assert res2["status"] == "saved"
+
+    # Collection-scoped search & list
+    proj_hits = await mgr.search(
+        user_id=uid,
+        agent_namespace="u_multi",
+        query="FastAPI",
+        collection="project-whitz",
+    )
+    assert len(proj_hits) == 1
+    assert proj_hits[0]["collection"] == "project-whitz"
+    assert await mgr.search(user_id=uid, agent_namespace="u_multi", query="FastAPI", collection="user") == []
+
+    proj_entries = await mgr.list_entries(user_id=uid, agent_namespace="u_multi", collection="project-whitz")
+    assert len(proj_entries) == 1
+    assert proj_entries[0]["title"] == "Backend Stack"
+
+    # RRF + MMR fusion test
+    fused = _rrf_fuse_memories(
+        [
+            [{"id": "e1", "content": "FastAPI backend"}, {"id": "e2", "content": "Vue 3 frontend"}],
+            [{"id": "e2", "content": "Vue 3 frontend"}, {"id": "e3", "content": "Android Compose"}],
+            [{"id": "e2", "content": "Vue 3 frontend"}],
+        ],
+        top_k=5,
+    )
+    assert fused[0]["id"] == "e2"
+    mmr = _mmr_select_memories(fused, limit=2)
+    assert len(mmr) == 2
+
+
 def test_rrf_fuse_combines_vector_and_fts_ranks():
     vec_rows = [
         {"chunk_id": "c1", "file_id": "f1", "filename": "a.md", "content": "only vec", "chunk_index": 0},

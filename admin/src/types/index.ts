@@ -336,6 +336,8 @@ export interface AdminUserDetail extends AdminUser {
   memory_enabled: boolean;
   memory_consented_at: string | null;
   memory_require_confirm: boolean;
+  memory_collection_count?: number;
+  memory_entry_count?: number;
   conversation_count: number;
   message_count: number;
   file_count: number;

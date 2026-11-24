@@ -105,8 +105,11 @@ async def test_memory_settings_consent_and_db_persistence(register, client, db):
     data = on.json()
     assert data["memory_enabled"] is True
     assert data["memory_require_confirm"] is False
-    assert data["memory_char_limit"] == 2200
-    assert data["user_char_limit"] == 1375
+    assert data["memory_char_limit"] == 12000
+    assert data["user_char_limit"] == 8000
+    assert data["total_char_limit"] == 200000
+    assert data["collection_limit"] == 50
+    assert len(data["collections"]) >= 3
 
     await db.refresh(user)
     assert user.memory_enabled is True
@@ -165,13 +168,48 @@ async def test_memory_crud_limits_pending_and_isolation(register, client, db):
     assert r3.status_code == 201
     assert r3.json()["memory_char_count"] == len("项目使用 FastAPI + PostgreSQL 17\n§\nRedis 端口为 6379")
 
-    # Enforce USER.md 1375 char limit
+    # Enforce USER.md 8000 char limit
     oversized = await client.post(
         "/api/users/me/memory/entries",
-        json={"target": "user", "content": "A" * 1400},
+        json={"target": "user", "content": "A" * 4000},
         headers=h1,
     )
-    assert oversized.status_code == 400
+    assert oversized.status_code == 201
+    oversized2 = await client.post(
+        "/api/users/me/memory/entries",
+        json={"target": "user", "content": "B" * 4000},
+        headers=h1,
+    )
+    assert oversized2.status_code == 400
+
+    # Create custom collection and add entry to it
+    c_resp = await client.post(
+        "/api/users/me/memory/collections",
+        json={"name": "Whitz 项目", "slug": "project-whitz", "description": "项目架构与约定"},
+        headers=h1,
+    )
+    assert c_resp.status_code == 201
+    assert any(c["slug"] == "project-whitz" for c in c_resp.json()["collections"])
+    r_proj = await client.post(
+        "/api/users/me/memory/entries",
+        json={
+            "target": "project-whitz",
+            "title": "后端框架",
+            "tags": ["fastapi", "pg"],
+            "content": "项目采用 FastAPI + LangGraph + PostgreSQL 17",
+        },
+        headers=h1,
+    )
+    assert r_proj.status_code == 201
+
+    # RAG search endpoint
+    s_resp = await client.post(
+        "/api/users/me/memory/search",
+        json={"query": "LangGraph", "collection": "project-whitz"},
+        headers=h1,
+    )
+    assert s_resp.status_code == 200
+    assert s_resp.json()["count"] >= 1
 
     # Update entry
     upd = await client.patch(

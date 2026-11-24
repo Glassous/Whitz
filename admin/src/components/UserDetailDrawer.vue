@@ -456,6 +456,9 @@ onMounted(() => {
               <BaseBadge :tone="detail.memory_require_confirm ? 'brand' : 'amber'">
                 {{ detail.memory_require_confirm ? "记忆写入需用户确认" : "记忆自动写入" }}
               </BaseBadge>
+              <BaseBadge v-if="detail.memory_collection_count != null" tone="gray">
+                记忆集：{{ detail.memory_collection_count }} 个 · {{ detail.memory_entry_count ?? 0 }} 条
+              </BaseBadge>
             </div>
             <div
               v-if="detail.profile_context_consented_at || detail.memory_consented_at"

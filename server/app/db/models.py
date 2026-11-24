@@ -439,15 +439,48 @@ class Message(Base):
     )
 
 
-class MemoryEntry(Base):
-    __tablename__ = "memory_entries"
-    __table_args__ = (Index("ix_memory_entries_user_target", "user_id", "target"),)
+class MemoryCollection(Base):
+    __tablename__ = "memory_collections"
+    __table_args__ = (
+        UniqueConstraint("user_id", "slug", name="uq_memory_collections_user_slug"),
+        Index("ix_memory_collections_user_enabled", "user_id", "enabled"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    target: Mapped[str] = mapped_column(String(16), default="memory", server_default="memory")
+    slug: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(80))
+    description: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    kind: Mapped[str] = mapped_column(String(24), default="custom", server_default="custom")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    char_limit: Mapped[int] = mapped_column(Integer, default=12000, server_default="12000")
+    max_entries: Mapped[int] = mapped_column(Integer, default=200, server_default="200")
+    sort_order: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MemoryEntry(Base):
+    __tablename__ = "memory_entries"
+    __table_args__ = (
+        Index("ix_memory_entries_user_target", "user_id", "target"),
+        Index("ix_memory_entries_user_collection", "user_id", "collection_id"),
+        Index("ix_memory_entries_search_tsv", "search_tsv", postgresql_using="gin"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    collection_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("memory_collections.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    target: Mapped[str] = mapped_column(String(64), default="memory", server_default="memory")
+    title: Mapped[str] = mapped_column(String(120), default="", server_default="")
     content: Mapped[str] = mapped_column(Text)
+    tags: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
     source: Mapped[str] = mapped_column(String(24), default="manual", server_default="manual")
+    search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -462,7 +495,12 @@ class MemoryPendingProposal(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    target: Mapped[str] = mapped_column(String(16), default="memory", server_default="memory")
+    collection_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("memory_collections.id", ondelete="SET NULL"), nullable=True
+    )
+    target: Mapped[str] = mapped_column(String(64), default="memory", server_default="memory")
+    title: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    tags: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
     action: Mapped[str] = mapped_column(String(16), default="add", server_default="add")
     content: Mapped[str] = mapped_column(Text)
     old_content: Mapped[str | None] = mapped_column(Text, nullable=True)

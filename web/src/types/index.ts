@@ -373,21 +373,63 @@ export interface SkillPendingItem {
   resolved_at?: string | null;
 }
 
+export interface MemoryCollection {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  kind: "system" | "custom" | string;
+  enabled: boolean;
+  entry_count: number;
+  char_count: number;
+  char_limit: number;
+  max_entries: number;
+  sort_order: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface MemoryEntry {
   id: string;
+  collection_id?: string | null;
+  collection_name?: string | null;
+  title?: string;
   content: string;
-  target?: "memory" | "user" | string;
+  tags?: string[];
+  target?: string;
   category?: string | null;
-  source?: "user" | "assistant" | "manual" | string;
+  source?: "user" | "assistant" | "agent" | "manual" | string;
   char_count?: number;
   created_at?: string | null;
   updated_at?: string | null;
 }
 
+export interface MemorySearchHit {
+  id: string;
+  collection_id?: string | null;
+  target: string;
+  collection_name: string;
+  title: string;
+  content: string;
+  tags: string[];
+  source: string;
+  score: number;
+}
+
+export interface MemorySearchResponse {
+  query: string;
+  collection?: string | null;
+  count: number;
+  results: MemorySearchHit[];
+}
+
 export interface MemoryPendingItem {
   id: string;
+  collection_id?: string | null;
   action: "add" | "replace" | "remove" | "create" | "update" | "delete" | string;
-  target?: "memory" | "user" | string;
+  target?: string;
+  title?: string;
+  tags?: string[];
   content: string;
   old_content?: string | null;
   category?: string | null;
@@ -405,6 +447,7 @@ export interface MemoryOverview {
   memory_require_confirm: boolean;
   profile_context_enabled?: boolean;
   profile_context_consented_at?: string | null;
+  collections?: MemoryCollection[];
   entries: MemoryEntry[];
   pending: MemoryPendingItem[];
   char_count?: number;
@@ -413,6 +456,9 @@ export interface MemoryOverview {
   memory_char_limit?: number;
   user_char_count?: number;
   user_char_limit?: number;
+  total_char_count?: number;
+  total_char_limit?: number;
+  collection_limit?: number;
 }
 
 export interface UserSessionItem {

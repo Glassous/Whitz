@@ -147,6 +147,7 @@ class AgentClient:
         assistant_name: str = "Whitz",
         rolling_summary: str | None = None,
         cross_chat_context: str | None = None,
+        memory_index: str | None = None,
         instructions: str | None = None,
         conversation_history: list[dict[str, str]] | None = None,
         model_route: str = "auto",
@@ -186,6 +187,8 @@ class AgentClient:
             payload["rolling_summary"] = rolling_summary
         if cross_chat_context:
             payload["cross_chat_context"] = cross_chat_context
+        if memory_index:
+            payload["memory_index"] = memory_index
         if instructions:
             payload["instructions"] = instructions
         if conversation_history:

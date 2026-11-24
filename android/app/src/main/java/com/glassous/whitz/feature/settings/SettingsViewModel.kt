@@ -9,6 +9,7 @@ import com.glassous.whitz.core.files.LibraryController
 import com.glassous.whitz.core.model.CreditStatus
 import com.glassous.whitz.core.model.GithubSkillPreviewResponse
 import com.glassous.whitz.core.model.MemoryOverview
+import com.glassous.whitz.core.model.MemorySearchHit
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.model.ThemePreference
@@ -18,7 +19,10 @@ import com.glassous.whitz.core.network.AvatarUploadRequest
 import com.glassous.whitz.core.network.CreateSkillRequest
 import com.glassous.whitz.core.network.GithubInstallRequest
 import com.glassous.whitz.core.network.GithubPreviewRequest
+import com.glassous.whitz.core.network.MemoryCollectionCreateRequest
+import com.glassous.whitz.core.network.MemoryCollectionUpdateRequest
 import com.glassous.whitz.core.network.MemoryEntryRequest
+import com.glassous.whitz.core.network.MemorySearchRequest
 import com.glassous.whitz.core.network.MemorySettingsRequest
 import com.glassous.whitz.core.network.PendingActionRequest
 import com.glassous.whitz.core.network.ProfileContextRequest
@@ -49,6 +53,9 @@ data class SettingsUiState(
     val credits: CreditStatus? = null,
     // Memory
     val memory: MemoryOverview? = null,
+    val selectedMemoryCollection: String? = null,
+    val memorySearchResults: List<MemorySearchHit>? = null,
+    val memorySearching: Boolean = false,
     // Skills
     val skills: List<SkillItem> = emptyList(),
     val pendingSkills: List<SkillPendingItem> = emptyList(),
@@ -306,16 +313,107 @@ class SettingsViewModel(
         }
     }
 
+    fun selectMemoryCollection(slug: String?) {
+        _ui.update { it.copy(selectedMemoryCollection = slug) }
+    }
+
+    fun createMemoryCollection(
+        name: String,
+        slug: String? = null,
+        description: String = "",
+        onSuccess: () -> Unit = {},
+    ) {
+        if (name.isBlank()) return
+        viewModelScope.launch {
+            _ui.update { it.copy(loading = true, message = null, error = null) }
+            try {
+                val m = container.network.api.createMemoryCollection(
+                    MemoryCollectionCreateRequest(
+                        name = name.trim(),
+                        slug = slug?.trim()?.takeIf { it.isNotEmpty() },
+                        description = description.trim(),
+                    )
+                )
+                _ui.update { it.copy(loading = false, memory = m, message = "已新建记忆集") }
+                onSuccess()
+            } catch (t: Throwable) {
+                _ui.update { it.copy(loading = false, error = extractErrorMessage(t, "创建记忆集失败")) }
+            }
+        }
+    }
+
+    fun toggleMemoryCollection(id: String, enabled: Boolean) {
+        viewModelScope.launch {
+            try {
+                val m = container.network.api.updateMemoryCollection(
+                    id,
+                    MemoryCollectionUpdateRequest(enabled = enabled),
+                )
+                _ui.update { it.copy(memory = m) }
+            } catch (t: Throwable) {
+                _ui.update { it.copy(error = extractErrorMessage(t, "更新记忆集失败")) }
+            }
+        }
+    }
+
+    fun deleteMemoryCollection(id: String) {
+        viewModelScope.launch {
+            try {
+                val m = container.network.api.deleteMemoryCollection(id)
+                _ui.update { state ->
+                    val stillExists = state.selectedMemoryCollection != null &&
+                        m.collections.any { it.slug == state.selectedMemoryCollection }
+                    state.copy(
+                        memory = m,
+                        selectedMemoryCollection = if (stillExists) state.selectedMemoryCollection else null,
+                        message = "已删除记忆集",
+                    )
+                }
+            } catch (t: Throwable) {
+                _ui.update { it.copy(error = extractErrorMessage(t, "删除记忆集失败")) }
+            }
+        }
+    }
+
+    fun searchMemory(query: String) {
+        val cleaned = query.trim()
+        if (cleaned.isEmpty()) {
+            _ui.update { it.copy(memorySearchResults = null, memorySearching = false) }
+            return
+        }
+        viewModelScope.launch {
+            _ui.update { it.copy(memorySearching = true, error = null) }
+            try {
+                val resp = container.network.api.searchMemory(
+                    MemorySearchRequest(
+                        query = cleaned,
+                        collection = _ui.value.selectedMemoryCollection,
+                    )
+                )
+                _ui.update { it.copy(memorySearching = false, memorySearchResults = resp.results) }
+            } catch (t: Throwable) {
+                _ui.update { it.copy(memorySearching = false, error = extractErrorMessage(t, "检索记忆失败")) }
+            }
+        }
+    }
+
+    fun clearMemorySearch() {
+        _ui.update { it.copy(memorySearchResults = null, memorySearching = false) }
+    }
+
     fun addMemoryEntry(
         content: String,
         target: String = "memory",
+        title: String = "",
         onSuccess: () -> Unit = {},
     ) {
         if (content.isBlank()) return
         viewModelScope.launch {
             _ui.update { it.copy(loading = true, message = null, error = null) }
             try {
-                container.network.api.createMemoryEntry(MemoryEntryRequest(content.trim(), target = target))
+                container.network.api.createMemoryEntry(
+                    MemoryEntryRequest(content.trim(), target = target, title = title.trim())
+                )
                 _ui.update { it.copy(loading = false, message = "已添加记忆") }
                 loadMemory()
                 onSuccess()
@@ -359,12 +457,12 @@ class SettingsViewModel(
         }
     }
 
-    fun clearAllMemory() {
+    fun clearAllMemory(collectionId: String? = null) {
         viewModelScope.launch {
             try {
-                container.network.api.clearMemory()
+                container.network.api.clearMemory(collectionId)
                 loadMemory()
-                _ui.update { it.copy(message = "已清空全部记忆") }
+                _ui.update { it.copy(message = if (collectionId != null) "已清空当前记忆集" else "已清空全部记忆") }
             } catch (t: Throwable) {
                 _ui.update { it.copy(error = extractErrorMessage(t, "清空记忆失败")) }
             }

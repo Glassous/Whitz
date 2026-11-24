@@ -12,6 +12,8 @@ from app.tools import parse_tool_error
 from app.tools.builtin_tools import (
     get_builtin_tools,
     http_request,
+    memory_list,
+    memory_manage_collection,
     memory_propose,
     memory_search,
     rag_search_workspace,
@@ -166,6 +168,37 @@ async def test_builtin_tools_and_ssrf_guard():
     assert def_propose["status"] == "saved"
     assert seen_calls[1]["memory_enabled"] is True
     assert seen_calls[1]["memory_require_confirm"] is False
+
+    # memory_list and memory_manage_collection delegation
+    async def recording_list_collections(**kwargs):
+        return [{"slug": "memory", "name": "通用笔记", "entry_count": 2}]
+
+    async def recording_list_entries(**kwargs):
+        return [{"id": "m2", "collection": kwargs.get("collection"), "content": "Uses Helix"}]
+
+    async def recording_manage_collection(**kwargs):
+        return {"status": "created", "slug": kwargs["slug"], "name": kwargs.get("name")}
+
+    fake_memory.list_collections = recording_list_collections
+    fake_memory.list_entries = recording_list_entries
+    fake_memory.manage_collection = recording_manage_collection
+
+    cols_out = json.loads(await memory_list.ainvoke({}, config=default_cfg))
+    assert cols_out["count"] == 1
+    assert cols_out["collections"][0]["slug"] == "memory"
+
+    entries_out = json.loads(await memory_list.ainvoke({"collection": "projects"}, config=default_cfg))
+    assert entries_out["count"] == 1
+    assert entries_out["entries"][0]["collection"] == "projects"
+
+    mg_out = json.loads(
+        await memory_manage_collection.ainvoke(
+            {"action": "create", "slug": "rust-quant", "name": "Rust 量化"},
+            config=default_cfg,
+        )
+    )
+    assert mg_out["status"] == "created"
+    assert mg_out["slug"] == "rust-quant"
 
 
 @pytest.mark.asyncio

@@ -215,7 +215,7 @@ def _base_agent_prompt(assistant_name: str = "Whitz", *, is_main_chat: bool = Fa
         "     {\"file_id\": \"<返回的file_id>\", \"filename\": \"report.html\", \"title\": \"简明交付标题\", \"summary\": \"一句话说明核心内容\"}\n"
         "     ```\n"
         "     请勿在正文中倾倒数百行原始 HTML/CSV/长文档源码，正文仅做核心解读并嵌入交付卡片即可；\n"
-        "   - 需要个性化背景时调用 `memory_search`；当用户表达长期偏好、重要项目背景或需要更新/删除已有长期记忆时，可直接调用 `memory_propose`（支持 `add` / `replace` / `remove`）写入或修改，无需额外向用户请求同意；"
+        "   - 多主题记忆集与 RAG：参考下方「记忆集目录索引」，需要回忆背景时优先调用 `memory_search`（支持按 `collection` 过滤做混合 RAG 检索）或 `memory_list` 查阅明细；当用户表达长期偏好、项目背景或需要更新/删除记忆时，可直接调用 `memory_propose`（支持 `add` / `replace` / `remove`，并可按需自动归类到新主题集）或 `memory_manage_collection` 管理记忆集，无需额外向用户请求同意；"
         f"{extra_main}\n"
         "   - 需要实时外部资料时使用 `web_search`，可根据查询目标自主选择搜索引擎 `provider`：`\"bocha\"`（博查 AI 搜索，响应快，最适合国内新闻、中文资料、国内企业与政策等）或 `\"tavily\"`（速度较慢但最适合国外英文资料、国际新闻、海外技术社区与英文文档）；若需兼顾国内外对比可并行调用两次 `web_search`，摘要不足时再调用 `web_extract` 精读关键页面；\n"
         "   - 需要调用公开 HTTP/REST API、发送自定义 Method/Headers/Query/JSON/表单请求或查看响应状态码与响应头（等效 curl 能力）时，直接调用 `http_request`；\n"
@@ -389,13 +389,17 @@ def _build_system_prompt(state: AgentState, cfg: dict[str, Any], current_time_st
 
     memory_enabled = bool(state.get("memory_enabled", True))
     require_confirm = bool(state.get("memory_require_confirm", False))
+    memory_index = str(state.get("memory_index") or "").strip()
     if memory_enabled:
         mode_note = (
             "写入需用户界面确认（propose）"
             if require_confirm
-            else "可直接读取、写入、修改与删除（无需用户同意）"
+            else "可直接读取、写入、修改、删除与管理记忆集（无需用户同意）"
         )
-        sections.append(f"## 长期记忆策略\n记忆功能已开启（{mode_note}）。")
+        mem_section = f"## 长期记忆策略\n记忆功能已开启（{mode_note}）。"
+        if memory_index:
+            mem_section += f"\n\n### 记忆集目录索引\n{memory_index}"
+        sections.append(mem_section)
     else:
         sections.append("## 长期记忆策略\n显式长期记忆条目写入未开启，请勿调用 `memory_propose`。")
 
@@ -937,10 +941,14 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                 temperature=0.0,
                 streaming=False,
             )
+            mem_index_hint = str(state.get("memory_index") or "").strip()
+            index_block = f"\n当前记忆集目录：\n{mem_index_hint[:800]}\n" if mem_index_hint else ""
             prompt = (
-                "判断本轮对话中用户是否明确表达了值得长期记住的个人偏好、身份背景或长期项目要求。"
+                "判断本轮对话中用户是否明确表达了值得长期记住的个人偏好、身份背景、项目架构或长期要求。"
                 "若无，仅返回 JSON `{\"should_save\": false}`。"
-                "若有，返回 JSON `{\"should_save\": true, \"target\": \"memory\"|\"user\", \"content\": \"一句话精炼记忆\"}`。\n\n"
+                "若有，返回 JSON `{\"should_save\": true, \"target\": \"memory\"|\"user\"|\"projects\"|\"<主题slug>\", "
+                "\"collection_name\": \"可选新集名\", \"title\": \"简短标题\", \"tags\": [\"标签\"], \"content\": \"一句话精炼记忆\"}`。"
+                f"{index_block}\n"
                 f"用户：{user_text[:1000]}\n助手：{assistant_text[:1000]}"
             )
             resp = await llm.ainvoke([HumanMessage(content=prompt)])
@@ -956,6 +964,9 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                         conversation_id=str(state.get("conversation_id") or cfg.get("conversation_id") or "") or None,
                         target=str(parsed.get("target") or "memory"),
                         action="add",
+                        title=str(parsed.get("title") or ""),
+                        tags=list(parsed.get("tags") or []) if isinstance(parsed.get("tags"), list) else None,
+                        collection_name=str(parsed.get("collection_name") or "").strip() or None,
                         content=str(parsed["content"]),
                         memory_enabled=True,
                         memory_require_confirm=bool(state.get("memory_require_confirm", False)),

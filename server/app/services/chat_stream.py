@@ -1298,6 +1298,13 @@ async def _prepare_turn_context(
             logger.warning("Main chat cross-session memory lookup failed: %s", exc)
             rolling_summary = (conv.rolling_summary or "").strip()
 
+    memory_index = ""
+    if bool(user.memory_enabled):
+        try:
+            memory_index = await memory_service.build_memory_index_prompt(db, user.id)
+        except Exception as exc:
+            logger.warning("Memory index lookup failed: %s", exc)
+
     return {
         "user_payload": user_payload or None,
         "instructions": "\n\n".join(instruction_parts) if instruction_parts else None,
@@ -1307,6 +1314,7 @@ async def _prepare_turn_context(
         "conversation_kind": conv.kind or "side",
         "rolling_summary": rolling_summary,
         "cross_chat_context": cross_chat_context,
+        "memory_index": memory_index,
         "timezone": (getattr(user, "timezone", None) or "").strip() or "Asia/Shanghai",
         "memory_enabled": bool(user.memory_enabled),
         "memory_require_confirm": bool(user.memory_require_confirm),
@@ -1352,6 +1360,7 @@ async def _launch_supervised_turn(
         assistant_name=str(turn_ctx.get("assistant_name") or getattr(user, "assistant_name", None) or "Whitz"),
         rolling_summary=turn_ctx.get("rolling_summary") or None,
         cross_chat_context=turn_ctx.get("cross_chat_context") or None,
+        memory_index=turn_ctx.get("memory_index") or None,
         input_text=prompt_content,
         instructions=turn_ctx.get("instructions"),
         conversation_history=conversation_history,

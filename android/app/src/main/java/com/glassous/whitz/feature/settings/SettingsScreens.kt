@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -53,6 +54,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -684,28 +686,84 @@ fun MemorySettingsScreen(
     val colors = LocalWhitzColors.current
     val ui by vm.ui.collectAsState()
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    var searchQuery by remember { mutableStateOf("") }
+    var showCreateColDialog by remember { mutableStateOf(false) }
+    var newColName by remember { mutableStateOf("") }
+    var newColDesc by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) { vm.loadMemory() }
 
+    if (showCreateColDialog) {
+        AlertDialog(
+            onDismissRequest = { showCreateColDialog = false },
+            title = { Text("新建记忆集") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    WhitzTextField(
+                        value = newColName,
+                        onValueChange = { newColName = it },
+                        label = "名称（如：项目A、阅读笔记）",
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    WhitzTextField(
+                        value = newColDesc,
+                        onValueChange = { newColDesc = it },
+                        label = "简介（可选，便于 AI 归类）",
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.createMemoryCollection(newColName, description = newColDesc) {
+                            newColName = ""
+                            newColDesc = ""
+                            showCreateColDialog = false
+                        }
+                    },
+                    enabled = newColName.isNotBlank(),
+                ) { Text("创建") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateColDialog = false }) { Text("取消") }
+            },
+        )
+    }
+
     SettingsPageScaffold(
-        title = "记忆管理",
+        title = "记忆集管理",
         ui = ui,
         onBack = {
             vm.clearFeedback()
+            vm.clearMemorySearch()
             onBack()
         },
     ) {
         val mem = ui.memory
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             if (mem != null) {
+                val activeCol = ui.selectedMemoryCollection?.let { slug ->
+                    mem.collections.firstOrNull { it.slug == slug }
+                }
+                val filteredEntries = if (ui.selectedMemoryCollection == null) {
+                    mem.entries
+                } else {
+                    mem.entries.filter { (it.target ?: "memory") == ui.selectedMemoryCollection }
+                }
+
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.surface).padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("启用长期记忆", fontWeight = FontWeight.Medium, fontSize = 14.sp, color = colors.fg)
-                        Text("在跨对话中记住你的偏好与事实", fontSize = 12.sp, color = colors.fgMuted)
+                        Text("启用长期记忆集", fontWeight = FontWeight.Medium, fontSize = 14.sp, color = colors.fg)
+                        Text(
+                            "${mem.collections.size} 个记忆集 · ${mem.entries.size} 条 · ${mem.totalCharCount ?: mem.charCount ?: 0} 字符",
+                            fontSize = 12.sp,
+                            color = colors.fgMuted,
+                        )
                     }
                     Switch(checked = mem.memoryEnabled, onCheckedChange = { vm.updateMemorySettings(enabled = it) })
                 }
@@ -721,15 +779,91 @@ fun MemorySettingsScreen(
                     Switch(checked = mem.memoryRequireConfirm, onCheckedChange = { vm.updateMemorySettings(requireConfirm = it) })
                 }
                 Spacer(modifier = Modifier.height(10.dp))
+
+                // Collections horizontal chips
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("记忆集 (${mem.collections.size})", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = colors.fg)
+                    TextButton(onClick = { showCreateColDialog = true }) { Text("+ 新建集") }
+                }
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item {
+                        FilterChip(
+                            selected = ui.selectedMemoryCollection == null,
+                            onClick = { vm.selectMemoryCollection(null) },
+                            label = { Text("全部 (${mem.entries.size})") },
+                        )
+                    }
+                    items(mem.collections, key = { it.id }) { col ->
+                        FilterChip(
+                            selected = ui.selectedMemoryCollection == col.slug,
+                            onClick = { vm.selectMemoryCollection(col.slug) },
+                            label = { Text("${col.name} (${col.entryCount})") },
+                        )
+                    }
+                }
+                if (activeCol != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(colors.surface).padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(activeCol.name, fontWeight = FontWeight.Medium, fontSize = 13.sp, color = colors.fg)
+                            if (activeCol.description.isNotBlank()) {
+                                Text(activeCol.description, fontSize = 11.sp, color = colors.fgMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        TextButton(onClick = { vm.toggleMemoryCollection(activeCol.id, !activeCol.enabled) }) {
+                            Text(if (activeCol.enabled) "暂停" else "启用")
+                        }
+                        if (activeCol.kind != "system") {
+                            TextButton(onClick = { vm.deleteMemoryCollection(activeCol.id) }) {
+                                Text("删集", color = colors.danger)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    WhitzTextField(
+                        value = searchQuery,
+                        onValueChange = {
+                            searchQuery = it
+                            if (it.isBlank()) vm.clearMemorySearch()
+                        },
+                        label = "RAG 语义 / 关键词检索记忆",
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { vm.searchMemory(searchQuery) }) {
+                        Text(if (ui.memorySearching) "..." else "检索")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("已存记忆 (${mem.entries.size})", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = colors.fg)
+                    val titleText = if (ui.memorySearchResults != null) {
+                        "检索命中 (${ui.memorySearchResults!!.size})"
+                    } else {
+                        "已存记忆 (${filteredEntries.size})"
+                    }
+                    Text(titleText, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = colors.fg)
                     Row {
                         TextButton(onClick = {
                             vm.clearFeedback()
                             onOpenAddMemory()
                         }) { Text("新增") }
-                        if (mem.entries.isNotEmpty()) {
-                            TextButton(onClick = { vm.clearAllMemory() }) { Text("清空", color = colors.danger) }
+                        if (filteredEntries.isNotEmpty()) {
+                            TextButton(onClick = { vm.clearAllMemory(activeCol?.id) }) { Text("清空", color = colors.danger) }
                         }
                     }
                 }
@@ -739,26 +873,61 @@ fun MemorySettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.weight(1f),
                 ) {
-                    items(mem.pending, key = { "p-${it.id}" }) { p ->
-                        Column(
-                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.warningWeak).padding(12.dp),
-                        ) {
-                            Text("待确认 (${p.action})", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = colors.warning)
-                            Text(p.content, fontSize = 13.sp, color = colors.fg)
-                            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                                TextButton(onClick = { vm.resolveMemoryPending(p.id, "reject") }) { Text("拒绝") }
-                                TextButton(onClick = { vm.resolveMemoryPending(p.id, "approve") }) { Text("批准") }
+                    val searchHits = ui.memorySearchResults
+                    if (searchHits != null) {
+                        items(searchHits, key = { "hit-${it.id}" }) { hit ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.surface).padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "${hit.collectionName.ifBlank { hit.target }} · ${String.format("%.3f", hit.score)}",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                    if (hit.title.isNotBlank()) {
+                                        Text(hit.title, fontWeight = FontWeight.Medium, fontSize = 13.sp, color = colors.fg)
+                                    }
+                                    Text(hit.content, fontSize = 13.sp, color = colors.fg)
+                                }
+                                IconButton(onClick = { vm.deleteMemoryEntry(hit.id) }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.Delete, contentDescription = "删除", tint = colors.fgFaint, modifier = Modifier.size(16.dp))
+                                }
                             }
                         }
-                    }
-                    items(mem.entries, key = { it.id }) { e ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.surface).padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(e.content, fontSize = 13.sp, color = colors.fg, modifier = Modifier.weight(1f))
-                            IconButton(onClick = { vm.deleteMemoryEntry(e.id) }, modifier = Modifier.size(32.dp)) {
-                                Icon(Icons.Default.Delete, contentDescription = "删除", tint = colors.fgFaint, modifier = Modifier.size(16.dp))
+                    } else {
+                        items(mem.pending, key = { "p-${it.id}" }) { p ->
+                            Column(
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.warningWeak).padding(12.dp),
+                            ) {
+                                Text("待确认 (${p.target ?: "memory"} · ${p.action})", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = colors.warning)
+                                Text(p.content, fontSize = 13.sp, color = colors.fg)
+                                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                                    TextButton(onClick = { vm.resolveMemoryPending(p.id, "reject") }) { Text("拒绝") }
+                                    TextButton(onClick = { vm.resolveMemoryPending(p.id, "approve") }) { Text("批准") }
+                                }
+                            }
+                        }
+                        items(filteredEntries, key = { it.id }) { e ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.surface).padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        e.collectionName ?: (e.target ?: "memory"),
+                                        fontSize = 11.sp,
+                                        color = colors.fgMuted,
+                                    )
+                                    if (e.title.isNotBlank()) {
+                                        Text(e.title, fontWeight = FontWeight.Medium, fontSize = 13.sp, color = colors.fg)
+                                    }
+                                    Text(e.content, fontSize = 13.sp, color = colors.fg)
+                                }
+                                IconButton(onClick = { vm.deleteMemoryEntry(e.id) }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.Delete, contentDescription = "删除", tint = colors.fgFaint, modifier = Modifier.size(16.dp))
+                                }
                             }
                         }
                     }
@@ -777,6 +946,11 @@ fun AddMemoryScreen(
     onBack: () -> Unit,
 ) {
     val ui by vm.ui.collectAsState()
+    val collections = ui.memory?.collections.orEmpty()
+    var targetSlug by remember(ui.selectedMemoryCollection, collections) {
+        mutableStateOf(ui.selectedMemoryCollection ?: collections.firstOrNull()?.slug ?: "memory")
+    }
+    var title by remember { mutableStateOf("") }
     var content by remember { mutableStateOf("") }
 
     SettingsPageScaffold(
@@ -795,10 +969,24 @@ fun AddMemoryScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
-                "添加一条供 AI 在后续对话中长期参考的偏好或背景信息：",
-                fontSize = 13.sp,
-                color = LocalWhitzColors.current.fgMuted,
+            if (collections.isNotEmpty()) {
+                Text("目标记忆集", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = LocalWhitzColors.current.fg)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(collections, key = { it.id }) { col ->
+                        FilterChip(
+                            selected = targetSlug == col.slug,
+                            onClick = { targetSlug = col.slug },
+                            label = { Text(col.name) },
+                        )
+                    }
+                }
+            }
+            WhitzTextField(
+                value = title,
+                onValueChange = { title = it },
+                label = "标题（可选）",
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
             )
             WhitzTextField(
                 value = content,
@@ -810,7 +998,7 @@ fun AddMemoryScreen(
             )
             Button(
                 onClick = {
-                    vm.addMemoryEntry(content, onSuccess = onBack)
+                    vm.addMemoryEntry(content, target = targetSlug, title = title, onSuccess = onBack)
                 },
                 shapes = ButtonDefaults.shapesFor(48.dp),
                 enabled = content.isNotBlank() && !ui.loading,

@@ -372,9 +372,30 @@ data class SkillPendingItem(
 )
 
 @Serializable
+data class MemoryCollection(
+    val id: String,
+    val slug: String,
+    val name: String,
+    val description: String = "",
+    val kind: String = "custom",
+    val enabled: Boolean = true,
+    @SerialName("entry_count") val entryCount: Int = 0,
+    @SerialName("char_count") val charCount: Int = 0,
+    @SerialName("char_limit") val charLimit: Int = 12000,
+    @SerialName("max_entries") val maxEntries: Int = 200,
+    @SerialName("sort_order") val sortOrder: Int = 100,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("updated_at") val updatedAt: String? = null,
+)
+
+@Serializable
 data class MemoryEntry(
     val id: String,
+    @SerialName("collection_id") val collectionId: String? = null,
+    @SerialName("collection_name") val collectionName: String? = null,
+    val title: String = "",
     val content: String,
+    val tags: List<String> = emptyList(),
     val target: String? = "memory",
     val category: String? = null,
     val source: String? = null,
@@ -384,10 +405,34 @@ data class MemoryEntry(
 )
 
 @Serializable
+data class MemorySearchHit(
+    val id: String,
+    @SerialName("collection_id") val collectionId: String? = null,
+    val target: String = "memory",
+    @SerialName("collection_name") val collectionName: String = "",
+    val title: String = "",
+    val content: String,
+    val tags: List<String> = emptyList(),
+    val source: String = "manual",
+    val score: Double = 0.0,
+)
+
+@Serializable
+data class MemorySearchResponse(
+    val query: String = "",
+    val collection: String? = null,
+    val count: Int = 0,
+    val results: List<MemorySearchHit> = emptyList(),
+)
+
+@Serializable
 data class MemoryPendingItem(
     val id: String,
+    @SerialName("collection_id") val collectionId: String? = null,
     val action: String = "add",
     val target: String? = "memory",
+    val title: String = "",
+    val tags: List<String> = emptyList(),
     val content: String = "",
     @SerialName("old_content") val oldContent: String? = null,
     val category: String? = null,
@@ -406,6 +451,7 @@ data class MemoryOverview(
     @SerialName("memory_require_confirm") val memoryRequireConfirm: Boolean = false,
     @SerialName("profile_context_enabled") val profileContextEnabled: Boolean? = null,
     @SerialName("profile_context_consented_at") val profileContextConsentedAt: String? = null,
+    val collections: List<MemoryCollection> = emptyList(),
     val entries: List<MemoryEntry> = emptyList(),
     val pending: List<MemoryPendingItem> = emptyList(),
     @SerialName("char_count") val charCount: Int? = null,
@@ -414,6 +460,9 @@ data class MemoryOverview(
     @SerialName("memory_char_limit") val memoryCharLimit: Int? = null,
     @SerialName("user_char_count") val userCharCount: Int? = null,
     @SerialName("user_char_limit") val userCharLimit: Int? = null,
+    @SerialName("total_char_count") val totalCharCount: Int? = null,
+    @SerialName("total_char_limit") val totalCharLimit: Int? = null,
+    @SerialName("collection_limit") val collectionLimit: Int? = null,
 )
 
 @Serializable

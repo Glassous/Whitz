@@ -1,14 +1,18 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.api.schemas import (
+    MemoryCollectionCreateRequest,
+    MemoryCollectionUpdateRequest,
     MemoryEntryCreateRequest,
     MemoryEntryUpdateRequest,
     MemoryOverviewOut,
     MemoryPendingResolveRequest,
+    MemorySearchRequest,
+    MemorySearchResponse,
     MemorySettingsUpdateRequest,
 )
 from app.db.models import User
@@ -60,6 +64,112 @@ async def update_memory_settings(
     return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
 
 
+@router.post("/collections", response_model=MemoryOverviewOut, status_code=status.HTTP_201_CREATED)
+async def create_memory_collection(
+    body: MemoryCollectionCreateRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MemoryOverviewOut:
+    try:
+        col = await memory_service.create_collection(
+            db,
+            user.id,
+            name=body.name,
+            slug=body.slug,
+            description=body.description,
+            char_limit=body.char_limit,
+        )
+    except memory_service.MemoryServiceError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+    await audit.record(
+        "memory.collection_create",
+        actor=user,
+        target_type="memory_collection",
+        target_id=col["id"],
+        request=request,
+        metadata={"slug": col["slug"], "name": col["name"]},
+    )
+    return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
+
+
+@router.patch("/collections/{collection_id}", response_model=MemoryOverviewOut)
+async def update_memory_collection(
+    collection_id: str,
+    body: MemoryCollectionUpdateRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MemoryOverviewOut:
+    try:
+        col = await memory_service.update_collection(
+            db,
+            user.id,
+            collection_id,
+            name=body.name,
+            description=body.description,
+            enabled=body.enabled,
+            char_limit=body.char_limit,
+            sort_order=body.sort_order,
+        )
+    except memory_service.MemoryServiceError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+    await audit.record(
+        "memory.collection_update",
+        actor=user,
+        target_type="memory_collection",
+        target_id=col["id"],
+        request=request,
+        metadata={"slug": col["slug"], "enabled": col["enabled"]},
+    )
+    return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
+
+
+@router.delete("/collections/{collection_id}", response_model=MemoryOverviewOut)
+async def delete_memory_collection(
+    collection_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MemoryOverviewOut:
+    try:
+        await memory_service.delete_collection(db, user.id, collection_id)
+    except memory_service.MemoryServiceError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+    await audit.record(
+        "memory.collection_delete",
+        actor=user,
+        target_type="memory_collection",
+        target_id=collection_id,
+        request=request,
+    )
+    return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
+
+
+@router.post("/search", response_model=MemorySearchResponse)
+async def search_memory(
+    body: MemorySearchRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MemorySearchResponse:
+    hits = await memory_service.search_entries_rag(
+        db,
+        user.id,
+        body.query,
+        collection=body.collection,
+        limit=body.limit,
+    )
+    return MemorySearchResponse(
+        query=body.query,
+        collection=body.collection,
+        count=len(hits),
+        results=hits,
+    )
+
+
 @router.post("/entries", response_model=MemoryOverviewOut, status_code=status.HTTP_201_CREATED)
 async def create_memory_entry(
     body: MemoryEntryCreateRequest,
@@ -73,6 +183,9 @@ async def create_memory_entry(
             user.id,
             body.target,
             body.content,
+            collection_id=body.collection_id,
+            title=body.title,
+            tags=body.tags,
             source="manual",
         )
     except memory_service.MemoryServiceError as exc:
@@ -104,6 +217,9 @@ async def update_memory_entry(
             entry_id,
             body.content,
             new_target=body.target,
+            new_collection_id=body.collection_id,
+            title=body.title,
+            tags=body.tags,
         )
     except memory_service.MemoryServiceError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
@@ -144,16 +260,21 @@ async def delete_memory_entry(
 @router.delete("", response_model=MemoryOverviewOut)
 async def clear_memory(
     request: Request,
+    collection_id: str | None = Query(default=None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> MemoryOverviewOut:
-    await memory_service.clear_all(db, user.id)
+    try:
+        await memory_service.clear_all(db, user.id, collection_id=collection_id)
+    except memory_service.MemoryServiceError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
     await audit.record(
         "memory.clear_all",
         actor=user,
         target_type="user",
         target_id=user.id,
         request=request,
+        metadata={"collection_id": collection_id} if collection_id else None,
     )
     return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
 

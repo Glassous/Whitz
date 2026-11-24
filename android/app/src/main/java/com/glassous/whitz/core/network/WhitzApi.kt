@@ -12,6 +12,7 @@ import com.glassous.whitz.core.model.DownloadUrlResponse
 import com.glassous.whitz.core.model.EmailCodeResponse
 import com.glassous.whitz.core.model.GithubSkillPreviewResponse
 import com.glassous.whitz.core.model.MemoryOverview
+import com.glassous.whitz.core.model.MemorySearchResponse
 import com.glassous.whitz.core.model.MessageReaction
 import com.glassous.whitz.core.model.PresignResponse
 import com.glassous.whitz.core.model.ScheduleOverview
@@ -172,9 +173,34 @@ data class MemorySettingsRequest(
 )
 
 @Serializable
+data class MemoryCollectionCreateRequest(
+    val name: String,
+    val slug: String? = null,
+    val description: String = "",
+    @SerialName("char_limit") val charLimit: Int = 12000,
+)
+
+@Serializable
+data class MemoryCollectionUpdateRequest(
+    val name: String? = null,
+    val description: String? = null,
+    val enabled: Boolean? = null,
+    @SerialName("char_limit") val charLimit: Int? = null,
+)
+
+@Serializable
+data class MemorySearchRequest(
+    val query: String,
+    val collection: String? = null,
+    val limit: Int = 20,
+)
+
+@Serializable
 data class MemoryEntryRequest(
     val content: String,
     val target: String? = null,
+    val title: String = "",
+    val tags: List<String> = emptyList(),
     val category: String? = null,
 )
 
@@ -359,6 +385,18 @@ interface WhitzApi {
     @PUT("users/me/memory/settings")
     suspend fun updateMemorySettings(@Body body: MemorySettingsRequest): MemoryOverview
 
+    @POST("users/me/memory/collections")
+    suspend fun createMemoryCollection(@Body body: MemoryCollectionCreateRequest): MemoryOverview
+
+    @PATCH("users/me/memory/collections/{id}")
+    suspend fun updateMemoryCollection(@Path("id") id: String, @Body body: MemoryCollectionUpdateRequest): MemoryOverview
+
+    @DELETE("users/me/memory/collections/{id}")
+    suspend fun deleteMemoryCollection(@Path("id") id: String): MemoryOverview
+
+    @POST("users/me/memory/search")
+    suspend fun searchMemory(@Body body: MemorySearchRequest): MemorySearchResponse
+
     @POST("users/me/memory/entries")
     suspend fun createMemoryEntry(@Body body: MemoryEntryRequest): JsonElement
 
@@ -372,7 +410,7 @@ interface WhitzApi {
     suspend fun resolveMemoryPending(@Path("id") id: String, @Body body: PendingActionRequest): Response<Unit>
 
     @DELETE("users/me/memory")
-    suspend fun clearMemory(): Response<Unit>
+    suspend fun clearMemory(@Query("collection_id") collectionId: String? = null): Response<Unit>
 
     // --- Skills ---
     @GET("skills")

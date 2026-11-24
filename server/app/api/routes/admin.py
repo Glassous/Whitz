@@ -32,6 +32,8 @@ from app.db.models import (
     CreditLedger,
     InviteCode,
     InviteRedemption,
+    MemoryCollection,
+    MemoryEntry,
     Message,
     RefreshToken,
     UsageDaily,
@@ -819,6 +821,12 @@ async def get_user_detail(
         )
         or 0
     )
+    memory_collection_count = int(
+        await db.scalar(select(func.count(MemoryCollection.id)).where(MemoryCollection.user_id == user.id)) or 0
+    )
+    memory_entry_count = int(
+        await db.scalar(select(func.count(MemoryEntry.id)).where(MemoryEntry.user_id == user.id)) or 0
+    )
     usage_row = (
         await db.execute(
             select(
@@ -882,6 +890,8 @@ async def get_user_detail(
             "memory_enabled": user.memory_enabled,
             "memory_consented_at": user.memory_consented_at,
             "memory_require_confirm": user.memory_require_confirm,
+            "memory_collection_count": memory_collection_count,
+            "memory_entry_count": memory_entry_count,
             "conversation_count": conversation_count,
             "message_count": message_count,
             "file_count": file_count,

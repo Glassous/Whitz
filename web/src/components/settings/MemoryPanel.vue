@@ -2,14 +2,19 @@
 import { computed, onMounted, ref } from "vue";
 import { api } from "../../api/client";
 import { useAuthStore } from "../../stores/auth";
-import type { MemoryEntry, MemoryOverview, MemoryPendingItem } from "../../types";
+import type {
+  MemoryCollection,
+  MemoryEntry,
+  MemoryOverview,
+  MemoryPendingItem,
+  MemorySearchHit,
+  MemorySearchResponse,
+} from "../../types";
 import BaseBadge from "../ui/BaseBadge.vue";
 import BaseButton from "../ui/BaseButton.vue";
 import BaseModal from "../ui/BaseModal.vue";
 import FormError from "../ui/FormError.vue";
 import Spinner from "../ui/Spinner.vue";
-
-type TargetFilter = "all" | "memory" | "user";
 
 const auth = useAuthStore();
 
@@ -21,18 +26,42 @@ const feedback = ref<string | null>(null);
 const settingsSaving = ref(false);
 const modalError = ref<string | null>(null);
 
-const targetFilter = ref<TargetFilter>("all");
+// Active collection filter ("all" or collection slug)
+const activeSlug = ref<string>("all");
+
+// Collection create / edit modal
+const collectionModalOpen = ref(false);
+const editingCollection = ref<MemoryCollection | null>(null);
+const colName = ref("");
+const colSlug = ref("");
+const colDescription = ref("");
+const colCharLimit = ref(12000);
+const savingCollection = ref(false);
+const togglingCollectionId = ref<string | null>(null);
+
+// Delete collection confirmation modal
+const deleteColTarget = ref<MemoryCollection | null>(null);
+const deletingCollection = ref(false);
+
+// RAG Search state
+const searchQuery = ref("");
+const searching = ref(false);
+const searchResults = ref<MemorySearchHit[] | null>(null);
 
 // Add entry state
 const addFormOpen = ref(false);
-const newTarget = ref<"memory" | "user">("memory");
+const newTarget = ref<string>("memory");
+const newTitle = ref("");
+const newTagsText = ref("");
 const newContent = ref("");
 const addingEntry = ref(false);
 const addError = ref<string | null>(null);
 
 // Inline edit entry state
 const editingId = ref<string | null>(null);
-const editTarget = ref<"memory" | "user">("memory");
+const editTarget = ref<string>("memory");
+const editTitle = ref("");
+const editTagsText = ref("");
 const editContent = ref("");
 const savingEdit = ref(false);
 const deletingId = ref<string | null>(null);
@@ -42,7 +71,7 @@ const pendingEditId = ref<string | null>(null);
 const pendingEditContent = ref("");
 const resolvingPendingId = ref<string | null>(null);
 
-// Clear all confirmation modal
+// Clear confirmation modal
 const clearModalOpen = ref(false);
 const clearingAll = ref(false);
 
@@ -53,22 +82,36 @@ function extractError(e: any, fallback: string): string {
   return e?.message ?? fallback;
 }
 
+function parseTags(raw: string): string[] {
+  return raw
+    .split(/[,，\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 10);
+}
+
 const memoryEnabled = computed(() => overview.value?.memory_enabled ?? true);
 const requireConfirm = computed(() => overview.value?.memory_require_confirm ?? false);
+const collections = computed<MemoryCollection[]>(() => overview.value?.collections ?? []);
 const entries = computed<MemoryEntry[]>(() => overview.value?.entries ?? []);
 const pending = computed<MemoryPendingItem[]>(() => overview.value?.pending ?? []);
 
-const memoryCharCount = computed(() => overview.value?.memory_char_count ?? overview.value?.char_count ?? 0);
-const memoryCharLimit = computed(() => overview.value?.memory_char_limit ?? overview.value?.char_limit ?? 2200);
-const userCharCount = computed(() => overview.value?.user_char_count ?? 0);
-const userCharLimit = computed(() => overview.value?.user_char_limit ?? 1375);
+const totalCharCount = computed(() => overview.value?.total_char_count ?? overview.value?.char_count ?? 0);
+const totalCharLimit = computed(() => overview.value?.total_char_limit ?? 200000);
+const collectionLimit = computed(() => overview.value?.collection_limit ?? 50);
 
-const memoryPercent = computed(() =>
-  memoryCharLimit.value > 0 ? Math.min(100, Math.round((memoryCharCount.value / memoryCharLimit.value) * 100)) : 0,
+const totalPercent = computed(() =>
+  totalCharLimit.value > 0 ? Math.min(100, Math.round((totalCharCount.value / totalCharLimit.value) * 100)) : 0,
 );
-const userPercent = computed(() =>
-  userCharLimit.value > 0 ? Math.min(100, Math.round((userCharCount.value / userCharLimit.value) * 100)) : 0,
+
+const activeCollection = computed<MemoryCollection | null>(() =>
+  activeSlug.value === "all" ? null : (collections.value.find((c) => c.slug === activeSlug.value) ?? null),
 );
+
+const filteredEntries = computed(() => {
+  if (activeSlug.value === "all") return entries.value;
+  return entries.value.filter((e) => (e.target ?? "memory") === activeSlug.value);
+});
 
 function barClass(pct: number): string {
   if (pct >= 95) return "bg-danger";
@@ -76,20 +119,23 @@ function barClass(pct: number): string {
   return "bg-accent";
 }
 
-const memoryCount = computed(() => entries.value.filter((e) => (e.target ?? "memory") === "memory").length);
-const userCount = computed(() => entries.value.filter((e) => e.target === "user").length);
+function collectionPercent(col: MemoryCollection): number {
+  return col.char_limit > 0 ? Math.min(100, Math.round((col.char_count / col.char_limit) * 100)) : 0;
+}
 
-const filteredEntries = computed(() => {
-  if (targetFilter.value === "all") return entries.value;
-  return entries.value.filter((e) => (e.target ?? "memory") === targetFilter.value);
-});
-
-function targetLabel(target?: string): string {
-  return target === "user" ? "个人偏好" : "助理笔记";
+function collectionNameFor(target?: string, fallback?: string | null): string {
+  if (fallback) return fallback;
+  const slug = target || "memory";
+  const found = collections.value.find((c) => c.slug === slug);
+  if (found) return found.name;
+  if (slug === "user") return "个人画像与偏好";
+  if (slug === "projects") return "项目与工作";
+  if (slug === "memory") return "通用笔记";
+  return slug;
 }
 
 function sourceLabel(source?: string): string {
-  if (source === "assistant") return "AI 写入";
+  if (source === "assistant" || source === "agent") return "AI 写入";
   return "手动添加";
 }
 
@@ -117,6 +163,9 @@ async function loadMemory() {
   error.value = null;
   try {
     overview.value = await api.get<MemoryOverview>("/users/me/memory");
+    if (activeSlug.value !== "all" && !collections.value.some((c) => c.slug === activeSlug.value)) {
+      activeSlug.value = "all";
+    }
   } catch (e: any) {
     error.value = extractError(e, "加载长期记忆失败");
   } finally {
@@ -140,14 +189,8 @@ async function enableMemory() {
   error.value = null;
   feedback.value = null;
   try {
-    const res = await api.put<MemoryOverview>("/users/me/memory/settings", {
-      enabled: true,
-    });
-    if (res && Array.isArray(res.entries)) {
-      overview.value = res;
-    } else {
-      await loadMemory();
-    }
+    const res = await api.put<MemoryOverview>("/users/me/memory/settings", { enabled: true });
+    overview.value = res;
     await auth.refreshUser();
     feedback.value = "已开启长期记忆功能";
   } catch (e: any) {
@@ -162,16 +205,10 @@ async function disableMemory() {
   error.value = null;
   feedback.value = null;
   try {
-    const res = await api.put<MemoryOverview>("/users/me/memory/settings", {
-      enabled: false,
-    });
-    if (res && Array.isArray(res.entries)) {
-      overview.value = res;
-    } else {
-      await loadMemory();
-    }
+    const res = await api.put<MemoryOverview>("/users/me/memory/settings", { enabled: false });
+    overview.value = res;
     await auth.refreshUser();
-    feedback.value = "已关闭长期记忆（已有条目仍保留，可随时重新开启或清空）";
+    feedback.value = "已关闭长期记忆（已有记忆集与条目仍保留）";
   } catch (e: any) {
     error.value = extractError(e, "关闭长期记忆失败");
   } finally {
@@ -186,16 +223,10 @@ async function onToggleRequireConfirm() {
   feedback.value = null;
   const nextVal = !requireConfirm.value;
   try {
-    const res = await api.put<MemoryOverview>("/users/me/memory/settings", {
-      require_confirm: nextVal,
-    });
-    if (res && Array.isArray(res.entries)) {
-      overview.value = res;
-    } else {
-      await loadMemory();
-    }
+    const res = await api.put<MemoryOverview>("/users/me/memory/settings", { require_confirm: nextVal });
+    overview.value = res;
     await auth.refreshUser();
-    feedback.value = nextVal ? "已开启写入前确认" : "已关闭写入前确认，AI 将直接写入记忆";
+    feedback.value = nextVal ? "已开启写入前确认" : "已关闭写入前确认，AI 将直接读写和修改记忆集";
   } catch (e: any) {
     error.value = extractError(e, "更新确认偏好失败");
   } finally {
@@ -203,6 +234,146 @@ async function onToggleRequireConfirm() {
   }
 }
 
+// --- Collections CRUD ---
+function openCreateCollection() {
+  editingCollection.value = null;
+  colName.value = "";
+  colSlug.value = "";
+  colDescription.value = "";
+  colCharLimit.value = 12000;
+  modalError.value = null;
+  collectionModalOpen.value = true;
+}
+
+function openEditCollection(col: MemoryCollection) {
+  editingCollection.value = col;
+  colName.value = col.name;
+  colSlug.value = col.slug;
+  colDescription.value = col.description || "";
+  colCharLimit.value = col.char_limit || 12000;
+  modalError.value = null;
+  collectionModalOpen.value = true;
+}
+
+async function saveCollection() {
+  const cleanedName = colName.value.trim();
+  if (!cleanedName) {
+    modalError.value = "请输入记忆集名称";
+    return;
+  }
+  savingCollection.value = true;
+  modalError.value = null;
+  feedback.value = null;
+  try {
+    if (editingCollection.value) {
+      overview.value = await api.patch<MemoryOverview>(
+        `/users/me/memory/collections/${encodeURIComponent(editingCollection.value.id)}`,
+        {
+          name: cleanedName,
+          description: colDescription.value.trim(),
+          char_limit: Number(colCharLimit.value) || 12000,
+        },
+      );
+      feedback.value = `已更新记忆集「${cleanedName}」`;
+    } else {
+      overview.value = await api.post<MemoryOverview>("/users/me/memory/collections", {
+        name: cleanedName,
+        slug: colSlug.value.trim() || undefined,
+        description: colDescription.value.trim(),
+        char_limit: Number(colCharLimit.value) || 12000,
+      });
+      feedback.value = `已新建记忆集「${cleanedName}」`;
+    }
+    collectionModalOpen.value = false;
+  } catch (e: any) {
+    modalError.value = extractError(e, "保存记忆集失败");
+  } finally {
+    savingCollection.value = false;
+  }
+}
+
+async function toggleCollectionEnabled(col: MemoryCollection) {
+  if (togglingCollectionId.value) return;
+  togglingCollectionId.value = col.id;
+  error.value = null;
+  feedback.value = null;
+  try {
+    overview.value = await api.patch<MemoryOverview>(
+      `/users/me/memory/collections/${encodeURIComponent(col.id)}`,
+      { enabled: !col.enabled },
+    );
+    feedback.value = !col.enabled ? `已启用记忆集「${col.name}」` : `已暂停记忆集「${col.name}」的 RAG 召回`;
+  } catch (e: any) {
+    error.value = extractError(e, "切换记忆集状态失败");
+  } finally {
+    togglingCollectionId.value = null;
+  }
+}
+
+async function confirmDeleteCollection() {
+  if (!deleteColTarget.value) return;
+  deletingCollection.value = true;
+  modalError.value = null;
+  feedback.value = null;
+  const targetCol = deleteColTarget.value;
+  try {
+    overview.value = await api.delete<MemoryOverview>(
+      `/users/me/memory/collections/${encodeURIComponent(targetCol.id)}`,
+    );
+    if (activeSlug.value === targetCol.slug) {
+      activeSlug.value = "all";
+    }
+    deleteColTarget.value = null;
+    feedback.value = `已删除记忆集「${targetCol.name}」`;
+  } catch (e: any) {
+    modalError.value = extractError(e, "删除记忆集失败");
+  } finally {
+    deletingCollection.value = false;
+  }
+}
+
+// --- RAG Search ---
+async function runRagSearch() {
+  const q = searchQuery.value.trim();
+  if (!q) {
+    searchResults.value = null;
+    return;
+  }
+  searching.value = true;
+  error.value = null;
+  try {
+    const res = await api.post<MemorySearchResponse>("/users/me/memory/search", {
+      query: q,
+      collection: activeSlug.value === "all" ? null : activeSlug.value,
+      limit: 20,
+    });
+    searchResults.value = res.results ?? [];
+  } catch (e: any) {
+    error.value = extractError(e, "RAG 语义检索失败");
+  } finally {
+    searching.value = false;
+  }
+}
+
+function selectCollection(slug: string) {
+  activeSlug.value = slug;
+  if (searchQuery.value.trim()) {
+    void runRagSearch();
+  }
+}
+
+function onSearchInput() {
+  if (!searchQuery.value.trim()) {
+    searchResults.value = null;
+  }
+}
+
+function clearSearch() {
+  searchQuery.value = "";
+  searchResults.value = null;
+}
+
+// --- Pending Proposals ---
 function startPendingEdit(item: MemoryPendingItem) {
   pendingEditId.value = item.id;
   pendingEditContent.value = item.content;
@@ -230,9 +401,8 @@ async function resolvePending(item: MemoryPendingItem, action: "approve" | "reje
       }
       body.content = cleaned;
     }
-    await api.post(`/users/me/memory/pending/${encodeURIComponent(item.id)}`, body);
+    overview.value = await api.post<MemoryOverview>(`/users/me/memory/pending/${encodeURIComponent(item.id)}`, body);
     if (isEditingThis) cancelPendingEdit();
-    await loadMemory();
     feedback.value = action === "approve" ? "已批准并写入长期记忆" : "已拒绝该记忆变更请求";
   } catch (e: any) {
     error.value = extractError(e, "处理待确认记忆失败");
@@ -241,10 +411,13 @@ async function resolvePending(item: MemoryPendingItem, action: "approve" | "reje
   }
 }
 
+// --- Entries CRUD ---
 function openAddForm() {
   addFormOpen.value = true;
   addError.value = null;
-  newTarget.value = targetFilter.value === "user" ? "user" : "memory";
+  newTarget.value = activeSlug.value !== "all" ? activeSlug.value : (collections.value[0]?.slug ?? "memory");
+  newTitle.value = "";
+  newTagsText.value = "";
   newContent.value = "";
 }
 
@@ -258,13 +431,16 @@ async function submitNewEntry() {
   addingEntry.value = true;
   feedback.value = null;
   try {
-    await api.post("/users/me/memory/entries", {
+    overview.value = await api.post<MemoryOverview>("/users/me/memory/entries", {
       target: newTarget.value,
+      title: newTitle.value.trim(),
+      tags: parseTags(newTagsText.value),
       content: cleaned,
     });
     addFormOpen.value = false;
+    newTitle.value = "";
+    newTagsText.value = "";
     newContent.value = "";
-    await loadMemory();
     feedback.value = "已添加新记忆条目";
   } catch (e: any) {
     addError.value = extractError(e, "添加记忆失败");
@@ -275,13 +451,17 @@ async function submitNewEntry() {
 
 function startEdit(entry: MemoryEntry) {
   editingId.value = entry.id;
-  editTarget.value = entry.target === "user" ? "user" : "memory";
+  editTarget.value = entry.target || "memory";
+  editTitle.value = entry.title || "";
+  editTagsText.value = (entry.tags ?? []).join(", ");
   editContent.value = entry.content;
   error.value = null;
 }
 
 function cancelEdit() {
   editingId.value = null;
+  editTitle.value = "";
+  editTagsText.value = "";
   editContent.value = "";
 }
 
@@ -295,12 +475,16 @@ async function saveEdit(entry: MemoryEntry) {
   error.value = null;
   feedback.value = null;
   try {
-    await api.patch(`/users/me/memory/entries/${encodeURIComponent(entry.id)}`, {
+    overview.value = await api.patch<MemoryOverview>(`/users/me/memory/entries/${encodeURIComponent(entry.id)}`, {
       content: cleaned,
       target: editTarget.value,
+      title: editTitle.value.trim(),
+      tags: parseTags(editTagsText.value),
     });
     cancelEdit();
-    await loadMemory();
+    if (searchResults.value !== null) {
+      await runRagSearch();
+    }
     feedback.value = "已更新记忆条目";
   } catch (e: any) {
     error.value = extractError(e, "更新记忆失败");
@@ -309,14 +493,16 @@ async function saveEdit(entry: MemoryEntry) {
   }
 }
 
-async function deleteEntry(entry: MemoryEntry) {
-  deletingId.value = entry.id;
+async function deleteEntry(entryId: string) {
+  deletingId.value = entryId;
   error.value = null;
   feedback.value = null;
   try {
-    await api.delete(`/users/me/memory/entries/${encodeURIComponent(entry.id)}`);
-    if (editingId.value === entry.id) cancelEdit();
-    await loadMemory();
+    overview.value = await api.delete<MemoryOverview>(`/users/me/memory/entries/${encodeURIComponent(entryId)}`);
+    if (editingId.value === entryId) cancelEdit();
+    if (searchResults.value !== null) {
+      searchResults.value = searchResults.value.filter((h) => h.id !== entryId);
+    }
     feedback.value = "已删除记忆条目";
   } catch (e: any) {
     error.value = extractError(e, "删除记忆失败");
@@ -330,11 +516,16 @@ async function confirmClearAll() {
   modalError.value = null;
   feedback.value = null;
   try {
-    await api.delete("/users/me/memory");
+    const qs = activeCollection.value
+      ? `?collection_id=${encodeURIComponent(activeCollection.value.id)}`
+      : "";
+    overview.value = await api.delete<MemoryOverview>(`/users/me/memory${qs}`);
     clearModalOpen.value = false;
     cancelEdit();
-    await loadMemory();
-    feedback.value = "已清空全部长期记忆";
+    searchResults.value = null;
+    feedback.value = activeCollection.value
+      ? `已清空「${activeCollection.value.name}」中的全部条目`
+      : "已清空全部长期记忆";
   } catch (e: any) {
     modalError.value = extractError(e, "清空记忆失败");
   } finally {
@@ -349,22 +540,18 @@ onMounted(() => {
 
 <template>
   <div class="space-y-5">
-    <!-- Top Switches & Quota Card -->
+    <!-- Top Switches & Global Quota Card -->
     <section class="space-y-4 rounded-[24px] bg-sidebar p-5 sm:p-6 dark:bg-surface">
       <div class="flex items-start justify-between gap-4">
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-2">
-            <h2 class="text-[15.5px] font-semibold text-fg">启用长期记忆</h2>
+            <h2 class="text-[15.5px] font-semibold text-fg">启用长期记忆集</h2>
             <BaseBadge :tone="memoryEnabled ? 'green' : 'gray'">
               {{ memoryEnabled ? "已开启" : "未开启" }}
             </BaseBadge>
           </div>
           <p class="mt-1 text-[13px] leading-relaxed text-fg-muted">
-            开启后，AI 助理可在独立隔离的 <code class="rounded bg-canvas px-1 py-0.5 text-[12px]">MEMORY.md</code> 与
-            <code class="rounded bg-canvas px-1 py-0.5 text-[12px]">USER.md</code> 中跨对话记住你的工作背景与偏好。
-          </p>
-          <p v-if="memoryEnabled && overview?.memory_consented_at" class="mt-1 text-[12px] text-fg-faint">
-            授权时间：{{ formatTime(overview.memory_consented_at) }}
+            开启后，AI 助理将通过轻量目录索引与混合 RAG（向量 + 全文 + 模糊重排）跨对话管理你的多个主题记忆集。
           </p>
         </div>
 
@@ -372,7 +559,7 @@ onMounted(() => {
           type="button"
           role="switch"
           :aria-checked="memoryEnabled"
-          aria-label="启用长期记忆"
+          aria-label="启用长期记忆集"
           :disabled="settingsSaving || loading"
           class="focus-ring relative mt-0.5 inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           :class="memoryEnabled ? 'bg-primary' : 'bg-line-strong'"
@@ -390,7 +577,7 @@ onMounted(() => {
         <div class="min-w-0">
           <p class="text-[14px] font-medium text-fg">AI 写入记忆前需要我确认</p>
           <p class="mt-0.5 text-[12.5px] text-fg-muted">
-            默认关闭：AI 无需用户确认即可直接读取、写入和修改记忆；开启后，AI 提议新增或修改记忆时会先进入待确认队列。
+            默认关闭：AI 无需用户确认即可直接读取、写入、修改记忆并新建记忆集；开启后将先进入待确认队列。
           </p>
         </div>
 
@@ -411,40 +598,22 @@ onMounted(() => {
         </button>
       </div>
 
-      <!-- Character Usage Progress Bars -->
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div class="rounded-2xl bg-canvas/80 p-3.5 dark:bg-canvas/70">
-          <div class="flex items-center justify-between gap-2 text-[12.5px]">
-            <span class="font-medium text-fg">助理笔记 (MEMORY.md)</span>
-            <span class="font-semibold tabular-nums text-fg-muted">
-              {{ memoryCharCount }} / {{ memoryCharLimit }} 字符
-            </span>
-          </div>
-          <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-surface">
-            <div
-              class="h-full rounded-full transition-[width] duration-300"
-              :class="barClass(memoryPercent)"
-              :style="{ width: `${memoryPercent}%` }"
-            />
-          </div>
-          <p class="mt-1.5 text-[11.5px] tabular-nums text-fg-faint">已用 {{ memoryPercent }}% · 共 {{ memoryCount }} 条</p>
+      <!-- Global Capacity Bar -->
+      <div class="rounded-2xl bg-canvas/80 p-3.5 dark:bg-canvas/70">
+        <div class="flex flex-wrap items-center justify-between gap-2 text-[12.5px]">
+          <span class="font-medium text-fg">
+            记忆集总容量 · {{ collections.length }} / {{ collectionLimit }} 个记忆集 · 共 {{ entries.length }} 条
+          </span>
+          <span class="font-semibold tabular-nums text-fg-muted">
+            {{ totalCharCount.toLocaleString() }} / {{ totalCharLimit.toLocaleString() }} 字符
+          </span>
         </div>
-
-        <div class="rounded-2xl bg-canvas/80 p-3.5 dark:bg-canvas/70">
-          <div class="flex items-center justify-between gap-2 text-[12.5px]">
-            <span class="font-medium text-fg">个人偏好 (USER.md)</span>
-            <span class="font-semibold tabular-nums text-fg-muted">
-              {{ userCharCount }} / {{ userCharLimit }} 字符
-            </span>
-          </div>
-          <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-surface">
-            <div
-              class="h-full rounded-full transition-[width] duration-300"
-              :class="barClass(userPercent)"
-              :style="{ width: `${userPercent}%` }"
-            />
-          </div>
-          <p class="mt-1.5 text-[11.5px] tabular-nums text-fg-faint">已用 {{ userPercent }}% · 共 {{ userCount }} 条</p>
+        <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-surface">
+          <div
+            class="h-full rounded-full transition-[width] duration-300"
+            :class="barClass(totalPercent)"
+            :style="{ width: `${totalPercent}%` }"
+          />
         </div>
       </div>
     </section>
@@ -458,6 +627,117 @@ onMounted(() => {
     >
       {{ feedback }}
     </div>
+
+    <!-- Collections Management Section -->
+    <section class="space-y-4 rounded-[24px] bg-sidebar p-5 sm:p-6 dark:bg-surface">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <h2 class="text-[15.5px] font-semibold text-fg">记忆集目录</h2>
+          <BaseBadge tone="gray">{{ collections.length }} 个</BaseBadge>
+        </div>
+        <BaseButton size="sm" rounded="full" :disabled="loading" @click="openCreateCollection">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+            <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+          </svg>
+          <span>新建记忆集</span>
+        </BaseButton>
+      </div>
+
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <!-- All Collections Card -->
+        <button
+          type="button"
+          class="focus-ring flex flex-col justify-between rounded-2xl p-3.5 text-left transition-colors"
+          :class="
+            activeSlug === 'all'
+              ? 'bg-primary text-primary-fg ring-1 ring-primary'
+              : 'bg-canvas/80 text-fg hover:bg-canvas dark:bg-canvas/70'
+          "
+          @click="selectCollection('all')"
+        >
+          <div>
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-[13.5px] font-semibold">全部记忆集</span>
+              <span class="text-[11.5px] tabular-nums opacity-80">{{ entries.length }} 条</span>
+            </div>
+            <p class="mt-1 text-[12px] opacity-75">跨全部记忆集浏览与检索条目</p>
+          </div>
+          <p class="mt-3 text-[11.5px] tabular-nums opacity-75">{{ collections.length }} 个记忆集</p>
+        </button>
+
+        <!-- Individual Collection Cards -->
+        <div
+          v-for="col in collections"
+          :key="col.id"
+          class="flex flex-col justify-between rounded-2xl p-3.5 transition-colors"
+          :class="
+            activeSlug === col.slug
+              ? 'bg-canvas ring-2 ring-primary'
+              : 'bg-canvas/80 hover:bg-canvas dark:bg-canvas/70'
+          "
+        >
+          <div class="cursor-pointer" @click="selectCollection(col.slug)">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="truncate text-[13.5px] font-semibold text-fg">{{ col.name }}</span>
+                  <BaseBadge v-if="col.kind === 'system'" tone="gray">预置</BaseBadge>
+                  <BaseBadge v-if="!col.enabled" tone="amber">已暂停</BaseBadge>
+                </div>
+                <p class="mt-0.5 truncate font-mono text-[11px] text-fg-faint">{{ col.slug }}</p>
+              </div>
+              <span class="shrink-0 text-[11.5px] font-medium tabular-nums text-fg-muted">
+                {{ col.entry_count }} 条
+              </span>
+            </div>
+
+            <p v-if="col.description" class="mt-1.5 line-clamp-2 text-[12px] leading-relaxed text-fg-muted">
+              {{ col.description }}
+            </p>
+
+            <div class="mt-2.5 h-1 overflow-hidden rounded-full bg-surface">
+              <div
+                class="h-full rounded-full transition-[width] duration-300"
+                :class="barClass(collectionPercent(col))"
+                :style="{ width: `${collectionPercent(col)}%` }"
+              />
+            </div>
+          </div>
+
+          <div class="mt-2.5 flex items-center justify-between gap-2 border-t border-line/60 pt-2">
+            <span class="text-[11px] tabular-nums text-fg-faint">
+              {{ col.char_count }} / {{ col.char_limit }} 字
+            </span>
+            <div class="flex items-center gap-1">
+              <button
+                type="button"
+                class="focus-ring rounded-full px-2 py-0.5 text-[11.5px] font-medium transition-colors"
+                :class="col.enabled ? 'text-fg-muted hover:bg-hover hover:text-fg' : 'bg-accent-weak text-accent'"
+                :disabled="togglingCollectionId === col.id"
+                @click.stop="toggleCollectionEnabled(col)"
+              >
+                {{ col.enabled ? "暂停" : "启用" }}
+              </button>
+              <button
+                type="button"
+                class="focus-ring rounded-full px-2 py-0.5 text-[11.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+                @click.stop="openEditCollection(col)"
+              >
+                编辑
+              </button>
+              <button
+                v-if="col.kind !== 'system'"
+                type="button"
+                class="focus-ring rounded-full px-2 py-0.5 text-[11.5px] font-medium text-danger transition-colors hover:bg-danger-weak"
+                @click.stop="modalError = null; deleteColTarget = col"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <!-- Pending Proposals -->
     <section
@@ -479,9 +759,7 @@ onMounted(() => {
         >
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div class="flex flex-wrap items-center gap-1.5">
-              <BaseBadge :tone="item.target === 'user' ? 'brand' : 'gray'">
-                {{ targetLabel(item.target) }}
-              </BaseBadge>
+              <BaseBadge tone="brand">{{ collectionNameFor(item.target) }}</BaseBadge>
               <BaseBadge
                 :tone="item.action === 'remove' || item.action === 'delete' ? 'red' : item.action === 'replace' || item.action === 'update' ? 'amber' : 'green'"
               >
@@ -534,7 +812,7 @@ onMounted(() => {
             <textarea
               v-model="pendingEditContent"
               rows="3"
-              maxlength="2000"
+              maxlength="4000"
               aria-label="编辑待批准的记忆内容"
               class="focus-ring w-full resize-y rounded-xl border border-line bg-canvas px-3 py-2 text-[13.5px] leading-relaxed text-fg"
             />
@@ -549,12 +827,16 @@ onMounted(() => {
       </div>
     </section>
 
-    <!-- Entries Section -->
+    <!-- Entries & Hybrid RAG Search Section -->
     <section class="space-y-4 rounded-[24px] bg-sidebar p-5 sm:p-6 dark:bg-surface">
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex flex-wrap items-center gap-2">
-          <h2 class="text-[15.5px] font-semibold text-fg">记忆条目</h2>
-          <BaseBadge tone="gray">{{ entries.length }} 条</BaseBadge>
+          <h2 class="text-[15.5px] font-semibold text-fg">
+            {{ activeCollection ? `「${activeCollection.name}」条目` : "全部记忆条目" }}
+          </h2>
+          <BaseBadge tone="gray">
+            {{ searchResults !== null ? `检索命中 ${searchResults.length} 条` : `${filteredEntries.length} 条` }}
+          </BaseBadge>
         </div>
 
         <div class="flex flex-wrap items-center gap-2">
@@ -569,35 +851,32 @@ onMounted(() => {
             size="sm"
             rounded="full"
             class="text-danger hover:bg-danger-weak hover:text-danger"
-            :disabled="loading || entries.length === 0"
+            :disabled="loading || filteredEntries.length === 0"
             @click="modalError = null; clearModalOpen = true"
           >
-            清空全部记忆
+            {{ activeCollection ? "清空当前集" : "清空全部记忆" }}
           </BaseButton>
         </div>
       </div>
 
-      <!-- Filter Tabs -->
-      <div class="flex flex-wrap items-center gap-1.5">
-        <button
-          v-for="tab in [
-            { value: 'all', label: `全部 (${entries.length})` },
-            { value: 'memory', label: `助理笔记 (${memoryCount})` },
-            { value: 'user', label: `个人偏好 (${userCount})` },
-          ] as const"
-          :key="tab.value"
-          type="button"
-          class="focus-ring rounded-full px-3 py-1.5 text-[12.5px] font-medium transition-colors"
-          :class="
-            targetFilter === tab.value
-              ? 'bg-primary text-primary-fg'
-              : 'bg-canvas text-fg-muted hover:bg-hover hover:text-fg'
-          "
-          @click="targetFilter = tab.value"
-        >
-          {{ tab.label }}
-        </button>
-      </div>
+      <!-- RAG Semantic Search Bar -->
+      <form class="flex items-center gap-2" @submit.prevent="runRagSearch">
+        <div class="relative flex-1">
+          <input
+            v-model="searchQuery"
+            type="search"
+            placeholder="混合 RAG 语义 / 关键词检索记忆（支持跨记忆集召回）…"
+            class="focus-ring w-full rounded-xl border border-line bg-canvas px-3.5 py-2 text-[13.5px] text-fg placeholder:text-fg-faint hover:border-line-strong"
+            @input="onSearchInput"
+          />
+        </div>
+        <BaseButton type="submit" size="sm" variant="secondary" rounded="full" :loading="searching">
+          检索
+        </BaseButton>
+        <BaseButton v-if="searchResults !== null" type="button" size="sm" variant="ghost" rounded="full" @click="clearSearch">
+          清除
+        </BaseButton>
+      </form>
 
       <!-- Add New Entry Form -->
       <form
@@ -607,30 +886,38 @@ onMounted(() => {
       >
         <div class="flex flex-wrap items-center justify-between gap-2">
           <span class="text-[13.5px] font-semibold text-fg">新增一条长期记忆</span>
-          <div class="flex items-center gap-1.5">
-            <button
-              type="button"
-              class="focus-ring rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors"
-              :class="newTarget === 'memory' ? 'bg-primary text-primary-fg' : 'bg-surface text-fg-muted hover:text-fg'"
-              @click="newTarget = 'memory'"
-            >
-              助理笔记 (MEMORY.md)
-            </button>
-            <button
-              type="button"
-              class="focus-ring rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors"
-              :class="newTarget === 'user' ? 'bg-primary text-primary-fg' : 'bg-surface text-fg-muted hover:text-fg'"
-              @click="newTarget = 'user'"
-            >
-              个人偏好 (USER.md)
-            </button>
-          </div>
+          <select
+            v-model="newTarget"
+            aria-label="选择目标记忆集"
+            class="focus-ring rounded-xl border border-line bg-canvas px-3 py-1.5 text-[12.5px] text-fg"
+          >
+            <option v-for="col in collections" :key="col.id" :value="col.slug">
+              {{ col.name }} ({{ col.slug }})
+            </option>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          <input
+            v-model="newTitle"
+            type="text"
+            maxlength="120"
+            placeholder="可选标题（如：后端技术栈偏好）"
+            class="focus-ring w-full rounded-xl border border-line bg-canvas px-3 py-2 text-[13px] text-fg placeholder:text-fg-faint"
+          />
+          <input
+            v-model="newTagsText"
+            type="text"
+            maxlength="160"
+            placeholder="可选标签，逗号分隔（如：python, fastapi）"
+            class="focus-ring w-full rounded-xl border border-line bg-canvas px-3 py-2 text-[13px] text-fg placeholder:text-fg-faint"
+          />
         </div>
 
         <textarea
           v-model="newContent"
           rows="3"
-          maxlength="2000"
+          maxlength="4000"
           placeholder="例如：我在编写 Python 后端时偏好使用 FastAPI 与 SQLAlchemy 2.0 异步风格，请尽量给出完整类型注解。"
           class="focus-ring w-full resize-y rounded-xl border border-line bg-canvas px-3.5 py-2.5 text-[13.5px] leading-relaxed text-fg placeholder:text-fg-faint hover:border-line-strong"
         />
@@ -638,7 +925,7 @@ onMounted(() => {
         <FormError :message="addError" />
 
         <div class="flex items-center justify-between gap-2">
-          <span class="text-[11.5px] tabular-nums text-fg-faint">{{ newContent.trim().length }} / 2000 字符</span>
+          <span class="text-[11.5px] tabular-nums text-fg-faint">{{ newContent.trim().length }} / 4000 字符</span>
           <div class="flex items-center gap-2">
             <BaseButton type="button" variant="soft" size="sm" rounded="full" :disabled="addingEntry" @click="addFormOpen = false">
               取消
@@ -650,8 +937,54 @@ onMounted(() => {
         </div>
       </form>
 
-      <!-- Loading / Empty / List -->
-      <div v-if="loading && !overview" class="flex items-center justify-center gap-2 py-10 text-[13.5px] text-fg-muted">
+      <!-- RAG Search Results View -->
+      <div v-if="searchResults !== null" class="space-y-2.5">
+        <div
+          v-if="searchResults.length === 0"
+          class="rounded-2xl border border-dashed border-line px-5 py-8 text-center text-[13px] text-fg-muted"
+        >
+          未检索到与「{{ searchQuery }}」相关的记忆条目。
+        </div>
+        <article
+          v-for="hit in searchResults"
+          :key="hit.id"
+          class="rounded-2xl bg-canvas p-4 ring-1 ring-accent/25"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex flex-wrap items-center gap-1.5">
+              <BaseBadge tone="brand">{{ hit.collection_name || collectionNameFor(hit.target) }}</BaseBadge>
+              <BaseBadge tone="green">相关度 {{ hit.score.toFixed(4) }}</BaseBadge>
+              <BaseBadge tone="gray">{{ sourceLabel(hit.source) }}</BaseBadge>
+            </div>
+            <BaseButton
+              variant="ghost"
+              size="sm"
+              rounded="full"
+              class="text-danger hover:bg-danger-weak hover:text-danger"
+              :loading="deletingId === hit.id"
+              @click="deleteEntry(hit.id)"
+            >
+              删除
+            </BaseButton>
+          </div>
+          <p v-if="hit.title" class="mt-2 text-[13.5px] font-semibold text-fg">{{ hit.title }}</p>
+          <p class="mt-1.5 whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg">
+            {{ hit.content }}
+          </p>
+          <div v-if="hit.tags?.length" class="mt-2 flex flex-wrap gap-1">
+            <span
+              v-for="tag in hit.tags"
+              :key="tag"
+              class="rounded-full bg-surface px-2 py-0.5 text-[11px] text-fg-muted"
+            >
+              #{{ tag }}
+            </span>
+          </div>
+        </article>
+      </div>
+
+      <!-- Loading / Empty / Normal List -->
+      <div v-else-if="loading && !overview" class="flex items-center justify-center gap-2 py-10 text-[13.5px] text-fg-muted">
         <Spinner :size="18" />
         <span>正在加载长期记忆…</span>
       </div>
@@ -660,7 +993,7 @@ onMounted(() => {
         v-else-if="!filteredEntries.length"
         class="rounded-2xl border border-dashed border-line px-5 py-8 text-center text-[13px] text-fg-muted"
       >
-        {{ entries.length ? "当前分类下暂无记忆条目。" : "暂无长期记忆条目。可在对话中自动记录，或点击右上角「新增记忆」手动添加。" }}
+        {{ entries.length ? "当前记忆集下暂无条目。" : "暂无长期记忆条目。可在对话中自动记录，或点击右上角「新增记忆」手动添加。" }}
       </div>
 
       <div v-else class="space-y-2.5">
@@ -672,7 +1005,7 @@ onMounted(() => {
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div class="flex flex-wrap items-center gap-1.5">
               <BaseBadge :tone="entry.target === 'user' ? 'brand' : 'gray'">
-                {{ targetLabel(entry.target) }}
+                {{ collectionNameFor(entry.target, entry.collection_name) }}
               </BaseBadge>
               <BaseBadge tone="gray">{{ sourceLabel(entry.source) }}</BaseBadge>
               <span class="text-[11.5px] tabular-nums text-fg-faint">{{ entry.content.length }} 字符</span>
@@ -697,7 +1030,7 @@ onMounted(() => {
                 rounded="full"
                 class="text-danger hover:bg-danger-weak hover:text-danger"
                 :loading="deletingId === entry.id"
-                @click="deleteEntry(entry)"
+                @click="deleteEntry(entry.id)"
               >
                 删除
               </BaseButton>
@@ -705,28 +1038,35 @@ onMounted(() => {
           </div>
 
           <div v-if="editingId === entry.id" class="mt-3 space-y-2.5">
-            <div class="flex items-center gap-1.5">
-              <button
-                type="button"
-                class="focus-ring rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors"
-                :class="editTarget === 'memory' ? 'bg-primary text-primary-fg' : 'bg-surface text-fg-muted hover:text-fg'"
-                @click="editTarget = 'memory'"
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <select
+                v-model="editTarget"
+                aria-label="目标记忆集"
+                class="focus-ring rounded-xl border border-line bg-canvas px-3 py-1.5 text-[12.5px] text-fg"
               >
-                助理笔记
-              </button>
-              <button
-                type="button"
-                class="focus-ring rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors"
-                :class="editTarget === 'user' ? 'bg-primary text-primary-fg' : 'bg-surface text-fg-muted hover:text-fg'"
-                @click="editTarget = 'user'"
-              >
-                个人偏好
-              </button>
+                <option v-for="col in collections" :key="col.id" :value="col.slug">
+                  {{ col.name }} ({{ col.slug }})
+                </option>
+              </select>
+              <input
+                v-model="editTitle"
+                type="text"
+                maxlength="120"
+                placeholder="可选标题"
+                class="focus-ring rounded-xl border border-line bg-canvas px-3 py-1.5 text-[12.5px] text-fg"
+              />
+              <input
+                v-model="editTagsText"
+                type="text"
+                maxlength="160"
+                placeholder="标签（逗号分隔）"
+                class="focus-ring rounded-xl border border-line bg-canvas px-3 py-1.5 text-[12.5px] text-fg"
+              />
             </div>
             <textarea
               v-model="editContent"
               rows="3"
-              maxlength="2000"
+              maxlength="4000"
               aria-label="编辑记忆内容"
               class="focus-ring w-full resize-y rounded-xl border border-line bg-canvas px-3.5 py-2.5 text-[13.5px] leading-relaxed text-fg"
             />
@@ -740,24 +1080,125 @@ onMounted(() => {
             </div>
           </div>
 
-          <p v-else class="mt-2.5 whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg">
-            {{ entry.content }}
-          </p>
+          <div v-else class="mt-2.5">
+            <p v-if="entry.title" class="mb-1 text-[13.5px] font-semibold text-fg">{{ entry.title }}</p>
+            <p class="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg">
+              {{ entry.content }}
+            </p>
+            <div v-if="entry.tags?.length" class="mt-2 flex flex-wrap gap-1">
+              <span
+                v-for="tag in entry.tags"
+                :key="tag"
+                class="rounded-full bg-surface px-2 py-0.5 text-[11px] text-fg-muted"
+              >
+                #{{ tag }}
+              </span>
+            </div>
+          </div>
         </article>
       </div>
     </section>
 
-    <!-- Clear All Confirmation Modal -->
+    <!-- Create / Edit Collection Modal -->
+    <BaseModal
+      :open="collectionModalOpen"
+      :title="editingCollection ? '编辑记忆集' : '新建记忆集'"
+      width="30rem"
+      @close="collectionModalOpen = false"
+    >
+      <div class="space-y-3">
+        <div>
+          <label class="mb-1 block text-[12.5px] font-medium text-fg">名称</label>
+          <input
+            v-model="colName"
+            type="text"
+            maxlength="80"
+            placeholder="例如：Whitz 项目、阅读笔记、写作风格"
+            class="focus-ring w-full rounded-xl border border-line bg-canvas px-3 py-2 text-[13.5px] text-fg"
+          />
+        </div>
+        <div v-if="!editingCollection">
+          <label class="mb-1 block text-[12.5px] font-medium text-fg">标识 Slug（可选，留空自动生成）</label>
+          <input
+            v-model="colSlug"
+            type="text"
+            maxlength="64"
+            placeholder="例如：project-whitz"
+            class="focus-ring w-full rounded-xl border border-line bg-canvas px-3 py-2 font-mono text-[13px] text-fg"
+          />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12.5px] font-medium text-fg">简介（用于 AI 目录索引归类参考）</label>
+          <textarea
+            v-model="colDescription"
+            rows="2"
+            maxlength="300"
+            placeholder="简述这个记忆集存放哪类信息，方便 AI 自动归类与检索"
+            class="focus-ring w-full resize-y rounded-xl border border-line bg-canvas px-3 py-2 text-[13px] text-fg"
+          />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12.5px] font-medium text-fg">单集字符上限（2,000 ~ 50,000）</label>
+          <input
+            v-model.number="colCharLimit"
+            type="number"
+            min="2000"
+            max="50000"
+            step="1000"
+            class="focus-ring w-full rounded-xl border border-line bg-canvas px-3 py-2 text-[13px] tabular-nums text-fg"
+          />
+        </div>
+        <FormError :message="modalError" />
+      </div>
+
+      <template #footer>
+        <BaseButton variant="soft" rounded="full" :disabled="savingCollection" @click="collectionModalOpen = false">
+          取消
+        </BaseButton>
+        <BaseButton rounded="full" :loading="savingCollection" @click="saveCollection">
+          保存
+        </BaseButton>
+      </template>
+    </BaseModal>
+
+    <!-- Delete Collection Confirmation Modal -->
+    <BaseModal
+      :open="Boolean(deleteColTarget)"
+      title="删除记忆集"
+      @close="deleteColTarget = null"
+    >
+      <div class="space-y-3">
+        <p class="text-[14px] leading-relaxed text-fg-muted">
+          确定要删除记忆集「<strong class="font-medium text-fg">{{ deleteColTarget?.name }}</strong>」及其包含的
+          <strong class="font-medium text-fg">{{ deleteColTarget?.entry_count ?? 0 }}</strong> 条记忆吗？此操作不可撤销。
+        </p>
+        <FormError :message="modalError" />
+      </div>
+      <template #footer>
+        <BaseButton variant="soft" rounded="full" :disabled="deletingCollection" @click="deleteColTarget = null">
+          取消
+        </BaseButton>
+        <BaseButton variant="danger" rounded="full" :loading="deletingCollection" @click="confirmDeleteCollection">
+          确认删除
+        </BaseButton>
+      </template>
+    </BaseModal>
+
+    <!-- Clear All / Collection Confirmation Modal -->
     <BaseModal
       :open="clearModalOpen"
-      title="清空全部记忆"
+      :title="activeCollection ? `清空「${activeCollection.name}」` : '清空全部记忆'"
       @close="clearModalOpen = false"
     >
       <div class="space-y-3">
         <p class="text-[14px] leading-relaxed text-fg-muted">
-          确定要清空全部 <strong class="font-medium text-fg">{{ entries.length }}</strong> 条长期记忆（包括
-          <code class="rounded bg-surface px-1 py-0.5 text-[12px]">MEMORY.md</code> 与
-          <code class="rounded bg-surface px-1 py-0.5 text-[12px]">USER.md</code>）吗？此操作不可撤销。
+          <template v-if="activeCollection">
+            确定要清空「<strong class="font-medium text-fg">{{ activeCollection.name }}</strong>」中的
+            <strong class="font-medium text-fg">{{ filteredEntries.length }}</strong> 条记忆吗？此操作不可撤销。
+          </template>
+          <template v-else>
+            确定要清空全部 <strong class="font-medium text-fg">{{ entries.length }}</strong> 条长期记忆吗？记忆集目录将保留，但所有条目会被永久删除。
+          </template>
         </p>
         <FormError :message="modalError" />
       </div>
