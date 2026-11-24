@@ -1,18 +1,28 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from typing import Literal
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
-from app.db.models import OpsAlertEvent, OpsAlertRule, User
+from app.db.models import (
+    ConversationDigest,
+    ConversationFile,
+    FileChunk,
+    MemoryEntry,
+    MessageChunk,
+    OpsAlertEvent,
+    OpsAlertRule,
+    RunTelemetry,
+    User,
+)
 from app.db.session import get_db
-from app.services import audit, ops_service
+from app.services import audit, embeddings, ops_service, rag_jobs
 
 router = APIRouter(prefix="/api/admin/ops", tags=["admin-ops"], dependencies=[Depends(require_admin)])
 
@@ -259,3 +269,169 @@ async def evaluate_alerts(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     return await ops_service.evaluate_alert_rules(db, admin)
+
+
+class RagBackfillRequest(BaseModel):
+    scope: Literal["all", "file_chunks", "memory_entries", "conversation_digests", "message_chunks"] = "all"
+    batch_size: int = Field(default=40, ge=5, le=200)
+    inline: bool = False
+
+
+async def _table_vector_stats(
+    db: AsyncSession,
+    model_cls: Any,
+    *,
+    key: str,
+    label: str,
+    current_tag: str,
+    extra_filter: Any = None,
+) -> dict[str, Any]:
+    total_stmt = select(func.count()).select_from(model_cls)
+    emb_stmt = select(func.count()).select_from(model_cls).where(model_cls.embedding.is_not(None))
+    stale_stmt = (
+        select(func.count())
+        .select_from(model_cls)
+        .where(
+            model_cls.embedding.is_not(None),
+            (model_cls.embedding_model.is_(None)) | (model_cls.embedding_model != current_tag),
+        )
+    )
+    if extra_filter is not None:
+        total_stmt = total_stmt.where(extra_filter)
+        emb_stmt = emb_stmt.where(extra_filter)
+        stale_stmt = stale_stmt.where(extra_filter)
+
+    total = int((await db.scalar(total_stmt)) or 0)
+    embedded = int((await db.scalar(emb_stmt)) or 0)
+    stale = int((await db.scalar(stale_stmt)) or 0) if current_tag else 0
+    coverage = round((embedded / total) * 100.0, 1) if total > 0 else 100.0
+    return {
+        "key": key,
+        "label": label,
+        "total": total,
+        "embedded": embedded,
+        "coverage_pct": coverage,
+        "stale_model": stale,
+    }
+
+
+@router.get("/rag/health")
+async def get_rag_health(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return vector index coverage, file index status, durable job queue depth, and 7d RAG telemetry."""
+    current_tag = embeddings.current_embedding_model_tag()
+    tables = [
+        await _table_vector_stats(db, FileChunk, key="file_chunks", label="文档分块", current_tag=current_tag),
+        await _table_vector_stats(
+            db,
+            MemoryEntry,
+            key="memory_entries",
+            label="长期记忆",
+            current_tag=current_tag,
+            extra_filter=MemoryEntry.status == "active",
+        ),
+        await _table_vector_stats(
+            db, ConversationDigest, key="conversation_digests", label="对话摘要", current_tag=current_tag
+        ),
+        await _table_vector_stats(
+            db, MessageChunk, key="message_chunks", label="对话回合分块", current_tag=current_tag
+        ),
+    ]
+
+    file_rows = (
+        await db.execute(
+            select(ConversationFile.index_status, func.count())
+            .where(ConversationFile.status == "ready")
+            .group_by(ConversationFile.index_status)
+        )
+    ).all()
+    file_counts = {str(st or "pending"): int(cnt or 0) for st, cnt in file_rows}
+    files_summary = {
+        "total_ready": sum(file_counts.values()),
+        "ready": file_counts.get("ready", 0),
+        "partial": file_counts.get("partial", 0),
+        "indexing": file_counts.get("indexing", 0),
+        "failed": file_counts.get("failed", 0),
+        "pending": file_counts.get("pending", 0),
+    }
+
+    queue = await rag_jobs.get_queue_depth()
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    telemetry_rows = (
+        await db.execute(
+            select(RunTelemetry.rag_metrics).where(
+                RunTelemetry.created_at >= cutoff,
+                RunTelemetry.rag_metrics.is_not(None),
+            )
+        )
+    ).scalars().all()
+
+    runs_with_rag = len(telemetry_rows)
+    runs_with_hits = 0
+    total_citations = 0
+    total_prefetch_ms = 0
+    prefetch_samples = 0
+    corrective_retries = 0
+    for rm in telemetry_rows:
+        if not isinstance(rm, dict):
+            continue
+        c_cnt = int(rm.get("citations_count") or rm.get("returned") or 0)
+        total_citations += c_cnt
+        if c_cnt > 0:
+            runs_with_hits += 1
+        ms = rm.get("prefetch_ms") or rm.get("latency_ms")
+        if isinstance(ms, (int, float)) and ms >= 0:
+            total_prefetch_ms += int(ms)
+            prefetch_samples += 1
+        if rm.get("corrective_retried"):
+            corrective_retries += 1
+
+    return {
+        "embedding_enabled": embeddings.is_embedding_configured(),
+        "rerank_enabled": embeddings.is_rerank_configured(),
+        "embedding_model": current_tag,
+        "tables": tables,
+        "files": files_summary,
+        "queue": queue,
+        "telemetry_7d": {
+            "runs_with_rag": runs_with_rag,
+            "hit_rate_pct": round((runs_with_hits / runs_with_rag) * 100.0, 1) if runs_with_rag else 0.0,
+            "avg_prefetch_ms": round(total_prefetch_ms / prefetch_samples) if prefetch_samples else 0,
+            "total_citations": total_citations,
+            "corrective_retries": corrective_retries,
+        },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.post("/rag/backfill")
+async def trigger_rag_backfill(
+    body: RagBackfillRequest,
+    request: Request,
+    admin: User = Depends(require_admin),
+) -> dict[str, Any]:
+    """Enqueue or execute vector embedding backfill across RAG tables."""
+    if not embeddings.is_embedding_configured():
+        raise HTTPException(status_code=400, detail="embedding_not_configured")
+
+    if body.inline:
+        counts = await rag_jobs.run_embeddings_backfill(scope=body.scope, batch_size=body.batch_size)
+        result: dict[str, Any] = {"queued": False, "scope": body.scope, "updated": counts}
+    else:
+        ok = await rag_jobs.enqueue_job(
+            "backfill_embeddings",
+            {"scope": body.scope, "batch_size": body.batch_size},
+        )
+        result = {"queued": ok, "scope": body.scope, "batch_size": body.batch_size}
+
+    await audit.record(
+        "ops.rag.backfill",
+        actor=admin,
+        target_type="rag_index",
+        target_id=body.scope,
+        request=request,
+        metadata={"scope": body.scope, "batch_size": body.batch_size, "inline": body.inline},
+    )
+    return result

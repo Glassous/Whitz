@@ -17,7 +17,15 @@ from sqlalchemy.orm import defer
 
 from app.core.config import get_settings
 from app.core.redis import get_redis
-from app.db.models import Conversation, ConversationDigest, Message, MessageChunk, User, is_pgvector_enabled
+from app.db.models import (
+    Conversation,
+    ConversationDigest,
+    ConversationEpisode,
+    Message,
+    MessageChunk,
+    User,
+    is_pgvector_enabled,
+)
 from app.db.session import SessionLocal, detect_pgvector
 from app.services import embeddings
 
@@ -27,16 +35,49 @@ MAIN_CONVERSATION_TITLE = "主要聊天"
 RECENT_VERBATIM_MESSAGES = 12
 COMPACT_TRIGGER_TOKENS = 12000
 COMPACT_TRIGGER_MESSAGES = 24
+EPISODE_TRIGGER_MESSAGES = 16
+EPISODE_TRIGGER_TOKENS = 6000
+EPISODE_KEEP_RECENT = 8
+EPISODE_GAP_SECONDS = 4 * 3600
+EPISODE_GAP_MIN_MESSAGES = 4
+CURSOR_HISTORY_MIN_MESSAGES = 10
+CURSOR_HISTORY_MAX_MESSAGES = 28
+CURSOR_HISTORY_MAX_TOKENS = 8000
 ROLLING_SUMMARY_MAX_TOKENS = 2200
 ROLLING_SUMMARY_MAX_CHARS = 4800
 
-DIRECTORY_MAX_ITEMS = 10
-DIRECTORY_MAX_CHARS = 1800
+DIRECTORY_MAX_ITEMS = 8
+DIRECTORY_MAX_CHARS = 1500
 RECALLED_MAX_ITEMS = 4
 RECALLED_MAX_CHARS = 2200
 
 DIGEST_MIN_NEW_MESSAGES = 4
 DIGEST_MIN_INTERVAL_SECONDS = 120
+
+_LOW_SIGNAL_USER_MSGS = frozenset(
+    {
+        "ok",
+        "okay",
+        "thanks",
+        "thank you",
+        "thx",
+        "好的",
+        "好",
+        "嗯",
+        "嗯嗯",
+        "收到",
+        "明白",
+        "知道了",
+        "谢谢",
+        "感谢",
+        "继续",
+        "可以",
+        "没问题",
+        "行",
+        "赞",
+        "好的谢谢",
+    }
+)
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
@@ -342,6 +383,7 @@ async def refresh_side_chat_digest(
     existing.last_message_at = latest_msg.created_at
     existing.search_tsv = func.to_tsvector("simple", search_text)
     existing.embedding = vec
+    existing.embedding_model = embeddings.current_embedding_model_tag() or None if vec is not None else None
     existing.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(existing)
@@ -408,6 +450,506 @@ async def backfill_missing_digests_lightweight(
         if digest is not None:
             created += 1
     return created
+
+
+def normalize_working_state(raw: Any) -> dict[str, Any]:
+    """Normalize structured L1 Working State with strict bounds to prevent unbounded drift."""
+    data = raw if isinstance(raw, dict) else {}
+
+    goals: list[dict[str, str]] = []
+    seen_goals: set[str] = set()
+    for g in data.get("active_goals") or []:
+        if isinstance(g, str) and g.strip():
+            title = _clip(g, 120)
+            status = "in_progress"
+            updated = ""
+        elif isinstance(g, dict):
+            title = _clip(str(g.get("title") or g.get("goal") or ""), 120)
+            status = str(g.get("status") or "in_progress").strip().lower()
+            updated = _clip(str(g.get("updated") or g.get("date") or ""), 24)
+        else:
+            continue
+        if not title or status in ("completed", "done", "cancelled", "archived"):
+            continue
+        key = title.lower()
+        if key in seen_goals:
+            continue
+        seen_goals.add(key)
+        goals.append({"title": title, "status": status if status in ("in_progress", "blocked", "pending") else "in_progress", **({"updated": updated} if updated else {})})
+        if len(goals) >= 8:
+            break
+
+    decisions: list[dict[str, str]] = []
+    seen_dec: set[str] = set()
+    for d in data.get("recent_decisions") or []:
+        if isinstance(d, str) and d.strip():
+            dec_txt = _clip(d, 160)
+            date_txt = ""
+            reason_txt = ""
+        elif isinstance(d, dict):
+            dec_txt = _clip(str(d.get("decision") or d.get("title") or ""), 160)
+            date_txt = _clip(str(d.get("date") or ""), 24)
+            reason_txt = _clip(str(d.get("reason") or ""), 100)
+        else:
+            continue
+        if not dec_txt:
+            continue
+        key = dec_txt.lower()
+        if key in seen_dec:
+            continue
+        seen_dec.add(key)
+        item: dict[str, str] = {"decision": dec_txt}
+        if date_txt:
+            item["date"] = date_txt
+        if reason_txt:
+            item["reason"] = reason_txt
+        decisions.append(item)
+        if len(decisions) >= 10:
+            break
+
+    questions: list[str] = []
+    seen_q: set[str] = set()
+    for q in data.get("open_questions") or []:
+        txt = _clip(str(q or ""), 140)
+        if txt and txt.lower() not in seen_q:
+            seen_q.add(txt.lower())
+            questions.append(txt)
+        if len(questions) >= 6:
+            break
+
+    entities: dict[str, str] = {}
+    raw_ent = data.get("key_entities")
+    if isinstance(raw_ent, dict):
+        for k, v in raw_ent.items():
+            kk = _clip(str(k or ""), 40)
+            vv = _clip(str(v or ""), 120)
+            if kk and vv:
+                entities[kk] = vv
+            if len(entities) >= 16:
+                break
+
+    return {
+        "active_goals": goals,
+        "recent_decisions": decisions,
+        "open_questions": questions,
+        "key_entities": entities,
+    }
+
+
+def apply_working_state_patch(current_raw: Any, patch_raw: Any) -> dict[str, Any]:
+    """Apply an incremental structured patch to L1 Working State (eliminates free-text summary drift)."""
+    base = normalize_working_state(current_raw)
+    patch = patch_raw if isinstance(patch_raw, dict) else {}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    completed_titles = {
+        str(t).strip().lower()
+        for t in (patch.get("completed_goals") or [])
+        if str(t).strip()
+    }
+    resolved_questions = {
+        str(q).strip().lower()
+        for q in (patch.get("resolved_questions") or [])
+        if str(q).strip()
+    }
+
+    # Filter out completed goals & merge added/updated goals
+    next_goals = [
+        g for g in base["active_goals"]
+        if g["title"].lower() not in completed_titles
+        and not any(ct in g["title"].lower() for ct in completed_titles if len(ct) >= 3)
+    ]
+    by_title = {g["title"].lower(): idx for idx, g in enumerate(next_goals)}
+    for raw_g in patch.get("active_goals") or []:
+        if isinstance(raw_g, str) and raw_g.strip():
+            g_title = _clip(raw_g, 120)
+            g_status = "in_progress"
+        elif isinstance(raw_g, dict):
+            g_title = _clip(str(raw_g.get("title") or raw_g.get("goal") or ""), 120)
+            g_status = str(raw_g.get("status") or "in_progress").strip().lower()
+        else:
+            continue
+        if not g_title:
+            continue
+        lk = g_title.lower()
+        if g_status in ("completed", "done", "cancelled", "archived"):
+            if lk in by_title:
+                next_goals[by_title[lk]]["status"] = "completed"
+            continue
+        entry = {"title": g_title, "status": g_status if g_status in ("in_progress", "blocked", "pending") else "in_progress", "updated": today}
+        if lk in by_title:
+            next_goals[by_title[lk]] = entry
+        else:
+            by_title[lk] = len(next_goals)
+            next_goals.append(entry)
+
+    # Prepend newest decisions so recent ones never get evicted before stale ones
+    new_decisions: list[dict[str, str]] = []
+    for raw_d in patch.get("recent_decisions") or []:
+        if isinstance(raw_d, str) and raw_d.strip():
+            new_decisions.append({"decision": _clip(raw_d, 160), "date": today})
+        elif isinstance(raw_d, dict) and str(raw_d.get("decision") or "").strip():
+            item = {"decision": _clip(str(raw_d["decision"]), 160), "date": _clip(str(raw_d.get("date") or today), 24)}
+            if str(raw_d.get("reason") or "").strip():
+                item["reason"] = _clip(str(raw_d["reason"]), 100)
+            new_decisions.append(item)
+    merged_decisions = new_decisions + base["recent_decisions"]
+
+    # Update open questions
+    next_questions = [
+        q for q in base["open_questions"]
+        if q.lower() not in resolved_questions
+        and not any(rq in q.lower() for rq in resolved_questions if len(rq) >= 3)
+    ]
+    for raw_q in patch.get("open_questions") or []:
+        txt = _clip(str(raw_q or ""), 140)
+        if txt:
+            next_questions.insert(0, txt)
+
+    # Merge key entities
+    merged_entities = dict(base["key_entities"])
+    if isinstance(patch.get("key_entities"), dict):
+        for k, v in patch["key_entities"].items():
+            kk = _clip(str(k or ""), 40)
+            vv = _clip(str(v or ""), 120)
+            if kk and vv:
+                merged_entities[kk] = vv
+
+    return normalize_working_state(
+        {
+            "active_goals": next_goals,
+            "recent_decisions": merged_decisions,
+            "open_questions": next_questions,
+            "key_entities": merged_entities,
+        }
+    )
+
+
+def format_working_state_prompt(
+    working_state: dict[str, Any] | None,
+    *,
+    rolling_summary: str | None = None,
+    max_chars: int = 1800,
+) -> str:
+    """Render structured L1 Working State into a compact, deterministic Markdown block (falls back to rolling_summary)."""
+    ws = normalize_working_state(working_state) if working_state else None
+    has_structured = bool(
+        ws
+        and (ws["active_goals"] or ws["recent_decisions"] or ws["open_questions"] or ws["key_entities"])
+    )
+    if not has_structured:
+        legacy = (rolling_summary or "").strip()
+        if len(legacy) > max_chars:
+            legacy = legacy[:max_chars].rstrip() + "…"
+        return legacy
+
+    parts: list[str] = []
+    if ws["active_goals"]:
+        lines = ["### 进行中目标与待办"]
+        for g in ws["active_goals"]:
+            st_tag = "阻塞" if g["status"] == "blocked" else ("待开始" if g["status"] == "pending" else "进行中")
+            dt = f" ({g['updated']})" if g.get("updated") else ""
+            lines.append(f"- [{st_tag}] {g['title']}{dt}")
+        parts.append("\n".join(lines))
+
+    if ws["recent_decisions"]:
+        lines = ["### 近期已拍板决策"]
+        for d in ws["recent_decisions"]:
+            dt = f"[{d['date']}] " if d.get("date") else ""
+            reason = f"（原因：{d['reason']}）" if d.get("reason") else ""
+            lines.append(f"- {dt}{d['decision']}{reason}")
+        parts.append("\n".join(lines))
+
+    if ws["open_questions"]:
+        lines = ["### 待决问题"]
+        for q in ws["open_questions"]:
+            lines.append(f"- {q}")
+        parts.append("\n".join(lines))
+
+    if ws["key_entities"]:
+        kv = "；".join(f"{k}: {v}" for k, v in ws["key_entities"].items())
+        parts.append(f"### 关键实体与参数\n{kv}")
+
+    rendered = "\n\n".join(parts)
+    if len(rendered) > max_chars:
+        rendered = rendered[:max_chars].rstrip() + "…"
+    return rendered
+
+
+def _parse_episode_and_state_json(raw: str | None) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    if not raw:
+        return None
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        parsed = json.loads(raw[start : end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    ep = parsed.get("episode") if isinstance(parsed.get("episode"), dict) else parsed
+    topic = _clip(str(ep.get("topic") or ep.get("title") or ""), 160)
+    summary = _clip(str(ep.get("summary") or ""), 520)
+    if not summary:
+        return None
+    key_facts = [_clip(str(x), 150) for x in (ep.get("key_facts") or []) if str(x).strip()][:8]
+    entities = [_clip(str(x), 48) for x in (ep.get("entities") or []) if str(x).strip()][:12]
+    state_patch = parsed.get("working_state_patch") if isinstance(parsed.get("working_state_patch"), dict) else {}
+    return (
+        {
+            "topic": topic or _clip(summary, 48),
+            "summary": summary,
+            "key_facts": key_facts,
+            "entities": entities,
+        },
+        state_patch,
+    )
+
+
+async def archive_conversation_episode_if_needed(
+    db: AsyncSession,
+    conv: Conversation,
+    *,
+    trigger_messages: int = EPISODE_TRIGGER_MESSAGES,
+    trigger_tokens: int = EPISODE_TRIGGER_TOKENS,
+    keep_recent: int = EPISODE_KEEP_RECENT,
+    force: bool = False,
+) -> ConversationEpisode | None:
+    """Unified L1+L2 archival for BOTH Main Chat and long Side Chats:
+    1. Seals evicted turns into an immutable `ConversationEpisode` (zero Telephone Game drift).
+    2. Incrementally patches `conv.working_state` and advances `working_state_cursor_msg_id`.
+    """
+    rows = list(
+        (
+            await db.execute(
+                select(Message)
+                .where(
+                    Message.conversation_id == conv.id,
+                    Message.role.in_(("user", "assistant")),
+                )
+                .order_by(Message.created_at.asc(), Message.id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    completed = [
+        m for m in rows if (m.content or "").strip() and (m.role == "user" or m.status == "completed")
+    ]
+    if len(completed) <= keep_recent:
+        return None
+
+    cursor_id = conv.working_state_cursor_msg_id or conv.summary_cursor_msg_id
+    start_idx = 0
+    if cursor_id is not None:
+        found = next((i for i, m in enumerate(completed) if m.id == cursor_id), None)
+        if found is not None:
+            start_idx = found + 1
+
+    unarchived = completed[start_idx:]
+    if len(unarchived) <= keep_recent:
+        return None
+
+    unarchived_tokens = sum(estimate_tokens(m.content) for m in unarchived)
+    # Check natural time boundary (>= 4h gap between older turns and latest turns)
+    time_gap_split: int | None = None
+    for idx in range(EPISODE_GAP_MIN_MESSAGES, len(unarchived) - 1):
+        prev_ts = unarchived[idx - 1].created_at
+        cur_ts = unarchived[idx].created_at
+        if prev_ts and cur_ts and (cur_ts - prev_ts).total_seconds() >= EPISODE_GAP_SECONDS:
+            time_gap_split = idx
+
+    should_trigger = (
+        force
+        or len(unarchived) >= trigger_messages
+        or unarchived_tokens >= trigger_tokens
+        or (time_gap_split is not None and time_gap_split >= EPISODE_GAP_MIN_MESSAGES)
+    )
+    if not should_trigger:
+        return None
+
+    if time_gap_split is not None and not (len(unarchived) >= trigger_messages or unarchived_tokens >= trigger_tokens):
+        evicted = unarchived[:time_gap_split]
+    else:
+        evict_count = len(unarchived) - keep_recent
+        # Archive in bounded chunks (<= 24 msgs per episode) so every single message is captured cleanly with zero drops!
+        evicted = unarchived[: min(evict_count, 24)]
+
+    if not evicted:
+        return None
+
+    transcript = "\n".join(
+        f"{'用户' if m.role == 'user' else '助手'} ({_format_short_date(m.created_at)}): {_clip(m.content, 650)}"
+        for m in evicted
+    )
+    current_ws_json = json.dumps(normalize_working_state(conv.working_state), ensure_ascii=False)
+    sys_prompt = (
+        "你是长期对话情景归档器与工作态维护器。你需要一次性完成两件事：\n"
+        "1. 将即将移出窗口的这段对话封存为一条不可变的情景卡片 `episode`（保留关键数字、决定、代码/文件名、专有名词与因果脉络）；\n"
+        "2. 基于既有 `working_state`，输出结构化增量补丁 `working_state_patch`（更新进行中目标、标记已完成目标 `completed_goals`、新增近期决策、移除已解决的问题）。\n"
+        "严格输出单行 JSON：\n"
+        '{"episode":{"topic":"8-24字主题标题","summary":"160-320字高密度总结","key_facts":["关键事实1"],"entities":["实体/参数/文件名"]},'
+        '"working_state_patch":{"active_goals":[{"title":"目标","status":"in_progress"}],"completed_goals":["已完成目标标题"],'
+        '"recent_decisions":[{"decision":"决定","reason":"原因"}],"open_questions":["待决问题"],"resolved_questions":["已解决问题"],"key_entities":{"键":"值"}}}'
+    )
+    user_prompt = (
+        f"会话类型：{'主聊天' if conv.kind == 'main' else '旁聊'}（标题：{conv.title}）\n"
+        f"当前工作状态 working_state：{current_ws_json}\n\n"
+        f"待封存对话片段（共 {len(evicted)} 条消息）：\n{transcript}"
+    )
+
+    raw = await _call_fast_llm(sys_prompt, user_prompt, max_tokens=850, temperature=0.1, timeout_seconds=25.0)
+    parsed = _parse_episode_and_state_json(raw)
+    if parsed is not None:
+        ep_data, state_patch = parsed
+    else:
+        sum_txt, facts_list, kw_list = _extractive_digest(conv.title, evicted)
+        ep_data = {
+            "topic": _clip(evicted[0].content, 48) or conv.title or "历史片段",
+            "summary": sum_txt,
+            "key_facts": facts_list,
+            "entities": kw_list,
+        }
+        state_patch = {}
+
+    next_index = int(
+        (
+            await db.scalar(
+                select(func.coalesce(func.max(ConversationEpisode.episode_index), 0)).where(
+                    ConversationEpisode.conversation_id == conv.id
+                )
+            )
+        )
+        or 0
+    ) + 1
+
+    await detect_pgvector(db)
+    search_text = " ".join(
+        [
+            ep_data["topic"],
+            ep_data["summary"],
+            " ".join(ep_data["key_facts"]),
+            " ".join(ep_data["entities"]),
+        ]
+    ).strip()
+    vec: list[float] | None = None
+    if embeddings.is_embedding_configured() and search_text:
+        vecs = await embeddings.embed_texts([search_text[:2000]])
+        vec = vecs[0] if vecs else None
+
+    episode = ConversationEpisode(
+        user_id=conv.user_id,
+        conversation_id=conv.id,
+        conversation_kind="main" if conv.kind == "main" else "side",
+        episode_index=next_index,
+        topic=ep_data["topic"],
+        summary=ep_data["summary"],
+        key_facts=ep_data["key_facts"],
+        entities=ep_data["entities"],
+        start_msg_id=evicted[0].id,
+        end_msg_id=evicted[-1].id,
+        started_at=evicted[0].created_at,
+        ended_at=evicted[-1].created_at,
+        message_count=len(evicted),
+        token_count=sum(estimate_tokens(m.content) for m in evicted),
+        search_tsv=func.to_tsvector("simple", search_text),
+        embedding=vec,
+        embedding_model=embeddings.current_embedding_model_tag() or None if vec is not None else None,
+    )
+    db.add(episode)
+
+    now_dt = datetime.now(timezone.utc)
+    next_ws = apply_working_state_patch(conv.working_state, state_patch)
+    conv.working_state = next_ws
+    conv.working_state_cursor_msg_id = evicted[-1].id
+    conv.working_state_updated_at = now_dt
+    # Keep legacy rolling_summary & cursor synchronized for full backward compatibility
+    conv.rolling_summary = format_working_state_prompt(next_ws, rolling_summary=conv.rolling_summary)
+    conv.summary_cursor_msg_id = evicted[-1].id
+    conv.summary_updated_at = now_dt
+
+    await db.commit()
+    await db.refresh(episode)
+    return episode
+
+
+def schedule_episode_archive_check(conv_id: uuid.UUID) -> None:
+    """Schedule durable L1 Working State + L2 Episode archival check via Redis RAG queue."""
+    from app.services import rag_jobs
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(rag_jobs.enqueue_job("archive_episode", {"conversation_id": str(conv_id)}))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+async def load_cursor_aligned_history(
+    db: AsyncSession,
+    conv: Conversation,
+    *,
+    min_messages: int = CURSOR_HISTORY_MIN_MESSAGES,
+    max_messages: int = CURSOR_HISTORY_MAX_MESSAGES,
+    max_tokens: int = CURSOR_HISTORY_MAX_TOKENS,
+) -> list[dict[str, str]]:
+    """Load cursor-aligned verbatim history with ZERO black-hole gaps and ZERO redundant archived overlap.
+
+    - Prefers all completed user/assistant messages strictly after `working_state_cursor_msg_id` (or `summary_cursor_msg_id`).
+    - If fewer than `min_messages` exist after the cursor (e.g., right after an archive run), pads backward up to
+      `min_messages` so turn continuity stays natural.
+    - Enforces `max_messages` and `max_tokens` from newest backward while preserving turn ordering.
+    """
+    rows = list(
+        (
+            await db.execute(
+                select(Message)
+                .where(
+                    Message.conversation_id == conv.id,
+                    Message.role.in_(("user", "assistant")),
+                )
+                .order_by(Message.created_at.desc(), Message.id.desc())
+                .limit(max(max_messages + 12, 40))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    rows.reverse()
+    completed = [
+        m
+        for m in rows
+        if (m.content or "").strip()
+        and (m.role == "user" or m.status not in ("failed", "cancelled", "streaming", "waiting"))
+    ]
+    if not completed:
+        return []
+
+    cursor_id = conv.working_state_cursor_msg_id or conv.summary_cursor_msg_id
+    selected = completed
+    if cursor_id is not None:
+        c_idx = next((i for i, m in enumerate(completed) if m.id == cursor_id), None)
+        if c_idx is not None:
+            after_cursor = completed[c_idx + 1 :]
+            if len(after_cursor) >= min_messages:
+                selected = after_cursor
+            else:
+                selected = completed[-min_messages:]
+
+    # Enforce max_messages & max_tokens from newest backward
+    kept: list[Message] = []
+    used_tokens = 0
+    for m in reversed(selected):
+        t = estimate_tokens(m.content)
+        if kept and (len(kept) >= max_messages or used_tokens + t > max_tokens):
+            break
+        kept.append(m)
+        used_tokens += t
+    kept.reverse()
+    return [{"role": m.role, "content": m.content} for m in kept]
 
 
 def _extractive_rolling_summary(previous: str | None, evicted: list[Message]) -> str:
@@ -684,6 +1226,18 @@ def schedule_backfill_missing_digests(user_id: uuid.UUID, limit: int = 12) -> No
     task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
+def _is_low_signal_turn(user_content: str, assistant_content: str) -> bool:
+    """Filter trivial acknowledgement turns out of message_chunks to prevent vector index noise."""
+    u = (user_content or "").strip()
+    a = (assistant_content or "").strip()
+    if len(u) + len(a) < 40:
+        return True
+    u_norm = u.lower().strip("!！。.~～?？,， ")
+    if u_norm in _LOW_SIGNAL_USER_MSGS and len(a) < 120 and "```" not in a:
+        return True
+    return False
+
+
 async def index_turn_chunk(
     db: AsyncSession,
     *,
@@ -696,7 +1250,9 @@ async def index_turn_chunk(
     user_content: str,
     assistant_content: str,
 ) -> MessageChunk | None:
-    """Vectorize & index a completed Q&A turn into ``message_chunks`` for episodic semantic recall."""
+    """Vectorize & index a substantive Q&A turn into ``message_chunks`` for verbatim episodic recall."""
+    if _is_low_signal_turn(user_content, assistant_content):
+        return None
     u_txt = _clip(user_content, 600)
     a_txt = _clip(assistant_content, 1000)
     if not u_txt and not a_txt:
@@ -725,6 +1281,7 @@ async def index_turn_chunk(
         token_count=estimate_tokens(body),
         search_tsv=func.to_tsvector("simple", embed_text),
         embedding=vec,
+        embedding_model=embeddings.current_embedding_model_tag() or None if vec is not None else None,
     )
     db.add(chunk)
     await db.commit()
@@ -742,30 +1299,24 @@ def schedule_turn_chunk_indexing(
     user_content: str,
     assistant_content: str,
 ) -> None:
-    """Schedule non-blocking episodic turn vectorization after a run completes."""
+    """Schedule durable episodic turn vectorization via Redis job queue (fallback: local task)."""
+    from app.services import rag_jobs
 
-    async def _runner() -> None:
-        try:
-            async with SessionLocal() as db:
-                await index_turn_chunk(
-                    db,
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    conversation_kind=conversation_kind,
-                    conversation_title=conversation_title,
-                    user_msg_id=user_msg_id,
-                    assistant_msg_id=assistant_msg_id,
-                    user_content=user_content,
-                    assistant_content=assistant_content,
-                )
-        except Exception as exc:
-            logger.debug("Background turn chunk indexing skipped for conv=%s: %s", conversation_id, exc)
-
+    payload = {
+        "user_id": str(user_id),
+        "conversation_id": str(conversation_id),
+        "conversation_kind": conversation_kind,
+        "conversation_title": conversation_title,
+        "user_msg_id": str(user_msg_id) if user_msg_id else None,
+        "assistant_msg_id": str(assistant_msg_id) if assistant_msg_id else None,
+        "user_content": user_content,
+        "assistant_content": assistant_content,
+    }
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    task = loop.create_task(_runner())
+    task = loop.create_task(rag_jobs.enqueue_job("index_turn_chunk", payload))
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
 
@@ -906,8 +1457,11 @@ async def build_main_chat_memory_context(
     max_recent_dir: int = DIRECTORY_MAX_ITEMS,
     max_recalled: int = RECALLED_MAX_ITEMS,
 ) -> dict[str, str]:
-    """Assemble bounded rolling summary + cross-side-chat & episodic turn memory context for Main Chat."""
-    # Trigger lightweight digest backfill asynchronously so it never stalls Main Chat TTFT
+    """Assemble lightweight L1 Working State + Recent Active Side-Chat Directory (ZERO duplicate RAG RTT).
+
+    Deep semantic/hybrid retrieval across side-chat digests, main-chat episodes, and message chunks is
+    executed ONCE by Agent's `UnifiedKnowledgeRetriever` (`rag_prefetch` + `knowledge_search`) with `[S1..Sn]` citations.
+    """
     schedule_backfill_missing_digests(user.id, limit=12)
 
     await detect_pgvector(db)
@@ -920,55 +1474,29 @@ async def build_main_chat_memory_context(
     if is_pgvector_enabled():
         recent_stmt = recent_stmt.options(defer(ConversationDigest.embedding))
     recent_digests = list((await db.execute(recent_stmt)).scalars().all())
-    recalled = await _recall_relevant_digests(db, user.id, query_text, limit=max_recalled)
-    episodic = await _recall_relevant_message_chunks(db, user.id, query_text, limit=3)
 
-    sections: list[str] = []
-
+    cross_chat_context = ""
     if recent_digests:
-        dir_lines = ["近期活跃旁聊目录（需要详细原文或更早记录请调用 `search_chat_history` / `read_conversation_history`）："]
+        dir_lines = [
+            "近期活跃旁聊目录（仅标题与近况速览；涉及深层细节、参数或早期主聊记录请直接参考本轮预召回证据或调用 `knowledge_search` / `read_conversation_history`）："
+        ]
         used = 0
         for d in recent_digests:
             dt_str = _format_short_date(d.last_message_at or d.updated_at)
-            line = f"- [{dt_str}] 「{d.title}」(conv_id=`{d.conversation_id}`): {_clip(d.summary, 130)}"
+            line = f"- [{dt_str}] 「{d.title}」(conv_id=`{d.conversation_id}`): {_clip(d.summary, 110)}"
             if used + len(line) > DIRECTORY_MAX_CHARS:
                 break
             dir_lines.append(line)
             used += len(line)
-        sections.append("\n".join(dir_lines))
+        cross_chat_context = "\n".join(dir_lines)
 
-    if recalled:
-        rec_lines = ["与当前问题高度相关的旁聊记忆召回："]
-        used = 0
-        for d in recalled:
-            dt_str = _format_short_date(d.last_message_at or d.updated_at)
-            block_parts = [f"- 【{d.title}】({dt_str}, conv_id=`{d.conversation_id}`): {_clip(d.summary, 280)}"]
-            facts = [str(f).strip() for f in (d.key_facts or []) if str(f).strip()][:4]
-            if facts:
-                block_parts.append("  要点：" + "；".join(_clip(f, 100) for f in facts))
-            block = "\n".join(block_parts)
-            if used + len(block) > RECALLED_MAX_CHARS:
-                break
-            rec_lines.append(block)
-            used += len(block)
-        sections.append("\n".join(rec_lines))
-
-    if episodic:
-        ep_lines = ["历史对话轮次语义片段召回："]
-        used = 0
-        for ep in episodic:
-            entry = f"- {ep['context_header']} (conv_id=`{ep['conversation_id']}`): {_clip(ep['content'], 320)}"
-            if used + len(entry) > 1200:
-                break
-            ep_lines.append(entry)
-            used += len(entry)
-        sections.append("\n".join(ep_lines))
-
-    rolling_summary = (conv.rolling_summary or "").strip()
-    if len(rolling_summary) > ROLLING_SUMMARY_MAX_CHARS:
-        rolling_summary = rolling_summary[:ROLLING_SUMMARY_MAX_CHARS].rstrip() + "…"
+    working_state_block = format_working_state_prompt(
+        conv.working_state,
+        rolling_summary=conv.rolling_summary,
+    )
 
     return {
-        "rolling_summary": rolling_summary,
-        "cross_chat_context": "\n\n".join(sections),
+        "rolling_summary": working_state_block,
+        "working_state_prompt": working_state_block,
+        "cross_chat_context": cross_chat_context,
     }

@@ -14,6 +14,12 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from app.core.config import AgentSettings, get_settings
+from whitz_rag.embeddings import (
+    EmbeddingClient as _SharedEmbeddingClient,
+    RerankClient as _SharedRerankClient,
+    aclose_shared_rag_clients,
+    fit_embedding,
+)
 
 logger = logging.getLogger("whitz.agent.models")
 
@@ -86,6 +92,7 @@ async def aclose_shared_http_clients() -> None:
                 pass
     _SHARED_API_CLIENT = None
     _SHARED_LLM_CLIENT = None
+    await aclose_shared_rag_clients()
 
 
 @dataclass(frozen=True)
@@ -95,19 +102,6 @@ class ModelEndpoint:
     api_key: str
     model: str
     supports_vision: bool = False
-
-
-def fit_embedding(vec: Sequence[float], dim: int = 1536) -> list[float]:
-    """Pad or truncate an embedding vector to ``dim`` and L2-normalize it."""
-    if dim <= 0:
-        raise ValueError("embedding dimension must be positive")
-    values = [float(x) for x in vec[:dim]]
-    if len(values) < dim:
-        values.extend([0.0] * (dim - len(values)))
-    norm = math.sqrt(sum(v * v for v in values))
-    if norm > 0.0:
-        return [v / norm for v in values]
-    return values
 
 
 def deterministic_embedding(text: str, dim: int = 1536) -> list[float]:
@@ -134,260 +128,42 @@ def deterministic_embedding(text: str, dim: int = 1536) -> list[float]:
     return fit_embedding(vec, dim=dim)
 
 
-def _normalize_embeddings_url(base_url: str) -> str:
-    cleaned = base_url.strip().rstrip("/")
-    if cleaned.endswith("/embeddings"):
-        return cleaned
-    if cleaned.endswith("/v1"):
-        return f"{cleaned}/embeddings"
-    return f"{cleaned}/v1/embeddings"
-
-
-def _embedding_cache_key(model: str, dim: int, text: str) -> str:
-    digest = hashlib.sha256(f"{model}|{dim}|{text}".encode("utf-8")).hexdigest()[:32]
-    return f"emb:cache:{digest}"
-
-
-class EmbeddingClient:
-    """OpenAI-compatible /v1/embeddings client with micro-batching, retry, Redis cache, and lossless L2 zero-padding.
-
-    Never fabricates hash vectors when unconfigured or on failure — returns ``None`` so pgvector
-    stays strictly single-space and retrievers degrade cleanly to ``pg_trgm`` + FTS.
-    """
+class EmbeddingClient(_SharedEmbeddingClient):
+    """Agent settings adapter around the shared ``whitz_rag.EmbeddingClient``."""
 
     def __init__(self, settings: AgentSettings | None = None, redis_client: Any = None) -> None:
         self.settings = settings or get_settings()
-        self.redis = redis_client
+        super().__init__(
+            base_url=self.settings.embedding_base_url,
+            api_key=self.settings.embedding_api_key,
+            model=self.settings.embedding_model,
+            dimensions=self.settings.embedding_dimensions,
+            batch_size=self.settings.embedding_batch_size,
+            cache_ttl_seconds=self.settings.embedding_cache_ttl_seconds,
+            timeout_seconds=self.settings.embedding_timeout_seconds,
+            redis_client=redis_client,
+        )
 
-    @property
-    def base_url(self) -> str:
-        return (self.settings.embedding_base_url or "").strip()
-
-    @property
-    def api_key(self) -> str:
-        return (self.settings.embedding_api_key or "").strip()
-
-    @property
-    def model(self) -> str:
-        return (self.settings.embedding_model or "").strip()
-
-    @property
-    def dimensions(self) -> int:
-        return max(1, int(self.settings.embedding_dimensions or 1536))
-
-    @property
-    def batch_size(self) -> int:
-        return max(1, min(int(self.settings.embedding_batch_size or 10), 64))
-
-    @property
-    def is_configured(self) -> bool:
-        return bool(self.base_url and self.model)
-
-    async def _post_batch(
-        self,
-        url: str,
-        headers: dict[str, str],
-        batch: list[str],
-        dim: int,
-    ) -> list[list[float]] | None:
-        """Send a single batch with exponential backoff retry and automatic batch-size halving on 400."""
-        client = _get_shared_api_client()
-        last_exc: Exception | None = None
-        for attempt in range(3):
-            try:
-                resp = await client.post(
-                    url,
-                    headers=headers,
-                    json={"model": self.model, "input": batch},
-                    timeout=httpx.Timeout(self.settings.embedding_timeout_seconds, connect=10.0),
-                )
-                if resp.status_code == 400 and len(batch) > 1 and "batch" in resp.text.lower():
-                    mid = len(batch) // 2
-                    left = await self._post_batch(url, headers, batch[:mid], dim)
-                    right = await self._post_batch(url, headers, batch[mid:], dim)
-                    if left is None or right is None:
-                        return None
-                    return left + right
-                if resp.status_code in (429, 500, 502, 503, 504):
-                    raise httpx.HTTPStatusError("transient", request=resp.request, response=resp)
-                resp.raise_for_status()
-                payload = resp.json()
-                data = payload.get("data") or []
-                ordered = sorted(data, key=lambda row: int(row.get("index", 0)))
-                if len(ordered) != len(batch):
-                    raise ValueError(f"unexpected embedding count {len(ordered)} != {len(batch)}")
-                return [fit_embedding(row["embedding"], dim=dim) for row in ordered]
-            except Exception as exc:
-                last_exc = exc
-                if attempt < 2:
-                    await asyncio.sleep(0.4 * (2**attempt))
-        logger.warning("Remote embedding batch failed after retries (%s)", last_exc)
-        return None
-
-    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]] | None:
-        items = [str(t or "").strip() for t in texts]
-        if not items:
-            return []
-        if not self.is_configured:
-            return None
-
-        dim = self.dimensions
-        results: list[list[float] | None] = [None] * len(items)
-        missing_indices: list[int] = []
-        cache_keys: list[str] = [_embedding_cache_key(self.model, dim, t) for t in items]
-
-        # 1. Check Redis embedding cache
-        if self.redis is not None:
-            try:
-                cached_vals = await self.redis.mget(cache_keys)
-                for idx, raw in enumerate(cached_vals or []):
-                    if raw:
-                        vec = json.loads(raw)
-                        if isinstance(vec, list) and len(vec) == dim:
-                            results[idx] = vec
-                            continue
-                    missing_indices.append(idx)
-            except Exception:
-                missing_indices = list(range(len(items)))
-        else:
-            missing_indices = list(range(len(items)))
-
-        # 2. Fetch uncached texts in micro-batches
-        if missing_indices:
-            url = _normalize_embeddings_url(self.base_url)
-            headers: dict[str, str] = {"Content-Type": "application/json"}
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-
-            bs = self.batch_size
-            ttl = max(60, int(self.settings.embedding_cache_ttl_seconds or 86400))
-            for start in range(0, len(missing_indices), bs):
-                sub_idxs = missing_indices[start : start + bs]
-                sub_texts = [items[i] or " " for i in sub_idxs]
-                vecs = await self._post_batch(url, headers, sub_texts, dim)
-                if vecs is None:
-                    return None
-                pipe = self.redis.pipeline(transaction=False) if self.redis is not None else None
-                for i, vec in zip(sub_idxs, vecs):
-                    results[i] = vec
-                    if pipe is not None:
-                        pipe.set(cache_keys[i], json.dumps(vec, separators=(",", ":")), ex=ttl)
-                if pipe is not None:
-                    try:
-                        await pipe.execute()
-                    except Exception:
-                        pass
-
-        if any(v is None for v in results):
-            return None
-        return [v for v in results if v is not None]
-
-    async def embed_query(self, text: str) -> list[float] | None:
-        vectors = await self.embed_texts([text])
-        if not vectors:
-            return None
-        return vectors[0]
+    def _get_http_client(self) -> httpx.AsyncClient:
+        return _get_shared_api_client()
 
 
-class RerankClient:
-    """Dual-protocol Stage-2 Reranker client supporting DashScope/Maas native & OpenAI/Jina/SiliconFlow APIs."""
+class RerankClient(_SharedRerankClient):
+    """Agent settings adapter around the shared ``whitz_rag.RerankClient``."""
 
     def __init__(self, settings: AgentSettings | None = None, redis_client: Any = None) -> None:
         self.settings = settings or get_settings()
-        self.redis = redis_client
+        super().__init__(
+            base_url=self.settings.rerank_base_url,
+            api_key=self.settings.rerank_api_key,
+            model=self.settings.rerank_model,
+            top_n=self.settings.rerank_top_n,
+            timeout_seconds=self.settings.rerank_timeout_seconds,
+            redis_client=redis_client,
+        )
 
-    @property
-    def base_url(self) -> str:
-        return (self.settings.rerank_base_url or "").strip()
-
-    @property
-    def api_key(self) -> str:
-        return (self.settings.rerank_api_key or "").strip()
-
-    @property
-    def model(self) -> str:
-        return (self.settings.rerank_model or "").strip()
-
-    @property
-    def is_configured(self) -> bool:
-        return bool(self.base_url and self.model)
-
-    @staticmethod
-    def _is_dashscope_native(url: str) -> bool:
-        low = url.lower()
-        return "/services/rerank/" in low or ("aliyuncs.com" in low and "/compatible-mode/" not in low)
-
-    @staticmethod
-    def _normalize_url(base_url: str) -> str:
-        cleaned = base_url.strip().rstrip("/")
-        if "/rerank" in cleaned.lower():
-            return cleaned
-        if cleaned.endswith("/v1"):
-            return f"{cleaned}/rerank"
-        return f"{cleaned}/v1/rerank"
-
-    async def rerank(
-        self,
-        query: str,
-        documents: Sequence[str],
-        *,
-        top_n: int | None = None,
-    ) -> list[tuple[int, float]] | None:
-        """Return ordered ``[(doc_index, relevance_score), ...]`` or ``None`` if disabled/failed."""
-        docs = [str(d or "")[:2000] for d in documents]
-        if not self.is_configured or not query.strip() or not docs:
-            return None
-
-        limit = max(1, min(int(top_n or self.settings.rerank_top_n or 8), len(docs)))
-        url = self._normalize_url(self.base_url)
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        is_ds = self._is_dashscope_native(url)
-        if is_ds:
-            body: dict[str, Any] = {
-                "model": self.model,
-                "input": {"query": query.strip()[:1000], "documents": docs},
-                "parameters": {"top_n": limit, "return_documents": False},
-            }
-        else:
-            body = {
-                "model": self.model,
-                "query": query.strip()[:1000],
-                "documents": docs,
-                "top_n": limit,
-                "return_documents": False,
-            }
-
-        client = _get_shared_api_client()
-        try:
-            resp = await client.post(
-                url,
-                headers=headers,
-                json=body,
-                timeout=httpx.Timeout(self.settings.rerank_timeout_seconds, connect=8.0),
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            raw_results = (
-                (payload.get("output") or {}).get("results")
-                if is_ds and isinstance(payload.get("output"), dict)
-                else payload.get("results")
-            ) or []
-            scored: list[tuple[int, float]] = []
-            for item in raw_results:
-                if not isinstance(item, dict):
-                    continue
-                idx = int(item.get("index", -1))
-                score = float(item.get("relevance_score", item.get("score", 0.0)))
-                if 0 <= idx < len(docs):
-                    scored.append((idx, score))
-            scored.sort(key=lambda pair: pair[1], reverse=True)
-            return scored[:limit] if scored else None
-        except Exception as exc:
-            logger.warning("Rerank API call failed (%s); falling back to RRF+MMR ordering", exc)
-            return None
+    def _get_http_client(self) -> httpx.AsyncClient:
+        return _get_shared_api_client()
 
 
 class ModelRouter:

@@ -4,7 +4,7 @@ import { api } from "../../api/client";
 import { ACCEPT_ATTR, categoryLabel, formatFileSize } from "../../lib/fileTypes";
 import { useFilesStore } from "../../stores/files";
 import { useRealtimeStore } from "../../stores/realtime";
-import type { LibraryFileItem } from "../../types";
+import type { LibraryContentSearchHit, LibraryFileItem } from "../../types";
 import MarkdownRenderer from "../chat/MarkdownRenderer.vue";
 import BaseBadge from "../ui/BaseBadge.vue";
 import BaseButton from "../ui/BaseButton.vue";
@@ -34,6 +34,10 @@ const feedback = ref<string | null>(null);
 
 const searchInput = ref("");
 const searchQuery = ref("");
+const searchMode = ref<"filename" | "content">("filename");
+const contentHits = ref<LibraryContentSearchHit[]>([]);
+const contentLoading = ref(false);
+const reindexingIds = ref<Record<string, boolean>>({});
 const categoryFilter = ref<CategoryFilter>("all");
 const sourceFilter = ref<SourceFilter>("all");
 
@@ -186,16 +190,109 @@ watch(searchInput, (val) => {
     if (searchQuery.value !== val) {
       searchQuery.value = val;
       page.value = 1;
-      void loadFiles();
+      if (searchMode.value === "content") {
+        void runContentSearch(val);
+      } else {
+        void loadFiles();
+      }
     }
   }, 260);
 });
+
+async function runContentSearch(raw: string) {
+  const q = raw.trim();
+  if (!q) {
+    contentHits.value = [];
+    contentLoading.value = false;
+    return;
+  }
+  contentLoading.value = true;
+  error.value = null;
+  try {
+    const res = await api.get<{ query: string; count: number; results: LibraryContentSearchHit[] }>(
+      `/library/search?q=${encodeURIComponent(q)}&limit=15`,
+    );
+    contentHits.value = res.results ?? [];
+  } catch (e: any) {
+    error.value = extractError(e, "内容语义检索失败");
+    contentHits.value = [];
+  } finally {
+    contentLoading.value = false;
+  }
+}
+
+function setSearchMode(next: "filename" | "content") {
+  if (searchMode.value === next) return;
+  searchMode.value = next;
+  if (next === "content") {
+    void runContentSearch(searchInput.value);
+  } else {
+    contentHits.value = [];
+    page.value = 1;
+    void loadFiles();
+  }
+}
+
+async function reindexFile(file: LibraryFileItem) {
+  if (reindexingIds.value[file.id]) return;
+  reindexingIds.value = { ...reindexingIds.value, [file.id]: true };
+  error.value = null;
+  feedback.value = null;
+  try {
+    const updated = await api.post<LibraryFileItem>(`/library/files/${encodeURIComponent(file.id)}/reindex`, {});
+    const idx = files.value.findIndex((f) => f.id === file.id);
+    if (idx >= 0) {
+      const next = [...files.value];
+      next[idx] = { ...next[idx], ...updated };
+      files.value = next;
+    }
+    feedback.value =
+      updated.index_status === "ready"
+        ? `「${file.filename}」已重建索引（${updated.indexed_chunks ?? 0} 块）`
+        : `已提交「${file.filename}」后台重建索引`;
+  } catch (e: any) {
+    error.value = extractError(e, "重建索引失败");
+  } finally {
+    const next = { ...reindexingIds.value };
+    delete next[file.id];
+    reindexingIds.value = next;
+  }
+}
+
+function openContentHitPreview(hit: LibraryContentSearchHit) {
+  const existing = files.value.find((f) => f.id === hit.file_id);
+  if (existing) {
+    void openPreview(existing);
+    return;
+  }
+  const dotIdx = hit.filename.lastIndexOf(".");
+  const ext = dotIdx >= 0 ? hit.filename.slice(dotIdx).toLowerCase() : "";
+  const synthetic: LibraryFileItem = {
+    id: hit.file_id,
+    conversation_id: null,
+    filename: hit.filename,
+    ext,
+    mime_type: "",
+    category: ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".webp" ? "image" : "document",
+    size_bytes: 0,
+    status: "ready",
+    source: "user",
+    is_global: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  void openPreview(synthetic);
+}
 
 function submitSearchNow() {
   if (searchTimer) window.clearTimeout(searchTimer);
   searchQuery.value = searchInput.value;
   page.value = 1;
-  void loadFiles();
+  if (searchMode.value === "content") {
+    void runContentSearch(searchInput.value);
+  } else {
+    void loadFiles();
+  }
 }
 
 function setCategory(next: CategoryFilter) {
@@ -427,27 +524,47 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <!-- Search Bar -->
-      <form class="relative" @submit.prevent="submitSearchNow">
-        <svg
-          class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-faint"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          aria-hidden="true"
-        >
-          <circle cx="11" cy="11" r="7" />
-          <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
-        </svg>
-        <input
-          v-model="searchInput"
-          type="search"
-          placeholder="搜索文件名…"
-          aria-label="搜索个人资料库文件"
-          class="focus-ring h-10 w-full rounded-xl border border-line/80 bg-canvas pl-10 pr-4 text-[13.5px] text-fg placeholder:text-fg-faint hover:border-line-strong"
-        />
-      </form>
+      <!-- Search Bar + RAG Mode Switch -->
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <form class="relative flex-1" @submit.prevent="submitSearchNow">
+          <svg
+            class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-faint"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            aria-hidden="true"
+          >
+            <circle cx="11" cy="11" r="7" />
+            <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
+          </svg>
+          <input
+            v-model="searchInput"
+            type="search"
+            :placeholder="searchMode === 'content' ? '按文档正文语义或关键词深度检索（RAG）…' : '搜索文件名…'"
+            aria-label="搜索个人资料库文件"
+            class="focus-ring h-10 w-full rounded-xl border border-line/80 bg-canvas pl-10 pr-4 text-[13.5px] text-fg placeholder:text-fg-faint hover:border-line-strong"
+          />
+        </form>
+        <div class="inline-flex shrink-0 items-center rounded-xl bg-canvas p-1 text-[12px]" role="group" aria-label="检索模式">
+          <button
+            type="button"
+            class="focus-ring rounded-lg px-2.5 py-1.5 font-medium transition-colors"
+            :class="searchMode === 'filename' ? 'bg-primary text-primary-fg' : 'text-fg-muted hover:text-fg'"
+            @click="setSearchMode('filename')"
+          >
+            按文件名
+          </button>
+          <button
+            type="button"
+            class="focus-ring rounded-lg px-2.5 py-1.5 font-medium transition-colors"
+            :class="searchMode === 'content' ? 'bg-primary text-primary-fg' : 'text-fg-muted hover:text-fg'"
+            @click="setSearchMode('content')"
+          >
+            按正文内容 (RAG)
+          </button>
+        </div>
+      </div>
 
       <!-- Filter Pills -->
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2.5 text-[12px]">
@@ -545,6 +662,47 @@ onBeforeUnmount(() => {
       <span>{{ feedback }}</span>
     </div>
 
+    <!-- RAG Content Search Results -->
+    <section
+      v-if="searchMode === 'content' && searchInput.trim()"
+      class="space-y-3 rounded-[24px] bg-sidebar p-5 dark:bg-surface"
+    >
+      <div class="flex items-center justify-between gap-2">
+        <h3 class="text-[14px] font-semibold text-fg">
+          正文语义检索命中（{{ contentHits.length }} 条片段）
+        </h3>
+        <Spinner v-if="contentLoading" :size="15" />
+      </div>
+
+      <div v-if="contentLoading && !contentHits.length" class="py-8 text-center text-[13px] text-fg-muted">
+        正在跨文档执行混合向量与全文检索…
+      </div>
+      <div v-else-if="!contentHits.length" class="py-8 text-center text-[13px] text-fg-muted">
+        未在资料库正文中找到与「{{ searchInput.trim() }}」相关的片段。
+      </div>
+      <div v-else class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
+        <button
+          v-for="(hit, idx) in contentHits"
+          :key="`${hit.file_id}:${hit.locator}:${idx}`"
+          type="button"
+          class="focus-ring flex flex-col gap-1.5 rounded-2xl border border-line/70 bg-canvas p-3.5 text-left transition-colors hover:border-line-strong hover:bg-hover/40"
+          @click="openContentHitPreview(hit)"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <span class="truncate text-[13.5px] font-semibold text-fg" :title="hit.filename">
+              {{ hit.filename }}
+            </span>
+            <span class="shrink-0 rounded-full bg-accent-weak px-2 py-0.5 text-[10.5px] font-medium text-accent">
+              {{ hit.section_path || hit.locator || "片段" }}
+            </span>
+          </div>
+          <p class="line-clamp-3 text-[12.5px] leading-relaxed text-fg-muted">
+            {{ hit.snippet }}
+          </p>
+        </button>
+      </div>
+    </section>
+
     <!-- Loading -->
     <div
       v-if="loading && !files.length"
@@ -608,11 +766,38 @@ onBeforeUnmount(() => {
                 {{ file.source === "assistant" ? "AI 生成" : "用户上传" }}
               </BaseBadge>
               <span
-                v-if="file.index_status === 'indexing'"
+                v-if="file.index_status === 'indexing' || reindexingIds[file.id]"
                 class="inline-flex items-center gap-1 rounded-full bg-surface px-2 py-0.5 text-[10.5px] font-medium text-fg-muted"
               >
                 <Spinner :size="10" />
                 索引中
+              </span>
+              <span
+                v-else-if="file.index_status === 'ready' && (file.indexed_chunks ?? 0) > 0"
+                class="inline-flex items-center gap-1 rounded-full bg-success-weak px-2 py-0.5 text-[10.5px] font-medium text-success"
+                :title="`已建立 RAG 向量与全文索引（${file.indexed_chunks} 块）`"
+              >
+                已索引 {{ file.indexed_chunks }} 块
+              </span>
+              <span
+                v-else-if="file.index_status === 'partial'"
+                class="inline-flex items-center gap-1 rounded-full bg-accent-weak px-2 py-0.5 text-[10.5px] font-medium text-accent"
+                title="文件较长，已索引前部核心片段与摘要"
+              >
+                部分索引 {{ file.indexed_chunks ?? 0 }} 块
+              </span>
+              <span
+                v-else-if="file.index_status === 'failed'"
+                class="inline-flex items-center gap-1 rounded-full bg-danger-weak px-2 py-0.5 text-[10.5px] font-medium text-danger"
+                :title="file.index_error || '索引失败，可点击重建索引重试'"
+              >
+                索引失败
+              </span>
+              <span
+                v-else-if="file.status === 'ready'"
+                class="inline-flex items-center gap-1 rounded-full bg-surface px-2 py-0.5 text-[10.5px] font-medium text-fg-faint"
+              >
+                待索引
               </span>
               <span class="text-[11.5px] tabular-nums text-fg-faint">{{ formatFileSize(file.size_bytes) }}</span>
               <span class="text-[11.5px] text-fg-faint">· {{ formatDate(file.created_at) }}</span>
@@ -628,6 +813,15 @@ onBeforeUnmount(() => {
         <div class="flex flex-wrap items-center justify-end gap-1 border-t border-line/60 pt-2.5">
           <BaseButton variant="ghost" size="sm" rounded="full" @click="openPreview(file)">
             预览
+          </BaseButton>
+          <BaseButton
+            variant="ghost"
+            size="sm"
+            rounded="full"
+            :loading="Boolean(reindexingIds[file.id])"
+            @click="reindexFile(file)"
+          >
+            重建索引
           </BaseButton>
           <BaseButton
             variant="ghost"

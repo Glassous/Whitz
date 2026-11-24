@@ -65,6 +65,28 @@ const editTagsText = ref("");
 const editContent = ref("");
 const savingEdit = ref(false);
 const deletingId = ref<string | null>(null);
+const pinningId = ref<string | null>(null);
+
+async function togglePinEntry(entry: MemoryEntry) {
+  if (pinningId.value) return;
+  pinningId.value = entry.id;
+  error.value = null;
+  feedback.value = null;
+  const nextPinned = !entry.is_pinned;
+  try {
+    overview.value = await api.patch<MemoryOverview>(`/users/me/memory/entries/${encodeURIComponent(entry.id)}`, {
+      is_pinned: nextPinned,
+      priority: nextPinned ? 1 : 2,
+    });
+    feedback.value = nextPinned
+      ? "已置顶为 L0 常驻核心记忆（每轮对话自动遵循，不依赖 RAG 召回）"
+      : "已取消常驻置顶（转为按需混合 RAG 检索）";
+  } catch (e: any) {
+    error.value = extractError(e, "切换常驻置顶失败");
+  } finally {
+    pinningId.value = null;
+  }
+}
 
 // Pending proposals state
 const pendingEditId = ref<string | null>(null);
@@ -603,6 +625,9 @@ onMounted(() => {
         <div class="flex flex-wrap items-center justify-between gap-2 text-[12.5px]">
           <span class="font-medium text-fg">
             记忆集总容量 · {{ collections.length }} / {{ collectionLimit }} 个记忆集 · 共 {{ entries.length }} 条
+            <span class="ml-1.5 rounded-full bg-accent-weak px-2 py-0.5 text-[11px] font-medium text-accent">
+              L0 常驻核心 {{ overview?.pinned_count ?? entries.filter((e) => e.is_pinned).length }} / {{ overview?.pinned_limit ?? 10 }}
+            </span>
           </span>
           <span class="font-semibold tabular-nums text-fg-muted">
             {{ totalCharCount.toLocaleString() }} / {{ totalCharLimit.toLocaleString() }} 字符
@@ -1007,6 +1032,9 @@ onMounted(() => {
               <BaseBadge :tone="entry.target === 'user' ? 'brand' : 'gray'">
                 {{ collectionNameFor(entry.target, entry.collection_name) }}
               </BaseBadge>
+              <BaseBadge v-if="entry.is_pinned" tone="brand">
+                L0 常驻
+              </BaseBadge>
               <BaseBadge tone="gray">{{ sourceLabel(entry.source) }}</BaseBadge>
               <span class="text-[11.5px] tabular-nums text-fg-faint">{{ entry.content.length }} 字符</span>
               <span v-if="entry.updated_at || entry.created_at" class="text-[11.5px] text-fg-faint">
@@ -1015,6 +1043,18 @@ onMounted(() => {
             </div>
 
             <div v-if="editingId !== entry.id" class="flex items-center gap-1">
+              <BaseButton
+                variant="ghost"
+                size="sm"
+                rounded="full"
+                :class="entry.is_pinned ? 'bg-accent-weak/80 text-accent' : ''"
+                :loading="pinningId === entry.id"
+                :disabled="deletingId === entry.id"
+                :title="entry.is_pinned ? '取消常驻核心（改为按需检索）' : '置顶为 L0 常驻核心记忆（每轮自动注入前缀）'"
+                @click="togglePinEntry(entry)"
+              >
+                {{ entry.is_pinned ? "取消常驻" : "常驻核心" }}
+              </BaseButton>
               <BaseButton
                 variant="ghost"
                 size="sm"

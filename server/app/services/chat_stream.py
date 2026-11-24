@@ -7,13 +7,13 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import ConversationFileOut
 from app.core.config import get_settings
 from app.core.redis import get_redis
-from app.db.models import Conversation, ConversationFile, Message, User
+from app.db.models import Conversation, ConversationEpisode, ConversationFile, Message, MessageChunk, User
 from app.db.session import SessionLocal
 from app.services import (
     cos,
@@ -225,6 +225,14 @@ class ChatPipeline:
             for a in self.artifacts
             if a.get("id") or a.get("file_id")
         }
+        stored_citations = (assistant.tool_payload or {}).get("citations")
+        self.citations: list[dict] = (
+            [dict(c) for c in stored_citations if isinstance(c, dict)]
+            if isinstance(stored_citations, list)
+            else []
+        )
+        stored_rag_metrics = (assistant.tool_payload or {}).get("rag_metrics")
+        self.rag_metrics: dict | None = dict(stored_rag_metrics) if isinstance(stored_rag_metrics, dict) else None
         self.native_reasoning = False
         self.terminal = False
         self.first_token_at: float | None = None
@@ -272,6 +280,10 @@ class ChatPipeline:
                 payload["plan"] = self.plan
             if self.artifacts:
                 payload["artifacts"] = self.artifacts
+            if self.citations:
+                payload["citations"] = self.citations
+            if self.rag_metrics:
+                payload["rag_metrics"] = self.rag_metrics
             self.assistant.tool_payload = payload
             await self.db.commit()
             self.last_flush = now
@@ -422,7 +434,7 @@ class ChatPipeline:
         return text.strip()
 
     async def _persist_reasoning(self) -> None:
-        if not self.reasoning and not self.plan and not self.artifacts:
+        if not self.reasoning and not self.plan and not self.artifacts and not self.citations and not self.rag_metrics:
             return
         payload = dict(self.assistant.tool_payload or {})
         if self.reasoning:
@@ -431,6 +443,10 @@ class ChatPipeline:
             payload["plan"] = self.plan
         if self.artifacts:
             payload["artifacts"] = self.artifacts
+        if self.citations:
+            payload["citations"] = self.citations
+        if self.rag_metrics:
+            payload["rag_metrics"] = self.rag_metrics
         self.assistant.tool_payload = payload
         await self.db.commit()
 
@@ -727,6 +743,34 @@ class ChatPipeline:
             await self.db.commit()
             yield sse(name, payload)
 
+        elif name == "rag.context":
+            cites = payload.get("citations")
+            if isinstance(cites, list):
+                self.citations = [dict(c) for c in cites if isinstance(c, dict)]
+            diag = payload.get("diagnostics")
+            if isinstance(diag, dict) and diag:
+                cur = dict(self.rag_metrics or {})
+                stage_key = str(payload.get("stage") or diag.get("stage") or "prefetch")
+                if stage_key == "prefetch":
+                    cur["prefetch_ms"] = diag.get("latency_ms", 0.0)
+                    cur["used_llm_rewrite"] = bool(diag.get("used_llm_rewrite", False))
+                cur["hits_by_source"] = diag.get("hits_by_source") or cur.get("hits_by_source") or {}
+                cur["top_score"] = max(float(cur.get("top_score") or 0.0), float(diag.get("top_score") or 0.0))
+                cur["corrective_retries"] = int(cur.get("corrective_retries") or 0) + int(
+                    diag.get("corrective_retries") or 0
+                )
+                cur["citations_count"] = len(self.citations)
+                self.rag_metrics = cur
+            await self._persist_reasoning()
+            yield sse(
+                "rag.context",
+                {
+                    "stage": str(payload.get("stage") or "prefetch"),
+                    "citations": self.citations,
+                    "diagnostics": diag if isinstance(diag, dict) else {},
+                },
+            )
+
         elif name == "message.reaction":
             yield sse("message.reaction", payload)
 
@@ -757,8 +801,16 @@ class ChatPipeline:
                 extra["reasoning"] = self.reasoning
             if self.plan:
                 extra["plan"] = self.plan
+            if isinstance(payload.get("citations"), list) and payload["citations"]:
+                self.citations = [dict(c) for c in payload["citations"] if isinstance(c, dict)]
+            if isinstance(payload.get("rag_metrics"), dict) and payload["rag_metrics"]:
+                self.rag_metrics = dict(payload["rag_metrics"])
             if self.artifacts:
                 extra["artifacts"] = self.artifacts
+            if self.citations:
+                extra["citations"] = self.citations
+            if self.rag_metrics:
+                extra["rag_metrics"] = self.rag_metrics
             self.assistant.tool_payload = extra
             self.conv.plan = self.plan
             await self._clear_active()
@@ -771,6 +823,7 @@ class ChatPipeline:
                     "plan": self.plan,
                     "reasoning": self.reasoning or None,
                     "artifacts": self.artifacts or None,
+                    "citations": self.citations or None,
                 },
             )
 
@@ -1170,8 +1223,19 @@ async def _prepare_turn_context(
             .all()
         )
 
-    # Include recent library files from across all chats (capped to avoid prompt bloat)
+    # Slim context budget: include ALL current-conversation & attached files, plus at most 6 recent extra library files
+    # (the remaining library files stay searchable via UnifiedKnowledgeRetriever without bloating every turn's prompt)
     seen_file_ids = {f.id for f in [*conv_files, *global_attached]}
+    total_library_count = int(
+        (
+            await db.scalar(
+                select(func.count())
+                .select_from(ConversationFile)
+                .where(ConversationFile.user_id == user.id, ConversationFile.status == "ready")
+            )
+        )
+        or 0
+    )
     recent_library_files = list(
         (
             await db.execute(
@@ -1181,15 +1245,14 @@ async def _prepare_turn_context(
                     ConversationFile.status == "ready",
                 )
                 .order_by(ConversationFile.created_at.desc())
-                .limit(30)
+                .limit(10)
             )
         )
         .scalars()
         .all()
     )
     extra_library = [f for f in recent_library_files if f.id not in seen_file_ids]
-    all_context_files = [*conv_files, *global_attached, *extra_library[: max(0, 30 - len(seen_file_ids))]]
-    total_library_count = len(recent_library_files)
+    all_context_files = [*conv_files, *global_attached, *extra_library[:6]]
     by_id = {f.id: f for f in all_context_files}
     attached_files = [by_id[fid] for fid in requested_ids if fid in by_id]
 
@@ -1296,14 +1359,26 @@ async def _prepare_turn_context(
             cross_chat_context = mem_ctx.get("cross_chat_context") or ""
         except Exception as exc:
             logger.warning("Main chat cross-session memory lookup failed: %s", exc)
-            rolling_summary = (conv.rolling_summary or "").strip()
+            rolling_summary = cross_chat_memory.format_working_state_prompt(
+                conv.working_state, rolling_summary=conv.rolling_summary
+            )
+    else:
+        # Long side chats also inject their structured L1 Working State when present
+        rolling_summary = cross_chat_memory.format_working_state_prompt(
+            conv.working_state, rolling_summary=conv.rolling_summary
+        )
 
     memory_index = ""
+    pinned_memories = ""
     if bool(user.memory_enabled):
         try:
             memory_index = await memory_service.build_memory_index_prompt(db, user.id)
         except Exception as exc:
             logger.warning("Memory index lookup failed: %s", exc)
+        try:
+            pinned_memories = await memory_service.build_pinned_memory_prompt(db, user.id)
+        except Exception as exc:
+            logger.warning("Pinned core memory lookup failed: %s", exc)
 
     return {
         "user_payload": user_payload or None,
@@ -1315,6 +1390,7 @@ async def _prepare_turn_context(
         "rolling_summary": rolling_summary,
         "cross_chat_context": cross_chat_context,
         "memory_index": memory_index,
+        "pinned_memories": pinned_memories,
         "timezone": (getattr(user, "timezone", None) or "").strip() or "Asia/Shanghai",
         "memory_enabled": bool(user.memory_enabled),
         "memory_require_confirm": bool(user.memory_require_confirm),
@@ -1338,6 +1414,7 @@ async def _launch_supervised_turn(
     *,
     conversation_history: list[dict[str, str]] | None = None,
     model_route: str = "auto",
+    rag_scope: dict[str, Any] | None = None,
     max_seconds: int | None = None,
     max_tool_iterations: int | None = None,
     run_slot: str | None = None,
@@ -1361,6 +1438,7 @@ async def _launch_supervised_turn(
         rolling_summary=turn_ctx.get("rolling_summary") or None,
         cross_chat_context=turn_ctx.get("cross_chat_context") or None,
         memory_index=turn_ctx.get("memory_index") or None,
+        pinned_memories=turn_ctx.get("pinned_memories") or None,
         input_text=prompt_content,
         instructions=turn_ctx.get("instructions"),
         conversation_history=conversation_history,
@@ -1376,6 +1454,7 @@ async def _launch_supervised_turn(
         ai_reactions_enabled=bool(turn_ctx.get("ai_reactions_enabled", True)),
         allow_hitl=allow_hitl,
         max_tool_iterations=max_tool_iterations,
+        rag_scope=rag_scope,
         idempotency_key=idempotency_key or uuid.uuid4().hex,
     )
     run_id = str(run.get("run_id") or run.get("id"))
@@ -1415,6 +1494,7 @@ async def stream_chat(
     file_ids: list[uuid.UUID] | None = None,
     skill_names: list[str] | None = None,
     model_route: str = "auto",
+    rag_scope: dict[str, Any] | None = None,
     max_seconds: int | None = None,
     max_tool_iterations: int | None = None,
     run_slot: str | None = None,
@@ -1452,8 +1532,8 @@ async def stream_chat(
                 conv.thread_id = str(uuid.uuid4())
                 await db.commit()
 
-            # Load recent verbatim history from PG before inserting this turn (clean per-run agent checkpoints)
-            history = await _recent_conversation_history(db, conv.id, limit=24)
+            # Load cursor-aligned verbatim history (zero black-hole gaps & zero archived duplication)
+            history = await cross_chat_memory.load_cursor_aligned_history(db, conv)
             turn_ctx = await _prepare_turn_context(db, user, conv, file_ids, skill_names, query_text=content)
 
             user_msg = Message(
@@ -1505,6 +1585,7 @@ async def stream_chat(
                 turn_ctx,
                 conversation_history=history or None,
                 model_route=model_route,
+                rag_scope=rag_scope,
                 max_seconds=max_seconds,
                 max_tool_iterations=max_tool_iterations,
                 run_slot=run_slot,
@@ -1552,6 +1633,7 @@ async def stream_regenerate(
     api_key: str,
     target_message_id: uuid.UUID,
     model_route: str = "auto",
+    rag_scope: dict[str, Any] | None = None,
     max_seconds: int | None = None,
     max_tool_iterations: int | None = None,
     run_slot: str | None = None,
@@ -1626,9 +1708,30 @@ async def stream_regenerate(
                         delete_ids.add(m.id)
             if delete_ids:
                 await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
+                await db.execute(
+                    delete(MessageChunk).where(
+                        MessageChunk.conversation_id == conv.id,
+                        or_(
+                            MessageChunk.start_msg_id.in_(delete_ids),
+                            MessageChunk.end_msg_id.in_(delete_ids),
+                        ),
+                    )
+                )
+                await db.execute(
+                    delete(ConversationEpisode).where(
+                        ConversationEpisode.conversation_id == conv.id,
+                        or_(
+                            ConversationEpisode.start_msg_id.in_(delete_ids),
+                            ConversationEpisode.end_msg_id.in_(delete_ids),
+                        ),
+                    )
+                )
                 if conv.summary_cursor_msg_id and conv.summary_cursor_msg_id in delete_ids:
                     conv.rolling_summary = None
                     conv.summary_cursor_msg_id = None
+                if conv.working_state_cursor_msg_id and conv.working_state_cursor_msg_id in delete_ids:
+                    conv.working_state = None
+                    conv.working_state_cursor_msg_id = None
 
             prompt_payload = user_msg.tool_payload or {}
             file_ids: list[uuid.UUID] = []
@@ -1688,6 +1791,7 @@ async def stream_regenerate(
                 turn_ctx,
                 conversation_history=history or None,
                 model_route=model_route,
+                rag_scope=rag_scope,
                 max_seconds=max_seconds,
                 max_tool_iterations=max_tool_iterations,
                 run_slot=run_slot,
@@ -1736,6 +1840,7 @@ async def stream_edit(
     file_ids: list[uuid.UUID] | None = None,
     skill_names: list[str] | None = None,
     model_route: str = "auto",
+    rag_scope: dict[str, Any] | None = None,
     max_seconds: int | None = None,
     max_tool_iterations: int | None = None,
     run_slot: str | None = None,
@@ -1788,9 +1893,30 @@ async def stream_edit(
             delete_ids = {m.id for m in ordered[target_idx:]}
             if delete_ids:
                 await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
+                await db.execute(
+                    delete(MessageChunk).where(
+                        MessageChunk.conversation_id == conv.id,
+                        or_(
+                            MessageChunk.start_msg_id.in_(delete_ids),
+                            MessageChunk.end_msg_id.in_(delete_ids),
+                        ),
+                    )
+                )
+                await db.execute(
+                    delete(ConversationEpisode).where(
+                        ConversationEpisode.conversation_id == conv.id,
+                        or_(
+                            ConversationEpisode.start_msg_id.in_(delete_ids),
+                            ConversationEpisode.end_msg_id.in_(delete_ids),
+                        ),
+                    )
+                )
                 if conv.summary_cursor_msg_id and conv.summary_cursor_msg_id in delete_ids:
                     conv.rolling_summary = None
                     conv.summary_cursor_msg_id = None
+                if conv.working_state_cursor_msg_id and conv.working_state_cursor_msg_id in delete_ids:
+                    conv.working_state = None
+                    conv.working_state_cursor_msg_id = None
 
             turn_ctx = await _prepare_turn_context(db, user, conv, file_ids, skill_names, query_text=content)
 
@@ -1857,6 +1983,7 @@ async def stream_edit(
                 turn_ctx,
                 conversation_history=history or None,
                 model_route=model_route,
+                rag_scope=rag_scope,
                 max_seconds=max_seconds,
                 max_tool_iterations=max_tool_iterations,
                 run_slot=run_slot,
@@ -1965,6 +2092,7 @@ async def stream_reconnect(
                 "reasoning": assistant_payload.get("reasoning") or [],
                 "plan": conv_plan or assistant_payload.get("plan"),
                 "artifacts": assistant_payload.get("artifacts") or [],
+                "citations": assistant_payload.get("citations") or [],
                 "pending_control": None,
                 "last_event_id": "0-0",
             },
@@ -1977,6 +2105,7 @@ async def stream_reconnect(
                 "plan": conv_plan or assistant_payload.get("plan"),
                 "reasoning": assistant_payload.get("reasoning"),
                 "artifacts": assistant_payload.get("artifacts"),
+                "citations": assistant_payload.get("citations"),
             },
         )
         return

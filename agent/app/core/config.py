@@ -62,6 +62,12 @@ class AgentSettings(BaseSettings):
     rerank_top_n: int = 8
     rerank_timeout_seconds: float = 15.0
 
+    # Deep RAG (Dual-Loop Proactive Prefetch + Agentic Corrective RAG)
+    rag_prefetch_enabled: bool = True
+    rag_prefetch_max_tokens: int = 3000
+    rag_query_rewrite_enabled: bool = True
+    rag_memory_consolidation_enabled: bool = True
+
     # Circuit breaker
     model_cb_failure_threshold: int = 3
     model_cb_cooldown_seconds: int = 60

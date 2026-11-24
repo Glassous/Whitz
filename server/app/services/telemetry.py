@@ -140,6 +140,7 @@ async def record_run_telemetry(
                 tool_errors_count=tool_errors_count,
                 tools_summary=tools_summary or None,
                 skills_used=skills_used,
+                rag_metrics=payload.get("rag_metrics") if isinstance(payload.get("rag_metrics"), dict) else None,
                 error_code=error_code[:80] if error_code else None,
             )
             .on_conflict_do_nothing(index_elements=[RunTelemetry.run_id])

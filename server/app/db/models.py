@@ -330,6 +330,9 @@ class Conversation(Base):
     rolling_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary_cursor_msg_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     summary_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    working_state: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    working_state_cursor_msg_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    working_state_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -369,10 +372,44 @@ class ConversationDigest(Base):
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class ConversationEpisode(Base):
+    """Immutable topic-segmented episodic archive for long Main Chats and Side Chats (L2 Episodic Memory)."""
+
+    __tablename__ = "conversation_episodes"
+    __table_args__ = (
+        Index("ix_conversation_episodes_conv_idx", "conversation_id", "episode_index"),
+        Index("ix_conversation_episodes_user_ended", "user_id", "ended_at"),
+        Index("ix_conversation_episodes_search_tsv", "search_tsv", postgresql_using="gin"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    conversation_kind: Mapped[str] = mapped_column(String(16), default="main", server_default="main")
+    episode_index: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    topic: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    summary: Mapped[str] = mapped_column(Text, default="", server_default="")
+    key_facts: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    entities: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    start_msg_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    end_msg_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    message_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    token_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ConversationFile(Base):
@@ -398,6 +435,11 @@ class ConversationFile(Base):
     status: Mapped[str] = mapped_column(String(24), default="pending", server_default="pending")
     index_status: Mapped[str] = mapped_column(String(24), default="ready", server_default="ready")
     indexed_chunks: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    summary: Mapped[str] = mapped_column(Text, default="", server_default="")
+    keywords: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    index_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     source: Mapped[str] = mapped_column(String(24), default="user", server_default="user")
     is_global: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
     message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
@@ -482,6 +524,12 @@ class MemoryEntry(Base):
     source: Mapped[str] = mapped_column(String(24), default="manual", server_default="manual")
     search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=2, server_default="2")
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    access_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -560,6 +608,7 @@ class FileChunk(Base):
     __tablename__ = "file_chunks"
     __table_args__ = (
         Index("ix_file_chunks_user_conv", "user_id", "conversation_id"),
+        Index("ix_file_chunks_file_idx", "file_id", "chunk_index"),
         Index("ix_file_chunks_search_tsv", "search_tsv", postgresql_using="gin"),
     )
 
@@ -575,9 +624,14 @@ class FileChunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer)
     locator: Mapped[str] = mapped_column(String(160), default="", server_default="")
     context_header: Mapped[str] = mapped_column(Text, default="", server_default="")
+    section_path: Mapped[str] = mapped_column(Text, default="", server_default="")
+    chunk_type: Mapped[str] = mapped_column(String(24), default="text", server_default="text")
+    token_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    chunk_meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     content: Mapped[str] = mapped_column(Text)
     search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -603,6 +657,7 @@ class MessageChunk(Base):
     token_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(SafeVector(1536), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -637,6 +692,7 @@ class RunTelemetry(Base):
     tool_errors_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     tools_summary: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     skills_used: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    rag_metrics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     is_regenerated: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     hitl_denied_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

@@ -69,6 +69,7 @@ class CreateRunRequest(BaseModel):
     rolling_summary: str = ""
     cross_chat_context: str = ""
     memory_index: str = ""
+    pinned_memories: str = ""
     user_id: str
     agent_namespace: str = ""
     agent_api_key: str = ""
@@ -88,6 +89,7 @@ class CreateRunRequest(BaseModel):
     allow_hitl: bool = True
     max_tool_iterations: int | None = None
     model_route: str = "auto"
+    rag_scope: dict[str, Any] | None = None
     idempotency_key: str | None = None
 
 
@@ -342,6 +344,8 @@ def create_app(
             "plan": meta.get("plan"),
             "reasoning": meta.get("reasoning"),
             "tool_events": meta.get("tool_events") or [],
+            "citations": meta.get("citations") or [],
+            "rag_metrics": meta.get("rag_metrics"),
             "pending_controls": meta.get("pending_controls") or [],
             "last_event_id": meta.get("last_event_id") or "0-0",
             "heartbeat_at": meta.get("heartbeat_at"),

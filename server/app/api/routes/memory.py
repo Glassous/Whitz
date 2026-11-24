@@ -187,6 +187,8 @@ async def create_memory_entry(
             title=body.title,
             tags=body.tags,
             source="manual",
+            is_pinned=body.is_pinned,
+            priority=body.priority,
         )
     except memory_service.MemoryServiceError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
@@ -220,6 +222,8 @@ async def update_memory_entry(
             new_collection_id=body.collection_id,
             title=body.title,
             tags=body.tags,
+            is_pinned=body.is_pinned,
+            priority=body.priority,
         )
     except memory_service.MemoryServiceError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc

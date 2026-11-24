@@ -8,13 +8,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
+COPY server/pyproject.toml ./
 RUN uv pip install --system -r pyproject.toml
 
-COPY app ./app
-COPY alembic ./alembic
-COPY resources ./resources
-COPY alembic.ini entrypoint.sh ./
+COPY shared/whitz_rag ./whitz_rag
+COPY server/app ./app
+COPY server/alembic ./alembic
+COPY server/resources ./resources
+COPY server/alembic.ini server/entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
 EXPOSE 8000

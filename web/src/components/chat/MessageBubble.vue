@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type { ConversationFile, DeliverableTarget, FileAttachmentMeta, Message, UserReactionType, WorkspaceArtifactMeta } from "../../types";
+import type { CitationItem, ConversationFile, DeliverableTarget, FileAttachmentMeta, Message, UserReactionType, WorkspaceArtifactMeta } from "../../types";
 import { useAuthStore } from "../../stores/auth";
 import { useChatStore } from "../../stores/chat";
 import { useFilesStore } from "../../stores/files";
@@ -21,6 +21,7 @@ const emit = defineEmits<{
   "open-deliverable": [target: DeliverableTarget];
   "open-lightbox": [file: ConversationFile, siblings: ConversationFile[]];
   "download-file": [file: ConversationFile];
+  "open-citation": [citation: CitationItem];
 }>();
 
 const auth = useAuthStore();
@@ -212,6 +213,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (copyTimer) window.clearTimeout(copyTimer);
+  if (citeHighlightTimer) window.clearTimeout(citeHighlightTimer);
   userResizeObserver?.disconnect();
   userResizeObserver = null;
   document.removeEventListener("pointerdown", onDocumentPointerDown);
@@ -236,6 +238,8 @@ const TOOL_LABELS: Record<string, string> = {
   web_extract: "读取网页",
   memory: "记忆",
   skill: "技能",
+  knowledge_search: "多源知识检索",
+  search_chat_history: "检索历史对话",
   rag_search_workspace: "检索工作区",
   memory_search: "RAG 检索记忆集",
   memory_list: "查看记忆集",
@@ -275,6 +279,7 @@ const liveLabel = computed(() => {
     return step.title ? `步骤 ${step.index}/${step.total} · ${step.title}` : `步骤 ${step.index}/${step.total}`;
   }
   if (chat.runningTool) return `正在使用 ${TOOL_LABELS[chat.runningTool] ?? chat.runningTool}`;
+  if (chat.ragPrefetching) return "正在检索知识库与记忆…";
   if (chat.waitingFirstByte) return "正在连接助理…";
   if (props.message.content.trim()) return "正在生成回答…";
   const items = chat.plan?.items ?? [];
@@ -291,6 +296,83 @@ const stepsCount = computed(() => {
   );
   return keys.size;
 });
+
+const citationsDetailsRef = ref<HTMLDetailsElement | null>(null);
+const highlightedCiteId = ref<string | null>(null);
+let citeHighlightTimer: number | null = null;
+
+const messageCitations = computed<CitationItem[]>(() => {
+  const live = isLive.value ? chat.citations : [];
+  const stored = props.message.tool_payload?.citations ?? [];
+  return live.length ? live : stored;
+});
+
+const citationSummaryText = computed(() => {
+  const list = messageCitations.value;
+  if (!list.length) return "";
+  let fileCount = 0;
+  let memCount = 0;
+  let chatCount = 0;
+  const seenFiles = new Set<string>();
+  for (const item of list) {
+    if (item.source_type === "file") {
+      seenFiles.add(item.source_id || item.title);
+    } else if (item.source_type === "memory") {
+      memCount++;
+    } else {
+      chatCount++;
+    }
+  }
+  fileCount = seenFiles.size;
+  const parts: string[] = [];
+  if (fileCount) parts.push(`${fileCount} 份文档`);
+  if (memCount) parts.push(`${memCount} 条记忆`);
+  if (chatCount) parts.push(`${chatCount} 段历史对话`);
+  return parts.length ? `参考了 ${parts.join(" · ")}` : `参考了 ${list.length} 条知识来源`;
+});
+
+function citationTypeLabel(sourceType: string): string {
+  if (sourceType === "file") return "文档";
+  if (sourceType === "memory") return "记忆";
+  if (sourceType === "chat_digest") return "对话摘要";
+  return "历史对话";
+}
+
+function citationConfidenceClass(confidence?: string): string {
+  if (confidence === "high") return "bg-success";
+  if (confidence === "low") return "bg-fg-faint";
+  return "bg-accent";
+}
+
+function highlightCitationCard(citationId: string) {
+  if (citationsDetailsRef.value) {
+    citationsDetailsRef.value.open = true;
+  }
+  highlightedCiteId.value = citationId;
+  if (citeHighlightTimer) window.clearTimeout(citeHighlightTimer);
+  citeHighlightTimer = window.setTimeout(() => {
+    highlightedCiteId.value = null;
+    citeHighlightTimer = null;
+  }, 2400);
+}
+
+function onOpenCitationById(citationId: string) {
+  const upper = citationId.toUpperCase();
+  const item = messageCitations.value.find((c) => c.citation_id.toUpperCase() === upper);
+  if (!item) return;
+  highlightCitationCard(item.citation_id);
+  if (item.source_type !== "memory") {
+    emit("open-citation", item);
+  }
+}
+
+function onCitationCardClick(item: CitationItem) {
+  if (item.source_type === "memory") {
+    highlightCitationCard(item.citation_id);
+    return;
+  }
+  emit("open-citation", item);
+}
 
 function resolveAttachmentFile(att: FileAttachmentMeta): ConversationFile {
   const found = filesStore.files.find((f) => f.id === att.id);
@@ -748,9 +830,11 @@ const resolvedArtifacts = computed(() =>
             ? chat.pendingControl?.kind === "approval"
               ? "正在等待你的审批确认…"
               : "正在等待你的澄清回答，提交后将继续执行…"
-            : chat.waitingFirstByte
-              ? "助理已接收请求，正在准备回复…"
-              : "正在组织回答…"
+            : chat.ragPrefetching
+              ? "正在检索知识库与记忆…"
+              : chat.waitingFirstByte
+                ? "助理已接收请求，正在准备回复…"
+                : "正在组织回答…"
       }}</span>
     </div>
 
@@ -758,9 +842,84 @@ const resolvedArtifacts = computed(() =>
       v-else
       :content="message.content"
       :streaming="isLive && !isWaitingControl"
+      :citations="messageCitations"
       @preview-html="emit('preview-html', $event)"
       @open-deliverable="emit('open-deliverable', $event)"
+      @open-citation="onOpenCitationById"
     />
+
+    <!-- Collapsible RAG Citations / Sources Disclosure -->
+    <details
+      v-if="messageCitations.length"
+      ref="citationsDetailsRef"
+      class="whitz-citations-disclosure mt-3 rounded-2xl border border-line/80 bg-sidebar/65 px-3 py-2 text-[12.5px] dark:bg-surface/65"
+    >
+      <summary class="focus-ring flex items-center gap-2 rounded-lg py-0.5 text-fg-muted select-none hover:text-fg">
+        <svg
+          class="whitz-cite-chevron h-3.5 w-3.5 shrink-0 text-fg-faint"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.2"
+          aria-hidden="true"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
+        </svg>
+        <svg
+          class="h-3.5 w-3.5 shrink-0 text-accent"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          aria-hidden="true"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 19.5A2.5 2.5 0 016.5 17H20" />
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
+        </svg>
+        <span class="font-medium text-fg">{{ citationSummaryText }}</span>
+        <span class="rounded-full bg-canvas px-1.5 py-0.5 text-[10.5px] tabular-nums text-fg-faint">
+          {{ messageCitations.length }}
+        </span>
+      </summary>
+
+      <div class="mt-2.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <button
+          v-for="item in messageCitations"
+          :key="item.citation_id"
+          type="button"
+          class="focus-ring group/cite flex flex-col gap-1 rounded-xl border bg-canvas/85 p-2.5 text-left transition-colors hover:border-line-strong hover:bg-canvas"
+          :class="
+            highlightedCiteId === item.citation_id
+              ? 'border-accent bg-accent-weak/45'
+              : 'border-line/70'
+          "
+          @click="onCitationCardClick(item)"
+        >
+          <div class="flex items-center gap-1.5">
+            <span class="inline-flex h-4.5 min-w-5 items-center justify-center rounded-full bg-accent-weak px-1.5 text-[10.5px] font-semibold text-accent">
+              {{ item.citation_id }}
+            </span>
+            <span class="rounded bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted">
+              {{ citationTypeLabel(item.source_type) }}
+            </span>
+            <span class="min-w-0 flex-1 truncate text-[12.5px] font-medium text-fg" :title="item.title">
+              {{ item.title }}
+            </span>
+            <span
+              class="h-1.5 w-1.5 shrink-0 rounded-full"
+              :class="citationConfidenceClass(item.confidence)"
+              :title="`置信度：${item.confidence || 'medium'}`"
+            />
+          </div>
+          <p v-if="item.subtitle" class="truncate text-[11px] text-fg-faint" :title="item.subtitle">
+            {{ item.subtitle }}
+          </p>
+          <p class="line-clamp-2 text-[11.5px] leading-relaxed text-fg-muted">
+            {{ item.snippet }}
+          </p>
+        </button>
+      </div>
+    </details>
 
     <!-- AI Generated Workspace Artifact Cards -->
     <div v-if="resolvedArtifacts.length" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">

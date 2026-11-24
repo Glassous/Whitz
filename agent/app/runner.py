@@ -18,6 +18,7 @@ from app.core.models import EmbeddingClient, ModelRouter, RerankClient
 from app.graph.builder import DEFAULT_MAX_TOOL_ITERATIONS, _extract_text, build_agent_graph
 from app.graph.topology import GRAPH_NODES
 from app.memory.store import MemoryManager
+from app.rag.citations import CitationRegistry
 from app.rag.hybrid_retriever import HybridRetriever
 from app.tools import parse_tool_error
 from app.tools.mcp_client import load_whitz_mcp_tools
@@ -171,6 +172,8 @@ def build_snapshot_payload(meta: dict[str, Any]) -> dict[str, Any]:
         "reasoning": meta.get("reasoning") or [],
         "plan": meta.get("plan"),
         "tool_events": meta.get("tool_events") or [],
+        "citations": meta.get("citations") or [],
+        "rag_metrics": meta.get("rag_metrics"),
         "pending_controls": meta.get("pending_controls") or [],
         "usage": meta.get("usage"),
         "route": meta.get("route"),
@@ -275,6 +278,14 @@ async def _build_runtime_config(
     rerank_client = RerankClient(settings=settings, redis_client=redis)
     model_router = ModelRouter(settings=settings, redis_client=redis)
     hybrid_retriever = HybridRetriever(pool=pool, embedding_client=emb_client, rerank_client=rerank_client)
+    citation_registry = CitationRegistry()
+    raw_attachments = list(payload.get("attachments") or [])
+    attached_file_ids = [
+        str(a.get("file_id") or a.get("id"))
+        for a in raw_attachments
+        if isinstance(a, dict) and a.get("attached") and (a.get("file_id") or a.get("id"))
+    ]
+    rag_scope = payload.get("rag_scope") if isinstance(payload.get("rag_scope"), dict) else {}
     memory_manager = MemoryManager(
         store=store,
         pool=pool,
@@ -319,6 +330,9 @@ async def _build_runtime_config(
             "embedding_client": emb_client,
             "rerank_client": rerank_client,
             "hybrid_retriever": hybrid_retriever,
+            "citation_registry": citation_registry,
+            "attached_file_ids": attached_file_ids,
+            "rag_scope": rag_scope,
             "memory_manager": memory_manager,
             "sandbox_executor": sandbox_executor,
             "pool": pool,
@@ -495,6 +509,8 @@ async def _stream_graph(
     buffered_text: list[str] = [str(meta.get("output") or "")] if meta.get("output") else []
     reasoning_buf: list[str] = [prior_reasoning] if prior_reasoning else []
     tool_events: list[dict[str, Any]] = list(meta.get("tool_events") or [])
+    latest_citations: list[dict[str, Any]] = list(meta.get("citations") or [])
+    latest_rag_metrics: dict[str, Any] = dict(meta.get("rag_metrics") or {})
     last_ai_text = ""
     latest_plan: dict[str, Any] | None = meta.get("plan")
     latest_usage: dict[str, int] = dict(meta.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
@@ -565,6 +581,35 @@ async def _stream_graph(
                     if not updated:
                         tool_events.append(payload)
                     await emitter.emit("tool.completed", payload)
+                elif ev_type == "rag.context":
+                    cites = list(chunk.get("citations") or [])
+                    if cites:
+                        latest_citations = cites
+                        meta["citations"] = latest_citations
+                    diag = chunk.get("diagnostics")
+                    if isinstance(diag, dict) and diag:
+                        stage_key = str(chunk.get("stage") or diag.get("stage") or "prefetch")
+                        if stage_key == "prefetch":
+                            latest_rag_metrics["prefetch_ms"] = diag.get("latency_ms", 0.0)
+                            latest_rag_metrics["used_llm_rewrite"] = bool(diag.get("used_llm_rewrite", False))
+                        latest_rag_metrics["hits_by_source"] = diag.get("hits_by_source") or latest_rag_metrics.get("hits_by_source") or {}
+                        latest_rag_metrics["top_score"] = max(
+                            float(latest_rag_metrics.get("top_score") or 0.0),
+                            float(diag.get("top_score") or 0.0),
+                        )
+                        latest_rag_metrics["corrective_retries"] = int(latest_rag_metrics.get("corrective_retries") or 0) + int(
+                            diag.get("corrective_retries") or 0
+                        )
+                        latest_rag_metrics["citations_count"] = len(latest_citations)
+                        meta["rag_metrics"] = latest_rag_metrics
+                    await emitter.emit(
+                        "rag.context",
+                        {
+                            "stage": str(chunk.get("stage") or "prefetch"),
+                            "citations": latest_citations,
+                            "diagnostics": diag if isinstance(diag, dict) else {},
+                        },
+                    )
                 elif ev_type:
                     payload = {k: v for k, v in chunk.items() if k != "type"}
                     await emitter.emit(ev_type, payload)
@@ -831,6 +876,8 @@ async def _stream_graph(
     meta["plan"] = latest_plan
     meta["reasoning"] = reasoning_blocks
     meta["tool_events"] = tool_events[-40:]
+    meta["citations"] = latest_citations
+    meta["rag_metrics"] = latest_rag_metrics or None
     meta["pending_controls"] = []
     meta["route"] = selected_route
     meta["model"] = selected_model
@@ -841,6 +888,8 @@ async def _stream_graph(
             "usage": latest_usage,
             "plan": latest_plan,
             "reasoning": reasoning_blocks,
+            "citations": latest_citations or None,
+            "rag_metrics": latest_rag_metrics or None,
         },
         force_ttl=True,
     )
@@ -943,6 +992,7 @@ async def execute_run(
             "rolling_summary": str(payload.get("rolling_summary") or ""),
             "cross_chat_context": str(payload.get("cross_chat_context") or ""),
             "memory_index": str(payload.get("memory_index") or ""),
+            "pinned_memories": str(payload.get("pinned_memories") or ""),
             "user_id": meta["user_id"],
             "agent_namespace": str(payload.get("agent_namespace") or ""),
             "persona": str(payload.get("persona") or ""),
@@ -958,6 +1008,7 @@ async def execute_run(
             "allow_hitl": bool(payload.get("allow_hitl", True)),
             "max_tool_iterations": max(1, int(payload.get("max_tool_iterations") or DEFAULT_MAX_TOOL_ITERATIONS)),
             "requested_route": str(payload.get("model_route") or "auto"),
+            "rag_scope": dict(payload.get("rag_scope") or {}) if isinstance(payload.get("rag_scope"), dict) else {},
         }
         await _stream_graph(
             graph=graph,

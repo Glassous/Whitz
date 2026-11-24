@@ -8,6 +8,7 @@ import type {
   OpsAlertRule,
   OpsAlertsResponse,
   OpsInspection,
+  OpsRagHealth,
 } from "../types";
 import BaseBadge from "../components/ui/BaseBadge.vue";
 import BaseButton from "../components/ui/BaseButton.vue";
@@ -18,9 +19,11 @@ import Icon from "../components/ui/Icon.vue";
 const inspection = ref<OpsInspection | null>(null);
 const alerts = ref<OpsAlertsResponse | null>(null);
 const monitor = ref<AdminMonitor | null>(null);
+const ragHealth = ref<OpsRagHealth | null>(null);
 
 const loading = ref(false);
 const evaluating = ref(false);
+const backfilling = ref(false);
 const autoRefresh = ref(false);
 const error = ref<string | null>(null);
 const toast = ref<string | null>(null);
@@ -54,14 +57,16 @@ async function loadAll() {
   loading.value = true;
   error.value = null;
   try {
-    const [insp, al, mon] = await Promise.all([
+    const [insp, al, mon, rag] = await Promise.all([
       api.get<OpsInspection>("/admin/ops/inspection"),
       api.get<OpsAlertsResponse>("/admin/ops/alerts"),
       api.get<AdminMonitor>("/admin/monitor"),
+      api.get<OpsRagHealth>("/admin/ops/rag/health").catch(() => null),
     ]);
     inspection.value = insp;
     alerts.value = al;
     monitor.value = mon;
+    ragHealth.value = rag;
   } catch (err) {
     error.value = readableError(err);
   } finally {
@@ -79,6 +84,23 @@ async function runEvaluate() {
     error.value = readableError(err);
   } finally {
     evaluating.value = false;
+  }
+}
+
+async function triggerRagBackfill() {
+  backfilling.value = true;
+  try {
+    const res = await api.post<{ queued: boolean; updated?: Record<string, number> }>("/admin/ops/rag/backfill", {
+      scope: "all",
+      batch_size: 40,
+      inline: false,
+    });
+    showToast(res.queued ? "已将存量向量回填任务加入 Redis 持久化队列" : "已触发存量向量回填");
+    await loadAll();
+  } catch (err) {
+    error.value = readableError(err);
+  } finally {
+    backfilling.value = false;
   }
 }
 
@@ -332,6 +354,87 @@ onBeforeUnmount(() => {
         </p>
       </router-link>
     </div>
+
+    <!-- RAG 知识引擎健康与向量覆盖 -->
+    <section v-if="ragHealth" class="rounded-2xl border border-line bg-surface p-5 space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div class="flex flex-wrap items-center gap-2">
+            <h2 class="text-[14px] font-semibold text-fg">RAG 知识引擎健康与向量覆盖</h2>
+            <BaseBadge :tone="ragHealth.embedding_enabled ? 'green' : 'amber'">
+              {{ ragHealth.embedding_enabled ? `Embedding: ${ragHealth.embedding_model}` : "Embedding 未配置（仅关键词检索）" }}
+            </BaseBadge>
+            <BaseBadge :tone="ragHealth.rerank_enabled ? 'green' : 'gray'">
+              {{ ragHealth.rerank_enabled ? "Rerank 已启用" : "Rerank 未配置" }}
+            </BaseBadge>
+          </div>
+          <p class="mt-1 text-[12px] text-fg-muted">
+            文档索引：就绪 {{ ragHealth.files.ready }} · 部分 {{ ragHealth.files.partial }} · 索引中 {{ ragHealth.files.indexing }}
+            <span :class="ragHealth.files.failed > 0 ? 'text-danger font-medium' : ''">
+              · 失败 {{ ragHealth.files.failed }}
+            </span>
+            · RAG 队列待处理 {{ ragHealth.queue.pending }}
+            <span v-if="ragHealth.queue.dlq > 0" class="text-danger font-medium">
+              (DLQ {{ ragHealth.queue.dlq }})
+            </span>
+          </p>
+        </div>
+        <BaseButton
+          variant="secondary"
+          size="sm"
+          :loading="backfilling"
+          :disabled="!ragHealth.embedding_enabled"
+          @click="triggerRagBackfill"
+        >
+          触发存量回填
+        </BaseButton>
+      </div>
+
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div
+          v-for="tbl in ragHealth.tables"
+          :key="tbl.key"
+          class="rounded-xl border border-line/80 bg-canvas p-3.5"
+        >
+          <div class="flex items-center justify-between text-[12px]">
+            <span class="font-medium text-fg">{{ tbl.label }}</span>
+            <span class="tabular-nums font-semibold text-fg">{{ tbl.coverage_pct }}%</span>
+          </div>
+          <div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface">
+            <div
+              class="h-full rounded-full transition-all"
+              :class="tbl.coverage_pct >= 95 ? 'bg-success' : tbl.coverage_pct >= 60 ? 'bg-accent' : 'bg-danger'"
+              :style="{ width: `${Math.min(100, Math.max(0, tbl.coverage_pct))}%` }"
+            />
+          </div>
+          <p class="mt-1.5 flex items-center justify-between text-[11px] text-fg-faint tabular-nums">
+            <span>已向量化 {{ tbl.embedded }} / {{ tbl.total }}</span>
+            <span v-if="tbl.stale_model > 0" class="text-warning">旧模型 {{ tbl.stale_model }}</span>
+          </p>
+        </div>
+      </div>
+
+      <div class="grid gap-3 sm:grid-cols-4 text-[12px]">
+        <div class="rounded-xl bg-canvas px-3.5 py-2.5">
+          <span class="text-fg-muted">7d RAG 参与回合</span>
+          <p class="mt-0.5 text-[15px] font-semibold text-fg tabular-nums">{{ ragHealth.telemetry_7d.runs_with_rag }}</p>
+        </div>
+        <div class="rounded-xl bg-canvas px-3.5 py-2.5">
+          <span class="text-fg-muted">7d 证据命中率</span>
+          <p class="mt-0.5 text-[15px] font-semibold text-fg tabular-nums">{{ ragHealth.telemetry_7d.hit_rate_pct }}%</p>
+        </div>
+        <div class="rounded-xl bg-canvas px-3.5 py-2.5">
+          <span class="text-fg-muted">7d 平均 Prefetch 耗时</span>
+          <p class="mt-0.5 text-[15px] font-semibold text-fg tabular-nums">{{ ragHealth.telemetry_7d.avg_prefetch_ms }} ms</p>
+        </div>
+        <div class="rounded-xl bg-canvas px-3.5 py-2.5">
+          <span class="text-fg-muted">7d 累计引用 / 纠错重试</span>
+          <p class="mt-0.5 text-[15px] font-semibold text-fg tabular-nums">
+            {{ ragHealth.telemetry_7d.total_citations }} / {{ ragHealth.telemetry_7d.corrective_retries }}
+          </p>
+        </div>
+      </div>
+    </section>
 
     <!-- SLO 错误预算与 Z-Score 异常检测 -->
     <div v-if="inspection?.slo" class="grid gap-4 lg:grid-cols-2">

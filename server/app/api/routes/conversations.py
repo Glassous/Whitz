@@ -10,13 +10,25 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import get_current_user, get_owned_conversation
 from app.api.schemas import (
+    ConversationContextStateOut,
     ConversationCreate,
     ConversationDetail,
+    ConversationEpisodeOut,
     ConversationOut,
     ConversationSearchHit,
     ConversationUpdate,
+    WorkingStateUpdateRequest,
 )
-from app.db.models import Conversation, ConversationFile, FileChunk, Message, ScheduledTask, User
+from app.db.models import (
+    Conversation,
+    ConversationEpisode,
+    ConversationFile,
+    FileChunk,
+    MemoryEntry,
+    Message,
+    ScheduledTask,
+    User,
+)
 from app.db.session import get_db
 from app.services import audit, cross_chat_memory, realtime_bus, titles
 from app.services.agent_client import AgentClient, AgentError
@@ -308,6 +320,105 @@ async def rename_conversation(
     scheduled_ids = await _scheduled_conversation_ids(db, user.id)
     _apply_scheduled_flag([conv], scheduled_ids)
     return conv
+
+
+@router.get("/{conversation_id}/context-state", response_model=ConversationContextStateOut)
+async def get_conversation_context_state(
+    conv: Conversation = Depends(get_owned_conversation),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ConversationContextStateOut:
+    """Return L1 structured working_state, L2 archived episodes timeline, and L0 pinned memory count."""
+    from sqlalchemy import func
+
+    ep_rows = list(
+        (
+            await db.execute(
+                select(ConversationEpisode)
+                .where(ConversationEpisode.conversation_id == conv.id)
+                .order_by(ConversationEpisode.episode_index.desc())
+                .limit(30)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    pinned_count = int(
+        (
+            await db.scalar(
+                select(func.count())
+                .select_from(MemoryEntry)
+                .where(MemoryEntry.user_id == user.id, MemoryEntry.is_pinned.is_(True))
+            )
+        )
+        or 0
+    )
+    return ConversationContextStateOut(
+        conversation_id=str(conv.id),
+        conversation_kind=conv.kind or "side",
+        working_state=cross_chat_memory.normalize_working_state(conv.working_state) if conv.working_state else None,
+        rolling_summary=conv.rolling_summary,
+        working_state_updated_at=conv.working_state_updated_at or conv.summary_updated_at,
+        episodes=[
+            ConversationEpisodeOut(
+                id=str(ep.id),
+                conversation_id=str(ep.conversation_id),
+                conversation_kind=ep.conversation_kind or "main",
+                episode_index=int(ep.episode_index or 1),
+                topic=ep.topic or "",
+                summary=ep.summary or "",
+                key_facts=list(ep.key_facts or []),
+                entities=list(ep.entities or []),
+                start_msg_id=str(ep.start_msg_id) if ep.start_msg_id else None,
+                end_msg_id=str(ep.end_msg_id) if ep.end_msg_id else None,
+                started_at=ep.started_at,
+                ended_at=ep.ended_at,
+                message_count=int(ep.message_count or 0),
+                created_at=ep.created_at,
+            )
+            for ep in ep_rows
+        ],
+        pinned_memories_count=pinned_count,
+    )
+
+
+@router.patch("/{conversation_id}/working-state", response_model=ConversationContextStateOut)
+async def update_conversation_working_state(
+    body: WorkingStateUpdateRequest,
+    request: Request,
+    conv: Conversation = Depends(get_owned_conversation),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ConversationContextStateOut:
+    """Allow users to inspect and prune/edit L1 structured Working State for transparent long-horizon control."""
+    normalized = cross_chat_memory.normalize_working_state(body.working_state)
+    now_dt = datetime.now(timezone.utc)
+    conv.working_state = normalized
+    conv.working_state_updated_at = now_dt
+    conv.rolling_summary = cross_chat_memory.format_working_state_prompt(normalized)
+    conv.summary_updated_at = now_dt
+    await db.commit()
+    await db.refresh(conv)
+    await audit.record(
+        "conversation.working_state_update",
+        actor=user,
+        target_type="conversation",
+        target_id=conv.id,
+        request=request,
+    )
+    return await get_conversation_context_state(conv=conv, user=user, db=db)
+
+
+@router.post("/{conversation_id}/archive-episode", response_model=ConversationContextStateOut)
+async def manual_archive_conversation_episode(
+    conv: Conversation = Depends(get_owned_conversation),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ConversationContextStateOut:
+    """Manually trigger L1+L2 archival of older unarchived turns into an immutable ConversationEpisode."""
+    await cross_chat_memory.archive_conversation_episode_if_needed(db, conv, force=True)
+    await db.refresh(conv)
+    return await get_conversation_context_state(conv=conv, user=user, db=db)
 
 
 @router.post("/{conversation_id}/title/generate")

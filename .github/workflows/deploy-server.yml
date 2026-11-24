@@ -10,6 +10,7 @@ on:
     paths:
       - "server/**"
       - "agent/**"
+      - "shared/**"
       - "docker-compose.prod.yml"
       - ".github/workflows/deploy-server.yml"
   workflow_dispatch:
@@ -68,10 +69,10 @@ jobs:
       matrix:
         include:
           - component: server
-            context: ./server
+            context: .
             dockerfile: ./server/Dockerfile
           - component: agent
-            context: ./agent
+            context: .
             dockerfile: ./agent/Dockerfile
     steps:
       - name: Checkout

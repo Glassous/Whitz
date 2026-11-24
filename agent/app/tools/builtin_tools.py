@@ -108,22 +108,128 @@ def _strip_html(html: str) -> str:
 
 
 @tool
+async def knowledge_search(
+    query: str,
+    sources: list[Literal["file", "memory", "chat"]] | None = None,
+    file_id: str | None = None,
+    collection: str | None = None,
+    top_k: int = 8,
+    config: RunnableConfig = None,  # type: ignore[assignment]
+) -> str:
+    """统一多源混合知识检索（同时覆盖资料库文档、多主题长期记忆与历史对话），支持重排、父子邻域扩展与低置信度自纠错。
+
+    - query: 清晰的语义或关键词查询。
+    - sources: 可选知识域列表，默认同时检索 ['file', 'memory', 'chat']；可按需缩小范围。
+    - file_id: 可选，限定仅在指定文件内检索。
+    - collection: 可选，限定仅在指定记忆集 slug 内检索。
+    返回结果每条附带引用编号 citation_id（如 S1、S2），回答引用事实时请使用 [[cite:S1]] 标注出处。
+    """
+    from app.rag.citations import emit_rag_context_event
+
+    cfg = _cfg(config)
+    retriever = cfg.get("hybrid_retriever")
+    user_id = str(cfg.get("user_id") or "")
+    conversation_id = str(cfg.get("conversation_id") or "")
+    if retriever is None or not hasattr(retriever, "engine") or not user_id:
+        return json.dumps({"count": 0, "results": [], "note": "Unified RAG engine not configured."}, ensure_ascii=False)
+
+    rag_scope_raw = cfg.get("rag_scope") or {}
+    mode = str(rag_scope_raw.get("mode") or "auto").lower()
+    req_sources = list(sources or ["file", "memory", "chat"])
+    if mode == "files_only":
+        req_sources = ["file"]
+    elif not bool(cfg.get("memory_enabled", True)):
+        req_sources = [s for s in req_sources if s != "memory"]
+
+    reg = cfg.get("citation_registry")
+    start_idx = reg.next_index if reg is not None else 1
+    attached_fids = list(cfg.get("attached_file_ids") or [])
+
+    items, diag = await retriever.engine.search_unified(
+        user_id=user_id,
+        queries=[query],
+        sources=req_sources,
+        conversation_id=conversation_id,
+        attached_file_ids=attached_fids,
+        file_id=file_id,
+        collection=collection,
+        exclude_current_chat=False,
+        top_k=max(1, min(int(top_k or 8), 20)),
+        expand_neighbors=True,
+        enable_corrective=True,
+        citation_start_index=start_idx,
+        stage="tool",
+    )
+
+    if reg is not None and items:
+        reg.register(items)
+        emit_rag_context_event(
+            stage="tool",
+            citations=reg.all_citations(),
+            diagnostics=diag.to_dict(),
+        )
+
+    hint = None
+    if not items and diag.indexing_files:
+        names = ", ".join(f"{f['filename']}({f['index_status']})" for f in diag.indexing_files[:3])
+        hint = f"部分文件仍在索引中或仅部分索引（{names}），可直接调用 read_workspace_file 读取原文。"
+    elif not items:
+        hint = "未命中高相关片段，可尝试换词检索，或调用 list_workspace_files / read_workspace_file / read_conversation_history 查阅原文。"
+
+    payload: dict[str, Any] = {
+        "count": len(items),
+        "results": [it.to_dict() for it in items],
+        "diagnostics": diag.to_dict(),
+    }
+    if hint:
+        payload["hint"] = hint
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@tool
 async def rag_search_workspace(
     query: str,
     file_id: str | None = None,
     top_k: int = 8,
     config: RunnableConfig = None,  # type: ignore[assignment]
 ) -> str:
-    """在当前对话工作区和用户的全局共享文件中执行混合检索（向量语义 + 全文检索 + RRF 融合）。
+    """在当前对话工作区和用户的全局共享文件中执行混合检索（向量语义 + 全文检索 + RRF + 重排 + 邻域扩展）。
 
     当用户提问涉及已上传附件、文档内容或全局资料库时优先调用此工具定位相关片段。
     """
+    from app.rag.citations import emit_rag_context_event
+
     cfg = _cfg(config)
     retriever = cfg.get("hybrid_retriever")
     user_id = str(cfg.get("user_id") or "")
     conversation_id = str(cfg.get("conversation_id") or "")
     if retriever is None or not user_id or not conversation_id:
         return json.dumps({"results": [], "note": "Hybrid RAG retriever not configured."}, ensure_ascii=False)
+    attached_fids = list(cfg.get("attached_file_ids") or [])
+
+    if hasattr(retriever, "engine"):
+        reg = cfg.get("citation_registry")
+        items, diag = await retriever.engine.search_unified(
+            user_id=user_id,
+            queries=[query],
+            sources=["file"],
+            conversation_id=conversation_id,
+            attached_file_ids=attached_fids,
+            file_id=file_id,
+            top_k=max(1, min(int(top_k or 8), 20)),
+            expand_neighbors=True,
+            enable_corrective=True,
+            citation_start_index=reg.next_index if reg is not None else 1,
+            stage="tool",
+        )
+        if reg is not None and items:
+            reg.register(items)
+            emit_rag_context_event(stage="tool", citations=reg.all_citations(), diagnostics=diag.to_dict())
+        from app.rag.hybrid_retriever import _evidence_to_chunk_dict
+
+        chunks = [_evidence_to_chunk_dict(it) for it in items]
+        return json.dumps({"count": len(chunks), "results": chunks, "diagnostics": diag.to_dict()}, ensure_ascii=False)
+
     chunks = await retriever.search(
         user_id=user_id,
         conversation_id=conversation_id,
@@ -897,17 +1003,20 @@ async def search_chat_history(
     limit: int = 8,
     config: RunnableConfig = None,  # type: ignore[assignment]
 ) -> str:
-    """检索用户全部旁聊与历史主聊天记录（摘要 + 原始消息全文），用于回忆具体细节、决定、代码或历史上下文。
+    """检索用户全部旁聊与历史主聊天记录（摘要 + 情景轮次语义混合检索 + 原始消息全文），用于回忆具体细节、决定、代码或历史上下文。
 
     scope: 'all'（全部聊天）| 'side'（仅旁聊）| 'main'（仅主聊天历史）。
     """
+    from app.rag.citations import emit_rag_context_event
+
     cfg = _cfg(config)
     pool = cfg.get("pool")
+    retriever = cfg.get("hybrid_retriever")
     user_id = str(cfg.get("user_id") or "")
     cleaned = (query or "").strip()
     if not cleaned:
         return json.dumps({"results": [], "error": "query 不能为空"}, ensure_ascii=False)
-    if pool is None or not user_id:
+    if (pool is None and retriever is None) or not user_id:
         return json.dumps({"results": [], "note": "History database not configured."}, ensure_ascii=False)
 
     norm_scope = (scope or "all").strip().lower()
@@ -918,184 +1027,100 @@ async def search_chat_history(
         user_uuid = uuid.UUID(user_id)
     except ValueError:
         return json.dumps({"results": [], "error": "无效的 user_id"}, ensure_ascii=False)
-    pattern = f"%{_escape_like(cleaned)}%"
 
     results: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
-    emb_client = cfg.get("embedding_client")
-    q_vec_lit: str | None = None
-    if emb_client is not None and getattr(emb_client, "is_configured", False):
+
+    # 1. Unified 3-leg Hybrid RAG over conversation_digests + message_chunks (strict HNSW iterative_scan + FTS + trgm + Rerank + MMR)
+    if retriever is not None and hasattr(retriever, "engine"):
         try:
-            q_vec = await emb_client.embed_query(cleaned)
-            if q_vec:
-                q_vec_lit = "[" + ",".join(f"{float(v):.8f}" for v in q_vec) + "]"
-        except Exception:
-            q_vec_lit = None
+            chat_items = await retriever.engine.search_chats(
+                user_id=user_id,
+                query=cleaned,
+                scope=norm_scope,
+                top_k=lim,
+                apply_rerank=True,
+            )
+            reg = cfg.get("citation_registry")
+            if reg is not None and chat_items:
+                reg.register(chat_items)
+                emit_rag_context_event(stage="tool", citations=reg.all_citations())
+            for it in chat_items:
+                seen_keys.add(it.chunk_id)
+                meta = it.metadata or {}
+                results.append(
+                    {
+                        "citation_id": it.citation_id,
+                        "match_type": "digest" if it.source_type == "chat_digest" else "episodic_turn",
+                        "conversation_id": str(meta.get("conversation_id") or it.source_id),
+                        "kind": str(meta.get("kind") or "side"),
+                        "title": it.title,
+                        "snippet": it.snippet,
+                        "key_facts": meta.get("key_facts") or [],
+                        "score": round(float(it.score), 4),
+                        "timestamp": meta.get("timestamp"),
+                    }
+                )
+        except Exception as exc:
+            logger.debug("Unified chat RAG leg failed (%s); falling back to verbatim message search", exc)
 
-    try:
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                # 1. Search side-chat digests (semantic vector + FTS + ILIKE)
-                if norm_scope in ("all", "side"):
-                    digest_rows: list[Any] = []
-                    if q_vec_lit:
-                        try:
-                            await cur.execute(
-                                """
-                                SELECT d.conversation_id, d.title, d.summary, d.key_facts, d.last_message_at
-                                FROM conversation_digests d
-                                WHERE d.user_id = %s
-                                  AND (
-                                      d.title ILIKE %s ESCAPE '\\'
-                                      OR d.summary ILIKE %s ESCAPE '\\'
-                                      OR d.search_tsv @@ plainto_tsquery('simple', %s)
-                                      OR (d.embedding IS NOT NULL AND (d.embedding <=> %s::vector) < 0.72)
-                                  )
-                                ORDER BY
-                                    CASE WHEN d.embedding IS NOT NULL THEN d.embedding <=> %s::vector ELSE 1.0 END ASC,
-                                    d.last_message_at DESC NULLS LAST
-                                LIMIT %s
-                                """,
-                                (user_uuid, pattern, pattern, cleaned, q_vec_lit, q_vec_lit, lim),
-                            )
-                            digest_rows = await cur.fetchall()
-                        except Exception:
-                            digest_rows = []
-                    if not digest_rows:
-                        await cur.execute(
-                            """
-                            SELECT d.conversation_id, d.title, d.summary, d.key_facts, d.last_message_at
-                            FROM conversation_digests d
-                            WHERE d.user_id = %s
-                              AND (
-                                  d.title ILIKE %s ESCAPE '\\'
-                                  OR d.summary ILIKE %s ESCAPE '\\'
-                                  OR d.search_tsv @@ plainto_tsquery('simple', %s)
-                              )
-                            ORDER BY d.last_message_at DESC NULLS LAST, d.updated_at DESC
-                            LIMIT %s
-                            """,
-                            (user_uuid, pattern, pattern, cleaned, lim),
-                        )
-                        digest_rows = await cur.fetchall()
-                    for row in digest_rows:
-                        cid = str(row[0])
-                        seen_keys.add(f"digest:{cid}")
-                        results.append(
-                            {
-                                "match_type": "digest",
-                                "conversation_id": cid,
-                                "kind": "side",
-                                "title": str(row[1] or ""),
-                                "snippet": str(row[2] or "")[:400],
-                                "key_facts": row[3] if isinstance(row[3], list) else [],
-                                "timestamp": row[4].isoformat() if row[4] is not None else None,
-                            }
-                        )
-
-                # 2. Search episodic message_chunks (semantic vector + pg_trgm + FTS)
-                if len(results) < lim:
-                    chunk_kind_clause = "AND mc.conversation_kind = %s" if norm_scope in ("side", "main") else ""
-                    chunk_rows: list[Any] = []
-                    if q_vec_lit:
-                        c_params: list[Any] = [user_uuid, q_vec_lit, pattern, cleaned]
-                        if norm_scope in ("side", "main"):
-                            c_params.append(norm_scope)
-                        c_params.extend([q_vec_lit, lim])
-                        try:
-                            await cur.execute(
-                                f"""
-                                SELECT mc.id, mc.conversation_id, mc.conversation_kind,
-                                       COALESCE(c.title, '') AS title, mc.context_header, mc.content, mc.created_at
-                                FROM message_chunks mc
-                                INNER JOIN conversations c ON c.id = mc.conversation_id
-                                WHERE mc.user_id = %s
-                                  AND (
-                                      (mc.embedding IS NOT NULL AND (mc.embedding <=> %s::vector) < 0.72)
-                                      OR mc.content ILIKE %s ESCAPE '\\'
-                                      OR mc.search_tsv @@ plainto_tsquery('simple', %s)
-                                  )
-                                  {chunk_kind_clause}
-                                ORDER BY
-                                    CASE WHEN mc.embedding IS NOT NULL THEN mc.embedding <=> %s::vector ELSE 1.0 END ASC,
-                                    mc.created_at DESC
-                                LIMIT %s
-                                """,
-                                tuple(c_params),
-                            )
-                            chunk_rows = await cur.fetchall()
-                        except Exception:
-                            chunk_rows = []
-                    for row in chunk_rows:
-                        key = f"chunk:{row[0]}"
-                        if key in seen_keys:
+    # 2. Verbatim raw message ILIKE fallback for exact identifiers/code/error strings
+    if pool is not None and len(results) < lim:
+        pattern = f"%{_escape_like(cleaned)}%"
+        try:
+            async with pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    kind_clause = ""
+                    params: list[Any] = [user_uuid, pattern]
+                    if norm_scope in ("side", "main"):
+                        kind_clause = "AND c.kind = %s"
+                        params.append(norm_scope)
+                    params.append(lim * 2)
+                    await cur.execute(
+                        f"""
+                        SELECT m.id, m.conversation_id, c.kind, c.title, m.role, m.content, m.created_at
+                        FROM messages m
+                        INNER JOIN conversations c ON c.id = m.conversation_id
+                        WHERE c.user_id = %s
+                          AND m.role IN ('user', 'assistant')
+                          AND m.status NOT IN ('failed', 'cancelled')
+                          AND m.content ILIKE %s ESCAPE '\\'
+                          {kind_clause}
+                        ORDER BY m.created_at DESC
+                        LIMIT %s
+                        """,
+                        tuple(params),
+                    )
+                    for row in await cur.fetchall():
+                        mid = str(row[0])
+                        if mid in seen_keys:
                             continue
-                        seen_keys.add(key)
+                        seen_keys.add(mid)
+                        content = str(row[5] or "")
+                        idx = content.lower().find(cleaned.lower())
+                        if idx >= 0:
+                            start = max(0, idx - 120)
+                            end = min(len(content), idx + len(cleaned) + 240)
+                            snippet = ("…" if start > 0 else "") + content[start:end] + ("…" if end < len(content) else "")
+                        else:
+                            snippet = content[:360]
                         results.append(
                             {
-                                "match_type": "episodic_turn",
+                                "match_type": "message",
+                                "message_id": mid,
                                 "conversation_id": str(row[1]),
                                 "kind": str(row[2] or "side"),
                                 "title": str(row[3] or ""),
-                                "context_header": str(row[4] or ""),
-                                "snippet": str(row[5] or "")[:450],
+                                "role": str(row[4] or ""),
+                                "snippet": snippet,
                                 "timestamp": row[6].isoformat() if row[6] is not None else None,
                             }
                         )
                         if len(results) >= lim:
                             break
-
-                # 3. Search raw verbatim messages across side chats and/or main chat
-                kind_clause = ""
-                params: list[Any] = [user_uuid, pattern]
-                if norm_scope in ("side", "main"):
-                    kind_clause = "AND c.kind = %s"
-                    params.append(norm_scope)
-                params.append(lim * 2)
-                await cur.execute(
-                    f"""
-                    SELECT m.id, m.conversation_id, c.kind, c.title, m.role, m.content, m.created_at
-                    FROM messages m
-                    INNER JOIN conversations c ON c.id = m.conversation_id
-                    WHERE c.user_id = %s
-                      AND m.role IN ('user', 'assistant')
-                      AND m.status NOT IN ('failed', 'cancelled')
-                      AND m.content ILIKE %s ESCAPE '\\'
-                      {kind_clause}
-                    ORDER BY m.created_at DESC
-                    LIMIT %s
-                    """,
-                    tuple(params),
-                )
-                for row in await cur.fetchall():
-                    mid = str(row[0])
-                    if mid in seen_keys:
-                        continue
-                    seen_keys.add(mid)
-                    content = str(row[5] or "")
-                    idx = content.lower().find(cleaned.lower())
-                    if idx >= 0:
-                        start = max(0, idx - 120)
-                        end = min(len(content), idx + len(cleaned) + 240)
-                        snippet = ("…" if start > 0 else "") + content[start:end] + ("…" if end < len(content) else "")
-                    else:
-                        snippet = content[:360]
-                    results.append(
-                        {
-                            "match_type": "message",
-                            "message_id": mid,
-                            "conversation_id": str(row[1]),
-                            "kind": str(row[2] or "side"),
-                            "title": str(row[3] or ""),
-                            "role": str(row[4] or ""),
-                            "snippet": snippet,
-                            "timestamp": row[6].isoformat() if row[6] is not None else None,
-                        }
-                    )
-                    if len(results) >= lim:
-                        break
-    except Exception as exc:
-        return json.dumps({"results": [], "error": f"检索历史聊天失败: {exc}"}, ensure_ascii=False)
+        except Exception as exc:
+            if not results:
+                return json.dumps({"results": [], "error": f"检索历史聊天失败: {exc}"}, ensure_ascii=False)
 
     return json.dumps({"query": cleaned, "count": len(results), "results": results[:lim]}, ensure_ascii=False)
 
@@ -1216,10 +1241,11 @@ def get_builtin_tools(
     *,
     include_delegation: bool = True,
     include_hitl: bool = True,
-    include_cross_chat: bool = False,
+    include_cross_chat: bool = True,
     include_user_reaction: bool = True,
 ) -> list[BaseTool]:
     tools: list[BaseTool] = [
+        knowledge_search,
         rag_search_workspace,
         memory_search,
         memory_list,

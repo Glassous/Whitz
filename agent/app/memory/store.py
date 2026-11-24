@@ -888,7 +888,31 @@ class MemoryManager:
             except Exception as exc:
                 logger.debug("Memory rerank skipped: %s", exc)
 
-        return _mmr_select_memories(fused, limit=limit)
+        selected = _mmr_select_memories(fused, limit=limit)
+        # Best-effort lifecycle access tracking for L3 relevance/recency governance
+        if selected and self.pool is not None:
+            hit_ids: list[uuid.UUID] = []
+            for s in selected:
+                try:
+                    hit_ids.append(uuid.UUID(str(s.get("id") or "")))
+                except ValueError:
+                    pass
+            if hit_ids:
+                try:
+                    async with self.pool.connection() as conn:
+                        async with conn.cursor() as cur:
+                            await cur.execute(
+                                """
+                                UPDATE memory_entries
+                                SET access_count = COALESCE(access_count, 0) + 1,
+                                    last_accessed_at = %s
+                                WHERE id = ANY(%s)
+                                """,
+                                (datetime.now(timezone.utc), hit_ids),
+                            )
+                except Exception:
+                    pass
+        return selected
 
     async def propose(
         self,
@@ -904,6 +928,8 @@ class MemoryManager:
         tags: list[str] | None = None,
         collection_name: str | None = None,
         collection_description: str | None = None,
+        is_pinned: bool = False,
+        priority: int = 2,
         memory_enabled: bool = True,
         memory_require_confirm: bool = False,
     ) -> dict[str, Any]:
@@ -961,6 +987,8 @@ class MemoryManager:
             old_content=cleaned_old,
             collection_name=collection_name,
             collection_description=collection_description,
+            is_pinned=is_pinned,
+            priority=priority,
         )
         return {
             "status": "saved",
@@ -1030,6 +1058,8 @@ class MemoryManager:
         old_content: str | None,
         collection_name: str | None = None,
         collection_description: str | None = None,
+        is_pinned: bool = False,
+        priority: int = 2,
     ) -> tuple[str, str]:
         key = _deterministic_key(target, content or old_content or "")
         now = datetime.now(timezone.utc)
@@ -1089,7 +1119,22 @@ class MemoryManager:
                             (user_uuid, norm_slug, target_text),
                         )
                         return col_name
+                    supersedes_uuid: uuid.UUID | None = None
+                    effective_pinned = bool(is_pinned)
+                    effective_priority = max(1, min(3, int(priority or 2)))
                     if action == "replace" and old_content:
+                        try:
+                            await cur.execute(
+                                "SELECT id, COALESCE(is_pinned, false) FROM memory_entries WHERE user_id = %s AND target = %s AND content = %s LIMIT 1",
+                                (user_uuid, norm_slug, old_content),
+                            )
+                            old_row = await cur.fetchone()
+                            if old_row:
+                                supersedes_uuid = old_row[0]
+                                if old_row[1]:
+                                    effective_pinned = True
+                        except Exception:
+                            pass
                         await cur.execute(
                             "DELETE FROM memory_entries WHERE user_id = %s AND target = %s AND content = %s",
                             (user_uuid, norm_slug, old_content),
@@ -1103,46 +1148,115 @@ class MemoryManager:
                         return col_name
                     if vec:
                         vec_lit = _vector_literal(vec)
-                        await cur.execute(
-                            """
-                            INSERT INTO memory_entries
-                                (id, user_id, collection_id, target, title, content, tags, source, search_tsv, embedding, created_at, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 'agent', to_tsvector('simple', %s), %s::vector, %s, %s)
-                            """,
-                            (
-                                uuid.UUID(entry_id),
-                                user_uuid,
-                                col_id,
-                                norm_slug,
-                                title,
-                                content,
-                                tags_json,
-                                tsv_text,
-                                vec_lit,
-                                now,
-                                now,
-                            ),
-                        )
+                        m_tag = getattr(self.embedding_client, "model_tag", "") or None
+                        try:
+                            await cur.execute(
+                                """
+                                INSERT INTO memory_entries
+                                    (id, user_id, collection_id, target, title, content, tags, source, search_tsv, embedding, embedding_model, is_pinned, priority, supersedes_id, created_at, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 'agent', to_tsvector('simple', %s), %s::vector, %s, %s, %s, %s, %s, %s)
+                                """,
+                                (
+                                    uuid.UUID(entry_id),
+                                    user_uuid,
+                                    col_id,
+                                    norm_slug,
+                                    title,
+                                    content,
+                                    tags_json,
+                                    tsv_text,
+                                    vec_lit,
+                                    m_tag,
+                                    effective_pinned,
+                                    effective_priority,
+                                    supersedes_uuid,
+                                    now,
+                                    now,
+                                ),
+                            )
+                        except Exception:
+                            await cur.execute(
+                                """
+                                INSERT INTO memory_entries
+                                    (id, user_id, collection_id, target, title, content, tags, source, search_tsv, embedding, created_at, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 'agent', to_tsvector('simple', %s), %s::vector, %s, %s)
+                                """,
+                                (
+                                    uuid.UUID(entry_id),
+                                    user_uuid,
+                                    col_id,
+                                    norm_slug,
+                                    title,
+                                    content,
+                                    tags_json,
+                                    tsv_text,
+                                    vec_lit,
+                                    now,
+                                    now,
+                                ),
+                            )
                     else:
-                        await cur.execute(
-                            """
-                            INSERT INTO memory_entries
-                                (id, user_id, collection_id, target, title, content, tags, source, search_tsv, created_at, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 'agent', to_tsvector('simple', %s), %s, %s)
-                            """,
-                            (
-                                uuid.UUID(entry_id),
-                                user_uuid,
-                                col_id,
-                                norm_slug,
-                                title,
-                                content,
-                                tags_json,
-                                tsv_text,
-                                now,
-                                now,
-                            ),
-                        )
+                        try:
+                            await cur.execute(
+                                """
+                                INSERT INTO memory_entries
+                                    (id, user_id, collection_id, target, title, content, tags, source, search_tsv, is_pinned, priority, supersedes_id, created_at, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 'agent', to_tsvector('simple', %s), %s, %s, %s, %s, %s)
+                                """,
+                                (
+                                    uuid.UUID(entry_id),
+                                    user_uuid,
+                                    col_id,
+                                    norm_slug,
+                                    title,
+                                    content,
+                                    tags_json,
+                                    tsv_text,
+                                    effective_pinned,
+                                    effective_priority,
+                                    supersedes_uuid,
+                                    now,
+                                    now,
+                                ),
+                            )
+                        except Exception:
+                            await cur.execute(
+                                """
+                                INSERT INTO memory_entries
+                                    (id, user_id, collection_id, target, title, content, tags, source, search_tsv, created_at, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 'agent', to_tsvector('simple', %s), %s, %s)
+                                """,
+                                (
+                                    uuid.UUID(entry_id),
+                                    user_uuid,
+                                    col_id,
+                                    norm_slug,
+                                    title,
+                                    content,
+                                    tags_json,
+                                    tsv_text,
+                                    now,
+                                    now,
+                                ),
+                            )
+                    if effective_pinned:
+                        # Keep L0 pinned count <= 10 by demoting oldest-accessed excess entries
+                        try:
+                            await cur.execute(
+                                """
+                                UPDATE memory_entries
+                                SET is_pinned = false
+                                WHERE id IN (
+                                    SELECT id FROM memory_entries
+                                    WHERE user_id = %s AND is_pinned = true AND id <> %s
+                                    ORDER BY priority ASC, last_accessed_at DESC NULLS LAST, updated_at DESC
+                                    OFFSET 9
+                                )
+                                """,
+                                (user_uuid, uuid.UUID(entry_id)),
+                            )
+                        except Exception:
+                            pass
                     return col_name
 
                 if hasattr(conn, "transaction"):

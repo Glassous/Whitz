@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     rerank_api_key: str = ""
     rerank_model: str = ""
     rerank_top_n: int = 8
+    rerank_timeout_seconds: float = 15.0
+
+    # Deep RAG feature flags
+    rag_image_indexing_enabled: bool = True
+    rag_doc_summary_llm_enabled: bool = True
 
     search_api_key: str = ""
     bocha_api_key: str = ""

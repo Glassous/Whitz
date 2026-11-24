@@ -17,6 +17,7 @@ class AgentState(TypedDict, total=False):
     rolling_summary: str
     cross_chat_context: str
     memory_index: str
+    pinned_memories: str
     user_id: str
     agent_namespace: str
     persona: str
@@ -39,6 +40,9 @@ class AgentState(TypedDict, total=False):
     max_tool_iterations: int
     usage: dict[str, int]
     subagent_outputs: Annotated[list[dict[str, Any]], operator.add]
+    rag_scope: dict[str, Any]
+    rag_evidence: list[dict[str, Any]]
+    rag_diagnostics: dict[str, Any]
     memory_extracted: bool
     final_output: str
 

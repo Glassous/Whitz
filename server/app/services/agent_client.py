@@ -148,6 +148,7 @@ class AgentClient:
         rolling_summary: str | None = None,
         cross_chat_context: str | None = None,
         memory_index: str | None = None,
+        pinned_memories: str | None = None,
         instructions: str | None = None,
         conversation_history: list[dict[str, str]] | None = None,
         model_route: str = "auto",
@@ -162,6 +163,7 @@ class AgentClient:
         ai_reactions_enabled: bool = True,
         allow_hitl: bool = True,
         max_tool_iterations: int | None = None,
+        rag_scope: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -189,6 +191,8 @@ class AgentClient:
             payload["cross_chat_context"] = cross_chat_context
         if memory_index:
             payload["memory_index"] = memory_index
+        if pinned_memories:
+            payload["pinned_memories"] = pinned_memories
         if instructions:
             payload["instructions"] = instructions
         if conversation_history:
@@ -201,6 +205,8 @@ class AgentClient:
             payload["requested_skills"] = requested_skills
         if profile_context:
             payload["profile_context"] = profile_context
+        if rag_scope:
+            payload["rag_scope"] = rag_scope
 
         headers: dict[str, str] = {}
         if idempotency_key:

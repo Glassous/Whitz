@@ -63,7 +63,7 @@ class ApprovedSandbox:
 def test_topology_matches_graph_nodes():
     topo = get_graph_topology()
     node_ids = {n["id"] for n in topo["nodes"]}
-    assert node_ids == {"context_loader", "agent", "tools", "hitl_gate", "subagent", "memory_extractor"}
+    assert node_ids == {"context_loader", "rag_prefetch", "agent", "tools", "hitl_gate", "subagent", "memory_extractor"}
     compiled = build_agent_graph()
     graph_nodes = set(compiled.get_graph().nodes.keys())
     assert node_ids.issubset(graph_nodes)
@@ -426,9 +426,9 @@ async def test_main_chat_prompt_ordering_token_budget_and_cross_chat_tools():
         {},
     )
     assert "你是 小智 智能助理" in prompt
-    assert "## 主聊天历史滚动摘要" in prompt
+    assert "## 主聊天工作态与历史进展" in prompt
     assert "## 跨旁聊全局记忆" in prompt
-    assert prompt.index("## 主聊天历史滚动摘要") < prompt.index("## 当前时间") < prompt.index("## 跨旁聊全局记忆")
+    assert prompt.index("## 主聊天工作态与历史进展") < prompt.index("## 当前时间") < prompt.index("## 跨旁聊全局记忆")
 
     # 2. Hard token budget trims older turns while preserving tool_call / ToolMessage boundaries
     sys_msg = SystemMessage(id=SYSTEM_CONTEXT_MSG_ID, content="SYS")

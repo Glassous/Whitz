@@ -40,6 +40,8 @@ const TOOL_LABELS: Record<string, string> = {
   web_extract: "读取网页",
   memory: "记忆",
   skill: "技能",
+  knowledge_search: "多源知识检索",
+  search_chat_history: "检索历史对话",
   rag_search_workspace: "检索工作区",
   memory_search: "RAG 检索记忆集",
   memory_list: "查看记忆集",

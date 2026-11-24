@@ -390,16 +390,18 @@ async def complete_upload(
     record.error_message = None
     record.expires_cleanup_at = None
     record.etag = (body.etag if body and body.etag else None) or meta.get("etag")
-    is_large_async = (
+    is_async_index = (
         settings.app_env == "production"
-        and record.category != "image"
-        and int(record.size_bytes or 0) > 256 * 1024
+        and (
+            (record.category != "image" and int(record.size_bytes or 0) > 256 * 1024)
+            or (record.category == "image" and settings.rag_image_indexing_enabled)
+        )
     )
-    record.index_status = "indexing" if is_large_async else "ready"
+    record.index_status = "indexing" if is_async_index else "ready"
     await db.commit()
     await db.refresh(record)
 
-    if is_large_async:
+    if is_async_index:
         file_chunks.schedule_file_indexing(record.id, user.id)
     else:
         await file_chunks.index_file_chunks_safe(db, record)
@@ -673,6 +675,8 @@ async def rename_file(
     record.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(record)
+    if cleaned != old_filename:
+        await file_chunks.sync_filename_change(db, record)
 
     from app.services import realtime_bus
 

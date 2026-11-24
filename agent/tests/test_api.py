@@ -34,7 +34,7 @@ async def test_control_api_auth_runs_resume_cancel_events_and_delete():
             headers = {"X-Agent-Token": "secret-token"}
             topo = await client.get("/v1/graph/topology", headers=headers)
             assert topo.status_code == 200
-            assert len(topo.json()["nodes"]) == 6
+            assert len(topo.json()["nodes"]) == 7
 
             # Create run + idempotency
             req_body = {

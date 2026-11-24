@@ -114,5 +114,69 @@
     "expected_tools": ["read_workspace_file"],
     "expect_interrupt": null,
     "description": "Multimodal image input should route to vision model when vision is supported."
+  },
+  {
+    "id": "rag-unified-multi-source",
+    "category": "unified_rag",
+    "input": "结合我之前在资料库里的项目方案、我的技术栈偏好以及上次关于鉴权的讨论，给出下一步改造建议并标注引用来源。",
+    "attachments": [],
+    "memory_enabled": true,
+    "rag_scope": { "mode": "auto", "include_memory": true, "include_chats": true },
+    "requested_route": "auto",
+    "expected_route": "default",
+    "expected_tools": ["knowledge_search"],
+    "expect_citations": true,
+    "expect_interrupt": null,
+    "description": "Unified RAG should prefetch or invoke knowledge_search across files, memories, and chats and emit [[cite:S1]] citations."
+  },
+  {
+    "id": "rag-deictic-rewrite",
+    "category": "unified_rag",
+    "input": "那里面提到的第三个风险点，上次我们是怎么决定处理的？",
+    "attachments": [],
+    "memory_enabled": true,
+    "rag_scope": { "mode": "auto", "include_memory": true, "include_chats": true },
+    "requested_route": "auto",
+    "expected_route": "default",
+    "expected_tools": ["knowledge_search"],
+    "expect_query_rewrite": true,
+    "expect_interrupt": null,
+    "description": "Multi-turn deictic query should trigger L2 query rewriting in rag_prefetch before retrieval."
+  },
+  {
+    "id": "rag-files-only-grounded",
+    "category": "unified_rag",
+    "input": "请仅根据上传的合同文档确认违约金比例，如果文档里没有写就明确说明未提及。",
+    "attachments": [
+      {
+        "file_id": "33333333-3333-3333-3333-333333333333",
+        "filename": "service_contract.pdf",
+        "category": "document",
+        "mime_type": "application/pdf",
+        "size_bytes": 180000,
+        "scope": "conversation"
+      }
+    ],
+    "memory_enabled": false,
+    "rag_scope": { "mode": "files_only", "include_memory": false, "include_chats": false },
+    "requested_route": "auto",
+    "expected_route": "default",
+    "expected_tools": ["rag_search_workspace"],
+    "expect_citations": true,
+    "expect_interrupt": null,
+    "description": "files_only mode must restrict retrieval to documents and enforce anti-hallucination grounding."
+  },
+  {
+    "id": "rag-memory-consolidation",
+    "category": "memory_consolidation",
+    "input": "从今天开始我改用 uv 和 ruff 替代 poetry，记住这个最新偏好。",
+    "attachments": [],
+    "memory_enabled": true,
+    "memory_require_confirm": false,
+    "requested_route": "auto",
+    "expected_route": "default",
+    "expected_tools": ["memory_propose"],
+    "expect_interrupt": null,
+    "description": "Conflicting preference update should trigger semantic memory consolidation (replace/merge) rather than creating duplicate entries."
   }
 ]

@@ -26,6 +26,8 @@ MAX_COLLECTION_CHAR_LIMIT = 50000
 MAX_COLLECTIONS_PER_USER = 50
 TOTAL_CHAR_LIMIT = 200000
 ENTRY_DELIMITER = "\n§\n"
+PINNED_MAX_ENTRIES = 10
+PINNED_MAX_CHARS = 1200
 
 SYSTEM_COLLECTIONS: tuple[dict[str, Any], ...] = (
     {
@@ -174,6 +176,11 @@ def _serialize_entry(
         "content": row.content,
         "tags": list(getattr(row, "tags", None) or []),
         "source": row.source or "manual",
+        "is_pinned": bool(getattr(row, "is_pinned", False)),
+        "priority": int(getattr(row, "priority", 2) or 2),
+        "access_count": int(getattr(row, "access_count", 0) or 0),
+        "last_accessed_at": getattr(row, "last_accessed_at", None),
+        "supersedes_id": str(row.supersedes_id) if getattr(row, "supersedes_id", None) else None,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
@@ -535,6 +542,43 @@ async def list_entries(
     )
 
 
+async def _enforce_pinned_budget(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    keep_id: uuid.UUID | None = None,
+) -> None:
+    """Keep L0 always-on pinned core memory strictly bounded (<=10 items & <=1200 chars)."""
+    rows = list(
+        (
+            await db.execute(
+                select(MemoryEntry)
+                .where(MemoryEntry.user_id == user_id, MemoryEntry.is_pinned.is_(True))
+                .order_by(
+                    MemoryEntry.priority.asc(),
+                    MemoryEntry.last_accessed_at.desc().nullslast(),
+                    MemoryEntry.updated_at.desc(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return
+    kept: list[MemoryEntry] = []
+    used_chars = 0
+    # Ensure keep_id always wins budget first if pinned
+    ordered = sorted(rows, key=lambda r: (0 if (keep_id and r.id == keep_id) else 1))
+    for r in ordered:
+        entry_len = len(r.title or "") + len(r.content or "") + 16
+        if len(kept) < PINNED_MAX_ENTRIES and (not kept or used_chars + entry_len <= PINNED_MAX_CHARS):
+            kept.append(r)
+            used_chars += entry_len
+        else:
+            r.is_pinned = False
+
+
 async def add_entry(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -545,6 +589,8 @@ async def add_entry(
     title: str = "",
     tags: list[str] | None = None,
     source: str = "manual",
+    is_pinned: bool = False,
+    priority: int = 2,
     auto_create_collection: bool = False,
     collection_name: str | None = None,
     collection_description: str = "",
@@ -576,6 +622,7 @@ async def add_entry(
 
     vec = await _optional_embed(_embed_text_for_entry(col.name, cleaned_title, content, cleaned_tags))
     tsv_text = _tsv_text_for_entry(cleaned_title, content, cleaned_tags)
+    m_tag = embeddings.current_embedding_model_tag() or None if vec is not None else None
 
     row = MemoryEntry(
         user_id=user_id,
@@ -585,10 +632,16 @@ async def add_entry(
         content=content,
         tags=cleaned_tags,
         source=source,
+        is_pinned=bool(is_pinned),
+        priority=max(1, min(3, int(priority or 2))),
         search_tsv=func.to_tsvector("simple", tsv_text),
         embedding=vec,
+        embedding_model=m_tag,
     )
     db.add(row)
+    await db.flush()
+    if row.is_pinned:
+        await _enforce_pinned_budget(db, user_id, keep_id=row.id)
     await db.commit()
     await db.refresh(row)
     return _serialize_entry(row, collection_name=col.name)
@@ -598,17 +651,15 @@ async def update_entry(
     db: AsyncSession,
     user_id: uuid.UUID,
     entry_id: str,
-    raw_content: str,
+    raw_content: str | None = None,
     *,
     new_target: str | None = None,
     new_collection_id: str | None = None,
     title: str | None = None,
     tags: list[str] | None = None,
+    is_pinned: bool | None = None,
+    priority: int | None = None,
 ) -> dict[str, Any]:
-    content = _sanitize_entry_text(raw_content)
-    if not content:
-        raise MemoryServiceError("记忆内容不能为空", 400)
-
     try:
         entry_uuid = uuid.UUID(str(entry_id))
     except ValueError as exc:
@@ -622,6 +673,10 @@ async def update_entry(
     if row is None:
         raise MemoryServiceError("记忆条目不存在", 404)
 
+    content = _sanitize_entry_text(raw_content) if raw_content is not None else row.content
+    if not content:
+        raise MemoryServiceError("记忆内容不能为空", 400)
+
     if new_collection_id is not None or new_target is not None:
         dest_col = await _resolve_collection(
             db,
@@ -634,33 +689,51 @@ async def update_entry(
     else:
         dest_col = await _resolve_collection(db, user_id, target=row.target)
 
-    dest_rows = await _collection_rows(db, user_id, dest_col)
-    for other in dest_rows:
-        if other.id != row.id and other.content == content:
-            raise MemoryServiceError("目标记忆集中已存在相同的记忆条目", 409)
+    content_changed = (
+        content != row.content
+        or dest_col.id != row.collection_id
+        or (title is not None and _sanitize_title(title) != (row.title or ""))
+        or (tags is not None and _sanitize_tags(tags) != list(row.tags or []))
+    )
 
-    if row.collection_id == dest_col.id or (row.collection_id is None and row.target == dest_col.slug):
-        next_texts = [content if r.id == row.id else r.content for r in dest_rows]
-    else:
-        next_texts = [r.content for r in dest_rows] + [content]
-    _check_collection_limits(dest_col, next_texts)
-    if await _total_user_chars(db, user_id, exclude_id=row.id) + len(content) > TOTAL_CHAR_LIMIT:
-        raise MemoryServiceError(f"超出全部记忆总字符上限（{TOTAL_CHAR_LIMIT} 字符）", 400)
+    if content_changed:
+        dest_rows = await _collection_rows(db, user_id, dest_col)
+        for other in dest_rows:
+            if other.id != row.id and other.content == content:
+                raise MemoryServiceError("目标记忆集中已存在相同的记忆条目", 409)
 
-    next_title = _sanitize_title(title) if title is not None else (getattr(row, "title", "") or "")
-    next_tags = _sanitize_tags(tags) if tags is not None else list(getattr(row, "tags", None) or [])
+        if row.collection_id == dest_col.id or (row.collection_id is None and row.target == dest_col.slug):
+            next_texts = [content if r.id == row.id else r.content for r in dest_rows]
+        else:
+            next_texts = [r.content for r in dest_rows] + [content]
+        _check_collection_limits(dest_col, next_texts)
+        if await _total_user_chars(db, user_id, exclude_id=row.id) + len(content) > TOTAL_CHAR_LIMIT:
+            raise MemoryServiceError(f"超出全部记忆总字符上限（{TOTAL_CHAR_LIMIT} 字符）", 400)
 
-    vec = await _optional_embed(_embed_text_for_entry(dest_col.name, next_title, content, next_tags))
-    tsv_text = _tsv_text_for_entry(next_title, content, next_tags)
+        next_title = _sanitize_title(title) if title is not None else (getattr(row, "title", "") or "")
+        next_tags = _sanitize_tags(tags) if tags is not None else list(getattr(row, "tags", None) or [])
 
-    row.collection_id = dest_col.id
-    row.target = dest_col.slug
-    row.title = next_title
-    row.content = content
-    row.tags = next_tags
-    row.source = "manual"
-    row.search_tsv = func.to_tsvector("simple", tsv_text)
-    row.embedding = vec
+        vec = await _optional_embed(_embed_text_for_entry(dest_col.name, next_title, content, next_tags))
+        tsv_text = _tsv_text_for_entry(next_title, content, next_tags)
+
+        row.collection_id = dest_col.id
+        row.target = dest_col.slug
+        row.title = next_title
+        row.content = content
+        row.tags = next_tags
+        row.source = "manual"
+        row.search_tsv = func.to_tsvector("simple", tsv_text)
+        row.embedding = vec
+        row.embedding_model = embeddings.current_embedding_model_tag() or None if vec is not None else None
+
+    if is_pinned is not None:
+        row.is_pinned = bool(is_pinned)
+    if priority is not None:
+        row.priority = max(1, min(3, int(priority)))
+
+    await db.flush()
+    if row.is_pinned:
+        await _enforce_pinned_budget(db, user_id, keep_id=row.id)
     await db.commit()
     await db.refresh(row)
     return _serialize_entry(row, collection_name=dest_col.name)
@@ -800,6 +873,7 @@ async def resolve_pending(
                         source="agent",
                         search_tsv=func.to_tsvector("simple", tsv_text),
                         embedding=vec,
+                        embedding_model=embeddings.current_embedding_model_tag() or None if vec is not None else None,
                     )
                 )
         else:
@@ -837,6 +911,61 @@ async def resolve_pending(
 
     await db.delete(proposal)
     await db.commit()
+
+
+async def build_pinned_memory_prompt(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    max_items: int = PINNED_MAX_ENTRIES,
+    max_chars: int = PINNED_MAX_CHARS,
+) -> str:
+    """Build L0 Always-On Core Memory block (strictly bounded, KV-prefix-cache friendly, never needs RAG)."""
+    cols = await ensure_default_collections(db, user_id)
+    enabled_cols = {c.id: c for c in cols if c.enabled}
+    enabled_slugs = {c.slug: c for c in cols if c.enabled}
+    if not enabled_cols:
+        return ""
+
+    rows = list(
+        (
+            await db.execute(
+                select(MemoryEntry)
+                .where(MemoryEntry.user_id == user_id, MemoryEntry.is_pinned.is_(True))
+                .order_by(
+                    MemoryEntry.priority.asc(),
+                    MemoryEntry.updated_at.desc(),
+                )
+                .limit(max_items * 2)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return ""
+
+    lines: list[str] = []
+    used = 0
+    for row in rows:
+        col = enabled_cols.get(row.collection_id) if row.collection_id else enabled_slugs.get(normalize_slug(row.target))
+        if col is None:
+            continue
+        title = (getattr(row, "title", "") or "").strip()
+        content = " ".join((row.content or "").split()).strip()
+        if not content:
+            continue
+        if len(content) > 220:
+            content = content[:219].rstrip() + "…"
+        prefix = f"[{col.name}] {title}：" if title else f"[{col.name}] "
+        line = f"- {prefix}{content}"
+        if lines and used + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        used += len(line) + 1
+        if len(lines) >= max_items:
+            break
+    return "\n".join(lines)
 
 
 async def build_memory_index_prompt(
@@ -905,147 +1034,43 @@ async def search_entries_rag(
     collection: str | None = None,
     limit: int = 12,
 ) -> list[dict[str, Any]]:
-    """Hybrid RAG search over memory_entries (pgvector + FTS + pg_trgm/ILIKE + RRF)."""
+    """Hybrid RAG search over memory_entries powered by shared UnifiedKnowledgeRetriever (3-leg + RRF + Rerank + MMR)."""
+    from whitz_rag import UnifiedKnowledgeRetriever
+
     cleaned = (query or "").strip()
     if not cleaned:
         return []
 
-    cols = await ensure_default_collections(db, user_id)
-    col_by_id = {c.id: c for c in cols}
-    col_by_slug = {c.slug: c for c in cols}
+    await ensure_default_collections(db, user_id)
     target_slug = normalize_slug(collection) if collection else None
-
     await detect_pgvector(db)
-    scores: dict[str, float] = {}
-    records: dict[str, dict[str, Any]] = {}
-    rrf_k = 60
-    pool_limit = max(limit * 3, 24)
-    like_pat = f"%{cleaned.replace(chr(92), chr(92) * 2).replace('%', chr(92) + '%').replace('_', chr(92) + '_')}%"
 
-    col_filter_sql = "AND (mc.slug = :slug OR (me.collection_id IS NULL AND me.target = :slug))" if target_slug else "AND (mc.enabled IS NULL OR mc.enabled = true)"
-    base_params: dict[str, Any] = {"uid": user_id, "lim": pool_limit}
-    if target_slug:
-        base_params["slug"] = target_slug
-
-    def _accumulate(rows: list[Any], weight: float) -> None:
-        for rank, r in enumerate(rows, 1):
-            eid = str(r[0])
-            scores[eid] = scores.get(eid, 0.0) + weight / (rrf_k + rank)
-            if eid not in records:
-                cid = r[1]
-                slug = str(r[2] or "memory")
-                col_obj = col_by_id.get(cid) if cid else col_by_slug.get(slug)
-                records[eid] = {
-                    "id": eid,
-                    "collection_id": str(cid) if cid else (str(col_obj.id) if col_obj else None),
-                    "target": col_obj.slug if col_obj else slug,
-                    "collection_name": col_obj.name if col_obj else slug,
-                    "title": str(r[3] or ""),
-                    "content": str(r[4] or ""),
-                    "tags": list(r[5] or []),
-                    "source": str(r[6] or "manual"),
-                }
-
-    # Leg 1: Vector HNSW
-    if embeddings.is_embedding_configured() and is_pgvector_enabled():
-        q_vecs = await embeddings.embed_texts([cleaned[:1000]])
-        q_vec = q_vecs[0] if q_vecs else None
-        if q_vec:
-            vec_lit = "[" + ",".join(f"{float(v):.8f}" for v in q_vec) + "]"
-            try:
-                async with db.begin_nested():
-                    res = await db.execute(
-                        text(
-                            f"""
-                            SELECT me.id, me.collection_id, me.target, me.title, me.content, me.tags, me.source
-                            FROM memory_entries me
-                            LEFT JOIN memory_collections mc ON mc.id = me.collection_id
-                            WHERE me.user_id = :uid
-                              {col_filter_sql}
-                              AND me.embedding IS NOT NULL
-                              AND (me.embedding <=> CAST(:qvec AS vector)) < 0.72
-                            ORDER BY me.embedding <=> CAST(:qvec AS vector) ASC
-                            LIMIT :lim
-                            """
-                        ),
-                        {**base_params, "qvec": vec_lit},
-                    )
-                    _accumulate(list(res.fetchall()), 1.3)
-            except Exception as exc:
-                logger.debug("Memory RAG vector leg skipped: %s", exc)
-
-    # Leg 2: PostgreSQL FTS
-    try:
-        async with db.begin_nested():
-            res = await db.execute(
-                text(
-                    f"""
-                    SELECT me.id, me.collection_id, me.target, me.title, me.content, me.tags, me.source
-                    FROM memory_entries me
-                    LEFT JOIN memory_collections mc ON mc.id = me.collection_id
-                    WHERE me.user_id = :uid
-                      {col_filter_sql}
-                      AND me.search_tsv @@ plainto_tsquery('simple', :q)
-                    ORDER BY ts_rank_cd(me.search_tsv, plainto_tsquery('simple', :q)) DESC, me.updated_at DESC
-                    LIMIT :lim
-                    """
-                ),
-                {**base_params, "q": cleaned},
-            )
-            _accumulate(list(res.fetchall()), 0.95)
-    except Exception as exc:
-        logger.debug("Memory RAG FTS leg skipped: %s", exc)
-
-    # Leg 3: pg_trgm CJK + ILIKE fallback
-    try:
-        async with db.begin_nested():
-            res = await db.execute(
-                text(
-                    f"""
-                    SELECT me.id, me.collection_id, me.target, me.title, me.content, me.tags, me.source
-                    FROM memory_entries me
-                    LEFT JOIN memory_collections mc ON mc.id = me.collection_id
-                    WHERE me.user_id = :uid
-                      {col_filter_sql}
-                      AND (
-                          me.content ILIKE :like_pat ESCAPE '\\'
-                          OR me.title ILIKE :like_pat ESCAPE '\\'
-                          OR word_similarity(:q, coalesce(me.title, '') || ' ' || me.content) >= 0.14
-                      )
-                    ORDER BY
-                        CASE WHEN me.title ILIKE :like_pat ESCAPE '\\' OR me.content ILIKE :like_pat ESCAPE '\\' THEN 0 ELSE 1 END,
-                        word_similarity(:q, coalesce(me.title, '') || ' ' || me.content) DESC,
-                        me.updated_at DESC
-                    LIMIT :lim
-                    """
-                ),
-                {**base_params, "q": cleaned, "like_pat": like_pat},
-            )
-            _accumulate(list(res.fetchall()), 0.9)
-    except Exception:
-        try:
-            async with db.begin_nested():
-                res = await db.execute(
-                    text(
-                        f"""
-                        SELECT me.id, me.collection_id, me.target, me.title, me.content, me.tags, me.source
-                        FROM memory_entries me
-                        LEFT JOIN memory_collections mc ON mc.id = me.collection_id
-                        WHERE me.user_id = :uid
-                          {col_filter_sql}
-                          AND (me.content ILIKE :like_pat ESCAPE '\\' OR me.title ILIKE :like_pat ESCAPE '\\')
-                        ORDER BY me.updated_at DESC
-                        LIMIT :lim
-                        """
-                    ),
-                    {**base_params, "like_pat": like_pat},
-                )
-                _accumulate(list(res.fetchall()), 0.9)
-        except Exception as exc:
-            logger.debug("Memory RAG ILIKE leg skipped: %s", exc)
-
-    ranked_ids = sorted(scores.keys(), key=lambda eid: scores[eid], reverse=True)[:limit]
-    return [{**records[eid], "score": round(scores[eid], 6)} for eid in ranked_ids]
+    retriever = UnifiedKnowledgeRetriever(
+        session=db,
+        embedding_client=embeddings.get_embedding_client(),
+        rerank_client=embeddings.get_rerank_client(),
+    )
+    items = await retriever.search_memories(
+        user_id=str(user_id),
+        query=cleaned,
+        collection=target_slug,
+        top_k=limit,
+        apply_rerank=True,
+    )
+    return [
+        {
+            "id": it.source_id,
+            "collection_id": it.metadata.get("collection_id"),
+            "target": str(it.metadata.get("collection") or "memory"),
+            "collection_name": str(it.metadata.get("collection_name") or it.title),
+            "title": it.title,
+            "content": it.content,
+            "tags": list(it.metadata.get("tags") or []),
+            "source": str(it.metadata.get("source") or "manual"),
+            "score": round(float(it.score), 6),
+        }
+        for it in items
+    ]
 
 
 async def get_overview(db: AsyncSession, user: User) -> dict[str, Any]:
@@ -1088,4 +1113,6 @@ async def get_overview(db: AsyncSession, user: User) -> dict[str, Any]:
         "total_char_count": total_chars,
         "total_char_limit": TOTAL_CHAR_LIMIT,
         "collection_limit": MAX_COLLECTIONS_PER_USER,
+        "pinned_count": sum(1 for e in entries if e.get("is_pinned")),
+        "pinned_limit": PINNED_MAX_ENTRIES,
     }

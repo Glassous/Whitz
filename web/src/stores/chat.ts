@@ -5,6 +5,7 @@ import { chatTicketHeaders } from "../api/chatTickets";
 import { streamSSE, streamSSEGet, type SSEEvent } from "../api/sse";
 import { createDeltaCoalescer } from "../lib/streamDeltaCoalescer";
 import type {
+  CitationItem,
   ClarifyDetail,
   ClarifyQuestionItem,
   ClarifySubmitPayload,
@@ -17,6 +18,8 @@ import type {
   PendingControl,
   Plan,
   PlanItem,
+  RagMode,
+  RagScope,
   ReasoningBlock,
   ScheduledTaskPendingItem,
   SkillPendingItem,
@@ -50,6 +53,34 @@ export const useChatStore = defineStore("chat", () => {
   const activeRunId = ref<string | null>(null);
   const plan = ref<Plan | null>(null);
   const reasoning = ref<ReasoningBlock[]>([]);
+  const citations = ref<CitationItem[]>([]);
+  const ragPrefetching = ref(false);
+  const RAG_MODE_STORAGE_KEY = "whitz_rag_mode";
+  function loadInitialRagMode(): RagMode {
+    if (typeof window === "undefined") return "auto";
+    const saved = window.localStorage.getItem(RAG_MODE_STORAGE_KEY);
+    return saved === "files_only" || saved === "off" || saved === "auto" ? saved : "auto";
+  }
+  const ragScope = ref<RagScope>({
+    mode: loadInitialRagMode(),
+    include_memory: true,
+    include_chats: true,
+  });
+  function setRagMode(mode: RagMode) {
+    ragScope.value = {
+      ...ragScope.value,
+      mode,
+      include_memory: mode === "auto",
+      include_chats: mode === "auto",
+    };
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(RAG_MODE_STORAGE_KEY, mode);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
   const pendingControl = ref<PendingControl | null>(null);
   const pendingMemory = ref<MemoryPendingItem[]>([]);
   const pendingSkills = ref<SkillPendingItem[]>([]);
@@ -406,6 +437,10 @@ export const useChatStore = defineStore("chat", () => {
     );
     reasoning.value = normalizeReasoning(lastReasoned?.tool_payload?.reasoning);
     const lastAssistant = detail.messages.findLast((m) => m.role === "assistant");
+    citations.value = Array.isArray(lastAssistant?.tool_payload?.citations)
+      ? [...lastAssistant.tool_payload.citations]
+      : [];
+    ragPrefetching.value = false;
     selectedTurnId.value = lastAssistant?.id ?? null;
     activeRunId.value = detail.active_run_id;
     lastEventId = null;
@@ -417,6 +452,7 @@ export const useChatStore = defineStore("chat", () => {
     error.value = null;
     streaming.value = false;
     waitingFirstByte.value = false;
+    ragPrefetching.value = false;
     stopping.value = false;
     reconnecting.value = false;
     approvingChoice.value = null;
@@ -442,6 +478,7 @@ export const useChatStore = defineStore("chat", () => {
     stableKeys.value = {};
     streaming.value = false;
     waitingFirstByte.value = false;
+    ragPrefetching.value = false;
     stopping.value = false;
     reconnecting.value = false;
     approvingChoice.value = null;
@@ -451,6 +488,7 @@ export const useChatStore = defineStore("chat", () => {
     lastEventId = null;
     plan.value = null;
     reasoning.value = [];
+    citations.value = [];
     selectedTurnId.value = null;
     pendingControl.value = null;
     pendingMemory.value = [];
@@ -476,12 +514,27 @@ export const useChatStore = defineStore("chat", () => {
     return block;
   }
 
+  function mergeCitations(incoming: unknown) {
+    if (!Array.isArray(incoming) || !incoming.length) return;
+    const next = [...citations.value];
+    for (const raw of incoming) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw as CitationItem;
+      if (!item.citation_id) continue;
+      const idx = next.findIndex((c) => c.citation_id === item.citation_id);
+      if (idx >= 0) next[idx] = { ...next[idx], ...item };
+      else next.push(item);
+    }
+    citations.value = next;
+  }
+
   function syncTurnToMessage() {
     const a = assistant();
     if (!a) return;
     const payload = { ...(a.tool_payload ?? {}) };
     payload.reasoning = reasoning.value.map((b) => ({ ...b }));
     if (plan.value) payload.plan = plan.value;
+    if (citations.value.length) payload.citations = citations.value.map((c) => ({ ...c }));
     a.tool_payload = payload;
   }
 
@@ -671,6 +724,10 @@ export const useChatStore = defineStore("chat", () => {
             }
           }
         }
+        if (Array.isArray(d.citations)) {
+          citations.value = [];
+          mergeCitations(d.citations);
+        }
         if (d.pending_control) {
           hydratePendingControl(d.pending_control);
         } else if (Array.isArray(d.pending_controls) && d.pending_controls.length) {
@@ -733,7 +790,14 @@ export const useChatStore = defineStore("chat", () => {
         break;
       }
       case "message.interim":
+        break;
       case "graph.node":
+        ragPrefetching.value = d.node === "rag_prefetch";
+        break;
+      case "rag.context":
+        ragPrefetching.value = false;
+        mergeCitations(d.citations);
+        syncTurnToMessage();
         break;
       case "tool.started": {
         const rawArgs = stringifyToolVal(d.args ?? d.preview);
@@ -857,6 +921,10 @@ export const useChatStore = defineStore("chat", () => {
             }
           }
         }
+        if (Array.isArray(d.citations) && d.citations.length) {
+          citations.value = [];
+          mergeCitations(d.citations);
+        }
         if (Array.isArray(d.reasoning)) reasoning.value = normalizeReasoning(d.reasoning);
         if (d.plan) plan.value = d.plan;
         syncTurnToMessage();
@@ -882,6 +950,7 @@ export const useChatStore = defineStore("chat", () => {
         if (a) a.status = "cancelled";
         if (Array.isArray(d.reasoning)) reasoning.value = normalizeReasoning(d.reasoning);
         if (d.plan) plan.value = d.plan;
+        if (Array.isArray(d.citations)) mergeCitations(d.citations);
         syncTurnToMessage();
         finishRun();
         break;
@@ -903,6 +972,7 @@ export const useChatStore = defineStore("chat", () => {
     deltaCoalescer.clear();
     streaming.value = false;
     waitingFirstByte.value = false;
+    ragPrefetching.value = false;
     stopping.value = false;
     reconnecting.value = false;
     approvingChoice.value = null;
@@ -1108,6 +1178,8 @@ export const useChatStore = defineStore("chat", () => {
     if (!convId.value || streaming.value) return;
     error.value = null;
     reasoning.value = [];
+    citations.value = [];
+    ragPrefetching.value = false;
     plan.value = null;
     pendingControl.value = null;
     pendingUserTargetId = null;
@@ -1124,7 +1196,7 @@ export const useChatStore = defineStore("chat", () => {
       created_at: new Date().toISOString(),
     });
     pushAssistantPlaceholder();
-    const body: Record<string, unknown> = { content };
+    const body: Record<string, unknown> = { content, rag_scope: { ...ragScope.value } };
     if (fileIds.length) body.file_ids = fileIds;
     if (skillNames.length) body.skill_names = skillNames;
     await streamTurn(`/conversations/${convId.value}/messages`, body, "发送失败");
@@ -1172,12 +1244,18 @@ export const useChatStore = defineStore("chat", () => {
 
     error.value = null;
     reasoning.value = [];
+    citations.value = [];
+    ragPrefetching.value = false;
     plan.value = null;
     pendingControl.value = null;
     pendingUserTargetId = null;
     messages.value = messages.value.slice(0, prevUserIdx >= 0 ? prevUserIdx + 1 : idx);
     pushAssistantPlaceholder();
-    await streamTurn(`/conversations/${convId.value}/messages/${assistantMessageId}/regenerate`, {}, "重新生成失败");
+    await streamTurn(
+      `/conversations/${convId.value}/messages/${assistantMessageId}/regenerate`,
+      { rag_scope: { ...ragScope.value } },
+      "重新生成失败",
+    );
   }
 
   async function editAndResend(
@@ -1198,6 +1276,8 @@ export const useChatStore = defineStore("chat", () => {
 
     error.value = null;
     reasoning.value = [];
+    citations.value = [];
+    ragPrefetching.value = false;
     plan.value = null;
     pendingControl.value = null;
     pendingUserTargetId = userMessageId;
@@ -1216,7 +1296,7 @@ export const useChatStore = defineStore("chat", () => {
     const fileIds = attachedFiles.map((f) => f.id);
     await streamTurn(
       `/conversations/${convId.value}/messages/${userMessageId}/edit`,
-      { content, file_ids: fileIds, skill_names: skillNames },
+      { content, file_ids: fileIds, skill_names: skillNames, rag_scope: { ...ragScope.value } },
       "保存并重发失败",
     );
   }
@@ -1417,8 +1497,8 @@ export const useChatStore = defineStore("chat", () => {
 
   return {
     convId, messages, stableKeys, stableKeyOf, latestTurnTriggerSeq,
-    streaming, waitingFirstByte, stopping, reconnecting, approvingChoice, submittingClarify,
-    activeAssistantId, activeRunId, plan, reasoning, currentStep, runningTool,
+    streaming, waitingFirstByte, ragPrefetching, stopping, reconnecting, approvingChoice, submittingClarify,
+    activeAssistantId, activeRunId, plan, reasoning, citations, ragScope, setRagMode, currentStep, runningTool,
     selectedTurnId, selectedTurn, assistantTurns, viewPlan, viewReasoning, viewStreaming, viewCurrentStep,
     viewRunningTool, selectTurn,
     pendingControl, pendingMemory, pendingSkills, pendingSchedules, error,

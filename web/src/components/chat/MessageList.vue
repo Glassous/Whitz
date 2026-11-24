@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from "vue";
-import type { ConversationFile, DeliverableTarget, Message } from "../../types";
+import type { CitationItem, ConversationFile, DeliverableTarget, Message } from "../../types";
 import { useChatStore } from "../../stores/chat";
 import { useSmartStreamScroll } from "../../composables/useSmartStreamScroll";
 import MessageBubble from "./MessageBubble.vue";
@@ -21,6 +21,7 @@ const emit = defineEmits<{
   "open-deliverable": [target: DeliverableTarget];
   "open-lightbox": [file: ConversationFile, siblings: ConversationFile[]];
   "download-file": [file: ConversationFile];
+  "open-citation": [citation: CitationItem];
 }>();
 
 const TOP_CLEARANCE = 88;
@@ -257,6 +258,7 @@ defineExpose({
           @open-deliverable="emit('open-deliverable', $event)"
           @open-lightbox="(f, list) => emit('open-lightbox', f, list)"
           @download-file="emit('download-file', $event)"
+          @open-citation="emit('open-citation', $event)"
         />
       </div>
       <div

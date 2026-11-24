@@ -159,6 +159,9 @@ export interface ConversationFile {
   status: "pending" | "ready" | "failed" | string;
   index_status?: "pending" | "indexing" | "ready" | "partial" | "failed" | string;
   indexed_chunks?: number;
+  summary?: string;
+  index_error?: string | null;
+  indexed_at?: string | null;
   source: "user" | "assistant" | string;
   is_global: boolean;
   message_id?: string | null;
@@ -236,6 +239,91 @@ export type PreviewTarget =
       title?: string;
     };
 
+export type RagMode = "auto" | "files_only" | "off";
+
+export interface RagScope {
+  mode: RagMode;
+  include_memory: boolean;
+  include_chats: boolean;
+  file_ids?: string[];
+  collections?: string[];
+}
+
+export interface CitationItem {
+  citation_id: string;
+  source_type: "file" | "memory" | "chat_digest" | "chat_turn" | string;
+  source_id: string;
+  chunk_id?: string | null;
+  title: string;
+  subtitle?: string;
+  snippet: string;
+  score?: number;
+  confidence?: "high" | "medium" | "low" | string;
+  metadata?: Record<string, any>;
+}
+
+export interface UnifiedFileSearchHit {
+  type: "file";
+  file_id: string;
+  filename: string;
+  locator: string;
+  section_path?: string;
+  chunk_type?: string;
+  snippet: string;
+  score: number;
+  confidence?: string;
+  conversation_id?: string | null;
+}
+
+export interface UnifiedMemorySearchHit {
+  type: "memory";
+  entry_id: string;
+  title: string;
+  collection: string;
+  collection_name: string;
+  tags: string[];
+  snippet: string;
+  content: string;
+  score: number;
+  confidence?: string;
+  timestamp?: string | null;
+}
+
+export interface UnifiedChatSearchHit {
+  type: "chat";
+  match_in: "digest" | "semantic_turn" | "message" | "title" | string;
+  conversation_id: string;
+  conversation_kind?: ConversationKind | string;
+  conversation_title: string;
+  message_id?: string | null;
+  role?: "user" | "assistant" | null;
+  snippet: string;
+  score: number;
+  confidence?: string;
+  created_at?: string | null;
+}
+
+export interface UnifiedSearchResponse {
+  query: string;
+  files: UnifiedFileSearchHit[];
+  memories: UnifiedMemorySearchHit[];
+  chats: UnifiedChatSearchHit[];
+  total: number;
+  diagnostics?: Record<string, any>;
+}
+
+export interface LibraryContentSearchHit {
+  file_id: string;
+  filename: string;
+  locator: string;
+  section_path?: string;
+  chunk_type?: string;
+  snippet: string;
+  content: string;
+  score: number;
+  confidence?: string;
+}
+
 export interface ToolPayload {
   call_id?: string | null;
   args?: unknown;
@@ -250,6 +338,8 @@ export interface ToolPayload {
   attachments?: FileAttachmentMeta[];
   skills?: string[];
   artifacts?: WorkspaceArtifactMeta[];
+  citations?: CitationItem[];
+  rag_metrics?: Record<string, any> | null;
 }
 
 export type UserReactionType = "like" | "love" | "insightful" | "celebrate" | "dislike";
@@ -399,9 +489,60 @@ export interface MemoryEntry {
   target?: string;
   category?: string | null;
   source?: "user" | "assistant" | "agent" | "manual" | string;
+  is_pinned?: boolean;
+  priority?: number;
+  access_count?: number;
+  last_accessed_at?: string | null;
+  supersedes_id?: string | null;
   char_count?: number;
   created_at?: string | null;
   updated_at?: string | null;
+}
+
+export interface ConversationWorkingGoal {
+  title: string;
+  status: "in_progress" | "blocked" | "pending" | string;
+  updated?: string;
+}
+
+export interface ConversationWorkingDecision {
+  decision: string;
+  date?: string;
+  reason?: string;
+}
+
+export interface ConversationWorkingState {
+  active_goals: ConversationWorkingGoal[];
+  recent_decisions: ConversationWorkingDecision[];
+  open_questions: string[];
+  key_entities: Record<string, string>;
+}
+
+export interface ConversationEpisodeItem {
+  id: string;
+  conversation_id: string;
+  conversation_kind: string;
+  episode_index: number;
+  topic: string;
+  summary: string;
+  key_facts: string[];
+  entities: string[];
+  start_msg_id?: string | null;
+  end_msg_id?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  message_count: number;
+  created_at?: string | null;
+}
+
+export interface ConversationContextState {
+  conversation_id: string;
+  conversation_kind: string;
+  working_state: ConversationWorkingState | null;
+  rolling_summary?: string | null;
+  working_state_updated_at?: string | null;
+  episodes: ConversationEpisodeItem[];
+  pinned_memories_count: number;
 }
 
 export interface MemorySearchHit {
@@ -459,6 +600,8 @@ export interface MemoryOverview {
   total_char_count?: number;
   total_char_limit?: number;
   collection_limit?: number;
+  pinned_count?: number;
+  pinned_limit?: number;
 }
 
 export interface UserSessionItem {

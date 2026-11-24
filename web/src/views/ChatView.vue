@@ -8,7 +8,7 @@ import { useCreditsStore } from "../stores/credits";
 import { useFilesStore } from "../stores/files";
 import { useRealtimeStore } from "../stores/realtime";
 import { api } from "../api/client";
-import type { AgentStatus, ConversationFile, DeliverableTarget, PreviewTarget, TaskPanelTab } from "../types";
+import type { AgentStatus, CitationItem, ConversationFile, DeliverableTarget, PreviewTarget, TaskPanelTab } from "../types";
 import ConversationSidebar from "../components/chat/ConversationSidebar.vue";
 import MessageList from "../components/chat/MessageList.vue";
 import ScrollToBottomButton from "../components/ui/ScrollToBottomButton.vue";
@@ -20,6 +20,7 @@ import MemoryPendingCard from "../components/chat/MemoryPendingCard.vue";
 import SkillPendingCard from "../components/chat/SkillPendingCard.vue";
 import SchedulePendingCard from "../components/chat/SchedulePendingCard.vue";
 import SearchModal from "../components/chat/SearchModal.vue";
+import ContextStateModal from "../components/chat/ContextStateModal.vue";
 import DeliverableModal from "../components/chat/DeliverableModal.vue";
 import ImageLightboxModal from "../components/chat/ImageLightboxModal.vue";
 import LibraryPanel from "../components/settings/LibraryPanel.vue";
@@ -139,6 +140,7 @@ function onWindowResize() {
   panelWidth.value = clampPanelWidth(panelWidth.value);
 }
 const searchOpen = ref(false);
+const contextStateOpen = ref(false);
 const focusMessageId = ref<string | null>(null);
 let pollTimer: number | null = null;
 
@@ -355,6 +357,61 @@ async function onSelectFromSearch(conversationId: string, messageId: string | nu
   }
   showPlan.value = true;
   focusMessageId.value = messageId;
+}
+
+function buildSyntheticFile(fileId: string, filename: string, conversationId: string | null): ConversationFile {
+  const existing = filesStore.files.find((f) => f.id === fileId);
+  if (existing) return existing;
+  const dotIdx = filename.lastIndexOf(".");
+  const ext = dotIdx >= 0 ? filename.slice(dotIdx).toLowerCase() : "";
+  const category =
+    ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".webp" || ext === ".gif"
+      ? "image"
+      : ext === ".xlsx" || ext === ".csv" || ext === ".tsv"
+        ? "spreadsheet"
+        : ext === ".py" || ext === ".ts" || ext === ".js" || ext === ".json" || ext === ".vue"
+          ? "code"
+          : "document";
+  return {
+    id: fileId,
+    conversation_id: conversationId,
+    filename: filename || "资料文件",
+    ext,
+    mime_type: "",
+    category,
+    size_bytes: 0,
+    status: "ready",
+    source: "user",
+    is_global: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function onSelectFileFromSearch(fileId: string, filename: string, conversationId: string | null) {
+  activeView.value = "chat";
+  onPreviewFile(buildSyntheticFile(fileId, filename, conversationId));
+}
+
+function onSelectMemoryFromSearch() {
+  void router.push({ path: "/settings" });
+}
+
+async function onOpenCitation(citation: CitationItem) {
+  const meta = citation.metadata ?? {};
+  if (citation.source_type === "file") {
+    const fileId = String(meta.file_id || citation.source_id || "").trim();
+    const filename = String(meta.filename || citation.title || "资料文件").trim();
+    if (!fileId) return;
+    onPreviewFile(buildSyntheticFile(fileId, filename, meta.conversation_id ?? null));
+    return;
+  }
+  if (citation.source_type === "chat_digest" || citation.source_type === "chat_turn") {
+    const targetConvId = String(meta.conversation_id || citation.source_id || "").trim();
+    if (!targetConvId) return;
+    const msgId = meta.message_id ? String(meta.message_id) : null;
+    await onSelectFromSearch(targetConvId, msgId);
+  }
 }
 
 async function onRename(id: string, title: string) {
@@ -977,6 +1034,19 @@ onBeforeUnmount(() => {
             </svg>
             <span>定时</span>
           </span>
+          <button
+            v-if="activeView === 'chat' && conversations.current?.id"
+            type="button"
+            class="focus-ring pointer-events-auto inline-flex shrink-0 items-center gap-1 rounded-full bg-surface/85 px-2.5 py-1 text-[11.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+            title="查看或修正当前对话的 L0/L1/L2 上下文记忆状态与归档时间线"
+            @click="contextStateOpen = true"
+          >
+            <svg class="h-3.5 w-3.5 shrink-0 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3c-4.97 0-9 2.24-9 5v8c0 2.76 4.03 5 9 5s9-2.24 9-5V8c0-2.76-4.03-5-9-5z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 12c0 2.76 4.03 5 9 5s9-2.24 9-5" />
+            </svg>
+            <span class="hidden sm:inline">记忆状态</span>
+          </button>
         </div>
 
         <div class="relative min-h-0 flex-1">
@@ -997,6 +1067,7 @@ onBeforeUnmount(() => {
             @open-deliverable="onOpenDeliverable"
             @open-lightbox="onOpenLightbox"
             @download-file="onDownloadFile"
+            @open-citation="onOpenCitation"
           />
 
           <div v-else v-scrollbar class="custom-scrollbar h-full overflow-y-auto">
@@ -1138,6 +1209,7 @@ onBeforeUnmount(() => {
             <ChatInput
               ref="chatInputRef"
               v-model:selected-skills="selectedSkills"
+              :rag-mode="chat.ragScope.mode"
               :streaming="chat.streaming"
               :sending="sendingMessage || chat.waitingFirstByte"
               :stopping="chat.stopping"
@@ -1147,6 +1219,7 @@ onBeforeUnmount(() => {
               :attached-files="filesStore.attachedFiles"
               :workspace-files="filesStore.files"
               :assistant-name="assistantName"
+              @update:rag-mode="chat.setRagMode"
               @send="onSend"
               @stop="chat.stop"
               @upload="(files, dt) => onUploadFiles(files, dt, false)"
@@ -1313,6 +1386,16 @@ onBeforeUnmount(() => {
       :conversations="conversations.conversations"
       @close="searchOpen = false"
       @select="onSelectFromSearch"
+      @select-file="onSelectFileFromSearch"
+      @select-memory="onSelectMemoryFromSearch"
+    />
+    <ContextStateModal
+      :open="contextStateOpen"
+      :conversation-id="conversations.current?.id ?? null"
+      :conversation-title="headerTitle"
+      @close="contextStateOpen = false"
+      @jump-message="(msgId) => { contextStateOpen = false; focusMessageId = msgId; }"
+      @open-memory-settings="() => { contextStateOpen = false; router.push({ path: '/settings' }); }"
     />
     <DeliverableModal
       :target="deliverableTarget"

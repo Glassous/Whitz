@@ -8,12 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
+COPY agent/pyproject.toml ./
 RUN uv pip install --system -r pyproject.toml
 
-COPY app ./app
-COPY evals ./evals
-COPY entrypoint.sh ./
+COPY shared/whitz_rag ./whitz_rag
+COPY agent/app ./app
+COPY agent/evals ./evals
+COPY agent/entrypoint.sh ./
 RUN chmod +x entrypoint.sh \
     && groupadd -g 1000 whitz \
     && useradd -u 1000 -g 1000 -m -s /bin/sh whitz \

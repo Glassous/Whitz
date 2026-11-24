@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ACCEPT_ATTR, SUPPORTED_TYPES_SUMMARY, categoryLabel, formatFileSize, validateDragItems } from "../../lib/fileTypes";
 import { isImageExt, serializeFileToken } from "../../lib/fileTokens";
-import type { ConversationFile, UploadTask } from "../../types";
+import type { ConversationFile, RagMode, UploadTask } from "../../types";
 import SkillPickerPopover from "./SkillPickerPopover.vue";
 
 const props = defineProps<{
@@ -15,6 +15,7 @@ const props = defineProps<{
   attachedFiles?: ConversationFile[];
   workspaceFiles?: ConversationFile[];
   selectedSkills?: string[];
+  ragMode?: RagMode;
   assistantName?: string;
 }>();
 
@@ -28,7 +29,33 @@ const emit = defineEmits<{
   "dismiss-upload": [localId: string];
   "detach-file": [fileId: string];
   "update:selectedSkills": [skills: string[]];
+  "update:ragMode": [mode: RagMode];
 }>();
+
+const RAG_MODE_META: Record<RagMode, { label: string; title: string; next: RagMode }> = {
+  auto: {
+    label: "智能融合",
+    title: "RAG 模式：智能融合（自动检索资料库 + 记忆 + 历史对话）— 点击切换",
+    next: "files_only",
+  },
+  files_only: {
+    label: "严选资料",
+    title: "RAG 模式：严选资料（仅严格基于已上传资料回答，防幻觉）— 点击切换",
+    next: "off",
+  },
+  off: {
+    label: "关闭检索",
+    title: "RAG 模式：关闭自动检索（仅按需手动调用工具）— 点击切换",
+    next: "auto",
+  },
+};
+
+const currentRagMode = computed<RagMode>(() => props.ragMode ?? "auto");
+const currentRagMeta = computed(() => RAG_MODE_META[currentRagMode.value]);
+
+function cycleRagMode() {
+  emit("update:ragMode", currentRagMeta.value.next);
+}
 
 const NORMAL_MAX_HEIGHT = 160;
 
@@ -965,6 +992,44 @@ onBeforeUnmount(() => {
             >
               {{ selectedSkills.length }}
             </span>
+          </button>
+
+          <button
+            type="button"
+            class="focus-ring flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-full px-2.5 text-[12.5px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            :class="
+              currentRagMode === 'files_only'
+                ? 'bg-accent-weak/90 text-accent'
+                : currentRagMode === 'off'
+                  ? 'bg-canvas/70 text-fg-faint hover:bg-hover hover:text-fg'
+                  : 'text-fg-muted hover:bg-hover hover:text-fg'
+            "
+            :disabled="disabled"
+            :aria-label="currentRagMeta.title"
+            :title="currentRagMeta.title"
+            @click="cycleRagMode"
+          >
+            <svg class="h-[16px] w-[16px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+              <path
+                v-if="currentRagMode === 'off'"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M3 3l18 18M10.6 10.6a3 3 0 004.24 4.24M9.5 4.2A7 7 0 0118 11c0 1.4-.4 2.7-1.1 3.8M6.1 6.1A7 7 0 004 11a7 7 0 009.9 6.4"
+              />
+              <path
+                v-else-if="currentRagMode === 'files_only'"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6M9 14l2 2 4-4"
+              />
+              <path
+                v-else
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M12 2a7 7 0 00-4 12.7V17a1 1 0 001 1h6a1 1 0 001-1v-2.3A7 7 0 0012 2zM9 21h6"
+              />
+            </svg>
+            <span class="hidden sm:inline">{{ currentRagMeta.label }}</span>
           </button>
 
           <span v-if="queuedSend && sendLockedByUpload" class="inline-flex items-center gap-1.5 text-[12px] text-accent">

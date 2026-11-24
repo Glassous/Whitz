@@ -16,9 +16,11 @@ from app.graph.state import SubagentState
 from app.tools import parse_tool_error
 from app.tools.builtin_tools import (
     http_request,
+    knowledge_search,
     memory_list,
     memory_search,
     rag_search_workspace,
+    search_chat_history,
     skill_view,
     web_extract,
     web_search,
@@ -56,6 +58,7 @@ def _select_subagent_tools(role: str, config: RunnableConfig) -> list[BaseTool]:
     mcp_tools: list[BaseTool] = list(cfg.get("mcp_tools") or [])
     allowed_mcp = _CODER_ALLOWED_MCP if role == "coder" else _RESEARCHER_ALLOWED_MCP
     base: list[BaseTool] = [
+        knowledge_search,
         rag_search_workspace,
         web_search,
         web_extract,
@@ -63,7 +66,7 @@ def _select_subagent_tools(role: str, config: RunnableConfig) -> list[BaseTool]:
         skill_view,
     ]
     if role != "coder":
-        base.extend([memory_search, memory_list])
+        base.extend([memory_search, memory_list, search_chat_history])
     for t in mcp_tools:
         if t.name in allowed_mcp:
             base.append(t)

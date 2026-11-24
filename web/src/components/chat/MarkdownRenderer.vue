@@ -4,13 +4,18 @@ import MarkdownIt, { type StateBlock, type StateInline, type Token } from "markd
 import hljs from "highlight.js/lib/common";
 import katex from "katex";
 
-import type { DeliverableTarget } from "../../types";
+import type { CitationItem, DeliverableTarget } from "../../types";
 
-const props = defineProps<{ content: string; streaming?: boolean }>();
+const props = defineProps<{
+  content: string;
+  streaming?: boolean;
+  citations?: CitationItem[];
+}>();
 
 const emit = defineEmits<{
   "preview-html": [html: string];
   "open-deliverable": [target: DeliverableTarget];
+  "open-citation": [citationId: string];
 }>();
 
 const containerRef = ref<HTMLElement | null>(null);
@@ -294,10 +299,43 @@ const md: MarkdownIt = new MarkdownIt({
   },
 });
 
+function parseCitationInline(state: StateInline, silent: boolean): boolean {
+  const pos = state.pos;
+  const src = state.src;
+  if (src.charCodeAt(pos) !== 0x5b /* [ */ || src.charCodeAt(pos + 1) !== 0x5b /* [ */) {
+    return false;
+  }
+  const rest = src.slice(pos, Math.min(state.posMax, pos + 64));
+  const match = /^\[\[cite:([A-Za-z]\d+(?:\s*,\s*[A-Za-z]\d+)*)\]\]/i.exec(rest);
+  if (!match) return false;
+  if (!silent) {
+    const token = state.push("rag_citation", "", 0);
+    token.content = match[1];
+  }
+  state.pos = pos + match[0].length;
+  return true;
+}
+
 md.block.ruler.after("blockquote", "math_block", parseMathBlock, {
   alt: ["paragraph", "reference", "blockquote", "list"],
 });
 md.inline.ruler.before("escape", "math_inline", parseMathInline);
+md.inline.ruler.before("link", "rag_citation", parseCitationInline);
+
+md.renderer.rules.rag_citation = (tokens: Token[], idx: number) => {
+  const rawIds = tokens[idx].content
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+  return rawIds
+    .map((cid) => {
+      const num = cid.replace(/^[A-Z]+/i, "") || cid;
+      const safeId = md.utils.escapeHtml(cid);
+      const safeNum = md.utils.escapeHtml(num);
+      return `<button type="button" class="md-cite-badge" data-action="open-citation" data-cite-id="${safeId}" aria-label="查看引用来源 ${safeId}" title="来源 ${safeId}">${safeNum}</button>`;
+    })
+    .join("");
+};
 
 md.renderer.rules.math_block = (tokens: Token[], idx: number) =>
   renderKatexHtml(tokens[idx].content, true, true);
@@ -634,6 +672,12 @@ function onContainerClick(event: MouseEvent) {
   if (!btn) return;
   const action = btn.dataset.action;
 
+  if (action === "open-citation") {
+    const citeId = btn.dataset.citeId?.trim();
+    if (citeId) emit("open-citation", citeId);
+    return;
+  }
+
   if (action === "open-deliverable") {
     const fileId = btn.dataset.fileId?.trim();
     const filename = btn.dataset.filename?.trim();
@@ -733,6 +777,20 @@ async function renderContent() {
     anchor.setAttribute("rel", "noopener noreferrer");
   }
 
+  if (props.citations?.length) {
+    const citeMap = new Map(props.citations.map((c) => [c.citation_id.toUpperCase(), c]));
+    for (const badge of staging.querySelectorAll<HTMLButtonElement>("button.md-cite-badge[data-cite-id]")) {
+      const cid = (badge.dataset.citeId || "").toUpperCase();
+      const item = citeMap.get(cid);
+      if (item) {
+        const header = [item.title, item.subtitle].filter(Boolean).join(" · ");
+        const snippet = item.snippet ? `\n${item.snippet.slice(0, 140)}` : "";
+        badge.setAttribute("title", `${header}${snippet}`);
+        badge.setAttribute("aria-label", `查看引用 ${cid}：${header}`);
+      }
+    }
+  }
+
   if (props.streaming) {
     const unclosedLang = detectUnclosedTrailingFence(raw);
     if (unclosedLang !== null) {
@@ -787,6 +845,15 @@ watch(
   () => props.streaming,
   (nowStreaming, wasStreaming) => {
     if (wasStreaming && !nowStreaming) {
+      scheduleRender(true);
+    }
+  },
+);
+
+watch(
+  () => props.citations?.length ?? 0,
+  () => {
+    if (props.content.includes("[[cite:")) {
       scheduleRender(true);
     }
   },

@@ -260,6 +260,42 @@ export interface AdminFailureSpike {
   latest_at: string;
 }
 
+export interface OpsRagTableStat {
+  key: string;
+  label: string;
+  total: number;
+  embedded: number;
+  coverage_pct: number;
+  stale_model: number;
+}
+
+export interface OpsRagHealth {
+  embedding_enabled: boolean;
+  rerank_enabled: boolean;
+  embedding_model: string;
+  tables: OpsRagTableStat[];
+  files: {
+    total_ready: number;
+    ready: number;
+    partial: number;
+    indexing: number;
+    failed: number;
+    pending: number;
+  };
+  queue: {
+    pending: number;
+    dlq: number;
+  };
+  telemetry_7d: {
+    runs_with_rag: number;
+    hit_rate_pct: number;
+    avg_prefetch_ms: number;
+    total_citations: number;
+    corrective_retries: number;
+  };
+  generated_at: string;
+}
+
 export interface AdminFailingActor {
   actor_email: string | null;
   count: number;

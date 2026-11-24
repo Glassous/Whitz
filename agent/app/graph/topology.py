@@ -8,7 +8,14 @@ GRAPH_NODES: list[dict[str, Any]] = [
         "label": "上下文装载",
         "type": "loader",
         "kind": "loader",
-        "description": "注入人设、授权用户画像、附件元数据列表与技能摘要（不预灌全量文档）",
+        "description": "注入人设、授权用户画像、附件元数据列表与技能摘要（维护静态前缀 KV 缓存）",
+    },
+    {
+        "id": "rag_prefetch",
+        "label": "主动知识预召回",
+        "type": "rag",
+        "kind": "rag",
+        "description": "分层指代改写 + 统一多源混合检索（文件/记忆/历史对话）+ 重排与父子邻域扩展",
     },
     {
         "id": "agent",
@@ -49,7 +56,8 @@ GRAPH_NODES: list[dict[str, Any]] = [
 
 GRAPH_EDGES: list[dict[str, Any]] = [
     {"source": "__start__", "target": "context_loader", "conditional": False, "label": "start"},
-    {"source": "context_loader", "target": "agent", "conditional": False, "label": "ready"},
+    {"source": "context_loader", "target": "rag_prefetch", "conditional": False, "label": "prefetch"},
+    {"source": "rag_prefetch", "target": "agent", "conditional": False, "label": "ready"},
     {"source": "agent", "target": "tools", "conditional": True, "label": "tool_calls"},
     {"source": "agent", "target": "hitl_gate", "conditional": True, "label": "hitl"},
     {"source": "agent", "target": "subagent", "conditional": True, "label": "delegate"},

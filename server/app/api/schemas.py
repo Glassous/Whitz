@@ -306,6 +306,14 @@ class ConversationSearchHit(BaseModel):
 
 
 ModelRouteType = Literal["auto", "default", "fast", "reasoning", "vision"]
+RagModeType = Literal["auto", "files_only", "off"]
+
+
+class RagScopeRequest(BaseModel):
+    mode: RagModeType = "auto"
+    file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
+    include_memory: bool = True
+    include_chats: bool = True
 
 
 class SendMessageRequest(BaseModel):
@@ -313,6 +321,7 @@ class SendMessageRequest(BaseModel):
     file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
     skill_names: list[str] = Field(default_factory=list, max_length=10)
     model_route: ModelRouteType = "auto"
+    rag_scope: RagScopeRequest | None = None
 
 
 class EditMessageRequest(BaseModel):
@@ -320,10 +329,12 @@ class EditMessageRequest(BaseModel):
     file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
     skill_names: list[str] = Field(default_factory=list, max_length=10)
     model_route: ModelRouteType = "auto"
+    rag_scope: RagScopeRequest | None = None
 
 
 class RegenerateMessageRequest(BaseModel):
     model_route: ModelRouteType = "auto"
+    rag_scope: RagScopeRequest | None = None
 
 
 class FilePresignRequest(BaseModel):
@@ -364,6 +375,9 @@ class ConversationFileOut(BaseModel):
     status: str
     index_status: str = "ready"
     indexed_chunks: int = 0
+    summary: str = ""
+    index_error: str | None = None
+    indexed_at: datetime | None = None
     source: str = "user"
     is_global: bool = True
     message_id: uuid.UUID | None = None
@@ -639,6 +653,11 @@ class MemoryEntryOut(BaseModel):
     content: str
     tags: list[str] = Field(default_factory=list)
     source: str = "manual"
+    is_pinned: bool = False
+    priority: int = 2
+    access_count: int = 0
+    last_accessed_at: datetime | None = None
+    supersedes_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -649,6 +668,8 @@ class MemoryEntryCreateRequest(BaseModel):
     title: str = Field(default="", max_length=120)
     content: str = Field(min_length=1, max_length=4000)
     tags: list[str] = Field(default_factory=list)
+    is_pinned: bool = False
+    priority: int = Field(default=2, ge=1, le=3)
 
     @field_validator("content")
     @classmethod
@@ -660,19 +681,54 @@ class MemoryEntryCreateRequest(BaseModel):
 
 
 class MemoryEntryUpdateRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=4000)
+    content: str | None = Field(default=None, min_length=1, max_length=4000)
     target: str | None = Field(default=None, max_length=64)
     collection_id: str | None = None
     title: str | None = Field(default=None, max_length=120)
     tags: list[str] | None = None
+    is_pinned: bool | None = None
+    priority: int | None = Field(default=None, ge=1, le=3)
 
     @field_validator("content")
     @classmethod
-    def check_content(cls, v: str) -> str:
+    def check_content(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
         cleaned = v.strip()
         if not cleaned:
             raise ValueError("记忆内容不能为空")
         return cleaned
+
+
+class ConversationEpisodeOut(BaseModel):
+    id: str
+    conversation_id: str
+    conversation_kind: str = "main"
+    episode_index: int = 1
+    topic: str = ""
+    summary: str = ""
+    key_facts: list[str] = Field(default_factory=list)
+    entities: list[str] = Field(default_factory=list)
+    start_msg_id: str | None = None
+    end_msg_id: str | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    message_count: int = 0
+    created_at: datetime | None = None
+
+
+class ConversationContextStateOut(BaseModel):
+    conversation_id: str
+    conversation_kind: str
+    working_state: dict[str, Any] | None = None
+    rolling_summary: str | None = None
+    working_state_updated_at: datetime | None = None
+    episodes: list[ConversationEpisodeOut] = Field(default_factory=list)
+    pinned_memories_count: int = 0
+
+
+class WorkingStateUpdateRequest(BaseModel):
+    working_state: dict[str, Any]
 
 
 class MemoryPendingOut(BaseModel):
@@ -734,6 +790,8 @@ class MemoryOverviewOut(BaseModel):
     total_char_count: int = 0
     total_char_limit: int = 200000
     collection_limit: int = 50
+    pinned_count: int = 0
+    pinned_limit: int = 10
 
 
 class SkillOut(BaseModel):

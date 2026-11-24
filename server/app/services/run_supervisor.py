@@ -163,6 +163,7 @@ class SupervisedRun:
         reasoning = list(p.reasoning) if p is not None else []
         plan = p.plan if p is not None else None
         artifacts = list(p.artifacts) if p is not None else []
+        citations = list(getattr(p, "citations", None) or []) if p is not None else []
         payload = {
             "run_id": self.run_id,
             "conversation_id": str(self.conv_id),
@@ -172,6 +173,7 @@ class SupervisedRun:
             "reasoning": reasoning,
             "plan": plan,
             "artifacts": artifacts,
+            "citations": citations,
             "tool_events": list(self.live_tools),
             "pending_control": self.live_pending_control,
             "last_event_id": self.last_event_id,
@@ -328,9 +330,9 @@ class SupervisedRun:
                     if assistant.status == "completed":
                         if conv.kind == "side":
                             cross_chat_memory.schedule_side_chat_digest_refresh(conv.id, self.user_id)
-                        elif conv.kind == "main":
-                            cross_chat_memory.schedule_main_compaction_check(conv.id)
-                        # Episodic turn vectorization into message_chunks
+                        # Unified L1 Working State + L2 Immutable Episode archival for BOTH main and long side chats
+                        cross_chat_memory.schedule_episode_archive_check(conv.id)
+                        # Episodic turn vectorization into message_chunks (low-signal turns filtered inside)
                         if self.user_content or assistant.content:
                             cross_chat_memory.schedule_turn_chunk_indexing(
                                 user_id=self.user_id,

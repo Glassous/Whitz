@@ -48,6 +48,108 @@ async def _get_owned_library_file(
     return row
 
 
+@router.get("/api/library/search")
+async def search_library_content(
+    q: str = Query(..., min_length=1, max_length=300),
+    limit: int = Query(default=20, ge=1, le=50),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Hybrid RAG search across document contents in the user's personal library."""
+    from whitz_rag import UnifiedKnowledgeRetriever
+
+    from app.db.session import detect_pgvector
+    from app.services import embeddings
+
+    term = q.strip()
+    if not term:
+        return {"query": "", "count": 0, "results": []}
+    await detect_pgvector(db)
+    retriever = UnifiedKnowledgeRetriever(
+        session=db,
+        embedding_client=embeddings.get_embedding_client(),
+        rerank_client=embeddings.get_rerank_client(),
+    )
+    items = await retriever.search_files(
+        user_id=str(user.id),
+        query=term,
+        top_k=limit,
+        expand_neighbors=False,
+        apply_rerank=True,
+    )
+    return {
+        "query": term,
+        "count": len(items),
+        "results": [
+            {
+                "file_id": str((it.metadata or {}).get("file_id") or it.source_id),
+                "filename": str((it.metadata or {}).get("filename") or it.title),
+                "locator": str((it.metadata or {}).get("locator") or it.subtitle),
+                "section_path": str((it.metadata or {}).get("section_path") or ""),
+                "chunk_type": str((it.metadata or {}).get("chunk_type") or "text"),
+                "snippet": it.snippet,
+                "content": it.content[:600],
+                "score": round(float(it.score), 4),
+                "confidence": it.confidence,
+            }
+            for it in items
+        ],
+    }
+
+
+@router.post("/api/library/files/{file_id}/reindex", response_model=LibraryFileOut)
+async def reindex_library_file(
+    file_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> LibraryFileOut:
+    """Manually re-parse and re-vectorize a library file (sync for small files, queued for large/image files)."""
+    row = await _get_owned_library_file(file_id, user, db)
+    if row.status != "ready":
+        raise HTTPException(status.HTTP_409_CONFLICT, "文件尚未就绪")
+
+    settings = get_settings()
+    is_async = settings.app_env == "production" and (
+        row.category == "image" or int(row.size_bytes or 0) > 256 * 1024
+    )
+    row.index_status = "indexing"
+    row.index_error = None
+    await db.commit()
+    await db.refresh(row)
+
+    if is_async:
+        file_chunks.schedule_file_indexing(row.id, user.id)
+    else:
+        await file_chunks.index_file_chunks_safe(db, row)
+        await db.refresh(row)
+
+    from app.services import realtime_bus
+
+    await realtime_bus.publish_user_event(
+        user.id,
+        "library.updated",
+        {
+            "action": "reindexed",
+            "file_id": str(row.id),
+            "index_status": row.index_status,
+            "indexed_chunks": row.indexed_chunks,
+        },
+    )
+    await audit.record(
+        "library.file_reindex",
+        actor=user,
+        target_type="conversation_file",
+        target_id=row.id,
+        request=request,
+        metadata={"filename": row.filename, "index_status": row.index_status},
+    )
+    conv_title = None
+    if row.conversation_id is not None:
+        conv_title = await db.scalar(select(Conversation.title).where(Conversation.id == row.conversation_id))
+    return serialize_file_out(row, settings=settings, conversation_title=conv_title, as_library=True)
+
+
 @router.get("/api/library/files")
 async def list_library_files(
     background_tasks: BackgroundTasks,
@@ -221,16 +323,18 @@ async def complete_library_upload(
     record.error_message = None
     record.expires_cleanup_at = None
     record.etag = (body.etag if body and body.etag else None) or meta.get("etag")
-    is_large_async = (
+    is_async_index = (
         settings.app_env == "production"
-        and record.category != "image"
-        and int(record.size_bytes or 0) > 256 * 1024
+        and (
+            (record.category != "image" and int(record.size_bytes or 0) > 256 * 1024)
+            or (record.category == "image" and settings.rag_image_indexing_enabled)
+        )
     )
-    record.index_status = "indexing" if is_large_async else "ready"
+    record.index_status = "indexing" if is_async_index else "ready"
     await db.commit()
     await db.refresh(record)
 
-    if is_large_async:
+    if is_async_index:
         file_chunks.schedule_file_indexing(record.id, user.id)
     else:
         await file_chunks.index_file_chunks_safe(db, record)
@@ -289,6 +393,8 @@ async def update_library_file(
 
     await db.commit()
     await db.refresh(row)
+    if "filename" in changes:
+        await file_chunks.sync_filename_change(db, row)
 
     conv_title = None
     if row.conversation_id is not None:

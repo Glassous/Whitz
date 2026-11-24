@@ -2,7 +2,20 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api } from "../../api/client";
 import { useAuthStore } from "../../stores/auth";
-import type { Conversation, ConversationSearchHit } from "../../types";
+import type {
+  Conversation,
+  UnifiedChatSearchHit,
+  UnifiedFileSearchHit,
+  UnifiedMemorySearchHit,
+  UnifiedSearchResponse,
+} from "../../types";
+
+type SourceTab = "all" | "chat" | "file" | "memory";
+
+type OmniboxItem =
+  | { kind: "chat"; key: string; hit: UnifiedChatSearchHit }
+  | { kind: "file"; key: string; hit: UnifiedFileSearchHit }
+  | { kind: "memory"; key: string; hit: UnifiedMemorySearchHit };
 
 const props = defineProps<{
   open: boolean;
@@ -15,19 +28,29 @@ const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz
 const emit = defineEmits<{
   close: [];
   select: [conversationId: string, messageId: string | null];
+  "select-file": [fileId: string, filename: string, conversationId: string | null];
+  "select-memory": [entryId: string, collection: string];
 }>();
 
 const query = ref("");
+const activeTab = ref<SourceTab>("all");
 const dialogRef = ref<HTMLDialogElement | null>(null);
 const inputRef = ref<HTMLInputElement | null>(null);
 const loading = ref(false);
 const error = ref<string | null>(null);
-const hits = ref<ConversationSearchHit[]>([]);
+const results = ref<UnifiedSearchResponse | null>(null);
 const activeIndex = ref(0);
 
 let debounceTimer: number | null = null;
 let requestSeq = 0;
 let pressedOutside = false;
+
+const SOURCE_TABS: { key: SourceTab; label: string }[] = [
+  { key: "all", label: "全部" },
+  { key: "chat", label: "对话" },
+  { key: "file", label: "资料库正文" },
+  { key: "memory", label: "长期记忆" },
+];
 
 const recentConversations = computed(() => {
   return props.conversations
@@ -38,6 +61,37 @@ const recentConversations = computed(() => {
     })
     .slice(0, 8);
 });
+
+const flatItems = computed<OmniboxItem[]>(() => {
+  const res = results.value;
+  if (!res) return [];
+  const items: OmniboxItem[] = [];
+  if (activeTab.value === "all" || activeTab.value === "file") {
+    for (const f of res.files ?? []) {
+      items.push({ kind: "file", key: `file:${f.file_id}:${f.locator}`, hit: f });
+    }
+  }
+  if (activeTab.value === "all" || activeTab.value === "chat") {
+    for (const c of res.chats ?? []) {
+      items.push({ kind: "chat", key: `chat:${c.conversation_id}:${c.message_id ?? c.match_in}`, hit: c });
+    }
+  }
+  if (activeTab.value === "all" || activeTab.value === "memory") {
+    for (const m of res.memories ?? []) {
+      items.push({ kind: "memory", key: `mem:${m.entry_id}`, hit: m });
+    }
+  }
+  return items;
+});
+
+function tabCount(tab: SourceTab): number | null {
+  const res = results.value;
+  if (!res || !query.value.trim()) return null;
+  if (tab === "all") return (res.files?.length ?? 0) + (res.chats?.length ?? 0) + (res.memories?.length ?? 0);
+  if (tab === "file") return res.files?.length ?? 0;
+  if (tab === "chat") return res.chats?.length ?? 0;
+  return res.memories?.length ?? 0;
+}
 
 interface HighlightPart {
   text: string;
@@ -66,8 +120,10 @@ function splitHighlight(text: string, needle: string): HighlightPart[] {
   return parts;
 }
 
-function formatTime(iso: string): string {
+function formatTime(iso?: string | null): string {
+  if (!iso) return "";
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
   const now = new Date();
   const sameDay =
     d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
@@ -80,18 +136,19 @@ function formatTime(iso: string): string {
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
 }
 
-function roleLabel(hit: ConversationSearchHit): string {
-  if (hit.match_in === "title") return "标题";
+function chatBadgeLabel(hit: UnifiedChatSearchHit): string {
+  if (hit.match_in === "digest") return "对话摘要";
+  if (hit.match_in === "semantic_turn") return "语义命中";
   if (hit.role === "user") return "我";
   if (hit.role === "assistant") return assistantName.value;
-  return "正文";
+  return "对话";
 }
 
-async function runSearch(raw: string) {
+async function runSearch(raw: string, source: SourceTab = activeTab.value) {
   const q = raw.trim();
   const seq = ++requestSeq;
   if (!q) {
-    hits.value = [];
+    results.value = null;
     error.value = null;
     loading.value = false;
     activeIndex.value = 0;
@@ -100,16 +157,16 @@ async function runSearch(raw: string) {
   loading.value = true;
   error.value = null;
   try {
-    const res = await api.get<ConversationSearchHit[]>(
-      `/conversations/search?q=${encodeURIComponent(q)}&limit=30`,
+    const res = await api.get<UnifiedSearchResponse>(
+      `/search/unified?q=${encodeURIComponent(q)}&sources=${encodeURIComponent(source)}&limit=12`,
     );
     if (seq !== requestSeq) return;
-    hits.value = res;
+    results.value = res;
     activeIndex.value = 0;
   } catch (e: any) {
     if (seq !== requestSeq) return;
     error.value = e?.detail?.detail ?? e?.message ?? "搜索失败，请稍后重试";
-    hits.value = [];
+    results.value = null;
   } finally {
     if (seq === requestSeq) {
       loading.value = false;
@@ -123,7 +180,8 @@ watch(
     const dialog = dialogRef.value;
     if (val) {
       query.value = "";
-      hits.value = [];
+      activeTab.value = "all";
+      results.value = null;
       error.value = null;
       loading.value = false;
       activeIndex.value = 0;
@@ -145,7 +203,7 @@ watch(query, (val) => {
   const trimmed = val.trim();
   if (!trimmed) {
     requestSeq++;
-    hits.value = [];
+    results.value = null;
     error.value = null;
     loading.value = false;
     activeIndex.value = 0;
@@ -153,17 +211,32 @@ watch(query, (val) => {
   }
   loading.value = true;
   debounceTimer = window.setTimeout(() => {
-    void runSearch(val);
-  }, 160);
+    void runSearch(val, activeTab.value);
+  }, 180);
 });
 
-const selectableCount = computed(() => (query.value.trim() ? hits.value.length : recentConversations.value.length));
+function switchTab(tab: SourceTab) {
+  if (activeTab.value === tab) return;
+  activeTab.value = tab;
+  activeIndex.value = 0;
+  if (query.value.trim()) {
+    void runSearch(query.value, tab);
+  }
+}
+
+const selectableCount = computed(() => (query.value.trim() ? flatItems.value.length : recentConversations.value.length));
 
 function chooseAt(index: number) {
   if (query.value.trim()) {
-    const hit = hits.value[index];
-    if (!hit) return;
-    emit("select", hit.conversation_id, hit.message_id);
+    const item = flatItems.value[index];
+    if (!item) return;
+    if (item.kind === "chat") {
+      emit("select", item.hit.conversation_id, item.hit.message_id ?? null);
+    } else if (item.kind === "file") {
+      emit("select-file", item.hit.file_id, item.hit.filename, item.hit.conversation_id ?? null);
+    } else {
+      emit("select-memory", item.hit.entry_id, item.hit.collection);
+    }
   } else {
     const conv = recentConversations.value[index];
     if (!conv) return;
@@ -229,9 +302,9 @@ onBeforeUnmount(() => {
   <dialog
     ref="dialogRef"
     class="whitz-dialog"
-    :style="{ '--whitz-modal-width': '42rem' }"
+    :style="{ '--whitz-modal-width': '44rem' }"
     closedby="any"
-    aria-label="搜索对话"
+    aria-label="全局知识与对话检索"
     @cancel="onCancel"
     @close="onNativeClose"
     @pointerdown="onPointerdown"
@@ -241,163 +314,226 @@ onBeforeUnmount(() => {
       class="flex max-h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-[28px] bg-canvas shadow-2xl dark:bg-[#161615]"
       style="box-shadow: var(--shadow)"
     >
-          <!-- Top search input (borderless, large radius) -->
-          <div class="flex items-center gap-3 px-5 pb-3 pt-4">
-            <svg
-              class="h-5 w-5 shrink-0 text-fg-muted"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.2"
-            >
-              <circle cx="11" cy="11" r="7" />
-              <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
-            </svg>
+      <!-- Top search input -->
+      <div class="flex items-center gap-3 px-5 pb-2 pt-4">
+        <svg
+          class="h-5 w-5 shrink-0 text-fg-muted"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.2"
+        >
+          <circle cx="11" cy="11" r="7" />
+          <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
+        </svg>
 
-            <input
-              ref="inputRef"
-              v-model="query"
-              type="text"
-              placeholder="搜索对话标题或正文内容…"
-              class="h-11 min-w-0 flex-1 bg-transparent text-[16px] text-fg outline-none placeholder:text-fg-faint"
-              @keydown="onInputKeydown"
-            />
+        <input
+          ref="inputRef"
+          v-model="query"
+          type="text"
+          placeholder="跨对话、资料库正文、长期记忆语义检索…"
+          class="h-11 min-w-0 flex-1 bg-transparent text-[16px] text-fg outline-none placeholder:text-fg-faint"
+          @keydown="onInputKeydown"
+        />
 
+        <button
+          v-if="query"
+          type="button"
+          class="focus-ring flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-fg-faint transition-colors hover:bg-hover hover:text-fg"
+          aria-label="清空搜索"
+          @click="query = ''; inputRef?.focus()"
+        >
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-fg-faint transition-colors hover:bg-hover hover:text-fg"
+          aria-label="关闭搜索"
+          @click="emit('close')"
+        >
+          <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
+
+      <!-- Source filter tabs -->
+      <div class="flex items-center gap-1.5 border-b border-line/60 px-5 pb-3 pt-1" role="tablist" aria-label="检索范围">
+        <button
+          v-for="tab in SOURCE_TABS"
+          :key="tab.key"
+          type="button"
+          role="tab"
+          :aria-selected="activeTab === tab.key"
+          class="focus-ring inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] font-medium transition-colors"
+          :class="
+            activeTab === tab.key
+              ? 'bg-primary text-primary-fg'
+              : 'bg-surface text-fg-muted hover:bg-hover hover:text-fg'
+          "
+          @click="switchTab(tab.key)"
+        >
+          <span>{{ tab.label }}</span>
+          <span
+            v-if="tabCount(tab.key) !== null"
+            class="tabular-nums text-[11px] opacity-80"
+          >
+            {{ tabCount(tab.key) }}
+          </span>
+        </button>
+      </div>
+
+      <!-- Results area -->
+      <div v-scrollbar class="custom-scrollbar max-h-[min(480px,62vh)] overflow-y-auto px-3 pb-4 pt-2">
+        <!-- Empty query: recent conversations -->
+        <template v-if="!query.trim()">
+          <div v-if="recentConversations.length" class="space-y-1">
+            <p class="px-3 pb-1.5 text-[12px] font-medium text-fg-faint">最近聊天</p>
             <button
-              v-if="query"
+              v-for="(c, idx) in recentConversations"
+              :key="c.id"
               type="button"
-              class="focus-ring flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-fg-faint transition-colors hover:bg-hover hover:text-fg"
-              aria-label="清空搜索"
-              @click="query = ''; inputRef?.focus()"
+              class="focus-ring flex w-full items-center justify-between gap-3 rounded-2xl px-3.5 py-3 text-left transition-colors"
+              :class="activeIndex === idx ? 'bg-hover/90 dark:bg-active' : 'hover:bg-hover/65'"
+              @mouseenter="activeIndex = idx"
+              @click="chooseAt(idx)"
             >
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-                <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-              </svg>
-            </button>
-
-            <button
-              type="button"
-              class="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-fg-faint transition-colors hover:bg-hover hover:text-fg"
-              aria-label="关闭搜索"
-              @click="emit('close')"
-            >
-              <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-              </svg>
+              <span class="flex min-w-0 items-center gap-2">
+                <span class="truncate text-[14.5px] font-medium text-fg">
+                  {{
+                    c.kind === "main"
+                      ? assistantName
+                      : c.is_scheduled || c.title.startsWith("[定时]")
+                        ? c.title.replace(/^\[定时\]\s*/, "").trim() || c.title
+                        : c.title
+                  }}
+                </span>
+                <span
+                  v-if="c.kind === 'main'"
+                  class="shrink-0 rounded-full bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted"
+                >
+                  主聊
+                </span>
+                <span
+                  v-else-if="c.is_scheduled || c.title.startsWith('[定时]')"
+                  class="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted"
+                >
+                  <span>定时</span>
+                </span>
+              </span>
+              <span class="shrink-0 text-[12px] tabular-nums text-fg-faint">
+                {{ formatTime(c.last_message_at ?? c.updated_at ?? c.created_at) }}
+              </span>
             </button>
           </div>
+          <p v-else class="px-4 py-12 text-center text-[14px] text-fg-faint">暂无历史对话</p>
+        </template>
 
-          <!-- Results area -->
-          <div v-scrollbar class="custom-scrollbar max-h-[min(460px,62vh)] overflow-y-auto px-3 pb-4 pt-1">
-            <!-- Empty query: recent conversations -->
-            <template v-if="!query.trim()">
-              <div v-if="recentConversations.length" class="space-y-1">
-                <p class="px-3 pb-1.5 text-[12px] font-medium text-fg-faint">最近聊天</p>
-                <button
-                  v-for="(c, idx) in recentConversations"
-                  :key="c.id"
-                  type="button"
-                  class="focus-ring flex w-full items-center justify-between gap-3 rounded-2xl px-3.5 py-3 text-left transition-colors"
-                  :class="activeIndex === idx ? 'bg-hover/90 dark:bg-active' : 'hover:bg-hover/65'"
-                  @mouseenter="activeIndex = idx"
-                  @click="chooseAt(idx)"
-                >
+        <!-- Active semantic & keyword Omnibox results -->
+        <template v-else>
+          <div v-if="loading && !flatItems.length" class="space-y-2 px-1 py-2">
+            <div v-for="i in 3" :key="i" class="h-16 w-full animate-pulse rounded-2xl bg-surface" />
+          </div>
+
+          <p v-else-if="error" class="px-4 py-10 text-center text-[13.5px] text-danger">
+            {{ error }}
+          </p>
+
+          <div v-else-if="flatItems.length" class="space-y-1">
+            <button
+              v-for="(item, idx) in flatItems"
+              :key="item.key"
+              type="button"
+              class="focus-ring flex w-full flex-col gap-1.5 rounded-2xl px-3.5 py-3 text-left transition-colors"
+              :class="activeIndex === idx ? 'bg-hover/90 dark:bg-active' : 'hover:bg-hover/65'"
+              @mouseenter="activeIndex = idx"
+              @click="chooseAt(idx)"
+            >
+              <!-- File hit -->
+              <template v-if="item.kind === 'file'">
+                <div class="flex items-center justify-between gap-3">
                   <span class="flex min-w-0 items-center gap-2">
-                    <span class="truncate text-[14.5px] font-medium text-fg">
-                      {{
-                        c.kind === "main"
-                          ? assistantName
-                          : c.is_scheduled || c.title.startsWith("[定时]")
-                            ? c.title.replace(/^\[定时\]\s*/, "").trim() || c.title
-                            : c.title
-                      }}
+                    <span class="shrink-0 rounded-full bg-accent-weak px-2 py-0.5 text-[10.5px] font-semibold text-accent">
+                      资料库
                     </span>
-                    <span
-                      v-if="c.kind === 'main'"
-                      class="shrink-0 rounded-full bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted"
-                    >
-                      主聊
-                    </span>
-                    <span
-                      v-else-if="c.is_scheduled || c.title.startsWith('[定时]')"
-                      class="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-fg-muted"
-                    >
-                      <svg class="h-2.5 w-2.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
-                        <circle cx="12" cy="12" r="9" />
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 2" />
-                      </svg>
-                      <span>定时</span>
-                    </span>
-                  </span>
-                  <span class="shrink-0 text-[12px] tabular-nums text-fg-faint">
-                    {{ formatTime(c.last_message_at ?? c.updated_at ?? c.created_at) }}
-                  </span>
-                </button>
-              </div>
-              <p v-else class="px-4 py-12 text-center text-[14px] text-fg-faint">暂无历史对话</p>
-            </template>
-
-            <!-- Active search -->
-            <template v-else>
-              <div v-if="loading && !hits.length" class="space-y-2 px-1 py-2">
-                <div v-for="i in 3" :key="i" class="h-16 w-full animate-pulse rounded-2xl bg-surface" />
-              </div>
-
-              <p v-else-if="error" class="px-4 py-10 text-center text-[13.5px] text-danger">
-                {{ error }}
-              </p>
-
-              <div v-else-if="hits.length" class="space-y-1">
-                <button
-                  v-for="(hit, idx) in hits"
-                  :key="`${hit.conversation_id}:${hit.message_id ?? 'title'}`"
-                  type="button"
-                  class="focus-ring flex w-full flex-col gap-1.5 rounded-2xl px-3.5 py-3 text-left transition-colors"
-                  :class="activeIndex === idx ? 'bg-hover/90 dark:bg-active' : 'hover:bg-hover/65'"
-                  @mouseenter="activeIndex = idx"
-                  @click="chooseAt(idx)"
-                >
-                  <div class="flex items-center justify-between gap-3">
-                    <span class="min-w-0 truncate text-[14.5px] font-medium text-fg">
-                      <template v-for="(part, pi) in splitHighlight(hit.conversation_title, query)" :key="pi">
-                        <mark
-                          v-if="part.match"
-                          class="rounded-md bg-fg/15 px-1 py-0.5 font-semibold text-fg dark:bg-fg/20"
-                        >{{ part.text }}</mark>
+                    <span class="truncate text-[14px] font-medium text-fg">
+                      <template v-for="(part, pi) in splitHighlight(item.hit.filename, query)" :key="pi">
+                        <mark v-if="part.match" class="rounded bg-fg/15 px-0.5 font-semibold text-fg">{{ part.text }}</mark>
                         <template v-else>{{ part.text }}</template>
                       </template>
                     </span>
+                  </span>
+                  <span class="shrink-0 truncate max-w-[180px] text-[11.5px] text-fg-faint">
+                    {{ item.hit.section_path || item.hit.locator }}
+                  </span>
+                </div>
+                <p v-if="item.hit.snippet" class="line-clamp-2 text-[13px] leading-relaxed text-fg-muted">
+                  <template v-for="(part, pi) in splitHighlight(item.hit.snippet, query)" :key="pi">
+                    <mark v-if="part.match" class="rounded bg-fg/15 px-0.5 font-semibold text-fg">{{ part.text }}</mark>
+                    <template v-else>{{ part.text }}</template>
+                  </template>
+                </p>
+              </template>
 
-                    <div class="flex shrink-0 items-center gap-2">
-                      <span class="rounded-full bg-surface px-2 py-0.5 text-[11px] font-medium text-fg-muted">
-                        {{ roleLabel(hit) }}
-                      </span>
-                      <span class="text-[12px] tabular-nums text-fg-faint">
-                        {{ formatTime(hit.created_at) }}
-                      </span>
-                    </div>
-                  </div>
+              <!-- Memory hit -->
+              <template v-else-if="item.kind === 'memory'">
+                <div class="flex items-center justify-between gap-3">
+                  <span class="flex min-w-0 items-center gap-2">
+                    <span class="shrink-0 rounded-full bg-success-weak px-2 py-0.5 text-[10.5px] font-semibold text-success">
+                      记忆
+                    </span>
+                    <span class="truncate text-[14px] font-medium text-fg">
+                      {{ item.hit.title || item.hit.collection_name }}
+                    </span>
+                  </span>
+                  <span class="shrink-0 rounded-full bg-surface px-2 py-0.5 text-[11px] text-fg-muted">
+                    {{ item.hit.collection_name }}
+                  </span>
+                </div>
+                <p v-if="item.hit.snippet" class="line-clamp-2 text-[13px] leading-relaxed text-fg-muted">
+                  <template v-for="(part, pi) in splitHighlight(item.hit.snippet, query)" :key="pi">
+                    <mark v-if="part.match" class="rounded bg-fg/15 px-0.5 font-semibold text-fg">{{ part.text }}</mark>
+                    <template v-else>{{ part.text }}</template>
+                  </template>
+                </p>
+              </template>
 
-                  <p
-                    v-if="hit.snippet"
-                    class="line-clamp-2 text-[13.5px] leading-relaxed text-fg-muted"
-                  >
-                    <template v-for="(part, pi) in splitHighlight(hit.snippet, query)" :key="pi">
-                      <mark
-                        v-if="part.match"
-                        class="rounded-md bg-fg/15 px-1 py-0.5 font-semibold text-fg dark:bg-fg/20"
-                      >{{ part.text }}</mark>
-                      <template v-else>{{ part.text }}</template>
-                    </template>
-                  </p>
-                </button>
-              </div>
-
-              <p v-else class="px-4 py-12 text-center text-[14px] text-fg-faint">
-                未找到与「{{ query.trim() }}」相关的对话或内容
-              </p>
-            </template>
+              <!-- Chat hit -->
+              <template v-else>
+                <div class="flex items-center justify-between gap-3">
+                  <span class="flex min-w-0 items-center gap-2">
+                    <span class="shrink-0 rounded-full bg-surface px-2 py-0.5 text-[10.5px] font-medium text-fg-muted">
+                      {{ chatBadgeLabel(item.hit) }}
+                    </span>
+                    <span class="truncate text-[14px] font-medium text-fg">
+                      <template v-for="(part, pi) in splitHighlight(item.hit.conversation_title, query)" :key="pi">
+                        <mark v-if="part.match" class="rounded bg-fg/15 px-0.5 font-semibold text-fg">{{ part.text }}</mark>
+                        <template v-else>{{ part.text }}</template>
+                      </template>
+                    </span>
+                  </span>
+                  <span v-if="item.hit.created_at" class="shrink-0 text-[12px] tabular-nums text-fg-faint">
+                    {{ formatTime(item.hit.created_at) }}
+                  </span>
+                </div>
+                <p v-if="item.hit.snippet" class="line-clamp-2 text-[13px] leading-relaxed text-fg-muted">
+                  <template v-for="(part, pi) in splitHighlight(item.hit.snippet, query)" :key="pi">
+                    <mark v-if="part.match" class="rounded bg-fg/15 px-0.5 font-semibold text-fg">{{ part.text }}</mark>
+                    <template v-else>{{ part.text }}</template>
+                  </template>
+                </p>
+              </template>
+            </button>
           </div>
-        </div>
+
+          <p v-else class="px-4 py-12 text-center text-[14px] text-fg-faint">
+            未找到与「{{ query.trim() }}」相关的知识、文档或对话
+          </p>
+        </template>
+      </div>
+    </div>
   </dialog>
 </template>
