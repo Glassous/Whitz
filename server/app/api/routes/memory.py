@@ -34,11 +34,8 @@ async def update_memory_settings(
     db: AsyncSession = Depends(get_db),
 ) -> MemoryOverviewOut:
     if body.enabled is True:
-        already_consented = bool(user.memory_enabled and user.memory_consented_at)
-        if not already_consented and not body.consent:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "开启长期记忆前请先确认授权")
         user.memory_enabled = True
-        if body.consent or user.memory_consented_at is None:
+        if body.consent and user.memory_consented_at is None:
             user.memory_consented_at = datetime.now(timezone.utc)
     elif body.enabled is False:
         user.memory_enabled = False

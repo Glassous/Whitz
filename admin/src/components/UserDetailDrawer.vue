@@ -451,7 +451,7 @@ onMounted(() => {
                 画像上下文：{{ detail.profile_context_enabled ? "已授权开启" : "未开启" }}
               </BaseBadge>
               <BaseBadge :tone="detail.memory_enabled ? 'green' : 'gray'">
-                长期记忆：{{ detail.memory_enabled ? "已授权开启" : "未开启" }}
+                长期记忆：{{ detail.memory_enabled ? "已开启" : "未开启" }}
               </BaseBadge>
               <BaseBadge :tone="detail.memory_require_confirm ? 'brand' : 'amber'">
                 {{ detail.memory_require_confirm ? "记忆写入需用户确认" : "记忆自动写入" }}

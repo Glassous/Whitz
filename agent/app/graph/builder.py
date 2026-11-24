@@ -215,7 +215,7 @@ def _base_agent_prompt(assistant_name: str = "Whitz", *, is_main_chat: bool = Fa
         "     {\"file_id\": \"<返回的file_id>\", \"filename\": \"report.html\", \"title\": \"简明交付标题\", \"summary\": \"一句话说明核心内容\"}\n"
         "     ```\n"
         "     请勿在正文中倾倒数百行原始 HTML/CSV/长文档源码，正文仅做核心解读并嵌入交付卡片即可；\n"
-        "   - 需要个性化背景时调用 `memory_search`，当用户表达长期偏好或重要项目背景且开启记忆功能时调用 `memory_propose`；"
+        "   - 需要个性化背景时调用 `memory_search`；当用户表达长期偏好、重要项目背景或需要更新/删除已有长期记忆时，可直接调用 `memory_propose`（支持 `add` / `replace` / `remove`）写入或修改，无需额外向用户请求同意；"
         f"{extra_main}\n"
         "   - 需要实时外部资料时使用 `web_search`，可根据查询目标自主选择搜索引擎 `provider`：`\"bocha\"`（博查 AI 搜索，响应快，最适合国内新闻、中文资料、国内企业与政策等）或 `\"tavily\"`（速度较慢但最适合国外英文资料、国际新闻、海外技术社区与英文文档）；若需兼顾国内外对比可并行调用两次 `web_search`，摘要不足时再调用 `web_extract` 精读关键页面；\n"
         "   - 需要调用公开 HTTP/REST API、发送自定义 Method/Headers/Query/JSON/表单请求或查看响应状态码与响应头（等效 curl 能力）时，直接调用 `http_request`；\n"
@@ -387,10 +387,14 @@ def _build_system_prompt(state: AgentState, cfg: dict[str, Any], current_time_st
             "## 本轮用户显式指定技能\n" + ", ".join(f"`{s}`" for s in sorted(requested_skills))
         )
 
-    memory_enabled = bool(state.get("memory_enabled"))
-    require_confirm = bool(state.get("memory_require_confirm", True))
+    memory_enabled = bool(state.get("memory_enabled", True))
+    require_confirm = bool(state.get("memory_require_confirm", False))
     if memory_enabled:
-        mode_note = "写入需用户界面确认（propose）" if require_confirm else "可直接写入"
+        mode_note = (
+            "写入需用户界面确认（propose）"
+            if require_confirm
+            else "可直接读取、写入、修改与删除（无需用户同意）"
+        )
         sections.append(f"## 长期记忆策略\n记忆功能已开启（{mode_note}）。")
     else:
         sections.append("## 长期记忆策略\n显式长期记忆条目写入未开启，请勿调用 `memory_propose`。")
@@ -474,7 +478,7 @@ def _classify_route(state: AgentState) -> str:
         if any(n in HITL_TOOL_NAMES for n in names):
             return "hitl_gate"
 
-    if bool(state.get("memory_enabled")) and not bool(state.get("memory_extracted")):
+    if bool(state.get("memory_enabled", True)) and not bool(state.get("memory_extracted")):
         return "memory_extractor"
     return END
 
@@ -891,7 +895,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
 
     async def memory_extractor(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         _emit_node_running("memory_extractor")
-        if not bool(state.get("memory_enabled")):
+        if not bool(state.get("memory_enabled", True)):
             return {"memory_extracted": True}
 
         cfg = dict(config.get("configurable") or {})
@@ -954,7 +958,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                         action="add",
                         content=str(parsed["content"]),
                         memory_enabled=True,
-                        memory_require_confirm=bool(state.get("memory_require_confirm", True)),
+                        memory_require_confirm=bool(state.get("memory_require_confirm", False)),
                     )
         except Exception as exc:
             logger.debug("Optional memory extraction skipped: %s", exc)

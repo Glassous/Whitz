@@ -92,7 +92,7 @@ class MemoryManager:
         user_id: str,
         agent_namespace: str,
         query: str,
-        memory_enabled: bool,
+        memory_enabled: bool = True,
         limit: int = 8,
     ) -> list[dict[str, Any]]:
         if not memory_enabled:
@@ -262,7 +262,7 @@ class MemoryManager:
         content: str,
         old_content: str | None = None,
         memory_enabled: bool = True,
-        memory_require_confirm: bool = True,
+        memory_require_confirm: bool = False,
     ) -> dict[str, Any]:
         if not memory_enabled:
             return {

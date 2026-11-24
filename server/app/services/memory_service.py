@@ -341,7 +341,7 @@ async def get_overview(db: AsyncSession, user: User) -> dict[str, Any]:
     entries, memory_chars, user_chars = await list_entries(db, user.id)
     pending = await list_pending(db, user.id)
     return {
-        "memory_enabled": bool(user.memory_enabled and user.memory_consented_at),
+        "memory_enabled": bool(user.memory_enabled),
         "memory_consented_at": user.memory_consented_at,
         "memory_require_confirm": bool(user.memory_require_confirm),
         "entries": entries,

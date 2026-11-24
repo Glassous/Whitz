@@ -93,6 +93,58 @@ async def test_memory_manager_respects_enabled_and_confirm_flags():
     assert await mgr.search(user_id=uid, agent_namespace="u123", query="Python", memory_enabled=False) == []
 
 
+@pytest.mark.asyncio
+async def test_memory_manager_defaults_enabled_without_confirm_for_write_read_modify():
+    store = FakeStore()
+    pool = FakePGPool()
+    emb = EmbeddingClient(AgentSettings(embedding_model=""))
+    mgr = MemoryManager(store=store, pool=pool, embedding_client=emb)
+    uid = str(uuid.uuid4())
+    cid = str(uuid.uuid4())
+
+    # Default flags: enabled=True, require_confirm=False -> direct write, read, modify, remove
+    added = await mgr.propose(
+        user_id=uid,
+        agent_namespace="u_default",
+        conversation_id=cid,
+        target="memory",
+        action="add",
+        content="Uses Neovim",
+    )
+    assert added["status"] == "saved"
+
+    hits = await mgr.search(user_id=uid, agent_namespace="u_default", query="Neovim")
+    assert len(hits) == 1
+    assert hits[0]["content"] == "Uses Neovim"
+
+    replaced = await mgr.propose(
+        user_id=uid,
+        agent_namespace="u_default",
+        conversation_id=cid,
+        target="memory",
+        action="replace",
+        old_content="Uses Neovim",
+        content="Uses Neovim + LazyVim",
+    )
+    assert replaced["status"] == "saved"
+
+    hits_after_replace = await mgr.search(user_id=uid, agent_namespace="u_default", query="LazyVim")
+    assert len(hits_after_replace) == 1
+    assert hits_after_replace[0]["content"] == "Uses Neovim + LazyVim"
+
+    removed = await mgr.propose(
+        user_id=uid,
+        agent_namespace="u_default",
+        conversation_id=cid,
+        target="memory",
+        action="remove",
+        content="Uses Neovim + LazyVim",
+        old_content="Uses Neovim + LazyVim",
+    )
+    assert removed["status"] == "saved"
+    assert await mgr.search(user_id=uid, agent_namespace="u_default", query="LazyVim") == []
+
+
 def test_rrf_fuse_combines_vector_and_fts_ranks():
     vec_rows = [
         {"chunk_id": "c1", "file_id": "f1", "filename": "a.md", "content": "only vec", "chunk_index": 0},

@@ -81,38 +81,46 @@ async def test_memory_settings_consent_and_db_persistence(register, client, db):
     headers = auth_header(reg["access_token"])
     user = (await db.execute(select(User).where(User.email == "memcfg@test.local"))).scalar_one()
 
-    # Initial settings have memory disabled
+    # Initial settings have memory enabled and direct write/modify without confirmation
     ov0 = (await client.get("/api/users/me/memory", headers=headers)).json()
-    assert ov0["memory_enabled"] is False
-    assert ov0["memory_require_confirm"] is True
+    assert ov0["memory_enabled"] is True
+    assert ov0["memory_require_confirm"] is False
 
-    # Turning on without consent=True returns 400
-    bad = await client.put(
+    # Turning off works cleanly
+    off = await client.put(
         "/api/users/me/memory/settings",
-        json={"enabled": True, "consent": False},
+        json={"enabled": False},
         headers=headers,
     )
-    assert bad.status_code == 400
+    assert off.status_code == 200
+    assert off.json()["memory_enabled"] is False
 
-    # Turning on with consent=True persists on User
+    # Turning back on without consent=True succeeds (no user consent required)
     on = await client.put(
         "/api/users/me/memory/settings",
-        json={"enabled": True, "require_confirm": True, "consent": True},
+        json={"enabled": True, "consent": False},
         headers=headers,
     )
     assert on.status_code == 200
     data = on.json()
     assert data["memory_enabled"] is True
-    assert data["memory_consented_at"] is not None
-    assert data["memory_require_confirm"] is True
+    assert data["memory_require_confirm"] is False
     assert data["memory_char_limit"] == 2200
     assert data["user_char_limit"] == 1375
 
     await db.refresh(user)
     assert user.memory_enabled is True
-    assert user.memory_require_confirm is True
+    assert user.memory_require_confirm is False
 
-    # Toggling require_confirm to False persists
+    # Toggling require_confirm to True and back to False persists
+    on_confirm = await client.put(
+        "/api/users/me/memory/settings",
+        json={"require_confirm": True},
+        headers=headers,
+    )
+    assert on_confirm.status_code == 200
+    assert on_confirm.json()["memory_require_confirm"] is True
+
     off_confirm = await client.put(
         "/api/users/me/memory/settings",
         json={"require_confirm": False},

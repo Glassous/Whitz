@@ -133,6 +133,40 @@ async def test_builtin_tools_and_ssrf_guard():
     mem_p_out = json.loads(await memory_propose.ainvoke({"content": "Uses Vim"}, config=run_cfg))
     assert mem_p_out["status"] == "pending_confirmation"
 
+    # Default config without memory flags: enabled=True and require_confirm=False
+    seen_calls: list[dict] = []
+
+    async def recording_search(**kwargs):
+        seen_calls.append({"op": "search", **kwargs})
+        return [{"id": "m2", "content": "Uses Neovim"}]
+
+    async def recording_propose(**kwargs):
+        seen_calls.append({"op": "propose", **kwargs})
+        return {"status": "saved", "entry_id": "m2"}
+
+    fake_memory.search = recording_search
+    fake_memory.propose = recording_propose
+    default_cfg = {
+        "configurable": {
+            "user_id": "u1",
+            "conversation_id": "c1",
+            "agent_namespace": "ns1",
+            "memory_manager": fake_memory,
+        }
+    }
+    def_search = json.loads(await memory_search.ainvoke({"query": "Neovim"}, config=default_cfg))
+    assert def_search["enabled"] is True
+    assert def_search["count"] == 1
+    def_propose = json.loads(
+        await memory_propose.ainvoke(
+            {"content": "Uses Helix", "action": "replace", "old_content": "Uses Neovim"},
+            config=default_cfg,
+        )
+    )
+    assert def_propose["status"] == "saved"
+    assert seen_calls[1]["memory_enabled"] is True
+    assert seen_calls[1]["memory_require_confirm"] is False
+
 
 @pytest.mark.asyncio
 async def test_react_to_user_message_positive_only():

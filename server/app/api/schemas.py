@@ -102,9 +102,9 @@ class UserOut(BaseModel):
     persona: str
     profile_context_enabled: bool = False
     profile_context_consented_at: datetime | None = None
-    memory_enabled: bool = False
+    memory_enabled: bool = True
     memory_consented_at: datetime | None = None
-    memory_require_confirm: bool = True
+    memory_require_confirm: bool = False
     ai_reactions_enabled: bool = True
     email_verified_at: datetime | None = None
     membership_tier: str
@@ -777,9 +777,9 @@ class AdminUserDetailOut(AdminUserOut):
     updated_at: datetime | None = None
     profile_context_enabled: bool = False
     profile_context_consented_at: datetime | None = None
-    memory_enabled: bool = False
+    memory_enabled: bool = True
     memory_consented_at: datetime | None = None
-    memory_require_confirm: bool = True
+    memory_require_confirm: bool = False
     conversation_count: int = 0
     message_count: int = 0
     file_count: int = 0

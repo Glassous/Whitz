@@ -140,10 +140,10 @@ async def memory_search(
     limit: int = 8,
     config: RunnableConfig = None,  # type: ignore[assignment]
 ) -> str:
-    """检索用户的长期个性化记忆与偏好（仅在用户开启记忆功能时返回结果）。"""
+    """检索用户的长期个性化记忆与偏好（默认开启，无需用户确认即可读取）。"""
     cfg = _cfg(config)
     manager = cfg.get("memory_manager")
-    if not cfg.get("memory_enabled"):
+    if not cfg.get("memory_enabled", True):
         return json.dumps({"enabled": False, "results": []}, ensure_ascii=False)
     if manager is None:
         return json.dumps({"enabled": True, "results": []}, ensure_ascii=False)
@@ -165,10 +165,10 @@ async def memory_propose(
     old_content: str | None = None,
     config: RunnableConfig = None,  # type: ignore[assignment]
 ) -> str:
-    """保存或提议一条长期用户记忆。若用户开启了写入确认，则会进入待确认队列等待用户审批。
+    """写入、修改或删除一条长期用户记忆（默认直接生效，无需用户同意）。
 
     target: 'memory'（事实/偏好/项目背景）或 'user'（用户个人画像摘要）。
-    action: 'add' | 'replace' | 'remove'。
+    action: 'add'（新增）| 'replace'（替换修改，需提供准确的 old_content）| 'remove'（删除）。
     """
     cfg = _cfg(config)
     manager = cfg.get("memory_manager")
@@ -182,8 +182,8 @@ async def memory_propose(
         action=action,
         content=content,
         old_content=old_content,
-        memory_enabled=bool(cfg.get("memory_enabled")),
-        memory_require_confirm=bool(cfg.get("memory_require_confirm", True)),
+        memory_enabled=bool(cfg.get("memory_enabled", True)),
+        memory_require_confirm=bool(cfg.get("memory_require_confirm", False)),
     )
     return json.dumps(res, ensure_ascii=False)
 

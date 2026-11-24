@@ -81,8 +81,8 @@ class CreateRunRequest(BaseModel):
     skills: list[dict[str, Any]] = Field(default_factory=list)
     requested_skills: list[str] = Field(default_factory=list)
     skill_names: list[str] = Field(default_factory=list)
-    memory_enabled: bool = False
-    memory_require_confirm: bool = True
+    memory_enabled: bool = True
+    memory_require_confirm: bool = False
     ai_reactions_enabled: bool = True
     allow_hitl: bool = True
     max_tool_iterations: int | None = None

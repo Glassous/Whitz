@@ -31,9 +31,9 @@ data class User(
     @SerialName("membership_expires_at") val membershipExpiresAt: String? = null,
     @SerialName("profile_context_enabled") val profileContextEnabled: Boolean = false,
     @SerialName("profile_context_consented_at") val profileContextConsentedAt: String? = null,
-    @SerialName("memory_enabled") val memoryEnabled: Boolean = false,
+    @SerialName("memory_enabled") val memoryEnabled: Boolean = true,
     @SerialName("memory_consented_at") val memoryConsentedAt: String? = null,
-    @SerialName("memory_require_confirm") val memoryRequireConfirm: Boolean = true,
+    @SerialName("memory_require_confirm") val memoryRequireConfirm: Boolean = false,
     @SerialName("ai_reactions_enabled") val aiReactionsEnabled: Boolean = true,
     @SerialName("created_at") val createdAt: String = "",
 )
@@ -401,9 +401,9 @@ data class MemoryPendingItem(
 
 @Serializable
 data class MemoryOverview(
-    @SerialName("memory_enabled") val memoryEnabled: Boolean = false,
+    @SerialName("memory_enabled") val memoryEnabled: Boolean = true,
     @SerialName("memory_consented_at") val memoryConsentedAt: String? = null,
-    @SerialName("memory_require_confirm") val memoryRequireConfirm: Boolean = true,
+    @SerialName("memory_require_confirm") val memoryRequireConfirm: Boolean = false,
     @SerialName("profile_context_enabled") val profileContextEnabled: Boolean? = null,
     @SerialName("profile_context_consented_at") val profileContextConsentedAt: String? = null,
     val entries: List<MemoryEntry> = emptyList(),

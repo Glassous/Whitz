@@ -716,7 +716,7 @@ fun MemorySettingsScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("写入记忆前需要确认", fontWeight = FontWeight.Medium, fontSize = 14.sp, color = colors.fg)
-                        Text("AI 提议新记忆时等待你批准", fontSize = 12.sp, color = colors.fgMuted)
+                        Text("关闭时 AI 可直接写入与修改记忆；开启后需你批准", fontSize = 12.sp, color = colors.fgMuted)
                     }
                     Switch(checked = mem.memoryRequireConfirm, onCheckedChange = { vm.updateMemorySettings(requireConfirm = it) })
                 }

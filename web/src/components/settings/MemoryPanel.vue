@@ -19,7 +19,6 @@ const error = ref<string | null>(null);
 const feedback = ref<string | null>(null);
 
 const settingsSaving = ref(false);
-const consentModalOpen = ref(false);
 const modalError = ref<string | null>(null);
 
 const targetFilter = ref<TargetFilter>("all");
@@ -54,8 +53,8 @@ function extractError(e: any, fallback: string): string {
   return e?.message ?? fallback;
 }
 
-const memoryEnabled = computed(() => Boolean(overview.value?.memory_enabled));
-const requireConfirm = computed(() => overview.value?.memory_require_confirm ?? true);
+const memoryEnabled = computed(() => overview.value?.memory_enabled ?? true);
+const requireConfirm = computed(() => overview.value?.memory_require_confirm ?? false);
 const entries = computed<MemoryEntry[]>(() => overview.value?.entries ?? []);
 const pending = computed<MemoryPendingItem[]>(() => overview.value?.pending ?? []);
 
@@ -129,22 +128,20 @@ function onToggleMemory() {
   if (settingsSaving.value) return;
   feedback.value = null;
   error.value = null;
-  modalError.value = null;
   if (!memoryEnabled.value) {
-    consentModalOpen.value = true;
+    void enableMemory();
   } else {
     void disableMemory();
   }
 }
 
-async function confirmEnableMemory() {
+async function enableMemory() {
   settingsSaving.value = true;
-  modalError.value = null;
+  error.value = null;
   feedback.value = null;
   try {
     const res = await api.put<MemoryOverview>("/users/me/memory/settings", {
       enabled: true,
-      consent: true,
     });
     if (res && Array.isArray(res.entries)) {
       overview.value = res;
@@ -152,10 +149,9 @@ async function confirmEnableMemory() {
       await loadMemory();
     }
     await auth.refreshUser();
-    consentModalOpen.value = false;
     feedback.value = "已开启长期记忆功能";
   } catch (e: any) {
-    modalError.value = extractError(e, "开启长期记忆失败");
+    error.value = extractError(e, "开启长期记忆失败");
   } finally {
     settingsSaving.value = false;
   }
@@ -168,7 +164,6 @@ async function disableMemory() {
   try {
     const res = await api.put<MemoryOverview>("/users/me/memory/settings", {
       enabled: false,
-      consent: false,
     });
     if (res && Array.isArray(res.entries)) {
       overview.value = res;
@@ -395,7 +390,7 @@ onMounted(() => {
         <div class="min-w-0">
           <p class="text-[14px] font-medium text-fg">AI 写入记忆前需要我确认</p>
           <p class="mt-0.5 text-[12.5px] text-fg-muted">
-            开启后，AI 提议新增或修改记忆时会先进入待确认队列，经你批准后才正式写入。
+            默认关闭：AI 无需用户确认即可直接读取、写入和修改记忆；开启后，AI 提议新增或修改记忆时会先进入待确认队列。
           </p>
         </div>
 
@@ -665,7 +660,7 @@ onMounted(() => {
         v-else-if="!filteredEntries.length"
         class="rounded-2xl border border-dashed border-line px-5 py-8 text-center text-[13px] text-fg-muted"
       >
-        {{ entries.length ? "当前分类下暂无记忆条目。" : "暂无长期记忆条目。开启功能后可通过对话自动记录，或点击右上角「新增记忆」手动添加。" }}
+        {{ entries.length ? "当前分类下暂无记忆条目。" : "暂无长期记忆条目。可在对话中自动记录，或点击右上角「新增记忆」手动添加。" }}
       </div>
 
       <div v-else class="space-y-2.5">
@@ -751,51 +746,6 @@ onMounted(() => {
         </article>
       </div>
     </section>
-
-    <!-- Consent Modal for Enabling Long-Term Memory -->
-    <BaseModal
-      :open="consentModalOpen"
-      title="开启长期记忆功能"
-      width="34rem"
-      @close="consentModalOpen = false"
-    >
-      <div class="space-y-3 text-[13.5px] leading-relaxed text-fg-muted">
-        <p>开启后，你的 AI 助理将能够在跨对话中保留重要事实与你的工作习惯，提升连续协作体验：</p>
-        <ul class="space-y-2 rounded-2xl bg-surface/70 p-3.5 text-[13px] text-fg">
-          <li class="flex items-start gap-2">
-            <span class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-            <span>
-              <strong>独立隔离存储：</strong>所有记忆仅写入你个人专属隔离工作区的
-              <code class="rounded bg-canvas px-1 py-0.5 text-[12px]">MEMORY.md</code>（助理笔记）与
-              <code class="rounded bg-canvas px-1 py-0.5 text-[12px]">USER.md</code>（个人偏好），不会与其他用户混用。
-            </span>
-          </li>
-          <li class="flex items-start gap-2">
-            <span class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-            <span>
-              <strong>容量上限控制：</strong>助理笔记上限为 <strong>2,200 字符</strong>，个人偏好上限为
-              <strong>1,375 字符</strong>，避免冗余信息干扰模型表现。
-            </span>
-          </li>
-          <li class="flex items-start gap-2">
-            <span class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-            <span>
-              <strong>完全由你掌控：</strong>默认开启「AI 写入记忆前需要我确认」，且你随时可在本页面查看、编辑、删除单条或一键清空全部记忆。
-            </span>
-          </li>
-        </ul>
-        <FormError :message="modalError" />
-      </div>
-
-      <template #footer>
-        <BaseButton variant="soft" rounded="full" :disabled="settingsSaving" @click="consentModalOpen = false">
-          取消
-        </BaseButton>
-        <BaseButton rounded="full" :loading="settingsSaving" @click="confirmEnableMemory">
-          确认同意并开启
-        </BaseButton>
-      </template>
-    </BaseModal>
 
     <!-- Clear All Confirmation Modal -->
     <BaseModal
