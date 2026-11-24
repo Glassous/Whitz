@@ -99,6 +99,14 @@ class TokenStorage(context: Context) {
         }
     }
 
+    fun getRagMode(): String {
+        return prefs.getString(KEY_RAG_MODE, "auto") ?: "auto"
+    }
+
+    fun setRagMode(mode: String) {
+        prefs.edit().putString(KEY_RAG_MODE, mode).apply()
+    }
+
     private fun getOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val existing = keyStore.getKey(KEY_ALIAS, null) as? SecretKey
@@ -164,5 +172,6 @@ class TokenStorage(context: Context) {
         private const val KEY_USER = "user_json"
         private const val KEY_THEME = "theme_pref"
         private const val KEY_API_BASE_URL = "api_base_url"
+        private const val KEY_RAG_MODE = "rag_mode"
     }
 }

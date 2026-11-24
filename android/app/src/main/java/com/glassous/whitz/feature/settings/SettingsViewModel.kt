@@ -8,6 +8,7 @@ import com.glassous.whitz.core.files.AvatarEncoder
 import com.glassous.whitz.core.files.LibraryController
 import com.glassous.whitz.core.model.CreditStatus
 import com.glassous.whitz.core.model.GithubSkillPreviewResponse
+import com.glassous.whitz.core.model.MemoryEntry
 import com.glassous.whitz.core.model.MemoryOverview
 import com.glassous.whitz.core.model.MemorySearchHit
 import com.glassous.whitz.core.model.SkillItem
@@ -21,6 +22,7 @@ import com.glassous.whitz.core.network.GithubInstallRequest
 import com.glassous.whitz.core.network.GithubPreviewRequest
 import com.glassous.whitz.core.network.MemoryCollectionCreateRequest
 import com.glassous.whitz.core.network.MemoryCollectionUpdateRequest
+import com.glassous.whitz.core.network.MemoryEntryPatchRequest
 import com.glassous.whitz.core.network.MemoryEntryRequest
 import com.glassous.whitz.core.network.MemorySearchRequest
 import com.glassous.whitz.core.network.MemorySettingsRequest
@@ -56,6 +58,7 @@ data class SettingsUiState(
     val selectedMemoryCollection: String? = null,
     val memorySearchResults: List<MemorySearchHit>? = null,
     val memorySearching: Boolean = false,
+    val pinningMemoryId: String? = null,
     // Skills
     val skills: List<SkillItem> = emptyList(),
     val pendingSkills: List<SkillPendingItem> = emptyList(),
@@ -431,6 +434,35 @@ class SettingsViewModel(
                 loadMemory()
             } catch (t: Throwable) {
                 _ui.update { it.copy(error = extractErrorMessage(t, "更新记忆失败")) }
+            }
+        }
+    }
+
+    fun togglePinMemoryEntry(entry: MemoryEntry) {
+        if (_ui.value.pinningMemoryId != null) return
+        val nextPinned = !entry.isPinned
+        val nextPriority = if (nextPinned) maxOf(entry.priority, 8) else entry.priority
+        viewModelScope.launch {
+            _ui.update { it.copy(pinningMemoryId = entry.id, error = null, message = null) }
+            try {
+                val overview = container.network.api.patchMemoryEntry(
+                    entry.id,
+                    MemoryEntryPatchRequest(isPinned = nextPinned, priority = nextPriority),
+                )
+                _ui.update {
+                    it.copy(
+                        pinningMemoryId = null,
+                        memory = overview,
+                        message = if (nextPinned) "已设为 L0 常驻核心记忆" else "已取消常驻核心",
+                    )
+                }
+            } catch (t: Throwable) {
+                _ui.update {
+                    it.copy(
+                        pinningMemoryId = null,
+                        error = extractErrorMessage(t, "更新常驻状态失败"),
+                    )
+                }
             }
         }
     }

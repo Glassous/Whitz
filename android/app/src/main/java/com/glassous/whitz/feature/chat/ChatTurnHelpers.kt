@@ -64,6 +64,8 @@ private val TOOL_LABELS: Map<String, String> = mapOf(
     "memory" to "记忆",
     "skill" to "技能",
     "rag_search_workspace" to "检索工作区",
+    "knowledge_search" to "多源知识检索",
+    "search_chat_history" to "检索历史对话",
     "memory_search" to "RAG 检索记忆集",
     "memory_list" to "查看记忆集",
     "memory_propose" to "写入/修改记忆",
@@ -193,6 +195,7 @@ enum class StreamingPhase {
     STOPPING,
     WAITING_APPROVAL,
     WAITING_CLARIFY,
+    RAG_PREFETCH,
     RUNNING_STEP,
     RUNNING_TOOL,
     THINKING,
@@ -208,6 +211,7 @@ fun resolveStreamingPhase(
     waitingFirstByte: Boolean = false,
     pendingControlKind: String? = null,
     hasContent: Boolean = false,
+    ragPrefetching: Boolean = false,
 ): StreamingPhase = when {
     stopping -> StreamingPhase.STOPPING
     reconnecting -> StreamingPhase.RECONNECTING
@@ -215,6 +219,7 @@ fun resolveStreamingPhase(
     pendingControlKind == "clarify" -> StreamingPhase.WAITING_CLARIFY
     currentStep != null -> StreamingPhase.RUNNING_STEP
     !runningTool.isNullOrBlank() -> StreamingPhase.RUNNING_TOOL
+    ragPrefetching && !hasContent -> StreamingPhase.RAG_PREFETCH
     waitingFirstByte -> StreamingPhase.CONNECTING
     hasContent -> StreamingPhase.GENERATING
     plan?.items.orEmpty().let { it.isNotEmpty() && it.all { item -> item.status == "completed" } } ->
@@ -231,6 +236,7 @@ fun computeLiveStepLabel(
     waitingFirstByte: Boolean = false,
     pendingControlKind: String? = null,
     hasContent: Boolean = false,
+    ragPrefetching: Boolean = false,
 ): String {
     return when (
         resolveStreamingPhase(
@@ -242,12 +248,14 @@ fun computeLiveStepLabel(
             waitingFirstByte = waitingFirstByte,
             pendingControlKind = pendingControlKind,
             hasContent = hasContent,
+            ragPrefetching = ragPrefetching,
         )
     ) {
         StreamingPhase.STOPPING -> "正在停止生成…"
         StreamingPhase.RECONNECTING -> "网络重连中，正在恢复进度…"
         StreamingPhase.WAITING_APPROVAL -> "等待你的批准"
         StreamingPhase.WAITING_CLARIFY -> "等待你补充信息"
+        StreamingPhase.RAG_PREFETCH -> "正在检索知识库与记忆…"
         StreamingPhase.RUNNING_STEP -> {
             val step = currentStep!!
             if (step.title.isNotBlank()) {

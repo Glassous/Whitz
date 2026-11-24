@@ -47,6 +47,7 @@ import com.glassous.whitz.ui.theme.Folder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import com.glassous.whitz.ui.theme.Psychology
+import com.glassous.whitz.ui.theme.PushPin
 import com.glassous.whitz.ui.theme.RateReview
 import com.glassous.whitz.ui.theme.SmartToy
 import androidx.compose.material3.AlertDialog
@@ -757,8 +758,28 @@ fun MemorySettingsScreen(
                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.surface).padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("启用长期记忆集", fontWeight = FontWeight.Medium, fontSize = 14.sp, color = colors.fg)
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("启用长期记忆集", fontWeight = FontWeight.Medium, fontSize = 14.sp, color = colors.fg)
+                            val pinnedCnt = mem.pinnedCount ?: mem.entries.count { it.isPinned }
+                            val pinnedLim = mem.pinnedLimit ?: 10
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                                    .padding(horizontal = 7.dp, vertical = 2.dp),
+                            ) {
+                                Text(
+                                    text = "L0 常驻 $pinnedCnt/$pinnedLim",
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
                         Text(
                             "${mem.collections.size} 个记忆集 · ${mem.entries.size} 条 · ${mem.totalCharCount ?: mem.charCount ?: 0} 字符",
                             fontSize = 12.sp,
@@ -910,20 +931,64 @@ fun MemorySettingsScreen(
                             }
                         }
                         items(filteredEntries, key = { it.id }) { e ->
+                            val isPinning = ui.pinningMemoryId == e.id
                             Row(
-                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.surface).padding(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(colors.surface)
+                                    .padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        e.collectionName ?: (e.target ?: "memory"),
-                                        fontSize = 11.sp,
-                                        color = colors.fgMuted,
-                                    )
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        Text(
+                                            e.collectionName ?: (e.target ?: "memory"),
+                                            fontSize = 11.sp,
+                                            color = colors.fgMuted,
+                                        )
+                                        if (e.isPinned) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                                                    .padding(horizontal = 6.dp, vertical = 1.dp),
+                                            ) {
+                                                Text(
+                                                    text = "L0 常驻",
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                )
+                                            }
+                                        }
+                                    }
                                     if (e.title.isNotBlank()) {
                                         Text(e.title, fontWeight = FontWeight.Medium, fontSize = 13.sp, color = colors.fg)
                                     }
                                     Text(e.content, fontSize = 13.sp, color = colors.fg)
+                                }
+                                IconButton(
+                                    onClick = { vm.togglePinMemoryEntry(e) },
+                                    enabled = ui.pinningMemoryId == null,
+                                    modifier = Modifier.size(32.dp),
+                                ) {
+                                    if (isPinning) {
+                                        WhitzLoadingIndicator(size = 14.dp)
+                                    } else {
+                                        Icon(
+                                            Icons.Default.PushPin,
+                                            contentDescription = if (e.isPinned) "取消常驻核心" else "设为常驻核心",
+                                            tint = if (e.isPinned) MaterialTheme.colorScheme.primary else colors.fgFaint,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                    }
                                 }
                                 IconButton(onClick = { vm.deleteMemoryEntry(e.id) }, modifier = Modifier.size(32.dp)) {
                                     Icon(Icons.Default.Delete, contentDescription = "删除", tint = colors.fgFaint, modifier = Modifier.size(16.dp))

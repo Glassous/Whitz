@@ -13,13 +13,16 @@ import com.glassous.whitz.core.files.extractInlineFileIds
 import com.glassous.whitz.core.files.isConversationImageFile
 import com.glassous.whitz.core.files.isWritableTextExt
 import com.glassous.whitz.core.model.AgentStatus
+import com.glassous.whitz.core.model.CitationItem
 import com.glassous.whitz.core.model.ClarifyAnswerItem
 import com.glassous.whitz.core.model.ClarifyDetail
 import com.glassous.whitz.core.model.ClarifyQuestionItem
 import com.glassous.whitz.core.model.Conversation
+import com.glassous.whitz.core.model.ConversationContextState
 import com.glassous.whitz.core.model.ConversationDetail
 import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.ConversationSearchHit
+import com.glassous.whitz.core.model.ConversationWorkingState
 import com.glassous.whitz.core.model.CreditStatus
 import com.glassous.whitz.core.model.DeliverableTarget
 import com.glassous.whitz.core.model.FileAttachmentMeta
@@ -29,12 +32,14 @@ import com.glassous.whitz.core.model.MessageReaction
 import com.glassous.whitz.core.model.PendingControl
 import com.glassous.whitz.core.model.Plan
 import com.glassous.whitz.core.model.PlanItem
+import com.glassous.whitz.core.model.RagMode
 import com.glassous.whitz.core.model.ReasoningBlock
 import com.glassous.whitz.core.model.ReasoningTool
 import com.glassous.whitz.core.model.ScheduledTaskPendingItem
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.model.ToolPayload
+import com.glassous.whitz.core.model.UnifiedSearchResponse
 import com.glassous.whitz.core.model.UploadTask
 import com.glassous.whitz.core.model.UploadTaskStatus
 import com.glassous.whitz.core.model.WorkspaceArtifactMeta
@@ -58,6 +63,7 @@ import com.glassous.whitz.feature.schedules.ScheduleController
 import com.glassous.whitz.core.network.UpdateAssistantRequest
 import com.glassous.whitz.core.network.UpdateFileContentRequest
 import com.glassous.whitz.core.network.WhitzJson
+import com.glassous.whitz.core.network.WorkingStateUpdateRequest
 import com.glassous.whitz.core.network.extractErrorMessage
 import com.glassous.whitz.core.util.ConversationSorter
 import com.glassous.whitz.core.util.DateTimeUtils
@@ -168,7 +174,19 @@ data class ChatUiState(
     val selectedSkillNames: List<String> = emptyList(),
     // Search
     val searchResults: List<ConversationSearchHit> = emptyList(),
+    val unifiedSearchResults: UnifiedSearchResponse? = null,
+    val searchSourceTab: String = "all",
     val searching: Boolean = false,
+    // RAG & Citations
+    val ragMode: RagMode = RagMode.AUTO,
+    val ragPrefetching: Boolean = false,
+    val citations: List<CitationItem> = emptyList(),
+    // 4-Tier Cognitive Context State (L0/L1/L2)
+    val contextState: ConversationContextState? = null,
+    val contextStateLoading: Boolean = false,
+    val contextStateSaving: Boolean = false,
+    val contextStateArchiving: Boolean = false,
+    val contextStateError: String? = null,
     // Preview / Deliverable / Lightbox / Focus / Composer insertion
     val previewTarget: PreviewTarget? = null,
     val deliverablePreview: DeliverablePreviewState? = null,
@@ -189,7 +207,9 @@ data class ChatUiState(
 class ChatViewModel(
     private val container: AppContainer,
 ) : ViewModel() {
-    private val _ui = MutableStateFlow(ChatUiState())
+    private val _ui = MutableStateFlow(
+        ChatUiState(ragMode = RagMode.fromWire(container.storage.getRagMode()))
+    )
     val ui: StateFlow<ChatUiState> = _ui.asStateFlow()
 
     val user = container.authManager.user
@@ -202,12 +222,25 @@ class ChatViewModel(
     private var streamJob: Job? = null
     private var pendingPollJob: Job? = null
     private var realtimeJob: Job? = null
+    private var unifiedSearchJob: Job? = null
     private val uploadJobs = mutableMapOf<String, Job>()
     private var pendingUserTargetId: String? = null
     private var lastEventId: String? = null
     private var openSeq = 0
     private var seq = 0
     private var initialLoaded = false
+
+    fun setRagMode(mode: RagMode) {
+        if (_ui.value.ragMode == mode) return
+        container.storage.setRagMode(mode.wireValue)
+        _ui.update { it.copy(ragMode = mode) }
+    }
+
+    private fun buildRagScopeJson(mode: RagMode): JsonObject = buildJsonObject {
+        put("mode", JsonPrimitive(mode.wireValue))
+        put("include_memory", JsonPrimitive(mode == RagMode.AUTO))
+        put("include_chats", JsonPrimitive(mode == RagMode.AUTO))
+    }
 
     private val deltaCoalescer = StreamDeltaCoalescer(
         scope = viewModelScope,
@@ -479,6 +512,10 @@ class ChatViewModel(
                 attachedIds = emptyList(),
                 selectedSkillNames = emptyList(),
                 fileError = null,
+                ragPrefetching = false,
+                citations = emptyList(),
+                contextState = null,
+                contextStateError = null,
             )
         }
     }
@@ -609,6 +646,10 @@ class ChatViewModel(
                 submittingClarify = false,
                 activeAssistantId = lastAssistant?.id,
                 attachedIds = emptyList(),
+                ragPrefetching = false,
+                citations = lastAssistant?.toolPayload?.citations.orEmpty(),
+                contextState = if (it.currentConvId == detail.id) it.contextState else null,
+                contextStateError = null,
             )
         }
         persistMainConversationCache(detail)
@@ -767,18 +808,125 @@ class ChatViewModel(
     }
 
     fun searchConversations(query: String) {
+        searchUnified(query, _ui.value.searchSourceTab)
+    }
+
+    fun setSearchSourceTab(source: String, currentQuery: String) {
+        val clean = if (source in setOf("all", "chat", "file", "memory")) source else "all"
+        _ui.update { it.copy(searchSourceTab = clean) }
+        if (currentQuery.trim().isNotEmpty()) {
+            searchUnified(currentQuery, clean)
+        }
+    }
+
+    fun searchUnified(query: String, source: String = _ui.value.searchSourceTab) {
         val q = query.trim()
+        unifiedSearchJob?.cancel()
         if (q.isEmpty()) {
-            _ui.update { it.copy(searchResults = emptyList(), searching = false) }
+            _ui.update {
+                it.copy(
+                    searchResults = emptyList(),
+                    unifiedSearchResults = null,
+                    searching = false,
+                )
+            }
             return
         }
-        viewModelScope.launch {
+        unifiedSearchJob = viewModelScope.launch {
+            delay(200L)
             _ui.update { it.copy(searching = true) }
             try {
-                val hits = container.network.api.searchConversations(q)
-                _ui.update { it.copy(searchResults = hits, searching = false) }
+                val res = container.network.api.unifiedSearch(q = q, sources = source, limit = 12)
+                _ui.update {
+                    it.copy(
+                        unifiedSearchResults = res,
+                        searching = false,
+                    )
+                }
             } catch (_: Throwable) {
-                _ui.update { it.copy(searching = false) }
+                try {
+                    val hits = container.network.api.searchConversations(q)
+                    _ui.update {
+                        it.copy(
+                            searchResults = hits,
+                            unifiedSearchResults = null,
+                            searching = false,
+                        )
+                    }
+                } catch (_: Throwable) {
+                    _ui.update { it.copy(searching = false) }
+                }
+            }
+        }
+    }
+
+    fun loadContextState() {
+        val convId = _ui.value.currentConvId ?: return
+        viewModelScope.launch {
+            _ui.update { it.copy(contextStateLoading = true, contextStateError = null) }
+            try {
+                val res = container.network.api.getConversationContextState(convId)
+                if (_ui.value.currentConvId == convId) {
+                    _ui.update { it.copy(contextState = res, contextStateLoading = false) }
+                }
+            } catch (t: Throwable) {
+                if (_ui.value.currentConvId == convId) {
+                    _ui.update {
+                        it.copy(
+                            contextStateLoading = false,
+                            contextStateError = extractErrorMessage(t, "加载记忆状态失败"),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun updateWorkingState(next: ConversationWorkingState) {
+        val convId = _ui.value.currentConvId ?: return
+        if (_ui.value.contextStateSaving) return
+        viewModelScope.launch {
+            _ui.update { it.copy(contextStateSaving = true, contextStateError = null) }
+            try {
+                val res = container.network.api.updateConversationWorkingState(
+                    convId,
+                    WorkingStateUpdateRequest(workingState = next),
+                )
+                if (_ui.value.currentConvId == convId) {
+                    _ui.update { it.copy(contextState = res, contextStateSaving = false) }
+                }
+            } catch (t: Throwable) {
+                if (_ui.value.currentConvId == convId) {
+                    _ui.update {
+                        it.copy(
+                            contextStateSaving = false,
+                            contextStateError = extractErrorMessage(t, "更新工作态失败"),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun archiveEpisodeNow() {
+        val convId = _ui.value.currentConvId ?: return
+        if (_ui.value.contextStateArchiving) return
+        viewModelScope.launch {
+            _ui.update { it.copy(contextStateArchiving = true, contextStateError = null) }
+            try {
+                val res = container.network.api.archiveConversationEpisode(convId)
+                if (_ui.value.currentConvId == convId) {
+                    _ui.update { it.copy(contextState = res, contextStateArchiving = false) }
+                }
+            } catch (t: Throwable) {
+                if (_ui.value.currentConvId == convId) {
+                    _ui.update {
+                        it.copy(
+                            contextStateArchiving = false,
+                            contextStateError = extractErrorMessage(t, "归档历史失败"),
+                        )
+                    }
+                }
             }
         }
     }
@@ -880,6 +1028,8 @@ class ChatViewModel(
                 reasoning = emptyList(),
                 plan = null,
                 pendingControl = null,
+                ragPrefetching = false,
+                citations = emptyList(),
                 messages = it.messages + userMsg + assistantMsg,
                 latestTurnTriggerSeq = it.latestTurnTriggerSeq + 1L,
                 activeAssistantId = assistantId,
@@ -891,6 +1041,7 @@ class ChatViewModel(
             )
         }
 
+        val ragMode = _ui.value.ragMode
         val bodyObj = buildJsonObject {
             put("content", JsonPrimitive(content))
             if (attachedFiles.isNotEmpty()) {
@@ -899,6 +1050,7 @@ class ChatViewModel(
             if (skillNames.isNotEmpty()) {
                 put("skill_names", buildJsonArray { skillNames.forEach { add(JsonPrimitive(it)) } })
             }
+            put("rag_scope", buildRagScopeJson(ragMode))
         }
         streamTurn(convId, "/conversations/$convId/messages", bodyObj.toString(), "发送失败")
     }
@@ -952,6 +1104,8 @@ class ChatViewModel(
                 reasoning = emptyList(),
                 plan = null,
                 pendingControl = null,
+                ragPrefetching = false,
+                citations = emptyList(),
                 messages = cutMessages + assistantMsg,
                 latestTurnTriggerSeq = it.latestTurnTriggerSeq + 1L,
                 activeAssistantId = assistantId,
@@ -962,7 +1116,10 @@ class ChatViewModel(
                 reconnecting = false,
             )
         }
-        streamTurn(convId, "/conversations/$convId/messages/$assistantMessageId/regenerate", "{}", "重新生成失败")
+        val regenBody = buildJsonObject {
+            put("rag_scope", buildRagScopeJson(state.ragMode))
+        }
+        streamTurn(convId, "/conversations/$convId/messages/$assistantMessageId/regenerate", regenBody.toString(), "重新生成失败")
     }
 
     fun editAndResend(userMessageId: String, newContent: String) {
@@ -1018,6 +1175,8 @@ class ChatViewModel(
                 reasoning = emptyList(),
                 plan = null,
                 pendingControl = null,
+                ragPrefetching = false,
+                citations = emptyList(),
                 messages = state.messages.take(idx) + updatedUser + assistantMsg,
                 latestTurnTriggerSeq = it.latestTurnTriggerSeq + 1L,
                 activeAssistantId = assistantId,
@@ -1032,6 +1191,7 @@ class ChatViewModel(
             put("content", JsonPrimitive(trimmed))
             put("file_ids", buildJsonArray { attached.forEach { add(JsonPrimitive(it.id)) } })
             put("skill_names", buildJsonArray { skills.forEach { add(JsonPrimitive(it)) } })
+            put("rag_scope", buildRagScopeJson(state.ragMode))
         }
         streamTurn(convId, "/conversations/$convId/messages/$userMessageId/edit", bodyObj.toString(), "保存并重发失败")
     }
@@ -1377,7 +1537,41 @@ class ChatViewModel(
                 _ui.update { it.copy(waitingFirstByte = false) }
             }
         }
+        if (ev.event !in setOf("run.started", "message.created", "run.reconnected", "graph.node")) {
+            if (_ui.value.ragPrefetching) {
+                _ui.update { it.copy(ragPrefetching = false) }
+            }
+        }
         when (ev.event) {
+            "graph.node" -> {
+                val node = d.str("node")
+                if (node == "rag_prefetch") {
+                    _ui.update { it.copy(ragPrefetching = true) }
+                } else if (_ui.value.ragPrefetching) {
+                    _ui.update { it.copy(ragPrefetching = false) }
+                }
+            }
+            "rag.context" -> {
+                val parsedCitations = parseCitations(d["citations"] as? JsonArray)
+                _ui.update { state ->
+                    val merged = mergeById(state.citations, parsedCitations) { it.citationId }
+                    val asstId = state.activeAssistantId
+                    val nextMsgs = if (asstId != null && merged.isNotEmpty()) {
+                        state.messages.map { m ->
+                            if (m.id == asstId) {
+                                val prevPayload = m.toolPayload ?: ToolPayload()
+                                val msgCitations = mergeById(prevPayload.citations.orEmpty(), merged) { it.citationId }
+                                m.copy(toolPayload = prevPayload.copy(citations = msgCitations))
+                            } else m
+                        }
+                    } else state.messages
+                    state.copy(
+                        ragPrefetching = false,
+                        citations = merged,
+                        messages = nextMsgs,
+                    )
+                }
+            }
             "message.created" -> {
                 val userMsgId = d.str("user_message_id")
                 val asstMsgId = d.str("assistant_message_id")
@@ -1476,6 +1670,7 @@ class ChatViewModel(
                         null
                     }
                 } ?: emptyList()
+                val parsedCitations = parseCitations(d["citations"] as? JsonArray)
 
                 val ctrlObj = (d["pending_control"] as? JsonObject)
                     ?: (d["pending_controls"] as? JsonArray)?.firstOrNull() as? JsonObject
@@ -1486,6 +1681,7 @@ class ChatViewModel(
                     val nextSel = asstId ?: state.selectedTurnId
                     val nextReasoning = parsedReasoning ?: state.reasoning
                     val nextPlan = parsedPlan ?: state.plan
+                    val nextCitations = mergeById(state.citations, parsedCitations) { it.citationId }
                     val mappedStatus = when (statusStr) {
                         "waiting_for_approval", "waiting_for_clarify" -> "waiting"
                         "running", "queued" -> "streaming"
@@ -1497,6 +1693,7 @@ class ChatViewModel(
                             matchedAsst = true
                             val prevPayload = m.toolPayload ?: ToolPayload()
                             val mergedArtifacts = mergeById(prevPayload.artifacts ?: emptyList(), parsedArtifacts) { it.id }
+                            val mergedCitations = mergeById(prevPayload.citations.orEmpty(), nextCitations) { it.citationId }
                             m.copy(
                                 content = output ?: m.content,
                                 status = mappedStatus ?: m.status,
@@ -1504,6 +1701,7 @@ class ChatViewModel(
                                     reasoning = nextReasoning,
                                     plan = nextPlan,
                                     artifacts = mergedArtifacts.ifEmpty { null },
+                                    citations = mergedCitations.ifEmpty { null },
                                 ),
                             )
                         } else m
@@ -1519,6 +1717,7 @@ class ChatViewModel(
                                 reasoning = nextReasoning,
                                 plan = nextPlan,
                                 artifacts = parsedArtifacts.ifEmpty { null },
+                                citations = nextCitations.ifEmpty { null },
                             ),
                             createdAt = Instant.now().toString(),
                         )
@@ -1531,10 +1730,12 @@ class ChatViewModel(
                         activeRunId = runId ?: state.activeRunId,
                         reasoning = nextReasoning,
                         plan = nextPlan,
+                        citations = nextCitations,
                         pendingControl = hydratedCtrl,
                         messages = nextMsgs,
                         reconnecting = false,
                         waitingFirstByte = false,
+                        ragPrefetching = false,
                     )
                 }
             }
@@ -1840,11 +2041,24 @@ class ChatViewModel(
         }
     }
 
+    private fun parseCitations(arr: JsonArray?): List<CitationItem> {
+        if (arr == null) return emptyList()
+        return arr.mapNotNull { elem ->
+            try {
+                WhitzJson.decodeFromJsonElement(CitationItem.serializer(), elem)
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
     private fun applyTerminalPayload(d: JsonObject, status: String, errorMsg: String?) {
         val output = d.str("output")
         val artifactsArr = d["artifacts"] as? JsonArray
         val reasoningArr = d["reasoning"] as? JsonArray
         val planElem = d["plan"]
+        val parsedCitations = parseCitations(d["citations"] as? JsonArray)
+        val ragMetricsElem = d["rag_metrics"]
 
         val parsedReasoning = reasoningArr?.mapNotNull {
             try {
@@ -1871,11 +2085,13 @@ class ChatViewModel(
         _ui.update { state ->
             val nextReasoning = parsedReasoning ?: state.reasoning
             val nextPlan = parsedPlan ?: state.plan
+            val nextCitations = mergeById(state.citations, parsedCitations) { it.citationId }
             val asstId = state.activeAssistantId
             val nextMsgs = state.messages.map { m ->
                 if (m.id == asstId) {
                     val prevPayload = m.toolPayload ?: ToolPayload()
                     val mergedArtifacts = mergeById(prevPayload.artifacts ?: emptyList(), parsedArtifacts) { it.id }
+                    val mergedCitations = mergeById(prevPayload.citations.orEmpty(), nextCitations) { it.citationId }
                     m.copy(
                         content = if (!output.isNullOrEmpty()) output else m.content,
                         status = status,
@@ -1883,6 +2099,8 @@ class ChatViewModel(
                             reasoning = nextReasoning,
                             plan = nextPlan,
                             artifacts = mergedArtifacts.ifEmpty { null },
+                            citations = mergedCitations.ifEmpty { null },
+                            ragMetrics = ragMetricsElem ?: prevPayload.ragMetrics,
                         ),
                     )
                 } else m
@@ -1891,6 +2109,8 @@ class ChatViewModel(
                 messages = nextMsgs,
                 reasoning = nextReasoning,
                 plan = nextPlan,
+                citations = nextCitations,
+                ragPrefetching = false,
                 error = errorMsg ?: state.error,
             )
         }
@@ -1911,6 +2131,7 @@ class ChatViewModel(
             state.copy(
                 streaming = false,
                 waitingFirstByte = false,
+                ragPrefetching = false,
                 stopping = false,
                 reconnecting = false,
                 approvingChoice = null,
@@ -2393,7 +2614,18 @@ class ChatViewModel(
         }
     }
 
-    private fun openConversationAndFocus(convId: String, messageId: String) {
+    fun focusMessageInCurrentConversation(messageId: String) {
+        _ui.update { it.copy(pendingFocusMessageId = messageId) }
+    }
+
+    fun openConversationAndFocus(convId: String, messageId: String?) {
+        val current = _ui.value
+        if (convId == current.currentConvId && current.messages.isNotEmpty()) {
+            if (!messageId.isNullOrBlank()) {
+                _ui.update { it.copy(pendingFocusMessageId = messageId) }
+            }
+            return
+        }
         val mySeq = ++openSeq
         pendingPollJob?.cancel()
         pendingPollJob = null
@@ -2428,6 +2660,19 @@ class ChatViewModel(
                 }
             }
         }
+    }
+
+    fun openFileById(fileId: String, filename: String = "", conversationId: String? = null) {
+        if (fileId.isBlank()) return
+        val existing = _ui.value.files.firstOrNull { it.id == fileId }
+        val file = existing ?: ConversationFile(
+            id = fileId,
+            conversationId = conversationId,
+            filename = filename.ifBlank { fileId },
+            ext = FileValidator.getFileExt(filename),
+            category = FileValidator.getFileSpec(filename)?.category ?: "document",
+        )
+        openFileSmart(file)
     }
 
     fun createTextFile(

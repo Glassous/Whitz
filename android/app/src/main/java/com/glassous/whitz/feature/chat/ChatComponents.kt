@@ -128,6 +128,7 @@ import com.glassous.whitz.core.files.extractInlineFileIds
 import com.glassous.whitz.core.files.isConversationImageFile
 import com.glassous.whitz.core.files.isImageFile
 import com.glassous.whitz.core.files.parseInlineFileSegments
+import com.glassous.whitz.core.model.CitationItem
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.ConversationSearchHit
@@ -141,11 +142,18 @@ import com.glassous.whitz.core.model.ReasoningTool
 import com.glassous.whitz.core.model.ScheduledTaskPendingItem
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
+import com.glassous.whitz.core.model.UnifiedChatSearchHit
+import com.glassous.whitz.core.model.UnifiedFileSearchHit
+import com.glassous.whitz.core.model.UnifiedMemorySearchHit
+import com.glassous.whitz.core.model.UnifiedSearchResponse
 import com.glassous.whitz.core.model.displaySideTitle
 import com.glassous.whitz.core.model.displayTitle
 import com.glassous.whitz.core.model.isScheduledSide
 import com.glassous.whitz.core.util.DateTimeUtils
+import com.glassous.whitz.ui.theme.Description
+import com.glassous.whitz.ui.theme.History
 import com.glassous.whitz.ui.theme.LocalWhitzColors
+import com.glassous.whitz.ui.theme.Psychology
 import com.glassous.whitz.ui.theme.Schedule
 import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
@@ -185,6 +193,7 @@ fun MessageBubble(
     hasActiveUploads: Boolean = false,
     reconnecting: Boolean = false,
     waitingFirstByte: Boolean = false,
+    ragPrefetching: Boolean = false,
     isActiveTurn: Boolean,
     isSelectedTurn: Boolean = false,
     isHighlighted: Boolean = false,
@@ -195,6 +204,7 @@ fun MessageBubble(
     pendingControl: PendingControl? = null,
     turnPlan: Plan? = null,
     turnReasoning: List<ReasoningBlock>? = null,
+    turnCitations: List<CitationItem>? = null,
     convFiles: List<ConversationFile>,
     assistantName: String = "Whitz",
     onRegenerate: (String) -> Unit,
@@ -204,6 +214,7 @@ fun MessageBubble(
     onOpenTurnDetails: (String) -> Unit,
     onOpenFile: (ConversationFile) -> Unit,
     onOpenDeliverable: (DeliverableTarget) -> Unit = {},
+    onOpenCitation: (CitationItem) -> Unit = {},
     onOpenLightbox: (ConversationFile, List<ConversationFile>?) -> Unit = { f, _ -> onOpenFile(f) },
     onReact: (messageId: String, reaction: String, reasonCode: String?) -> Unit = { _, _, _ -> },
 ) {
@@ -559,6 +570,29 @@ fun MessageBubble(
         else -> {
             val effectiveReasoning = turnReasoning ?: message.toolPayload?.reasoning.orEmpty()
             val effectivePlan = turnPlan ?: message.toolPayload?.plan ?: derivePlanFromReasoning(effectiveReasoning)
+            val effectiveCitations = remember(turnCitations, message.toolPayload?.citations) {
+                val base = message.toolPayload?.citations.orEmpty()
+                val live = turnCitations.orEmpty()
+                if (live.isEmpty()) base
+                else {
+                    val map = LinkedHashMap<String, CitationItem>()
+                    base.forEach { map[it.citationId] = it }
+                    live.forEach { map[it.citationId] = it }
+                    map.values.toList()
+                }
+            }
+            var citationsExpanded by remember(message.id) { mutableStateOf(false) }
+            var highlightedCitationId by remember(message.id) { mutableStateOf<String?>(null) }
+            val handleInlineCitationClick: (String) -> Unit = { citeId ->
+                val matched = effectiveCitations.firstOrNull {
+                    it.citationId.equals(citeId, ignoreCase = true)
+                }
+                citationsExpanded = true
+                highlightedCitationId = matched?.citationId ?: citeId
+                if (matched != null) {
+                    onOpenCitation(matched)
+                }
+            }
             val isLive = isActiveTurn && streaming
             val isWaitingControl = isLive && (message.status == "waiting" || pendingControl != null)
             val isFailureOrCancelled = !isLive && (message.status == "failed" || message.status == "cancelled")
@@ -696,6 +730,7 @@ fun MessageBubble(
                                 isStreaming = showLiveCursor,
                                 modifier = Modifier.fillMaxWidth(),
                                 onOpenDeliverable = onOpenDeliverable,
+                                onOpenCitation = handleInlineCitationClick,
                             )
                         }
                     } else {
@@ -704,6 +739,7 @@ fun MessageBubble(
                             isStreaming = showLiveCursor,
                             modifier = Modifier.fillMaxWidth(),
                             onOpenDeliverable = onOpenDeliverable,
+                            onOpenCitation = handleInlineCitationClick,
                         )
                     }
                 } else if (isLive || message.status == "streaming") {
@@ -722,6 +758,7 @@ fun MessageBubble(
                             } else {
                                 "正在等待你的澄清回答，提交后将继续执行…"
                             }
+                            ragPrefetching -> "正在检索知识库与记忆…"
                             waitingFirstByte -> "助理已接收请求，正在准备回复…"
                             else -> "正在组织回答…"
                         }
@@ -733,6 +770,17 @@ fun MessageBubble(
                     }
                 } else if (message.status == "waiting") {
                     Text("等待你的确认...", fontSize = 13.5.sp, color = colors.warning)
+                }
+
+                if (effectiveCitations.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    CitationsDisclosureCard(
+                        citations = effectiveCitations,
+                        expanded = citationsExpanded,
+                        highlightedCitationId = highlightedCitationId,
+                        onToggleExpanded = { citationsExpanded = !citationsExpanded },
+                        onOpenCitation = onOpenCitation,
+                    )
                 }
 
                 if (artifacts.isNotEmpty()) {
@@ -2473,13 +2521,192 @@ private fun ToolCallRow(tool: ReasoningTool) {
 }
 
 @Composable
+private fun CitationsDisclosureCard(
+    citations: List<CitationItem>,
+    expanded: Boolean,
+    highlightedCitationId: String?,
+    onToggleExpanded: () -> Unit,
+    onOpenCitation: (CitationItem) -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val rotation by animateFloatAsState(
+        targetValue = if (expanded) 90f else 0f,
+        label = "citationsChevron",
+    )
+    val summaryText = remember(citations) {
+        val fileCount = citations.count { it.sourceType == "file" }
+        val memCount = citations.count { it.sourceType == "memory" }
+        val chatCount = citations.count { it.sourceType == "chat_digest" || it.sourceType == "chat_turn" }
+        val parts = buildList {
+            if (fileCount > 0) add("$fileCount 份文档")
+            if (memCount > 0) add("$memCount 条记忆")
+            if (chatCount > 0) add("$chatCount 段历史对话")
+        }
+        if (parts.isNotEmpty()) "参考了 ${parts.joinToString(" · ")}" else "参考来源 · ${citations.size} 条"
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(colors.surface)
+            .border(0.6.dp, colors.line, RoundedCornerShape(14.dp)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggleExpanded)
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Default.Description,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(14.dp),
+            )
+            Text(
+                text = summaryText,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = colors.fgMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = if (expanded) "收起引用" else "展开引用",
+                tint = colors.fgFaint,
+                modifier = Modifier
+                    .size(15.dp)
+                    .rotate(rotation),
+            )
+        }
+
+        AnimatedVisibility(visible = expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                citations.forEach { cite ->
+                    val isHighlighted = highlightedCitationId != null &&
+                        highlightedCitationId.equals(cite.citationId, ignoreCase = true)
+                    val typeLabel = when (cite.sourceType) {
+                        "file" -> "文档"
+                        "memory" -> "记忆"
+                        "chat_digest", "chat_turn" -> "历史对话"
+                        else -> "来源"
+                    }
+                    val typeIcon = when (cite.sourceType) {
+                        "file" -> Icons.Default.Description
+                        "memory" -> Icons.Default.Psychology
+                        else -> Icons.Default.History
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isHighlighted) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else colors.canvas,
+                        border = BorderStroke(
+                            if (isHighlighted) 1.dp else 0.5.dp,
+                            if (isHighlighted) MaterialTheme.colorScheme.primary else colors.line,
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onOpenCitation(cite) },
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(5.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                                ) {
+                                    Text(
+                                        text = cite.citationId,
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                                Icon(
+                                    imageVector = typeIcon,
+                                    contentDescription = null,
+                                    tint = colors.fgMuted,
+                                    modifier = Modifier.size(13.dp),
+                                )
+                                Text(
+                                    text = cite.title.ifBlank { typeLabel },
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = colors.fg,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    text = typeLabel,
+                                    fontSize = 10.5.sp,
+                                    color = colors.fgFaint,
+                                )
+                            }
+                            if (cite.subtitle.isNotBlank()) {
+                                Text(
+                                    text = cite.subtitle,
+                                    fontSize = 11.sp,
+                                    color = colors.fgFaint,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            if (cite.snippet.isNotBlank()) {
+                                Text(
+                                    text = cite.snippet,
+                                    fontSize = 12.sp,
+                                    lineHeight = 17.sp,
+                                    color = colors.fgMuted,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private val OMNIBOX_TABS = listOf(
+    "all" to "全部",
+    "chat" to "对话",
+    "file" to "资料库正文",
+    "memory" to "长期记忆",
+)
+
+@Composable
 fun SearchDialog(
     recentConversations: List<Conversation> = emptyList(),
     assistantName: String = "Whitz",
     results: List<ConversationSearchHit>,
+    unifiedResults: UnifiedSearchResponse? = null,
+    selectedSourceTab: String = "all",
     searching: Boolean,
     onQueryChange: (String) -> Unit,
-    onSelectConversation: (String) -> Unit,
+    onSelectSourceTab: (source: String, currentQuery: String) -> Unit = { _, _ -> },
+    onSelectConversation: (convId: String, messageId: String?) -> Unit,
+    onSelectFileHit: (UnifiedFileSearchHit) -> Unit = {},
+    onSelectMemoryHit: (UnifiedMemorySearchHit) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     val colors = LocalWhitzColors.current
@@ -2488,7 +2715,7 @@ fun SearchDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = colors.canvas,
-        title = { Text("搜索聊天", fontWeight = FontWeight.SemiBold, color = colors.fg) },
+        title = { Text("全局统一检索", fontWeight = FontWeight.SemiBold, color = colors.fg) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 WhitzTextField(
@@ -2497,10 +2724,35 @@ fun SearchDialog(
                         query = it
                         onQueryChange(it)
                     },
-                    placeholder = "输入标题或消息关键词...",
+                    placeholder = "搜索聊天、资料库正文、长期记忆…",
                     leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = colors.fgMuted) },
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    OMNIBOX_TABS.forEach { (key, label) ->
+                        val active = selectedSourceTab == key
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(if (active) MaterialTheme.colorScheme.primary else colors.surface)
+                                .clickable { onSelectSourceTab(key, query) }
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                        ) {
+                            Text(
+                                text = label,
+                                fontSize = 11.5.sp,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                                color = if (active) MaterialTheme.colorScheme.onPrimary else colors.fgMuted,
+                            )
+                        }
+                    }
+                }
                 Spacer(modifier = Modifier.height(10.dp))
                 if (searching) {
                     Box(modifier = Modifier.fillMaxWidth().padding(18.dp), contentAlignment = Alignment.Center) {
@@ -2518,7 +2770,7 @@ fun SearchDialog(
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(10.dp))
                                         .clickable {
-                                            onSelectConversation(c.id)
+                                            onSelectConversation(c.id, null)
                                             onDismiss()
                                         }
                                         .padding(10.dp),
@@ -2571,6 +2823,164 @@ fun SearchDialog(
                             }
                         }
                     }
+                } else if (unifiedResults != null) {
+                    val chatHits = if (selectedSourceTab == "all" || selectedSourceTab == "chat") unifiedResults.chats else emptyList()
+                    val fileHits = if (selectedSourceTab == "all" || selectedSourceTab == "file") unifiedResults.files else emptyList()
+                    val memHits = if (selectedSourceTab == "all" || selectedSourceTab == "memory") unifiedResults.memories else emptyList()
+
+                    if (chatHits.isEmpty() && fileHits.isEmpty() && memHits.isEmpty()) {
+                        Text("没有找到匹配的结果", fontSize = 13.sp, color = colors.fgFaint, modifier = Modifier.padding(8.dp))
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.heightIn(max = 360.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            if (fileHits.isNotEmpty()) {
+                                item(key = "hdr-files") {
+                                    Text(
+                                        text = "资料库正文 (${fileHits.size})",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = colors.fgFaint,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                                    )
+                                }
+                                items(fileHits, key = { "file-${it.fileId}-${it.locator}-${it.snippet.hashCode()}" }) { fh ->
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .clickable {
+                                                onSelectFileHit(fh)
+                                                onDismiss()
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                        ) {
+                                            Icon(Icons.Default.Description, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                                            Text(
+                                                text = fh.filename.ifBlank { fh.fileId },
+                                                fontWeight = FontWeight.Medium,
+                                                fontSize = 13.5.sp,
+                                                color = colors.fg,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                            val loc = fh.sectionPath.ifBlank { fh.locator }
+                                            if (loc.isNotBlank()) {
+                                                Text(loc, fontSize = 10.5.sp, color = colors.fgFaint, maxLines = 1)
+                                            }
+                                        }
+                                        if (fh.snippet.isNotBlank()) {
+                                            Text(fh.snippet, fontSize = 12.sp, color = colors.fgMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (memHits.isNotEmpty()) {
+                                item(key = "hdr-mem") {
+                                    Text(
+                                        text = "长期记忆 (${memHits.size})",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = colors.fgFaint,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                                    )
+                                }
+                                items(memHits, key = { "mem-${it.entryId}" }) { mh ->
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .clickable {
+                                                onSelectMemoryHit(mh)
+                                                onDismiss()
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                        ) {
+                                            Icon(Icons.Default.Psychology, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                                            Text(
+                                                text = mh.title.ifBlank { mh.collectionName.ifBlank { "长期记忆" } },
+                                                fontWeight = FontWeight.Medium,
+                                                fontSize = 13.5.sp,
+                                                color = colors.fg,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                            if (mh.collectionName.isNotBlank()) {
+                                                Text(mh.collectionName, fontSize = 10.5.sp, color = colors.fgFaint)
+                                            }
+                                        }
+                                        val body = mh.snippet.ifBlank { mh.content }
+                                        if (body.isNotBlank()) {
+                                            Text(body, fontSize = 12.sp, color = colors.fgMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (chatHits.isNotEmpty()) {
+                                item(key = "hdr-chat") {
+                                    Text(
+                                        text = "对话与情景归档 (${chatHits.size})",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = colors.fgFaint,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                                    )
+                                }
+                                items(chatHits, key = { "chat-${it.conversationId}-${it.messageId}-${it.snippet.hashCode()}" }) { ch ->
+                                    val matchTag = when (ch.matchIn) {
+                                        "digest" -> "情景归档"
+                                        "semantic_turn" -> "语义命中"
+                                        "title" -> "标题"
+                                        else -> if (ch.role == "user") "我" else assistantName
+                                    }
+                                    val title = if (ch.conversationKind == "main") assistantName else ch.conversationTitle.ifBlank { "新旁聊" }
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .clickable {
+                                                onSelectConversation(ch.conversationId, ch.messageId)
+                                                onDismiss()
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                        ) {
+                                            Icon(Icons.Default.History, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(14.dp))
+                                            Text(
+                                                text = title,
+                                                fontWeight = FontWeight.Medium,
+                                                fontSize = 13.5.sp,
+                                                color = colors.fg,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                            Text(matchTag, fontSize = 10.5.sp, color = colors.fgFaint)
+                                        }
+                                        if (ch.snippet.isNotBlank()) {
+                                            Text(ch.snippet, fontSize = 12.sp, color = colors.fgMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else if (results.isEmpty()) {
                     Text("没有找到匹配的聊天", fontSize = 13.sp, color = colors.fgFaint, modifier = Modifier.padding(8.dp))
                 } else {
@@ -2587,7 +2997,7 @@ fun SearchDialog(
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(10.dp))
                                     .clickable {
-                                        onSelectConversation(hit.conversationId)
+                                        onSelectConversation(hit.conversationId, hit.messageId)
                                         onDismiss()
                                     }
                                     .padding(10.dp),

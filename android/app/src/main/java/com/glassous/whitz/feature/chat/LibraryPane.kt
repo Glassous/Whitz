@@ -66,6 +66,7 @@ import com.glassous.whitz.core.files.FileValidator
 import com.glassous.whitz.core.files.LibraryController
 import com.glassous.whitz.core.files.LibraryUploadStatus
 import com.glassous.whitz.core.model.ConversationFile
+import com.glassous.whitz.core.model.LibraryContentSearchHit
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
@@ -198,44 +199,64 @@ fun LibraryPane(
                         WhitzTextField(
                             value = ui.query,
                             onValueChange = { controller.updateQuery(it) },
-                            placeholder = "搜索文件名…",
+                            placeholder = if (ui.searchMode == "content") "语义 / 关键词检索文档正文内容 (RAG)…" else "搜索文件名…",
                             leadingIcon = {
                                 Icon(Icons.Default.Search, contentDescription = null, tint = colors.fgFaint, modifier = Modifier.size(18.dp))
                             },
                             modifier = Modifier.fillMaxWidth(),
                         )
 
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text("类型", fontSize = 12.sp, color = colors.fgFaint, modifier = Modifier.padding(end = 2.dp))
-                                CATEGORY_FILTERS.forEach { (value, label) ->
-                                    LibraryFilterChip(
-                                        label = label,
-                                        selected = ui.category == value,
-                                        onClick = { controller.setCategory(value) },
-                                    )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("检索", fontSize = 12.sp, color = colors.fgFaint, modifier = Modifier.padding(end = 2.dp))
+                            LibraryFilterChip(
+                                label = "按文件名",
+                                selected = ui.searchMode == "filename",
+                                onClick = { controller.setSearchMode("filename") },
+                            )
+                            LibraryFilterChip(
+                                label = "按正文内容 (RAG)",
+                                selected = ui.searchMode == "content",
+                                onClick = { controller.setSearchMode("content") },
+                            )
+                        }
+
+                        if (ui.searchMode == "filename") {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text("类型", fontSize = 12.sp, color = colors.fgFaint, modifier = Modifier.padding(end = 2.dp))
+                                    CATEGORY_FILTERS.forEach { (value, label) ->
+                                        LibraryFilterChip(
+                                            label = label,
+                                            selected = ui.category == value,
+                                            onClick = { controller.setCategory(value) },
+                                        )
+                                    }
                                 }
-                            }
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text("来源", fontSize = 12.sp, color = colors.fgFaint, modifier = Modifier.padding(end = 2.dp))
-                                SOURCE_FILTERS.forEach { (value, label) ->
-                                    LibraryFilterChip(
-                                        label = label,
-                                        selected = ui.source == value,
-                                        onClick = { controller.setSource(value) },
-                                    )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text("来源", fontSize = 12.sp, color = colors.fgFaint, modifier = Modifier.padding(end = 2.dp))
+                                    SOURCE_FILTERS.forEach { (value, label) ->
+                                        LibraryFilterChip(
+                                            label = label,
+                                            selected = ui.source == value,
+                                            onClick = { controller.setSource(value) },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -330,7 +351,47 @@ fun LibraryPane(
                 }
             }
 
-            if (ui.loading && ui.files.isEmpty()) {
+            if (ui.searchMode == "content") {
+                if (ui.contentLoading) {
+                    item(key = "lib-content-loading") {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 44.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            WhitzLoadingIndicator()
+                        }
+                    }
+                } else if (ui.query.trim().isEmpty()) {
+                    item(key = "lib-content-hint") {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 44.dp, horizontal = 16.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "输入关键词或自然语言问题，跨所有已索引文档检索匹配片段。",
+                                color = colors.fgFaint,
+                                fontSize = 13.sp,
+                            )
+                        }
+                    }
+                } else if (ui.contentHits.isEmpty()) {
+                    item(key = "lib-content-empty") {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 44.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("未检索到匹配的文档正文片段", color = colors.fgFaint, fontSize = 13.5.sp)
+                        }
+                    }
+                } else {
+                    items(ui.contentHits, key = { "${it.fileId}-${it.locator}-${it.snippet.hashCode()}" }) { hit ->
+                        LibraryContentHitCard(
+                            hit = hit,
+                            onPreview = { controller.openContentHitPreview(hit) },
+                        )
+                    }
+                }
+            } else if (ui.loading && ui.files.isEmpty()) {
                 item(key = "lib-loading") {
                     Box(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
@@ -354,7 +415,9 @@ fun LibraryPane(
                         file = file,
                         downloading = ui.downloadingId == file.id,
                         deleting = ui.deletingId == file.id,
+                        reindexing = file.id in ui.reindexingIds,
                         onPreview = { controller.openPreview(file) },
+                        onReindex = { controller.reindexFile(file) },
                         onDownload = {
                             controller.downloadFile(file) { url ->
                                 try {
@@ -468,7 +531,9 @@ private fun LibraryFileCard(
     file: ConversationFile,
     downloading: Boolean,
     deleting: Boolean,
+    reindexing: Boolean,
     onPreview: () -> Unit,
+    onReindex: () -> Unit,
     onDownload: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -509,17 +574,61 @@ private fun LibraryFileCard(
                         ) {
                             Text(sourceLabel, fontSize = 10.5.sp, color = colors.fgMuted)
                         }
-                        if (file.indexStatus == "indexing") {
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(colors.canvas)
-                                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                WhitzLoadingIndicator(size = 10.dp)
-                                Text("索引中", fontSize = 10.5.sp, color = colors.fgMuted)
+                        when (file.indexStatus) {
+                            "indexing" -> {
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(colors.canvas)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    WhitzLoadingIndicator(size = 10.dp)
+                                    Text("索引中", fontSize = 10.5.sp, color = colors.fgMuted)
+                                }
+                            }
+                            "ready" -> {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(colors.successWeak)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                ) {
+                                    val label = if (file.indexedChunks > 0) "已索引 ${file.indexedChunks} 块" else "已索引"
+                                    Text(label, fontSize = 10.5.sp, color = colors.success)
+                                }
+                            }
+                            "partial" -> {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(colors.warningWeak)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                ) {
+                                    val label = if (file.indexedChunks > 0) "部分索引 ${file.indexedChunks} 块" else "部分索引"
+                                    Text(label, fontSize = 10.5.sp, color = colors.warning)
+                                }
+                            }
+                            "failed" -> {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(colors.dangerWeak)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                ) {
+                                    Text("索引失败", fontSize = 10.5.sp, color = colors.danger)
+                                }
+                            }
+                            "pending" -> {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(colors.canvas)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                ) {
+                                    Text("待索引", fontSize = 10.5.sp, color = colors.fgFaint)
+                                }
                             }
                         }
                         Text(
@@ -531,12 +640,30 @@ private fun LibraryFileCard(
                 }
             }
 
+            if (file.indexStatus == "failed" && !file.indexError.isNullOrBlank()) {
+                Text(
+                    text = "错误：${file.indexError}",
+                    fontSize = 11.5.sp,
+                    color = colors.danger,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else if (file.summary.isNotBlank()) {
+                Text(
+                    text = file.summary,
+                    fontSize = 12.sp,
+                    color = colors.fgMuted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
             val sourceConvText = file.conversationTitle?.takeIf { it.isNotBlank() }
                 ?: if (file.conversationId != null) "原聊天" else "资料库直传"
             Text(
                 text = "来源：$sourceConvText",
                 fontSize = 12.sp,
-                color = colors.fgMuted,
+                color = colors.fgFaint,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -546,34 +673,108 @@ private fun LibraryFileCard(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = onPreview, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
-                    Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(15.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("预览", fontSize = 12.5.sp)
+                TextButton(
+                    onClick = onReindex,
+                    enabled = !reindexing && file.indexStatus != "indexing",
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    if (reindexing) {
+                        WhitzLoadingIndicator(size = 13.dp)
+                    } else {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                    }
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text("重建索引", fontSize = 12.sp)
+                }
+                TextButton(onClick = onPreview, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                    Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text("预览", fontSize = 12.sp)
                 }
                 TextButton(
                     onClick = onDownload,
                     enabled = !downloading,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                 ) {
                     if (downloading) {
-                        WhitzLoadingIndicator(size = 14.dp)
+                        WhitzLoadingIndicator(size = 13.dp)
                     } else {
-                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(14.dp))
                     }
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("下载", fontSize = 12.5.sp)
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text("下载", fontSize = 12.sp)
                 }
                 TextButton(
                     onClick = onDelete,
                     enabled = !deleting,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                 ) {
-                    Icon(Icons.Default.Delete, contentDescription = null, tint = colors.danger, modifier = Modifier.size(15.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("删除", fontSize = 12.5.sp, color = colors.danger)
+                    Icon(Icons.Default.Delete, contentDescription = null, tint = colors.danger, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text("删除", fontSize = 12.sp, color = colors.danger)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LibraryContentHitCard(
+    hit: LibraryContentSearchHit,
+    onPreview: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onPreview),
+        shape = RoundedCornerShape(16.dp),
+        color = colors.surface,
+        border = BorderStroke(0.5.dp, colors.line),
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(Icons.Default.AttachFile, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                Text(
+                    text = hit.filename.ifBlank { hit.fileId },
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.fg,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                val loc = hit.sectionPath.ifBlank { hit.locator }
+                if (loc.isNotBlank()) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(colors.canvas)
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    ) {
+                        Text(
+                            text = loc,
+                            fontSize = 10.5.sp,
+                            color = colors.fgMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+            Text(
+                text = hit.snippet.ifBlank { hit.content },
+                fontSize = 12.5.sp,
+                lineHeight = 18.sp,
+                color = colors.fgMuted,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

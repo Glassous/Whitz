@@ -4,13 +4,16 @@ import com.glassous.whitz.core.model.AgentStatus
 import com.glassous.whitz.core.model.AuthResponse
 import com.glassous.whitz.core.model.ClarifyAnswerItem
 import com.glassous.whitz.core.model.Conversation
+import com.glassous.whitz.core.model.ConversationContextState
 import com.glassous.whitz.core.model.ConversationDetail
 import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.ConversationSearchHit
+import com.glassous.whitz.core.model.ConversationWorkingState
 import com.glassous.whitz.core.model.CreditStatus
 import com.glassous.whitz.core.model.DownloadUrlResponse
 import com.glassous.whitz.core.model.EmailCodeResponse
 import com.glassous.whitz.core.model.GithubSkillPreviewResponse
+import com.glassous.whitz.core.model.LibraryContentSearchResponse
 import com.glassous.whitz.core.model.MemoryOverview
 import com.glassous.whitz.core.model.MemorySearchResponse
 import com.glassous.whitz.core.model.MessageReaction
@@ -24,6 +27,7 @@ import com.glassous.whitz.core.model.ScheduledTaskRun
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.model.TicketResponse
+import com.glassous.whitz.core.model.UnifiedSearchResponse
 import com.glassous.whitz.core.model.User
 import com.glassous.whitz.core.model.UserFeedbackItem
 import com.glassous.whitz.core.model.UserSessionItem
@@ -202,6 +206,22 @@ data class MemoryEntryRequest(
     val title: String = "",
     val tags: List<String> = emptyList(),
     val category: String? = null,
+)
+
+@Serializable
+data class MemoryEntryPatchRequest(
+    val content: String? = null,
+    val target: String? = null,
+    val title: String? = null,
+    val tags: List<String>? = null,
+    val category: String? = null,
+    @SerialName("is_pinned") val isPinned: Boolean? = null,
+    val priority: Int? = null,
+)
+
+@Serializable
+data class WorkingStateUpdateRequest(
+    @SerialName("working_state") val workingState: ConversationWorkingState,
 )
 
 @Serializable
@@ -403,6 +423,9 @@ interface WhitzApi {
     @PATCH("users/me/memory/entries/{id}")
     suspend fun updateMemoryEntry(@Path("id") id: String, @Body body: MemoryEntryRequest): JsonElement
 
+    @PATCH("users/me/memory/entries/{id}")
+    suspend fun patchMemoryEntry(@Path("id") id: String, @Body body: MemoryEntryPatchRequest): MemoryOverview
+
     @DELETE("users/me/memory/entries/{id}")
     suspend fun deleteMemoryEntry(@Path("id") id: String): Response<Unit>
 
@@ -457,8 +480,27 @@ interface WhitzApi {
         @Query("limit") limit: Int = 30,
     ): List<ConversationSearchHit>
 
+    @GET("search/unified")
+    suspend fun unifiedSearch(
+        @Query("q") q: String,
+        @Query("sources") sources: String = "all",
+        @Query("limit") limit: Int = 12,
+    ): UnifiedSearchResponse
+
     @GET("conversations/{id}")
     suspend fun getConversation(@Path("id") id: String): ConversationDetail
+
+    @GET("conversations/{id}/context-state")
+    suspend fun getConversationContextState(@Path("id") id: String): ConversationContextState
+
+    @PATCH("conversations/{id}/working-state")
+    suspend fun updateConversationWorkingState(
+        @Path("id") id: String,
+        @Body body: WorkingStateUpdateRequest,
+    ): ConversationContextState
+
+    @POST("conversations/{id}/archive-episode")
+    suspend fun archiveConversationEpisode(@Path("id") id: String): ConversationContextState
 
     @PATCH("conversations/{id}")
     suspend fun patchConversation(@Path("id") id: String, @Body body: PatchConversationRequest): Conversation
@@ -570,6 +612,17 @@ interface WhitzApi {
         @Query("page") page: Int = 1,
         @Query("page_size") pageSize: Int = 40,
     ): JsonElement
+
+    @GET("library/search")
+    suspend fun searchLibraryContent(
+        @Query("q") q: String,
+        @Query("limit") limit: Int = 15,
+    ): LibraryContentSearchResponse
+
+    @POST("library/files/{fileId}/reindex")
+    suspend fun reindexLibraryFile(
+        @Path("fileId") fileId: String,
+    ): ConversationFile
 
     @POST("library/files/presign")
     suspend fun presignLibraryUpload(@Body body: PresignRequest): PresignResponse

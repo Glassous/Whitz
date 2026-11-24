@@ -72,6 +72,14 @@ private val BULLET_REGEX = Regex("^[-*+]\\s+.+")
 private val BULLET_PREFIX_REGEX = Regex("^[-*+]\\s+")
 private val ORDERED_REGEX = Regex("^(\\d+\\.)\\s+(.+)")
 private val TRAILING_PARTIAL_LINK_REGEX = Regex("\\[([^\\]\\n]+)]\\([^)\\n]*$")
+private val TRAILING_PARTIAL_CITE_REGEX = Regex("\\[\\[cite:[^\\]\\n]*$", RegexOption.IGNORE_CASE)
+internal val INLINE_CITATION_TOKEN_REGEX = Regex("\\[\\[cite:([^\\]\\n]+)]]", RegexOption.IGNORE_CASE)
+
+internal fun parseCitationIds(rawInner: String): List<String> =
+    rawInner.split(',', '，', ';', ' ')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .distinct()
 
 internal sealed interface MdBlock {
     data class Heading(val level: Int, val text: String) : MdBlock
@@ -220,6 +228,7 @@ internal fun parseMarkdownBlocks(input: String, isStreaming: Boolean = false): L
 internal fun normalizeStreamingInlineTail(text: String): String {
     if (text.isEmpty()) return text
     var result = TRAILING_PARTIAL_LINK_REGEX.replace(text, "$1")
+    result = TRAILING_PARTIAL_CITE_REGEX.replace(result, "")
     // Close dangling inline code backtick if unpaired
     val backtickCount = result.count { it == '`' }
     if (backtickCount % 2 == 1) {
@@ -259,12 +268,46 @@ internal fun normalizeStreamingInlineTail(text: String): String {
 private fun buildInlineAnnotated(
     text: String,
     linkColor: Color,
+    citeBg: Color,
+    citeFg: Color,
     codeBg: Color,
     codeFg: Color,
+    onOpenCitation: (String) -> Unit,
 ): AnnotatedString {
     return buildAnnotatedString {
         var idx = 0
         while (idx < text.length) {
+            // Inline RAG citation [[cite:S1]] or [[cite:S1,S2]]
+            if (text.startsWith("[[cite:", idx, ignoreCase = true)) {
+                val endIdx = text.indexOf("]]", idx + 7)
+                if (endIdx > idx + 7) {
+                    val inner = text.substring(idx + 7, endIdx)
+                    val ids = parseCitationIds(inner)
+                    if (ids.isNotEmpty()) {
+                        ids.forEachIndexed { cIdx, citeId ->
+                            if (cIdx > 0) append(" ")
+                            withLink(
+                                LinkAnnotation.Clickable(
+                                    tag = "cite:$citeId",
+                                    styles = TextLinkStyles(
+                                        style = SpanStyle(
+                                            color = citeFg,
+                                            background = citeBg,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 11.5.sp,
+                                        ),
+                                    ),
+                                    linkInteractionListener = { onOpenCitation(citeId) },
+                                ),
+                            ) {
+                                append(" $citeId ")
+                            }
+                        }
+                        idx = endIdx + 2
+                        continue
+                    }
+                }
+            }
             // Link [label](url)
             if (text[idx] == '[') {
                 val closeBracket = text.indexOf(']', idx + 1)
@@ -376,20 +419,26 @@ private fun InlineMdText(
     style: TextStyle,
     modifier: Modifier = Modifier,
     isStreamingTail: Boolean = false,
+    onOpenCitation: (String) -> Unit = {},
 ) {
     val colors = LocalWhitzColors.current
     val linkColor = if (colors.isDark) Color(0xFF93C5FD) else Color(0xFF2563EB)
+    val citeFg = MaterialTheme.colorScheme.primary
+    val citeBg = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
     val codeBg = colors.surface
     val codeFg = colors.fg
     val effectiveText = remember(text, isStreamingTail) {
         if (isStreamingTail) normalizeStreamingInlineTail(text) else text
     }
-    val baseAnnotated = remember(effectiveText, linkColor, codeBg, codeFg) {
+    val baseAnnotated = remember(effectiveText, linkColor, citeBg, citeFg, codeBg, codeFg, onOpenCitation) {
         buildInlineAnnotated(
             text = effectiveText,
             linkColor = linkColor,
+            citeBg = citeBg,
+            citeFg = citeFg,
             codeBg = codeBg,
             codeFg = codeFg,
+            onOpenCitation = onOpenCitation,
         )
     }
     if (isStreamingTail) {
@@ -428,6 +477,7 @@ fun MarkdownText(
     modifier: Modifier = Modifier,
     isStreaming: Boolean = false,
     onOpenDeliverable: (DeliverableTarget) -> Unit = {},
+    onOpenCitation: (String) -> Unit = {},
 ) {
     val blocks = remember(markdown, isStreaming) { parseMarkdownBlocks(markdown, isStreaming) }
 
@@ -442,6 +492,7 @@ fun MarkdownText(
                     block = block,
                     isTailStreaming = isTailStreaming,
                     onOpenDeliverable = onOpenDeliverable,
+                    onOpenCitation = onOpenCitation,
                 )
             }
         }
@@ -453,6 +504,7 @@ private fun MarkdownBlockItem(
     block: MdBlock,
     isTailStreaming: Boolean,
     onOpenDeliverable: (DeliverableTarget) -> Unit,
+    onOpenCitation: (String) -> Unit,
 ) {
     val colors = LocalWhitzColors.current
     val clipboard = LocalClipboardManager.current
@@ -468,6 +520,7 @@ private fun MarkdownBlockItem(
             InlineMdText(
                 text = block.text,
                 isStreamingTail = isTailStreaming,
+                onOpenCitation = onOpenCitation,
                 style = TextStyle(
                     color = colors.fg,
                     fontSize = fontSize,
@@ -480,6 +533,7 @@ private fun MarkdownBlockItem(
             InlineMdText(
                 text = block.text,
                 isStreamingTail = isTailStreaming,
+                onOpenCitation = onOpenCitation,
                 style = TextStyle(
                     color = colors.fg,
                     fontSize = 15.sp,
@@ -505,6 +559,7 @@ private fun MarkdownBlockItem(
                 InlineMdText(
                     text = block.text,
                     isStreamingTail = isTailStreaming,
+                    onOpenCitation = onOpenCitation,
                     style = TextStyle(
                         color = colors.fgMuted,
                         fontSize = 14.sp,
@@ -611,6 +666,7 @@ private fun MarkdownBlockItem(
                         InlineMdText(
                             text = item,
                             isStreamingTail = itemStreaming,
+                            onOpenCitation = onOpenCitation,
                             style = TextStyle(color = colors.fg, fontSize = 15.sp, lineHeight = 22.sp),
                             modifier = Modifier.weight(1f),
                         )
@@ -632,6 +688,7 @@ private fun MarkdownBlockItem(
                         InlineMdText(
                             text = item,
                             isStreamingTail = itemStreaming,
+                            onOpenCitation = onOpenCitation,
                             style = TextStyle(color = colors.fg, fontSize = 15.sp, lineHeight = 22.sp),
                             modifier = Modifier.weight(1f),
                         )

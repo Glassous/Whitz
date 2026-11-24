@@ -3,6 +3,7 @@ package com.glassous.whitz.core.files
 import android.net.Uri
 import com.glassous.whitz.AppContainer
 import com.glassous.whitz.core.model.ConversationFile
+import com.glassous.whitz.core.model.LibraryContentSearchHit
 import com.glassous.whitz.core.network.CompleteUploadRequest
 import com.glassous.whitz.core.network.PresignRequest
 import com.glassous.whitz.core.network.WhitzJson
@@ -47,6 +48,9 @@ data class LibraryUiState(
     val page: Int = 1,
     val pageSize: Int = 24,
     val query: String = "",
+    val searchMode: String = "filename", // "filename" | "content"
+    val contentHits: List<LibraryContentSearchHit> = emptyList(),
+    val contentLoading: Boolean = false,
     val category: String = "all",
     val source: String = "all",
     val loading: Boolean = false,
@@ -56,6 +60,7 @@ data class LibraryUiState(
     val uploadItems: List<LibraryUploadItem> = emptyList(),
     val deletingId: String? = null,
     val downloadingId: String? = null,
+    val reindexingIds: Set<String> = emptySet(),
     val previewTarget: PreviewTarget? = null,
 )
 
@@ -116,20 +121,122 @@ class LibraryController(
         }
     }
 
-    fun updateQuery(nextQuery: String) {
-        _ui.update { it.copy(query = nextQuery) }
+    fun setSearchMode(mode: String) {
+        val clean = if (mode == "content") "content" else "filename"
+        if (_ui.value.searchMode == clean) return
         searchJob?.cancel()
-        searchJob = scope.launch {
-            delay(280L)
+        _ui.update {
+            it.copy(
+                searchMode = clean,
+                contentHits = if (clean == "filename") emptyList() else it.contentHits,
+                contentLoading = false,
+                error = null,
+            )
+        }
+        val q = _ui.value.query.trim()
+        if (clean == "content") {
+            if (q.isNotEmpty()) runContentSearch(q)
+        } else {
             _ui.update { it.copy(page = 1) }
             loadFiles()
         }
     }
 
+    fun updateQuery(nextQuery: String) {
+        _ui.update { it.copy(query = nextQuery) }
+        searchJob?.cancel()
+        searchJob = scope.launch {
+            delay(280L)
+            if (_ui.value.searchMode == "content") {
+                val q = nextQuery.trim()
+                if (q.isEmpty()) {
+                    _ui.update { it.copy(contentHits = emptyList(), contentLoading = false) }
+                } else {
+                    runContentSearch(q)
+                }
+            } else {
+                _ui.update { it.copy(page = 1) }
+                loadFiles()
+            }
+        }
+    }
+
     fun submitQueryNow() {
         searchJob?.cancel()
-        _ui.update { it.copy(page = 1) }
-        loadFiles()
+        val snapshot = _ui.value
+        if (snapshot.searchMode == "content") {
+            val q = snapshot.query.trim()
+            if (q.isEmpty()) {
+                _ui.update { it.copy(contentHits = emptyList(), contentLoading = false) }
+            } else {
+                runContentSearch(q)
+            }
+        } else {
+            _ui.update { it.copy(page = 1) }
+            loadFiles()
+        }
+    }
+
+    private fun runContentSearch(query: String) {
+        scope.launch {
+            _ui.update { it.copy(contentLoading = true, error = null) }
+            try {
+                val resp = container.network.api.searchLibraryContent(q = query, limit = 15)
+                if (_ui.value.query.trim() == query && _ui.value.searchMode == "content") {
+                    _ui.update { it.copy(contentHits = resp.results, contentLoading = false) }
+                }
+            } catch (t: Throwable) {
+                if (_ui.value.query.trim() == query) {
+                    _ui.update {
+                        it.copy(
+                            contentLoading = false,
+                            error = extractErrorMessage(t, "正文检索失败"),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun reindexFile(file: ConversationFile) {
+        if (file.id in _ui.value.reindexingIds) return
+        scope.launch {
+            _ui.update {
+                it.copy(
+                    reindexingIds = it.reindexingIds + file.id,
+                    error = null,
+                    feedback = null,
+                )
+            }
+            try {
+                val updated = container.network.api.reindexLibraryFile(file.id)
+                _ui.update { state ->
+                    state.copy(
+                        reindexingIds = state.reindexingIds - file.id,
+                        files = state.files.map { f -> if (f.id == file.id) updated else f },
+                        feedback = "已提交「${file.filename}」重建向量索引",
+                    )
+                }
+            } catch (t: Throwable) {
+                _ui.update {
+                    it.copy(
+                        reindexingIds = it.reindexingIds - file.id,
+                        error = extractErrorMessage(t, "重建索引失败"),
+                    )
+                }
+            }
+        }
+    }
+
+    fun openContentHitPreview(hit: LibraryContentSearchHit) {
+        val existing = _ui.value.files.firstOrNull { it.id == hit.fileId }
+        val file = existing ?: ConversationFile(
+            id = hit.fileId,
+            filename = hit.filename.ifBlank { hit.fileId },
+            ext = FileValidator.getFileExt(hit.filename),
+            category = FileValidator.getFileSpec(hit.filename)?.category ?: "document",
+        )
+        openPreview(file)
     }
 
     fun setCategory(nextCategory: String) {

@@ -210,6 +210,9 @@ data class ConversationFile(
     val status: String = "ready",
     @SerialName("index_status") val indexStatus: String = "ready",
     @SerialName("indexed_chunks") val indexedChunks: Int = 0,
+    val summary: String = "",
+    @SerialName("index_error") val indexError: String? = null,
+    @SerialName("indexed_at") val indexedAt: String? = null,
     val source: String = "user",
     @SerialName("is_global") val isGlobal: Boolean = true,
     @SerialName("message_id") val messageId: String? = null,
@@ -222,6 +225,114 @@ data class ConversationFile(
     @SerialName("conversation_kind") val conversationKind: String? = null,
     @SerialName("qa_snippet") val qaSnippet: String? = null,
     @SerialName("turn_role") val turnRole: String? = null,
+)
+
+enum class RagMode(val wireValue: String, val label: String, val description: String) {
+    AUTO("auto", "智能融合", "自动检索资料库、长期记忆与相关历史对话"),
+    FILES_ONLY("files_only", "严选资料", "仅检索已上传和资料库文件，不混合记忆与历史对话"),
+    OFF("off", "关闭检索", "本轮跳过 RAG 自动预检索，直接回答"),
+    ;
+
+    companion object {
+        fun fromWire(value: String?): RagMode =
+            entries.firstOrNull { it.wireValue == value } ?: AUTO
+    }
+}
+
+@Serializable
+data class RagScope(
+    val mode: String = "auto",
+    @SerialName("include_memory") val includeMemory: Boolean = true,
+    @SerialName("include_chats") val includeChats: Boolean = true,
+    @SerialName("file_ids") val fileIds: List<String>? = null,
+    val collections: List<String>? = null,
+)
+
+@Serializable
+data class CitationItem(
+    @SerialName("citation_id") val citationId: String,
+    @SerialName("source_type") val sourceType: String = "file",
+    @SerialName("source_id") val sourceId: String = "",
+    @SerialName("chunk_id") val chunkId: String? = null,
+    val title: String = "",
+    val subtitle: String = "",
+    val snippet: String = "",
+    val score: Double? = null,
+    val confidence: String? = null,
+    val metadata: JsonObject? = null,
+)
+
+@Serializable
+data class UnifiedFileSearchHit(
+    val type: String = "file",
+    @SerialName("file_id") val fileId: String,
+    val filename: String = "",
+    val locator: String = "",
+    @SerialName("section_path") val sectionPath: String = "",
+    @SerialName("chunk_type") val chunkType: String = "",
+    val snippet: String = "",
+    val score: Double = 0.0,
+    val confidence: String? = null,
+    @SerialName("conversation_id") val conversationId: String? = null,
+)
+
+@Serializable
+data class UnifiedMemorySearchHit(
+    val type: String = "memory",
+    @SerialName("entry_id") val entryId: String,
+    val title: String = "",
+    val collection: String = "memory",
+    @SerialName("collection_name") val collectionName: String = "",
+    val tags: List<String> = emptyList(),
+    val snippet: String = "",
+    val content: String = "",
+    val score: Double = 0.0,
+    val confidence: String? = null,
+    val timestamp: String? = null,
+)
+
+@Serializable
+data class UnifiedChatSearchHit(
+    val type: String = "chat",
+    @SerialName("match_in") val matchIn: String = "message",
+    @SerialName("conversation_id") val conversationId: String,
+    @SerialName("conversation_kind") val conversationKind: String = "side",
+    @SerialName("conversation_title") val conversationTitle: String = "",
+    @SerialName("message_id") val messageId: String? = null,
+    val role: String? = null,
+    val snippet: String = "",
+    val score: Double = 0.0,
+    val confidence: String? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+)
+
+@Serializable
+data class UnifiedSearchResponse(
+    val query: String = "",
+    val files: List<UnifiedFileSearchHit> = emptyList(),
+    val memories: List<UnifiedMemorySearchHit> = emptyList(),
+    val chats: List<UnifiedChatSearchHit> = emptyList(),
+    val total: Int = 0,
+)
+
+@Serializable
+data class LibraryContentSearchHit(
+    @SerialName("file_id") val fileId: String,
+    val filename: String = "",
+    val locator: String = "",
+    @SerialName("section_path") val sectionPath: String = "",
+    @SerialName("chunk_type") val chunkType: String = "",
+    val snippet: String = "",
+    val content: String = "",
+    val score: Double = 0.0,
+    val confidence: String? = null,
+)
+
+@Serializable
+data class LibraryContentSearchResponse(
+    val query: String = "",
+    val count: Int = 0,
+    val results: List<LibraryContentSearchHit> = emptyList(),
 )
 
 data class DeliverableTarget(
@@ -249,6 +360,8 @@ data class ToolPayload(
     val attachments: List<FileAttachmentMeta>? = null,
     val skills: List<String>? = null,
     val artifacts: List<WorkspaceArtifactMeta>? = null,
+    val citations: List<CitationItem>? = null,
+    @SerialName("rag_metrics") val ragMetrics: JsonElement? = null,
     @SerialName("scheduled_task") val scheduledTask: JsonElement? = null,
 )
 
@@ -399,9 +512,65 @@ data class MemoryEntry(
     val target: String? = "memory",
     val category: String? = null,
     val source: String? = null,
+    @SerialName("is_pinned") val isPinned: Boolean = false,
+    val priority: Int = 5,
+    @SerialName("access_count") val accessCount: Int = 0,
+    @SerialName("last_accessed_at") val lastAccessedAt: String? = null,
+    @SerialName("supersedes_id") val supersedesId: String? = null,
     @SerialName("char_count") val charCount: Int? = null,
     @SerialName("created_at") val createdAt: String? = null,
     @SerialName("updated_at") val updatedAt: String? = null,
+)
+
+@Serializable
+data class ConversationWorkingGoal(
+    val title: String = "",
+    val status: String = "in_progress",
+    val updated: String? = null,
+)
+
+@Serializable
+data class ConversationWorkingDecision(
+    val decision: String = "",
+    val date: String? = null,
+    val reason: String? = null,
+)
+
+@Serializable
+data class ConversationWorkingState(
+    @SerialName("active_goals") val activeGoals: List<ConversationWorkingGoal> = emptyList(),
+    @SerialName("recent_decisions") val recentDecisions: List<ConversationWorkingDecision> = emptyList(),
+    @SerialName("open_questions") val openQuestions: List<String> = emptyList(),
+    @SerialName("key_entities") val keyEntities: Map<String, String> = emptyMap(),
+)
+
+@Serializable
+data class ConversationEpisodeItem(
+    val id: String,
+    @SerialName("conversation_id") val conversationId: String = "",
+    @SerialName("conversation_kind") val conversationKind: String = "side",
+    @SerialName("episode_index") val episodeIndex: Int = 1,
+    val topic: String = "",
+    val summary: String = "",
+    @SerialName("key_facts") val keyFacts: List<String> = emptyList(),
+    val entities: List<String> = emptyList(),
+    @SerialName("start_msg_id") val startMsgId: String? = null,
+    @SerialName("end_msg_id") val endMsgId: String? = null,
+    @SerialName("started_at") val startedAt: String? = null,
+    @SerialName("ended_at") val endedAt: String? = null,
+    @SerialName("message_count") val messageCount: Int = 0,
+    @SerialName("created_at") val createdAt: String? = null,
+)
+
+@Serializable
+data class ConversationContextState(
+    @SerialName("conversation_id") val conversationId: String,
+    @SerialName("conversation_kind") val conversationKind: String = "side",
+    @SerialName("working_state") val workingState: ConversationWorkingState? = null,
+    @SerialName("rolling_summary") val rollingSummary: String? = null,
+    @SerialName("working_state_updated_at") val workingStateUpdatedAt: String? = null,
+    val episodes: List<ConversationEpisodeItem> = emptyList(),
+    @SerialName("pinned_memories_count") val pinnedMemoriesCount: Int = 0,
 )
 
 @Serializable
@@ -463,6 +632,8 @@ data class MemoryOverview(
     @SerialName("total_char_count") val totalCharCount: Int? = null,
     @SerialName("total_char_limit") val totalCharLimit: Int? = null,
     @SerialName("collection_limit") val collectionLimit: Int? = null,
+    @SerialName("pinned_count") val pinnedCount: Int? = null,
+    @SerialName("pinned_limit") val pinnedLimit: Int? = null,
 )
 
 @Serializable

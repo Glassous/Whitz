@@ -173,6 +173,7 @@ private fun WhitzRoot(container: AppContainer) {
             ChatScreen(
                 vm = chatVm,
                 onOpenSettings = { navController.navigate(SettingsRoutes.GRAPH) },
+                onOpenMemorySettings = { navController.navigate(SettingsRoutes.MEMORY) },
                 onOpenLibrary = { navController.navigate("library") },
                 onOpenSchedules = { navController.navigate("schedules") },
                 onOpenTaskDetails = { tab -> navController.navigate("task_details?tab=$tab") },
