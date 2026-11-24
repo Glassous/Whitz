@@ -509,6 +509,7 @@ class MemoryEntry(Base):
     __table_args__ = (
         Index("ix_memory_entries_user_target", "user_id", "target"),
         Index("ix_memory_entries_user_collection", "user_id", "collection_id"),
+        Index("ix_memory_entries_user_pinned", "user_id", "is_pinned", "priority"),
         Index("ix_memory_entries_search_tsv", "search_tsv", postgresql_using="gin"),
     )
 

@@ -63,7 +63,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_memory_entries_user_pinned",
         "memory_entries",
-        ["user_id", "is_pinned", "status"],
+        ["user_id", "is_pinned", "priority"],
     )
 
     # 3. L2 Immutable Conversation Episodes table (episodic archive for main & long side chats)
