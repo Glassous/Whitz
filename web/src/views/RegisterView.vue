@@ -5,6 +5,7 @@ import AuthLayout from "../components/AuthLayout.vue";
 import BaseInput from "../components/ui/BaseInput.vue";
 import BaseButton from "../components/ui/BaseButton.vue";
 import FormError from "../components/ui/FormError.vue";
+import AppIcon from "../components/ui/AppIcon.vue";
 import { extractErrorMessage, isValidEmail, useEmailCode } from "../composables/useEmailCode";
 import { useAuthStore } from "../stores/auth";
 
@@ -146,30 +147,10 @@ async function submit() {
               @mousedown.prevent
               @click="showPassword = !showPassword"
             >
-              <svg
-                v-if="!showPassword"
-                class="h-4 w-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.75"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"
-                />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-              <svg v-else class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                <path stroke-linecap="round" d="M3 3l18 18" />
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M10.6 5.9A10.8 10.8 0 0112 5.8c6 0 9.5 6.2 9.5 6.2a17 17 0 01-3.2 3.9M6.5 7.4A17.3 17.3 0 002.5 12S6 18.2 12 18.2c1.6 0 3-.5 4.3-1.2"
-                />
-                <path stroke-linecap="round" stroke-linejoin="round" d="M9.9 9.9a3 3 0 004.2 4.2" />
-              </svg>
+              <Transition name="whitz-icon-swap" mode="out-in">
+                <AppIcon v-if="!showPassword" key="eye" name="eye" class="h-4 w-4" :stroke-width="1.8" />
+                <AppIcon v-else key="eye-off" name="eye-off" class="h-4 w-4" :stroke-width="1.8" />
+              </Transition>
             </button>
           </template>
         </BaseInput>
@@ -190,30 +171,10 @@ async function submit() {
               @mousedown.prevent
               @click="showConfirm = !showConfirm"
             >
-              <svg
-                v-if="!showConfirm"
-                class="h-4 w-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.75"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"
-                />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-              <svg v-else class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                <path stroke-linecap="round" d="M3 3l18 18" />
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M10.6 5.9A10.8 10.8 0 0112 5.8c6 0 9.5 6.2 9.5 6.2a17 17 0 01-3.2 3.9M6.5 7.4A17.3 17.3 0 002.5 12S6 18.2 12 18.2c1.6 0 3-.5 4.3-1.2"
-                />
-                <path stroke-linecap="round" stroke-linejoin="round" d="M9.9 9.9a3 3 0 004.2 4.2" />
-              </svg>
+              <Transition name="whitz-icon-swap" mode="out-in">
+                <AppIcon v-if="!showConfirm" key="eye" name="eye" class="h-4 w-4" :stroke-width="1.8" />
+                <AppIcon v-else key="eye-off" name="eye-off" class="h-4 w-4" :stroke-width="1.8" />
+              </Transition>
             </button>
           </template>
         </BaseInput>

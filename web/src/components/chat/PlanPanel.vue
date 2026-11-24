@@ -23,6 +23,7 @@ import { useFilesStore } from "../../stores/files";
 import { useAuthStore } from "../../stores/auth";
 import { api } from "../../api/client";
 import BaseButton from "../ui/BaseButton.vue";
+import AppIcon from "../ui/AppIcon.vue";
 import BaseModal from "../ui/BaseModal.vue";
 import Spinner from "../ui/Spinner.vue";
 import FilePreviewPane from "./FilePreviewPane.vue";
@@ -616,14 +617,7 @@ function submitCreateFile() {
               class="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/45 text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100"
               aria-hidden="true"
             >
-              <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M3 9a2.5 2.5 0 012.5-2.5h1.2a2 2 0 001.72-.98l.44-.72A1.2 1.2 0 019.9 4.3h4.2a1.2 1.2 0 011.04.5l.44.72A2 2 0 0017.3 6.5h1.2A2.5 2.5 0 0121 9v7.5A2.5 2.5 0 0118.5 19h-13A2.5 2.5 0 013 16.5V9z"
-                />
-                <circle cx="12" cy="12.6" r="3.3" />
-              </svg>
+              <AppIcon name="camera" class="h-6 w-6 scale-90 transition-transform duration-200 group-hover:scale-100" :stroke-width="1.8" />
             </span>
           </button>
 
@@ -649,9 +643,7 @@ function submitCreateFile() {
               @mousedown.prevent
               @click="cancelRename"
             >
-              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-              </svg>
+              <AppIcon name="close" class="h-3.5 w-3.5" :stroke-width="2" />
             </button>
           </form>
           <button
@@ -663,16 +655,11 @@ function submitCreateFile() {
             @click="startRename"
           >
             <span class="max-w-full truncate text-center">{{ resolvedAssistantName }}</span>
-            <svg
+            <AppIcon
+              name="edit"
               class="absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fg-faint opacity-0 transition-opacity group-hover:opacity-100"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.9"
-              aria-hidden="true"
-            >
-              <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-            </svg>
+              :stroke-width="1.9"
+            />
           </button>
 
           <p v-if="headerError" role="alert" class="mt-1.5 max-w-full text-center text-[11.5px] leading-snug text-danger">
@@ -742,9 +729,7 @@ function submitCreateFile() {
                       v-else-if="step.item.status === 'completed'"
                       class="flex h-4 w-4 items-center justify-center rounded-full bg-success-weak text-success"
                     >
-                      <svg class="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-                      </svg>
+                      <AppIcon name="check" motion="check-draw" class="h-2.5 w-2.5" :stroke-width="2.8" />
                     </span>
                     <span v-else class="h-3 w-3 rounded-full border-[1.5px] border-line-strong" />
                   </span>
@@ -769,17 +754,13 @@ function submitCreateFile() {
                       <template v-if="!stepOpen(step) && stepMeta(step)"> · {{ stepMeta(step) }}</template>
                     </span>
                   </div>
-                  <svg
+                  <AppIcon
                     v-if="step.blocks.length"
-                    class="mt-1 h-3.5 w-3.5 shrink-0 text-fg-faint transition-transform duration-200"
-                    :class="stepOpen(step) ? 'rotate-90' : ''"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                  >
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-                  </svg>
+                    name="chevron-right"
+                    motion="chevron-r"
+                    class="mt-1 h-3.5 w-3.5 shrink-0 text-fg-faint"
+                    :stroke-width="2"
+                  />
                 </summary>
 
                 <div v-if="step.blocks.length" class="space-y-2 px-3 pb-2.5 pt-0.5">
@@ -909,9 +890,7 @@ function submitCreateFile() {
               :disabled="uploadDisabled"
               @click="openFilePicker"
             >
-              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
-                <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-              </svg>
+              <AppIcon name="plus" class="h-3.5 w-3.5" :stroke-width="2.1" />
               <span>上传</span>
             </button>
           </div>
@@ -956,9 +935,7 @@ function submitCreateFile() {
                   :aria-label="u.status === 'error' ? '关闭错误项' : '取消上传'"
                   @click="u.status === 'error' ? emit('dismiss-upload', u.localId) : emit('cancel-upload', u.localId)"
                 >
-                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-                  </svg>
+                  <AppIcon name="close" class="h-3.5 w-3.5" :stroke-width="2" />
                 </button>
               </div>
               <progress
@@ -1023,9 +1000,7 @@ function submitCreateFile() {
                       aria-label="插入到输入框"
                       @click="emit('insert-file', img)"
                     >
-                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-                        <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-                      </svg>
+                      <AppIcon name="plus" class="h-3.5 w-3.5" :stroke-width="2.1" />
                     </button>
                     <button
                       v-if="img.message_id"
@@ -1035,9 +1010,7 @@ function submitCreateFile() {
                       aria-label="定位到问答"
                       @click="emit('locate-file-message', img)"
                     >
-                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-                      </svg>
+                      <AppIcon name="message-locate" class="h-3.5 w-3.5" :stroke-width="1.95" />
                     </button>
                     <button
                       type="button"
@@ -1047,9 +1020,7 @@ function submitCreateFile() {
                       :disabled="props.deletingFileId === img.id"
                       @click="onDeleteClick(img.id)"
                     >
-                      <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3">
-                        <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-                      </svg>
+                      <AppIcon name="close" class="h-3 w-3" :stroke-width="2.2" />
                     </button>
                   </div>
                 </div>
@@ -1117,9 +1088,7 @@ function submitCreateFile() {
                       title="插入到输入框光标处"
                       @click="emit('insert-file', f)"
                     >
-                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-                      </svg>
+                      <AppIcon name="plus" class="h-3.5 w-3.5" :stroke-width="2" />
                     </button>
                     <button
                       v-if="f.message_id"
@@ -1129,9 +1098,7 @@ function submitCreateFile() {
                       title="定位到对应问答消息"
                       @click="emit('locate-file-message', f)"
                     >
-                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-                      </svg>
+                      <AppIcon name="message-locate" class="h-3.5 w-3.5" :stroke-width="1.9" />
                     </button>
                     <button
                       type="button"
@@ -1140,9 +1107,7 @@ function submitCreateFile() {
                       title="重命名文件"
                       @click="startFileRename(f)"
                     >
-                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-                      </svg>
+                      <AppIcon name="edit" class="h-3.5 w-3.5" :stroke-width="1.9" />
                     </button>
                     <button
                       type="button"
@@ -1153,9 +1118,7 @@ function submitCreateFile() {
                       @click="onDownloadClick(f)"
                     >
                       <Spinner v-if="props.downloadingFileId === f.id" :size="12" />
-                      <svg v-else class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-                      </svg>
+                      <AppIcon v-else name="download" class="h-3.5 w-3.5" :stroke-width="1.95" />
                     </button>
                     <button
                       type="button"
@@ -1166,9 +1129,7 @@ function submitCreateFile() {
                       @click="onDeleteClick(f.id)"
                     >
                       <Spinner v-if="props.deletingFileId === f.id" :size="12" />
-                      <svg v-else class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M18 6L6 18" />
-                      </svg>
+                      <AppIcon v-else name="close" class="h-3.5 w-3.5" :stroke-width="2" />
                     </button>
                   </div>
                 </div>
@@ -1184,14 +1145,7 @@ function submitCreateFile() {
             v-else-if="!uploads.length"
             class="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-line px-4 py-6 text-center"
           >
-            <svg class="mb-2 h-6 w-6 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"
-              />
-              <path stroke-linecap="round" stroke-linejoin="round" d="M14 2v6h6M12 18v-6m0 0l-2.5 2.5M12 12l2.5 2.5" />
-            </svg>
+            <AppIcon name="file-upload" class="mb-2 h-6 w-6 text-fg-faint" :stroke-width="1.65" />
             <p class="text-[13px] font-medium text-fg-muted">工作区暂无文件</p>
             <p class="mt-1 text-[11.5px] leading-relaxed text-fg-faint">
               支持拖拽文件至此、点击「上传文件」或从个人资料库引用

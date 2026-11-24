@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api } from "../../api/client";
 import { useAuthStore } from "../../stores/auth";
+import AppIcon from "../ui/AppIcon.vue";
 import type {
   Conversation,
   UnifiedChatSearchHit,
@@ -315,17 +316,8 @@ onBeforeUnmount(() => {
       style="box-shadow: var(--shadow)"
     >
       <!-- Top search input -->
-      <div class="flex items-center gap-3 px-5 pb-2 pt-4">
-        <svg
-          class="h-5 w-5 shrink-0 text-fg-muted"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2.2"
-        >
-          <circle cx="11" cy="11" r="7" />
-          <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
-        </svg>
+      <div class="icon-search-group flex items-center gap-3 px-5 pb-2 pt-4">
+        <AppIcon name="search" motion="search-focus" class="h-5 w-5 shrink-0 text-fg-muted" :stroke-width="2" />
 
         <input
           ref="inputRef"
@@ -343,9 +335,7 @@ onBeforeUnmount(() => {
           aria-label="清空搜索"
           @click="query = ''; inputRef?.focus()"
         >
-          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-          </svg>
+          <AppIcon name="close" class="h-4 w-4" :stroke-width="2.1" />
         </button>
 
         <button
@@ -354,9 +344,7 @@ onBeforeUnmount(() => {
           aria-label="关闭搜索"
           @click="emit('close')"
         >
-          <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-          </svg>
+          <AppIcon name="close" class="h-4.5 w-4.5" :stroke-width="2" />
         </button>
       </div>
 

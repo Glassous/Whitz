@@ -11,6 +11,7 @@ import BaseButton from "../ui/BaseButton.vue";
 import BaseModal from "../ui/BaseModal.vue";
 import FormError from "../ui/FormError.vue";
 import Spinner from "../ui/Spinner.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 const props = defineProps<{
   embedded?: boolean;
@@ -513,9 +514,7 @@ onBeforeUnmount(() => {
 
         <div class="flex shrink-0 items-center gap-2">
           <BaseButton size="sm" rounded="full" :loading="uploading" @click="openUploadPicker">
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
-              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-            </svg>
+            <AppIcon name="plus" class="h-3.5 w-3.5" :stroke-width="2.1" />
             <span>上传文件</span>
           </BaseButton>
           <BaseButton variant="soft" size="sm" rounded="full" :loading="loading" @click="loadFiles">
@@ -526,18 +525,13 @@ onBeforeUnmount(() => {
 
       <!-- Search Bar + RAG Mode Switch -->
       <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <form class="relative flex-1" @submit.prevent="submitSearchNow">
-          <svg
+        <form class="icon-search-group relative flex-1" @submit.prevent="submitSearchNow">
+          <AppIcon
+            name="search"
+            motion="search-focus"
             class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-faint"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            aria-hidden="true"
-          >
-            <circle cx="11" cy="11" r="7" />
-            <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
-          </svg>
+            :stroke-width="2"
+          />
           <input
             v-model="searchInput"
             type="search"

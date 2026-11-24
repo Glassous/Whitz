@@ -15,6 +15,7 @@ import BaseButton from "../ui/BaseButton.vue";
 import BaseModal from "../ui/BaseModal.vue";
 import FormError from "../ui/FormError.vue";
 import Spinner from "../ui/Spinner.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 const auth = useAuthStore();
 
@@ -661,9 +662,7 @@ onMounted(() => {
           <BaseBadge tone="gray">{{ collections.length }} 个</BaseBadge>
         </div>
         <BaseButton size="sm" rounded="full" :disabled="loading" @click="openCreateCollection">
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
-            <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-          </svg>
+          <AppIcon name="plus" class="h-3.5 w-3.5" :stroke-width="2.1" />
           <span>新建记忆集</span>
         </BaseButton>
       </div>
@@ -866,9 +865,7 @@ onMounted(() => {
 
         <div class="flex flex-wrap items-center gap-2">
           <BaseButton size="sm" rounded="full" @click="openAddForm">
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
-              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-            </svg>
+            <AppIcon name="plus" class="h-3.5 w-3.5" :stroke-width="2.1" />
             <span>新增记忆</span>
           </BaseButton>
           <BaseButton

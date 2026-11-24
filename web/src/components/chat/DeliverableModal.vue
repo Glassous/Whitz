@@ -7,6 +7,7 @@ import { useFilesStore } from "../../stores/files";
 import type { DeliverableTarget } from "../../types";
 import BaseModal from "../ui/BaseModal.vue";
 import Spinner from "../ui/Spinner.vue";
+import AppIcon from "../ui/AppIcon.vue";
 import CsvTableEditor from "./CsvTableEditor.vue";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 
@@ -333,9 +334,7 @@ onBeforeUnmount(() => {
             title="在新标签页中独立打开此 HTML 页面"
             @click="openHtmlInNewTab"
           >
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M14 3h7v7M10 14L21 3M21 14v5a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h5" />
-            </svg>
+            <AppIcon name="external-link" class="h-3.5 w-3.5" :stroke-width="1.9" />
             <span class="hidden sm:inline">新标签页打开</span>
           </button>
 
@@ -386,9 +385,7 @@ onBeforeUnmount(() => {
             aria-label="刷新内容"
             @click="loadContent"
           >
-            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 0115.3-6.4L21 8M21 3v5h-5M21 12a9 9 0 01-15.3 6.4L3 16M3 21v-5h5" />
-            </svg>
+            <AppIcon name="refresh" class="h-4 w-4" :stroke-width="1.9" />
           </button>
 
           <button
@@ -398,9 +395,7 @@ onBeforeUnmount(() => {
             aria-label="下载文件"
             @click="downloadFile"
           >
-            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-            </svg>
+            <AppIcon name="download" class="h-4 w-4" :stroke-width="1.9" />
           </button>
 
           <button
@@ -410,12 +405,10 @@ onBeforeUnmount(() => {
             :aria-label="fullscreen ? '退出全屏' : '全屏查看'"
             @click="fullscreen = !fullscreen"
           >
-            <svg v-if="fullscreen" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3" />
-            </svg>
-            <svg v-else class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" />
-            </svg>
+            <Transition name="whitz-icon-swap" mode="out-in">
+              <AppIcon v-if="fullscreen" key="minimize" name="minimize" class="h-4 w-4" :stroke-width="1.9" />
+              <AppIcon v-else key="maximize" name="maximize" class="h-4 w-4" :stroke-width="1.9" />
+            </Transition>
           </button>
 
           <button
@@ -424,9 +417,7 @@ onBeforeUnmount(() => {
             aria-label="关闭"
             @click="emit('close')"
           >
-            <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-            </svg>
+            <AppIcon name="close" class="h-4.5 w-4.5" :stroke-width="2" />
           </button>
         </div>
       </div>

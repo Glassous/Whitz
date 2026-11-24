@@ -1,0 +1,729 @@
+/* ------------------------------------------------------------------ */
+/* Whitz Icon Visual & Expressive Micro-Interaction System             */
+/* Illustrative morphing, stroke-growth, compositor-first & accessible */
+/* ------------------------------------------------------------------ */
+
+:root {
+  --icon-duotone-opacity: 0.09;
+  --icon-duotone-hover: 0.17;
+  --icon-duotone-active: 0.22;
+
+  --dur-icon-fast: 150ms;
+  --dur-icon-base: 260ms;
+  --dur-icon-draw: 340ms;
+  --dur-icon-swap: 200ms;
+
+  --ease-icon-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Fallback for browsers without linear() easing */
+  --ease-icon-spring: cubic-bezier(0.34, 1.45, 0.64, 1);
+}
+
+@supports (animation-timing-function: linear(0, 1)) {
+  :root {
+    /* Lively yet controlled ~6% single-overshoot spring */
+    --ease-icon-spring: linear(
+      0,
+      0.014 1.2%,
+      0.056 2.6%,
+      0.215 5.6%,
+      0.608 12.2%,
+      0.878 18.6%,
+      1.012 24.8%,
+      1.058 31.2%,
+      1.062 36.8%,
+      1.048 43.8%,
+      1.022 54.2%,
+      1.005 67.2%,
+      0.999 82.4%,
+      1
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Adaptive Optical Duotone Fill                                       */
+/* ------------------------------------------------------------------ */
+
+.icon-duotone-fill {
+  fill: currentColor;
+  fill-opacity: var(--icon-duotone-opacity);
+  stroke: none;
+  transition: fill-opacity 200ms ease;
+}
+
+.icon-m.is-active .icon-duotone-fill,
+:where(button, a, summary, label.theme-segment-option, .icon-trigger)[aria-current="page"] .icon-duotone-fill,
+:where(button, a, summary, label.theme-segment-option, .icon-trigger)[aria-pressed="true"] .icon-duotone-fill {
+  fill-opacity: var(--icon-duotone-active);
+}
+
+@media (hover: hover) {
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-duotone-fill {
+    fill-opacity: var(--icon-duotone-hover);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Base Identity & Part Setup                                          */
+/* ------------------------------------------------------------------ */
+
+.icon-m {
+  display: inline-block;
+  flex-shrink: 0;
+  overflow: visible;
+  /* Identity transform prevents stacking-context shifts on :hover/:active
+     without touching `translate` (which may hold -translate-y-1/2). */
+  rotate: 0deg;
+  scale: 1;
+  transform-origin: center;
+}
+
+.icon-m-lift,
+.icon-m-right,
+.icon-m-left,
+.icon-m-down,
+.icon-m-up-right,
+.icon-m-chevron-r,
+.icon-m-chevron-d,
+.icon-m-folder,
+.icon-m-book,
+.icon-m-chat,
+.icon-m-crown,
+.icon-m-shield,
+.icon-m-message-plus,
+.icon-m-file {
+  translate: 0 0;
+}
+
+.icon-part {
+  translate: 0 0;
+  rotate: 0deg;
+  scale: 1;
+  transform-box: view-box;
+  transform-origin: 12px 12px;
+}
+
+.icon-part-lid {
+  transform-box: view-box;
+  transform-origin: 5.5px 6.5px;
+}
+
+.icon-part-pen {
+  transform-box: view-box;
+  transform-origin: 16px 8px;
+}
+
+.icon-part-flap {
+  transform-box: view-box;
+  transform-origin: 12px 19px;
+}
+
+.icon-part-sub,
+.icon-part-bloom,
+.icon-part-dot {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* Line-growth primitives (uses SVG pathLength="1") */
+.icon-grow {
+  stroke-dasharray: 1.05;
+  stroke-dashoffset: 1.05;
+  opacity: 0;
+}
+
+.icon-redraw {
+  stroke-dasharray: 1.05;
+  stroke-dashoffset: 0;
+}
+
+/* Hidden decorative elements that bloom in on hover */
+.icon-bloom {
+  opacity: 0;
+  scale: 0.25;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.icon-part-sheet {
+  opacity: 0;
+  translate: 0 2.5px;
+  transform-box: view-box;
+  transform-origin: 12px 12px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Motion Enabled (prefers-reduced-motion: no-preference)              */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: no-preference) {
+  .icon-m {
+    transition:
+      translate var(--dur-icon-base) var(--ease-icon-smooth),
+      rotate var(--dur-icon-base) var(--ease-icon-spring),
+      scale var(--dur-icon-base) var(--ease-icon-spring),
+      opacity var(--dur-icon-fast) ease,
+      color var(--dur-icon-fast) ease;
+  }
+
+  .icon-part {
+    transition:
+      translate var(--dur-icon-base) var(--ease-icon-smooth),
+      rotate var(--dur-icon-base) var(--ease-icon-spring),
+      scale var(--dur-icon-base) var(--ease-icon-spring),
+      opacity var(--dur-icon-fast) ease;
+  }
+
+  .icon-grow {
+    transition:
+      stroke-dashoffset var(--dur-icon-draw) var(--ease-icon-smooth),
+      opacity 140ms ease;
+  }
+
+  .icon-bloom {
+    transition:
+      opacity 180ms ease,
+      scale var(--dur-icon-base) var(--ease-icon-spring),
+      rotate var(--dur-icon-base) var(--ease-icon-spring),
+      translate var(--dur-icon-base) var(--ease-icon-smooth);
+  }
+
+  .icon-part-sheet {
+    transition:
+      translate 280ms var(--ease-icon-spring),
+      opacity 160ms ease;
+  }
+
+  /* Stagger delays for multi-line growth & dot waves */
+  .icon-d1 {
+    transition-delay: 55ms;
+  }
+  .icon-d2 {
+    transition-delay: 115ms;
+  }
+  .icon-d3 {
+    transition-delay: 175ms;
+  }
+
+  /* Tactile active press compression (desktop + touch) */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):active .icon-m:not(.icon-m-none) {
+    scale: 0.89;
+    transition-duration: 95ms;
+  }
+
+  /* Search input focus-within highlight + lens glint growth */
+  .icon-search-group:focus-within .icon-m-search-focus {
+    scale: 1.1;
+    rotate: -10deg;
+    color: var(--fg);
+  }
+  .icon-search-group:focus-within .icon-m-search-focus .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* Disclosure / Accordion rotation states */
+  details[open] > summary .icon-m-chevron-r,
+  [aria-expanded="true"] .icon-m-chevron-r,
+  .is-open .icon-m-chevron-r {
+    rotate: 90deg;
+  }
+
+  details[open] > summary .icon-m-chevron-d,
+  [aria-expanded="true"] .icon-m-chevron-d,
+  .is-expanded .icon-m-chevron-d {
+    rotate: 180deg;
+  }
+
+  /* AI generating gentle breathing sparkle */
+  .is-generating .icon-m-sparkle {
+    animation: whitz-sparkle-breathe 1.6s ease-in-out infinite;
+  }
+
+  /* One-shot checkmark path draw */
+  .icon-m-check-draw .icon-check-path {
+    stroke-dasharray: 28;
+    stroke-dashoffset: 0;
+    animation: whitz-check-draw 280ms var(--ease-icon-smooth) both;
+  }
+
+  .icon-m-check-draw {
+    animation: whitz-check-pop 300ms var(--ease-icon-spring) both;
+  }
+
+  /* One-shot card badge / notice entrance pop */
+  .icon-m-enter-pop {
+    animation: whitz-icon-enter-pop 340ms var(--ease-icon-spring) both;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Desktop Pointer Hover Micro-Interactions                            */
+/* ------------------------------------------------------------------ */
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  /* Generic directional & geometric motions */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-pop {
+    scale: 1.1;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-lift {
+    translate: 0 -2px;
+    scale: 1.08;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-right {
+    translate: 3px 0;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-left {
+    translate: -3px 0;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-down {
+    translate: 0 2.5px;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-up-right {
+    translate: 2px -2px;
+    scale: 1.06;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-plus {
+    rotate: 90deg;
+    scale: 1.1;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-close {
+    rotate: 90deg;
+    scale: 1.1;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-spin-nudge {
+    rotate: 180deg;
+    scale: 1.08;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-gear {
+    rotate: 60deg;
+    scale: 1.08;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-tilt-left {
+    rotate: -14deg;
+    scale: 1.1;
+  }
+
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-expand {
+    scale: 1.14;
+  }
+
+  /* Chevron hover nudge only when closed */
+  :where(button, a, summary, .icon-trigger):not(:disabled, [aria-disabled="true"], [aria-expanded="true"], .is-open):hover .icon-m-chevron-r {
+    translate: 2.5px 0;
+  }
+  details[open] > summary:hover .icon-m-chevron-r {
+    translate: 0 0;
+  }
+
+  :where(button, a, summary, .icon-trigger):not(:disabled, [aria-disabled="true"], [aria-expanded="true"], .is-expanded):hover .icon-m-chevron-d {
+    translate: 0 2.5px;
+  }
+  details[open] > summary:hover .icon-m-chevron-d {
+    translate: 0 0;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Illustrative & Line-Growing Hover Choreographies                 */
+  /* ---------------------------------------------------------------- */
+
+  /* 1. Folder (资料库): flap dips open, inner file rises & lines grow in */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-folder {
+    translate: 0 -1px;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-folder .icon-part-flap {
+    translate: 0 0.8px;
+    scale: 1 0.92;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-folder .icon-part-sheet {
+    opacity: 1;
+    translate: 0 -2.2px;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-folder .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 2. Chat (聊天): bubble lifts & 3 typing dots wave in */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-chat {
+    translate: 0 -1.5px;
+    scale: 1.07;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-chat .icon-bloom {
+    opacity: 1;
+    scale: 1;
+  }
+
+  /* 3. Search (搜索): magnifier leans in & glass glint arc draws */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-search {
+    rotate: -12deg;
+    scale: 1.1;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-search .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 4. Book (长期记忆 / 引用): lifts, inner lines re-draw, bookmark grows down */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-book {
+    translate: 0 -1.5px;
+    scale: 1.05;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-book .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-book .icon-redraw {
+    animation: whitz-line-redraw 380ms var(--ease-icon-smooth) both;
+  }
+
+  /* 5. Clock (定时任务): two-hand tick + top-right pulse arc grows */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-clock .icon-part-min {
+    rotate: 75deg;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-clock .icon-part-hour {
+    rotate: 20deg;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-clock .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 6. Sparkles (AI / 技能 / 角色): main & sub stars dance + 3rd star blooms */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-sparkle .icon-part-main {
+    rotate: 22deg;
+    scale: 1.1;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-sparkle .icon-part-sub {
+    scale: 1.3;
+    rotate: -24deg;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-sparkle .icon-bloom {
+    opacity: 1;
+    scale: 1;
+    rotate: 18deg;
+  }
+
+  /* 7. Shield (管理后台): lifts & checkmark grows inside */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-shield {
+    translate: 0 -1.5px;
+    scale: 1.08;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-shield .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 8. Crown (会员): lifts, jewel dots bloom & band grows */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-crown {
+    translate: 0 -2px;
+    scale: 1.08;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-crown .icon-bloom {
+    opacity: 1;
+    scale: 1;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-crown .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 9. User (用户信息): head nods/lifts & shoulder arc re-draws */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-user .icon-part-head {
+    translate: 0 -1.5px;
+    scale: 1.08;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-user .icon-redraw {
+    animation: whitz-line-redraw 380ms var(--ease-icon-smooth) both;
+  }
+
+  /* 10. Wrench (技能 / 工具): tightening twist + sparks grow */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-wrench .icon-part-tool {
+    rotate: -24deg;
+    scale: 1.08;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-wrench .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 11. Message Plus (意见反馈): bubble lifts & inner + rotates 90deg */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-message-plus {
+    translate: 0 -1.5px;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-message-plus .icon-part-plus {
+    rotate: 90deg;
+    scale: 1.18;
+  }
+
+  /* 12. Device Screens (Monitor / Smartphone / Tablet): screen lines light up */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-screen {
+    scale: 1.06;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-screen .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 13. Sun & Moon (主题): sun rays spin+expand; moon rocks & stars bloom */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-sun .icon-part-rays {
+    rotate: 45deg;
+    scale: 1.12;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-sun .icon-part-core {
+    scale: 1.12;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-moon .icon-part-crescent {
+    rotate: -18deg;
+    scale: 1.06;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-moon .icon-bloom {
+    opacity: 1;
+    scale: 1;
+  }
+
+  /* 14. Trash (删除): lid swings open & bin tilts slightly */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-trash .icon-part-lid {
+    translate: 0 -2.2px;
+    rotate: -22deg;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-trash .icon-part-bin {
+    rotate: 3deg;
+  }
+
+  /* 15. Download (下载): arrow drops into tray + tray line re-draws */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-download .icon-part-arrow {
+    translate: 0 3px;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-download .icon-redraw {
+    animation: whitz-line-redraw 320ms var(--ease-icon-smooth) both;
+  }
+
+  /* 16. Logout (退出): arrow glides decisively out of door */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-logout .icon-part-arrow {
+    translate: 3.5px 0;
+  }
+
+  /* 17. Copy (复制): front sheet glides out & inner text lines grow */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-copy .icon-part-front {
+    translate: 1.8px -1.8px;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-copy .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 18. Edit (编辑): pencil tilts & handwriting stroke grows */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-edit .icon-part-pen {
+    translate: 1.5px -1.5px;
+    rotate: -14deg;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-edit .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 19. Lightbulb (RAG 自动 / 记忆): lifts & 3 rays radiate outward */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-bulb {
+    scale: 1.07;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-bulb .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 20. File Check / File Text: lifts & inner lines/check re-draw */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-file {
+    translate: 0 -1.5px;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-file .icon-redraw {
+    animation: whitz-line-redraw 360ms var(--ease-icon-smooth) both;
+  }
+
+  /* 21. Panels & Menu Lines: divider slides + bar extends */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-panel-l .icon-part-bar {
+    translate: -2px 0;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-panel-r .icon-part-bar {
+    translate: 2px 0;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-menu .icon-part-bar {
+    translate: 2px 0;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-menu .icon-grow {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  /* 22. Camera: lens zooms & flash star blooms */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-camera .icon-part-lens {
+    scale: 1.18;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-camera .icon-bloom {
+    opacity: 1;
+    scale: 1;
+  }
+
+  /* 23. Database (记忆状态): cylinder rings breathe apart slightly */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-database .icon-part-top {
+    translate: 0 -1.2px;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-database .icon-part-mid {
+    translate: 0 1px;
+  }
+
+  /* 24. Eye: pupil dilates */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-eye .icon-part-pupil {
+    scale: 1.28;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-eye .icon-redraw {
+    animation: whitz-line-redraw 320ms var(--ease-icon-smooth) both;
+  }
+
+  /* 25. Send: arrow glides forward & shaft re-draws */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-send {
+    translate: 3px 0;
+    scale: 1.08;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-send .icon-redraw {
+    animation: whitz-line-redraw 300ms var(--ease-icon-smooth) both;
+  }
+
+  /* 26. Smile (表情评价): playful tilt + wider smile */
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-smile {
+    rotate: -10deg;
+    scale: 1.12;
+  }
+  :where(button, a, summary, label.theme-segment-option, .icon-trigger):not(:disabled, [aria-disabled="true"]):hover .icon-m-smile .icon-part-mouth {
+    scale: 1.18;
+    translate: 0 -0.5px;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Vue <Transition name="whitz-icon-swap">                             */
+/* ------------------------------------------------------------------ */
+
+.whitz-icon-swap-enter-active {
+  transition:
+    opacity var(--dur-icon-fast) ease-out,
+    scale var(--dur-icon-swap) var(--ease-icon-spring),
+    rotate var(--dur-icon-swap) var(--ease-icon-spring);
+}
+
+.whitz-icon-swap-leave-active {
+  transition:
+    opacity 100ms ease-in,
+    scale 100ms ease-in,
+    rotate 100ms ease-in;
+}
+
+.whitz-icon-swap-enter-from {
+  opacity: 0;
+  scale: 0.74;
+  rotate: -14deg;
+}
+
+.whitz-icon-swap-leave-to {
+  opacity: 0;
+  scale: 0.74;
+  rotate: 14deg;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .whitz-icon-swap-enter-from,
+  .whitz-icon-swap-leave-to {
+    scale: 1;
+    rotate: 0deg;
+  }
+  .whitz-icon-swap-enter-active,
+  .whitz-icon-swap-leave-active {
+    transition: opacity 90ms ease;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Spinner Reduced-Motion Graceful Slowdown                            */
+/* ------------------------------------------------------------------ */
+
+.whitz-spinner {
+  animation: whitz-spin 0.85s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .whitz-spinner {
+    animation-duration: 6s;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Keyframes                                                           */
+/* ------------------------------------------------------------------ */
+
+@keyframes whitz-spin {
+  to {
+    rotate: 1turn;
+  }
+}
+
+@keyframes whitz-line-redraw {
+  0% {
+    stroke-dashoffset: 1.05;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes whitz-check-draw {
+  from {
+    stroke-dashoffset: 28;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes whitz-check-pop {
+  0% {
+    scale: 0.76;
+  }
+  100% {
+    scale: 1;
+  }
+}
+
+@keyframes whitz-icon-enter-pop {
+  0% {
+    opacity: 0;
+    scale: 0.82;
+  }
+  100% {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+@keyframes whitz-sparkle-breathe {
+  0%,
+  100% {
+    scale: 0.94;
+    rotate: 0deg;
+    opacity: 0.72;
+  }
+  50% {
+    scale: 1.1;
+    rotate: 22deg;
+    opacity: 1;
+  }
+}

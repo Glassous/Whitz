@@ -7,6 +7,7 @@ import BaseButton from "../ui/BaseButton.vue";
 import BaseModal from "../ui/BaseModal.vue";
 import FormError from "../ui/FormError.vue";
 import Spinner from "../ui/Spinner.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 interface GithubPreviewResult {
   name: string;
@@ -358,15 +359,11 @@ onMounted(() => {
 
         <div class="flex shrink-0 flex-wrap items-center gap-2">
           <BaseButton variant="secondary" size="sm" rounded="full" @click="openGithubModal">
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-            </svg>
+            <AppIcon name="download" class="h-3.5 w-3.5" :stroke-width="2" />
             <span>从 GitHub 安装技能</span>
           </BaseButton>
           <BaseButton size="sm" rounded="full" @click="openCreateModal">
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
-              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-            </svg>
+            <AppIcon name="plus" class="h-3.5 w-3.5" :stroke-width="2.1" />
             <span>新建自定义技能</span>
           </BaseButton>
         </div>
@@ -374,18 +371,13 @@ onMounted(() => {
 
       <!-- Search & Source Filter -->
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <div class="relative min-w-0 flex-1">
-          <svg
+        <div class="icon-search-group relative min-w-0 flex-1">
+          <AppIcon
+            name="search"
+            motion="search-focus"
             class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-faint"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            aria-hidden="true"
-          >
-            <circle cx="11" cy="11" r="7" />
-            <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
-          </svg>
+            :stroke-width="2"
+          />
           <input
             v-model="searchQuery"
             type="search"

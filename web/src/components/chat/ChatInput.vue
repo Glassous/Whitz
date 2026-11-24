@@ -4,6 +4,8 @@ import { ACCEPT_ATTR, SUPPORTED_TYPES_SUMMARY, categoryLabel, formatFileSize, va
 import { isImageExt, serializeFileToken } from "../../lib/fileTokens";
 import type { ConversationFile, RagMode, UploadTask } from "../../types";
 import SkillPickerPopover from "./SkillPickerPopover.vue";
+import AppIcon from "../ui/AppIcon.vue";
+import Spinner from "../ui/Spinner.vue";
 
 const props = defineProps<{
   streaming: boolean;
@@ -803,17 +805,7 @@ onBeforeUnmount(() => {
             </span>
             <span class="min-w-0 flex-1 truncate font-medium" :title="u.filename">{{ u.filename }}</span>
             <span class="inline-flex shrink-0 items-center gap-1 tabular-nums text-[11px] opacity-80">
-              <svg
-                v-if="u.status === 'signing' || u.status === 'completing'"
-                class="h-3 w-3 animate-spin"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2.4"
-              >
-                <circle cx="12" cy="12" r="9" class="opacity-25" />
-                <path stroke-linecap="round" d="M12 3a9 9 0 019 9" />
-              </svg>
+              <Spinner v-if="u.status === 'signing' || u.status === 'completing'" :size="12" />
               {{ uploadLabel(u) }}
             </span>
             <button
@@ -830,9 +822,7 @@ onBeforeUnmount(() => {
               :aria-label="u.status === 'error' ? '关闭错误项' : '取消上传'"
               @click="u.status === 'error' ? emit('dismiss-upload', u.localId) : emit('cancel-upload', u.localId)"
             >
-              <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-                <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-              </svg>
+              <AppIcon name="close" class="h-3 w-3" :stroke-width="2.2" />
             </button>
           </div>
           <progress
@@ -864,9 +854,7 @@ onBeforeUnmount(() => {
               aria-label="从本条消息移除图片"
               @click="emit('detach-file', f.id)"
             >
-              <svg class="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6">
-                <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-              </svg>
+              <AppIcon name="close" class="h-2.5 w-2.5" :stroke-width="2.5" />
             </button>
           </div>
 
@@ -888,9 +876,7 @@ onBeforeUnmount(() => {
               title="从本条消息移除标签（文件仍保留在工作区）"
               @click="emit('detach-file', f.id)"
             >
-              <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-                <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-              </svg>
+              <AppIcon name="close" class="h-3 w-3" :stroke-width="2.2" />
             </button>
           </div>
         </template>
@@ -901,9 +887,7 @@ onBeforeUnmount(() => {
           class="inline-flex max-w-[220px] items-center gap-1.5 rounded-xl bg-accent-weak/85 px-2.5 py-1.5 text-[12px] text-fg"
           :title="`技能：${skillName}`"
         >
-          <svg class="h-3.5 w-3.5 shrink-0 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3z" />
-          </svg>
+          <AppIcon name="sparkles" motion="enter-pop" class="h-3.5 w-3.5 shrink-0 text-accent" :stroke-width="1.95" />
           <span class="min-w-0 flex-1 truncate font-medium">{{ skillName }}</span>
           <button
             type="button"
@@ -912,9 +896,7 @@ onBeforeUnmount(() => {
             title="移除技能"
             @click="removeSkill(skillName)"
           >
-            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-            </svg>
+            <AppIcon name="close" class="h-3 w-3" :stroke-width="2.2" />
           </button>
         </div>
       </div>
@@ -959,13 +941,7 @@ onBeforeUnmount(() => {
             :title="`上传文件到当前对话工作区（${SUPPORTED_TYPES_SUMMARY}）`"
             @click="openFilePicker"
           >
-            <svg class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 01-7.78-7.78l8.49-8.49a3.5 3.5 0 114.95 4.95l-8.49 8.49a1.5 1.5 0 01-2.12-2.12l7.78-7.78"
-              />
-            </svg>
+            <AppIcon name="paperclip" class="h-[18px] w-[18px]" :stroke-width="1.85" />
             <span class="hidden sm:inline">上传文件</span>
           </button>
 
@@ -978,13 +954,7 @@ onBeforeUnmount(() => {
             aria-label="选择技能"
             title="选择本轮对话附加技能"
           >
-            <svg class="h-[17px] w-[17px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3zM5 17l.9 2.1L8 20l-2.1.9L5 23l-.9-2.1L2 20l2.1-.9L5 17z"
-              />
-            </svg>
+            <AppIcon name="sparkles" :active="Boolean(selectedSkills?.length)" class="h-[17px] w-[17px] shrink-0" :stroke-width="1.85" />
             <span class="hidden sm:inline">技能</span>
             <span
               v-if="selectedSkills?.length"
@@ -1009,26 +979,30 @@ onBeforeUnmount(() => {
             :title="currentRagMeta.title"
             @click="cycleRagMode"
           >
-            <svg class="h-[16px] w-[16px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
-              <path
+            <Transition name="whitz-icon-swap" mode="out-in">
+              <AppIcon
                 v-if="currentRagMode === 'off'"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M3 3l18 18M10.6 10.6a3 3 0 004.24 4.24M9.5 4.2A7 7 0 0118 11c0 1.4-.4 2.7-1.1 3.8M6.1 6.1A7 7 0 004 11a7 7 0 009.9 6.4"
+                key="rag-off"
+                name="rag-off"
+                class="h-[16px] w-[16px] shrink-0"
+                :stroke-width="1.85"
               />
-              <path
+              <AppIcon
                 v-else-if="currentRagMode === 'files_only'"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6M9 14l2 2 4-4"
+                key="rag-files"
+                name="file-check"
+                active
+                class="h-[16px] w-[16px] shrink-0"
+                :stroke-width="1.85"
               />
-              <path
+              <AppIcon
                 v-else
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M12 2a7 7 0 00-4 12.7V17a1 1 0 001 1h6a1 1 0 001-1v-2.3A7 7 0 0012 2zM9 21h6"
+                key="rag-auto"
+                name="lightbulb"
+                class="h-[16px] w-[16px] shrink-0"
+                :stroke-width="1.85"
               />
-            </svg>
+            </Transition>
             <span class="hidden sm:inline">{{ currentRagMeta.label }}</span>
           </button>
 
@@ -1060,26 +1034,10 @@ onBeforeUnmount(() => {
               :title="expanded ? '收起输入框' : '加大输入框'"
               @click="toggleExpand"
             >
-              <svg
-                v-if="expanded"
-                class="h-4.5 w-4.5"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path stroke-linecap="round" stroke-linejoin="round" d="M4 14h6v6M20 10h-6V4M14 10l7-7M10 14l-7 7" />
-              </svg>
-              <svg
-                v-else
-                class="h-4.5 w-4.5"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path stroke-linecap="round" stroke-linejoin="round" d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
-              </svg>
+              <Transition name="whitz-icon-swap" mode="out-in">
+                <AppIcon v-if="expanded" key="collapse" name="collapse-diagonal" class="h-4.5 w-4.5" :stroke-width="1.95" />
+                <AppIcon v-else key="expand" name="expand-diagonal" class="h-4.5 w-4.5" :stroke-width="1.95" />
+              </Transition>
             </button>
           </Transition>
 
@@ -1093,20 +1051,8 @@ onBeforeUnmount(() => {
             :title="stopping ? '正在停止…' : '停止生成'"
             @click="emit('stop')"
           >
-            <svg
-              v-if="stopping"
-              class="h-4 w-4 animate-spin text-fg-muted"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.2"
-            >
-              <circle cx="12" cy="12" r="9" class="opacity-25" />
-              <path stroke-linecap="round" d="M12 3a9 9 0 019 9" />
-            </svg>
-            <svg v-else class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="6" width="12" height="12" rx="2.5" />
-            </svg>
+            <Spinner v-if="stopping" :size="16" class="text-fg-muted" />
+            <AppIcon v-else name="stop" class="h-3.5 w-3.5" />
           </button>
           <button
             v-else
@@ -1118,20 +1064,8 @@ onBeforeUnmount(() => {
             :title="sending ? '发送中…' : queuedSend && sendLockedByUpload ? '已排队，上传完成后自动发送' : sendLockedByUpload ? '文件上传中，点击可排队自动发送' : '发送'"
             @click="submit"
           >
-            <svg
-              v-if="sending || (queuedSend && sendLockedByUpload) || sendLockedByUpload"
-              class="h-4 w-4 animate-spin"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.2"
-            >
-              <circle cx="12" cy="12" r="9" class="opacity-25" />
-              <path stroke-linecap="round" d="M12 3a9 9 0 019 9" />
-            </svg>
-            <svg v-else class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M13 6l6 6-6 6" />
-            </svg>
+            <Spinner v-if="sending || (queuedSend && sendLockedByUpload) || sendLockedByUpload" :size="16" />
+            <AppIcon v-else name="send" class="h-[18px] w-[18px]" :stroke-width="2.1" />
           </button>
         </div>
       </div>

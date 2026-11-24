@@ -1,4 +1,5 @@
 @import "katex/dist/katex.min.css";
+@import "./icon-motion.css";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -320,11 +321,22 @@ body {
 }
 
 .whitz-citations-disclosure > summary .whitz-cite-chevron {
-  transition: transform 0.2s ease;
+  rotate: 0deg;
+  translate: 0 0;
+  transition:
+    rotate var(--dur-icon-base) var(--ease-icon-smooth),
+    translate var(--dur-icon-base) var(--ease-icon-smooth);
 }
 
 .whitz-citations-disclosure[open] > summary .whitz-cite-chevron {
-  transform: rotate(90deg);
+  rotate: 90deg;
+  translate: 0 0;
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .whitz-citations-disclosure:not([open]) > summary:hover .whitz-cite-chevron {
+    translate: 1.5px 0;
+  }
 }
 
 .whitz-citations-disclosure::details-content {
@@ -1137,11 +1149,25 @@ progress.upload-progress:indeterminate {
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
-  transition: background-color 0.12s ease, color 0.12s ease;
+  scale: 1;
+  transition:
+    background-color 0.14s ease,
+    color 0.14s ease,
+    scale var(--dur-icon-fast) var(--ease-icon-spring);
 }
 .whitz-inline-file-remove:hover {
   background: var(--hover);
   color: var(--fg);
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .whitz-inline-file-remove:hover {
+    scale: 1.08;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .whitz-inline-file-remove:active {
+    scale: 0.9;
+  }
 }
 
 .whitz-inline-img-chip {
@@ -1189,7 +1215,11 @@ progress.upload-progress:indeterminate {
   line-height: 1;
   opacity: 0;
   cursor: pointer;
-  transition: opacity 0.12s ease, background-color 0.12s ease;
+  scale: 1;
+  transition:
+    opacity 0.14s ease,
+    background-color 0.14s ease,
+    scale var(--dur-icon-fast) var(--ease-icon-spring);
 }
 .whitz-inline-img-chip:hover .whitz-inline-img-remove,
 .whitz-inline-img-remove:focus-visible {
@@ -1197,6 +1227,16 @@ progress.upload-progress:indeterminate {
 }
 .whitz-inline-img-remove:hover {
   background: rgb(0 0 0 / 0.88);
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .whitz-inline-img-remove:hover {
+    scale: 1.08;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .whitz-inline-img-remove:active {
+    scale: 0.9;
+  }
 }
 
 /* ===== Markdown Embedded Deliverable Cards ===== */

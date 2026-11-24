@@ -6,6 +6,7 @@ import { isWritableTextExt } from "../../lib/fileTokens";
 import { useFilesStore } from "../../stores/files";
 import type { ConversationFile, DeliverableTarget, PreviewTarget } from "../../types";
 import Spinner from "../ui/Spinner.vue";
+import AppIcon from "../ui/AppIcon.vue";
 import CsvTableEditor from "./CsvTableEditor.vue";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 
@@ -310,9 +311,7 @@ watch(() => props.target, () => {
           class="focus-ring inline-flex h-8 shrink-0 items-center gap-1 rounded-lg px-2 text-[12.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
           @click="emit('close')"
         >
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
-          </svg>
+          <AppIcon name="chevron-left" class="h-3.5 w-3.5" :stroke-width="2.1" />
           <span>返回步骤与文件</span>
         </button>
 
@@ -410,9 +409,7 @@ watch(() => props.target, () => {
             title="下载文件"
             @click="onDownload"
           >
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-            </svg>
+            <AppIcon name="download" class="h-3.5 w-3.5" :stroke-width="2" />
             <span>下载</span>
           </button>
         </div>

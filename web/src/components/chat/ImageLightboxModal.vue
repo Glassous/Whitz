@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useFilesStore } from "../../stores/files";
 import type { ConversationFile } from "../../types";
 import Spinner from "../ui/Spinner.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 const props = defineProps<{
   open: boolean;
@@ -195,9 +196,7 @@ onBeforeUnmount(() => {
               title="缩小 (-)"
               @click="zoomBy(-0.25)"
             >
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" d="M5 12h14" />
-              </svg>
+              <AppIcon name="minus" class="h-4 w-4" :stroke-width="2" />
             </button>
             <button
               type="button"
@@ -213,9 +212,7 @@ onBeforeUnmount(() => {
               title="放大 (+)"
               @click="zoomBy(0.25)"
             >
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-              </svg>
+              <AppIcon name="plus" class="h-4 w-4" :stroke-width="2" />
             </button>
             <button
               type="button"
@@ -223,9 +220,7 @@ onBeforeUnmount(() => {
               title="下载原图"
               @click="emit('download', currentFile)"
             >
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-              </svg>
+              <AppIcon name="download" class="h-4 w-4" :stroke-width="2" />
             </button>
             <button
               type="button"
@@ -233,9 +228,7 @@ onBeforeUnmount(() => {
               aria-label="关闭画廊"
               @click="emit('close')"
             >
-              <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-              </svg>
+              <AppIcon name="close" class="h-4.5 w-4.5" :stroke-width="2" />
             </button>
           </div>
         </div>
@@ -253,9 +246,7 @@ onBeforeUnmount(() => {
             aria-label="上一张"
             @click.stop="prev"
           >
-            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
-            </svg>
+            <AppIcon name="chevron-left" class="h-5 w-5" :stroke-width="2.2" />
           </button>
 
           <Spinner v-if="loadingUrl && !currentUrl" :size="24" />
@@ -282,9 +273,7 @@ onBeforeUnmount(() => {
             aria-label="下一张"
             @click.stop="next"
           >
-            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-            </svg>
+            <AppIcon name="chevron-right" class="h-5 w-5" :stroke-width="2.2" />
           </button>
         </div>
 

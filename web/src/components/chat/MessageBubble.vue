@@ -8,6 +8,7 @@ import { categoryLabel, formatFileSize, getFileExt, getFileSpec } from "../../li
 import { isWritableTextExt, parseInlineFileSegments } from "../../lib/fileTokens";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 import Spinner from "../ui/Spinner.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
@@ -559,9 +560,7 @@ const resolvedArtifacts = computed(() =>
           :key="skillName"
           class="inline-flex items-center gap-1 rounded-full bg-accent-weak/85 px-2.5 py-0.5 text-[11.5px] font-medium text-accent"
         >
-          <svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3z" />
-          </svg>
+          <AppIcon name="sparkles" motion="none" class="h-3 w-3 shrink-0" :stroke-width="2" />
           <span>{{ skillName }}</span>
         </span>
       </div>
@@ -596,10 +595,7 @@ const resolvedArtifacts = computed(() =>
             :title="`${file.filename} (${formatFileSize(file.size_bytes)}) — 点击预览`"
             @click="onFileClick(file)"
           >
-            <svg class="h-3.5 w-3.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-              <path stroke-linecap="round" stroke-linejoin="round" d="M14 2v6h6" />
-            </svg>
+            <AppIcon name="file-text" class="h-3.5 w-3.5 shrink-0 text-fg-faint" :stroke-width="1.85" />
             <span class="min-w-0 flex-1 truncate font-medium text-fg">{{ file.filename }}</span>
             <span class="shrink-0 text-[11px] text-fg-faint">{{ categoryLabel(file.category, file.ext) }}</span>
           </button>
@@ -698,17 +694,12 @@ const resolvedArtifacts = computed(() =>
             @click="userExpanded = !userExpanded"
           >
             <span>{{ userExpanded ? "收起" : "展开全文" }}</span>
-            <svg
-              class="h-3.5 w-3.5 transition-transform duration-200"
-              :class="userExpanded ? 'rotate-180' : ''"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              aria-hidden="true"
-            >
-              <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6" />
-            </svg>
+            <AppIcon
+              name="chevron-down"
+              motion="chevron-d"
+              class="h-3.5 w-3.5"
+              :stroke-width="2"
+            />
           </button>
         </div>
       </div>
@@ -741,9 +732,7 @@ const resolvedArtifacts = computed(() =>
           title="编辑并重发"
           @click="startEdit"
         >
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-          </svg>
+          <AppIcon name="edit" class="h-3.5 w-3.5" :stroke-width="1.85" />
           <span>编辑</span>
         </button>
 
@@ -754,38 +743,9 @@ const resolvedArtifacts = computed(() =>
           :title="copied ? '已复制' : '复制'"
           @click="copyContent"
         >
-          <Transition
-            mode="out-in"
-            enter-active-class="transition duration-150 ease-out"
-            enter-from-class="scale-75 opacity-0"
-            enter-to-class="scale-100 opacity-100"
-            leave-active-class="transition duration-100 ease-in"
-            leave-from-class="scale-100 opacity-100"
-            leave-to-class="scale-75 opacity-0"
-          >
-            <svg
-              v-if="copied"
-              key="check"
-              class="h-4 w-4 text-success"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.2"
-            >
-              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
-            <svg
-              v-else
-              key="copy"
-              class="h-4 w-4"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.85"
-            >
-              <rect x="9" y="9" width="11" height="11" rx="2.2" />
-              <path stroke-linecap="round" stroke-linejoin="round" d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-            </svg>
+          <Transition name="whitz-icon-swap" mode="out-in">
+            <AppIcon v-if="copied" key="check" name="check" motion="check-draw" class="h-4 w-4 text-success" :stroke-width="2.2" />
+            <AppIcon v-else key="copy" name="copy" class="h-4 w-4" :stroke-width="1.85" />
           </Transition>
         </button>
       </div>
@@ -807,9 +767,7 @@ const resolvedArtifacts = computed(() =>
       <Spinner v-if="isLive" :size="13" class="shrink-0 text-accent" />
       <span class="truncate">{{ isLive ? liveLabel : "步骤查看" }}</span>
       <span v-if="!isLive && stepsCount" class="shrink-0 tabular-nums opacity-80">· {{ stepsCount }}</span>
-      <svg class="h-3.5 w-3.5 shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-      </svg>
+      <AppIcon name="chevron-right" class="h-3.5 w-3.5 shrink-0 opacity-70" :stroke-width="2" />
     </button>
 
     <div
@@ -855,27 +813,8 @@ const resolvedArtifacts = computed(() =>
       class="whitz-citations-disclosure mt-3 rounded-2xl border border-line/80 bg-sidebar/65 px-3 py-2 text-[12.5px] dark:bg-surface/65"
     >
       <summary class="focus-ring flex items-center gap-2 rounded-lg py-0.5 text-fg-muted select-none hover:text-fg">
-        <svg
-          class="whitz-cite-chevron h-3.5 w-3.5 shrink-0 text-fg-faint"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2.2"
-          aria-hidden="true"
-        >
-          <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-        </svg>
-        <svg
-          class="h-3.5 w-3.5 shrink-0 text-accent"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          aria-hidden="true"
-        >
-          <path stroke-linecap="round" stroke-linejoin="round" d="M4 19.5A2.5 2.5 0 016.5 17H20" />
-          <path stroke-linecap="round" stroke-linejoin="round" d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
-        </svg>
+        <AppIcon name="chevron-right" motion="none" class="whitz-cite-chevron h-3.5 w-3.5 shrink-0 text-fg-faint" :stroke-width="2.2" />
+        <AppIcon name="book" motion="pop" class="h-3.5 w-3.5 shrink-0 text-accent" :stroke-width="1.95" />
         <span class="font-medium text-fg">{{ citationSummaryText }}</span>
         <span class="rounded-full bg-canvas px-1.5 py-0.5 text-[10.5px] tabular-nums text-fg-faint">
           {{ messageCitations.length }}
@@ -976,9 +915,7 @@ const resolvedArtifacts = computed(() =>
             @click="emit('download-file', file)"
           >
             <Spinner v-if="downloadingFileId === file.id" :size="15" />
-            <svg v-else class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-            </svg>
+            <AppIcon v-else name="download" class="h-4 w-4" :stroke-width="1.9" />
           </button>
         </div>
       </div>
@@ -995,9 +932,7 @@ const resolvedArtifacts = computed(() =>
         :disabled="chat.streaming || filesStore.hasActiveUploads"
         @click="emit('regenerate', message.id)"
       >
-        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 0115.3-6.4L21 8M21 3v5h-5M21 12a9 9 0 01-15.3 6.4L3 16M3 21v-5h5" />
-        </svg>
+        <AppIcon name="refresh" class="h-3.5 w-3.5" :stroke-width="2" />
         <span>重试</span>
       </button>
     </div>
@@ -1012,38 +947,9 @@ const resolvedArtifacts = computed(() =>
         :title="copied ? '已复制' : '复制'"
         @click="copyContent"
       >
-        <Transition
-          mode="out-in"
-          enter-active-class="transition duration-150 ease-out"
-          enter-from-class="scale-75 opacity-0"
-          enter-to-class="scale-100 opacity-100"
-          leave-active-class="transition duration-100 ease-in"
-          leave-from-class="scale-100 opacity-100"
-          leave-to-class="scale-75 opacity-0"
-        >
-          <svg
-            v-if="copied"
-            key="check"
-            class="h-4 w-4 text-success"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.2"
-          >
-            <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-          </svg>
-          <svg
-            v-else
-            key="copy"
-            class="h-4 w-4"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.85"
-          >
-            <rect x="9" y="9" width="11" height="11" rx="2.2" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-          </svg>
+        <Transition name="whitz-icon-swap" mode="out-in">
+          <AppIcon v-if="copied" key="check" name="check" motion="check-draw" class="h-4 w-4 text-success" :stroke-width="2.2" />
+          <AppIcon v-else key="copy" name="copy" class="h-4 w-4" :stroke-width="1.85" />
         </Transition>
       </button>
 
@@ -1055,9 +961,7 @@ const resolvedArtifacts = computed(() =>
         title="重新生成"
         @click="emit('regenerate', message.id)"
       >
-        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 0115.3-6.4L21 8M21 3v5h-5M21 12a9 9 0 01-15.3 6.4L3 16M3 21v-5h5" />
-        </svg>
+        <AppIcon name="refresh" class="h-3.5 w-3.5" :stroke-width="1.9" />
         <span>重新生成</span>
       </button>
 
@@ -1080,20 +984,10 @@ const resolvedArtifacts = computed(() =>
           :title="selectedReactionMeta ? `已评价：${selectedReactionMeta.label}（点击切换或取消）` : '表情评价'"
           @click="toggleReactionPicker"
         >
-          <span v-if="selectedReactionMeta" class="text-[14px] leading-none">{{ selectedReactionMeta.emoji }}</span>
-          <svg
-            v-else
-            class="h-4 w-4"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.85"
-          >
-            <circle cx="12" cy="12" r="9" />
-            <path stroke-linecap="round" d="M8.5 14.5s1.3 2 3.5 2 3.5-2 3.5-2" />
-            <circle cx="9.25" cy="9.75" r="0.75" fill="currentColor" stroke="none" />
-            <circle cx="14.75" cy="9.75" r="0.75" fill="currentColor" stroke="none" />
-          </svg>
+          <Transition name="whitz-icon-swap" mode="out-in">
+            <span v-if="selectedReactionMeta" :key="selectedReactionMeta.key" class="inline-block text-[14px] leading-none">{{ selectedReactionMeta.emoji }}</span>
+            <AppIcon v-else key="smile" name="smile" class="h-4 w-4" :stroke-width="1.85" />
+          </Transition>
         </button>
 
         <Transition

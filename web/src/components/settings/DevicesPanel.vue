@@ -7,6 +7,7 @@ import BaseButton from "../ui/BaseButton.vue";
 import BaseModal from "../ui/BaseModal.vue";
 import FormError from "../ui/FormError.vue";
 import Spinner from "../ui/Spinner.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 type DeviceKind = "desktop" | "mobile" | "tablet" | "unknown";
 
@@ -237,7 +238,7 @@ onMounted(() => {
       <article
         v-for="session in sortedSessions"
         :key="session.session_id"
-        class="flex flex-col gap-3 rounded-[24px] bg-sidebar p-5 transition-colors sm:flex-row sm:items-center sm:justify-between dark:bg-surface"
+        class="icon-trigger flex flex-col gap-3 rounded-[24px] bg-sidebar p-5 transition-colors sm:flex-row sm:items-center sm:justify-between dark:bg-surface"
         :class="session.is_current ? 'ring-1 ring-accent/45' : ''"
       >
         <div class="flex min-w-0 items-start gap-3.5">
@@ -246,54 +247,34 @@ onMounted(() => {
             class="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-canvas text-fg dark:bg-active"
             aria-hidden="true"
           >
-            <!-- Mobile -->
-            <svg
+            <AppIcon
               v-if="parseUserAgent(session.user_agent).kind === 'mobile'"
+              name="smartphone"
+              :active="session.is_current"
               class="h-5 w-5"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.85"
-            >
-              <rect x="7" y="2.5" width="10" height="19" rx="2.2" />
-              <path stroke-linecap="round" d="M11 18.5h2" />
-            </svg>
-            <!-- Tablet -->
-            <svg
+              :stroke-width="1.85"
+            />
+            <AppIcon
               v-else-if="parseUserAgent(session.user_agent).kind === 'tablet'"
+              name="tablet"
+              :active="session.is_current"
               class="h-5 w-5"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.85"
-            >
-              <rect x="4.5" y="3" width="15" height="18" rx="2" />
-              <path stroke-linecap="round" d="M11 18h2" />
-            </svg>
-            <!-- Desktop -->
-            <svg
+              :stroke-width="1.85"
+            />
+            <AppIcon
               v-else-if="parseUserAgent(session.user_agent).kind === 'desktop'"
+              name="monitor"
+              :active="session.is_current"
               class="h-5 w-5"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.85"
-            >
-              <rect x="3" y="4" width="18" height="12" rx="2" />
-              <path stroke-linecap="round" d="M2 20h20" />
-            </svg>
-            <!-- Unknown -->
-            <svg
+              :stroke-width="1.85"
+            />
+            <AppIcon
               v-else
+              name="globe"
+              :active="session.is_current"
               class="h-5 w-5"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.85"
-            >
-              <circle cx="12" cy="12" r="9" />
-              <path stroke-linecap="round" d="M3.5 9h17M3.5 15h17M12 3a14 14 0 010 18M12 3a14 14 0 000 18" />
-            </svg>
+              :stroke-width="1.85"
+            />
           </span>
 
           <div class="min-w-0 flex-1">

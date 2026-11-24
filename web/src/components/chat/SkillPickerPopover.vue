@@ -2,6 +2,7 @@
 import { computed, nextTick, ref } from "vue";
 import { api } from "../../api/client";
 import type { SkillItem } from "../../types";
+import AppIcon from "../ui/AppIcon.vue";
 
 const MAX_SELECTED_SKILLS = 10;
 
@@ -130,11 +131,8 @@ function sourceLabel(source?: string): string {
 
       <!-- Search -->
       <div class="border-b border-line px-3 py-2">
-        <div class="flex items-center gap-2 rounded-xl bg-surface px-2.5 py-1.5">
-          <svg class="h-3.5 w-3.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
-            <circle cx="11" cy="11" r="7" />
-            <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
-          </svg>
+        <div class="icon-search-group flex items-center gap-2 rounded-xl bg-surface px-2.5 py-1.5">
+          <AppIcon name="search" motion="search-focus" class="h-3.5 w-3.5 shrink-0 text-fg-faint" :stroke-width="2" />
           <input
             ref="searchInputRef"
             v-model="searchQuery"
@@ -149,9 +147,7 @@ function sourceLabel(source?: string): string {
             aria-label="清空搜索"
             @click="searchQuery = ''"
           >
-            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-            </svg>
+            <AppIcon name="close" class="h-3 w-3" :stroke-width="2.2" />
           </button>
         </div>
       </div>
@@ -185,9 +181,7 @@ function sourceLabel(source?: string): string {
                   : 'border-line-strong bg-canvas'
               "
             >
-              <svg v-if="selectedSet.has(skill.name)" class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-              </svg>
+              <AppIcon v-if="selectedSet.has(skill.name)" name="check" motion="check-draw" class="h-3 w-3" :stroke-width="2.6" />
             </span>
 
             <span class="min-w-0 flex-1">
@@ -223,9 +217,7 @@ function sourceLabel(source?: string): string {
           @click="closePopover"
         >
           <span>管理 / GitHub 安装</span>
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-          </svg>
+          <AppIcon name="chevron-right" class="h-3.5 w-3.5" :stroke-width="2" />
         </router-link>
       </div>
     </div>

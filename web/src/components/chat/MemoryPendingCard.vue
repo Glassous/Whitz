@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import type { MemoryPendingItem } from "../../types";
 import BaseButton from "../ui/BaseButton.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 const props = defineProps<{
   item: MemoryPendingItem;
@@ -57,13 +58,7 @@ function approve() {
   <div class="animate-rise rounded-2xl bg-surface p-4">
     <div class="flex gap-3">
       <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-weak text-accent">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            d="M12 3a7 7 0 00-7 7c0 2.6 1.4 4.9 3.5 6.1V19a1 1 0 001 1h5a1 1 0 001-1v-2.9A7 7 0 0012 3zM9.5 22h5"
-          />
-        </svg>
+        <AppIcon name="lightbulb" motion="enter-pop" class="h-4 w-4" :stroke-width="1.95" />
       </div>
       <div class="min-w-0 flex-1">
         <div class="flex flex-wrap items-center gap-1.5">

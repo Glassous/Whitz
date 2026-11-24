@@ -28,8 +28,8 @@ defineProps<{
 
     <!-- Top bar -->
     <header class="relative z-10 flex items-center justify-between px-5 py-4 sm:px-8">
-      <router-link to="/login" class="focus-ring flex items-center rounded-xl py-1 pr-2">
-        <span class="brand-mark-tight h-[16px] w-[24px] text-fg" aria-hidden="true" />
+      <router-link to="/login" class="focus-ring icon-trigger flex items-center rounded-xl py-1 pr-2">
+        <span class="brand-mark-tight icon-m icon-m-lift h-[16px] w-[24px] text-fg" aria-hidden="true" />
         <span class="ml-[1px] translate-y-[0.5px] text-[22px] font-semibold leading-none tracking-tight text-fg">hitz</span>
       </router-link>
       <ThemeToggle />

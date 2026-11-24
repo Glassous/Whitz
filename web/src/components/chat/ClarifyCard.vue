@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import type { ClarifyAnswerItem, ClarifyQuestionItem, ClarifySubmitPayload, PendingControl } from "../../types";
 import BaseButton from "../ui/BaseButton.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 const props = defineProps<{
   control: PendingControl;
@@ -147,13 +148,7 @@ function onFormKeydown(e: KeyboardEvent) {
   <div class="animate-rise rounded-2xl border border-line bg-surface p-4 shadow-sm">
     <div class="flex gap-3">
       <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-weak text-accent">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            d="M8 10h.01M12 10h.01M16 10h.01M21 12a8 8 0 01-11.6 7.1L4 20l1-5.2A8 8 0 1121 12z"
-          />
-        </svg>
+        <AppIcon name="message-dots" class="h-4 w-4" :stroke-width="1.95" />
       </div>
 
       <form class="min-w-0 flex-1" @submit.prevent="send" @keydown="onFormKeydown">
@@ -203,9 +198,7 @@ function onFormKeydown(e: KeyboardEvent) {
                     isSelected(q.id, opt) ? 'border-accent bg-accent text-white' : 'border-line-strong bg-transparent',
                   ]"
                 >
-                  <svg v-if="isSelected(q.id, opt)" class="h-2.5 w-2.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.5 8.5L6.5 11.5L12.5 4.5" />
-                  </svg>
+                  <AppIcon v-if="isSelected(q.id, opt)" name="check" motion="check-draw" class="h-2.5 w-2.5" :stroke-width="2.8" />
                 </span>
                 <span>{{ opt }}</span>
               </button>

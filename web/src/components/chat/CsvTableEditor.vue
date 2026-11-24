@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import Spinner from "../ui/Spinner.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 const MAX_DISPLAY_ROWS = 1000;
 
@@ -228,9 +229,7 @@ function saveChanges() {
           class="focus-ring inline-flex items-center gap-1 rounded-lg bg-surface px-2.5 py-1 text-[11.5px] font-medium text-fg transition-colors hover:bg-hover"
           @click="editing = true"
         >
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-          </svg>
+          <AppIcon name="edit" class="h-3.5 w-3.5" :stroke-width="1.9" />
           <span>编辑表格</span>
         </button>
       </div>

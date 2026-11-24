@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, useId, watch } from "vue";
+import AppIcon from "./AppIcon.vue";
 
 const TAILWIND_WIDTH_MAP: Record<string, string> = {
   "max-w-xs": "20rem",
@@ -147,9 +148,7 @@ onMounted(() => {
           aria-label="关闭"
           @click="emit('close')"
         >
-          <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-          </svg>
+          <AppIcon name="close" class="h-4.5 w-4.5" :stroke-width="2" />
         </button>
       </div>
       <div

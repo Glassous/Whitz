@@ -4,6 +4,7 @@ import AuthLayout from "../components/AuthLayout.vue";
 import BaseInput from "../components/ui/BaseInput.vue";
 import BaseButton from "../components/ui/BaseButton.vue";
 import FormError from "../components/ui/FormError.vue";
+import AppIcon from "../components/ui/AppIcon.vue";
 import { api } from "../api/client";
 import { extractErrorMessage, isValidEmail, useEmailCode } from "../composables/useEmailCode";
 
@@ -166,9 +167,7 @@ async function resetPassword() {
 
     <div v-else class="space-y-4 text-center">
       <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-success-weak text-success">
-        <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-        </svg>
+        <AppIcon name="check" motion="check-draw" class="h-6 w-6" :stroke-width="2.2" />
       </div>
       <p class="text-[13px] text-fg-muted">密码已重置，请使用新密码登录。</p>
       <BaseButton size="lg" block @click="$router.push('/login')">去登录</BaseButton>

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import AppIcon from "./AppIcon.vue";
+
 const props = defineProps<{
   visible: boolean;
   streaming?: boolean;
@@ -42,16 +44,7 @@ function onFocusOut(e: FocusEvent) {
         aria-hidden="true"
       />
       <span v-if="streaming" class="whitespace-nowrap">新内容</span>
-      <svg
-        class="h-4.5 w-4.5 shrink-0"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2.1"
-        aria-hidden="true"
-      >
-        <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6" />
-      </svg>
+      <AppIcon name="chevron-down" class="h-4.5 w-4.5 shrink-0" :stroke-width="2.1" />
     </button>
   </Transition>
 </template>

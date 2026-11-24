@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { ReasoningBlock, ReasoningTool } from "../../types";
+import AppIcon from "../ui/AppIcon.vue";
 
 const props = defineProps<{ block: ReasoningBlock }>();
 
@@ -272,25 +273,15 @@ function prettyResult(tool: ReasoningTool): string {
             class="focus-ring flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-2 text-left"
             @click.prevent="toggleTool(ti)"
           >
-            <svg class="h-3.5 w-3.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.3 2.3-2.1-2.1 2.4-2.2z"
-              />
-            </svg>
+            <AppIcon name="wrench" class="h-3.5 w-3.5 shrink-0 text-fg-faint" :stroke-width="1.8" />
             <span class="shrink-0 text-[12.5px] font-medium text-fg-muted">{{ toolLabel(tool) }}</span>
             <span class="min-w-0 flex-1 truncate text-[12.5px] text-fg-faint">{{ toolSummary(tool) }}</span>
-            <svg
-              class="h-3.5 w-3.5 shrink-0 text-fg-faint transition-transform duration-200"
-              :class="openTools.has(ti) ? 'rotate-90' : ''"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-            </svg>
+            <AppIcon
+              name="chevron-right"
+              motion="chevron-r"
+              class="h-3.5 w-3.5 shrink-0 text-fg-faint"
+              :stroke-width="2"
+            />
           </summary>
 
           <div class="space-y-1.5 px-2.5 pb-2.5 pt-1">

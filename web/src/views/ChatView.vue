@@ -12,6 +12,7 @@ import type { AgentStatus, CitationItem, ConversationFile, DeliverableTarget, Pr
 import ConversationSidebar from "../components/chat/ConversationSidebar.vue";
 import MessageList from "../components/chat/MessageList.vue";
 import ScrollToBottomButton from "../components/ui/ScrollToBottomButton.vue";
+import AppIcon from "../components/ui/AppIcon.vue";
 import ChatInput from "../components/chat/ChatInput.vue";
 import PlanPanel from "../components/chat/PlanPanel.vue";
 import ApprovalCard from "../components/chat/ApprovalCard.vue";
@@ -943,9 +944,7 @@ onBeforeUnmount(() => {
               :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
               @click="onSidebarToggleClick"
             >
-              <svg class="h-[22px] w-[22px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3">
-                <path stroke-linecap="round" d="M4 8.5h16M4 15.5h10" />
-              </svg>
+              <AppIcon name="menu-lines" class="h-[22px] w-[22px]" :stroke-width="2.1" />
             </button>
             <h1 class="min-w-0 truncate text-[16px] font-semibold text-fg">资料库</h1>
           </div>
@@ -968,9 +967,7 @@ onBeforeUnmount(() => {
               :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
               @click="onSidebarToggleClick"
             >
-              <svg class="h-[22px] w-[22px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3">
-                <path stroke-linecap="round" d="M4 8.5h16M4 15.5h10" />
-              </svg>
+              <AppIcon name="menu-lines" class="h-[22px] w-[22px]" :stroke-width="2.1" />
             </button>
             <h1 class="min-w-0 truncate text-[16px] font-semibold text-fg">定时任务</h1>
           </div>
@@ -992,9 +989,7 @@ onBeforeUnmount(() => {
         :title="showPlan ? '收起右侧栏' : '展开右侧栏'"
         @click="onPlanToggleClick"
       >
-        <svg class="h-[21px] w-[21px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v14H3zM15 5v14" />
-        </svg>
+        <AppIcon name="panel-right" :active="showPlan" class="h-[21px] w-[21px]" :stroke-width="1.95" />
         <span
           v-if="filesStore.fileCount > 0 && !showPlan"
           class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-accent"
@@ -1016,9 +1011,7 @@ onBeforeUnmount(() => {
             :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
             @click="onSidebarToggleClick"
           >
-            <svg class="h-[22px] w-[22px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3">
-              <path stroke-linecap="round" d="M4 8.5h16M4 15.5h10" />
-            </svg>
+            <AppIcon name="menu-lines" class="h-[22px] w-[22px]" :stroke-width="2.1" />
           </button>
 
           <h1 class="min-w-0 truncate text-[15.5px] font-semibold text-fg">
@@ -1028,10 +1021,7 @@ onBeforeUnmount(() => {
             v-if="activeView === 'chat' && isCurrentScheduled"
             class="inline-flex shrink-0 items-center gap-1 rounded-full bg-surface px-2 py-0.5 text-[11px] font-medium text-fg-muted"
           >
-            <svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-              <circle cx="12" cy="12" r="9" />
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 2" />
-            </svg>
+            <AppIcon name="clock" motion="none" class="h-3 w-3 shrink-0" :stroke-width="2" />
             <span>定时</span>
           </span>
           <button
@@ -1041,10 +1031,7 @@ onBeforeUnmount(() => {
             title="查看或修正当前对话的 L0/L1/L2 上下文记忆状态与归档时间线"
             @click="contextStateOpen = true"
           >
-            <svg class="h-3.5 w-3.5 shrink-0 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3c-4.97 0-9 2.24-9 5v8c0 2.76 4.03 5 9 5s9-2.24 9-5V8c0-2.76-4.03-5-9-5z" />
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 12c0 2.76 4.03 5 9 5s9-2.24 9-5" />
-            </svg>
+            <AppIcon name="database" class="h-3.5 w-3.5 shrink-0 text-accent" :stroke-width="1.95" />
             <span class="hidden sm:inline">记忆状态</span>
           </button>
         </div>
@@ -1174,9 +1161,7 @@ onBeforeUnmount(() => {
               <div v-if="filesStore.error" class="flex items-start gap-2 rounded-xl bg-danger-weak px-3 py-2 text-[13px] text-danger">
                 <span class="flex-1">{{ filesStore.error }}</span>
                 <button class="rounded p-0.5 transition-opacity hover:opacity-70" aria-label="关闭文件提示" @click="filesStore.clearError()">
-                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-                  </svg>
+                  <AppIcon name="close" class="h-3.5 w-3.5" :stroke-width="2" />
                 </button>
               </div>
             </Transition>
@@ -1199,9 +1184,7 @@ onBeforeUnmount(() => {
                   查看会员
                 </router-link>
                 <button class="rounded p-0.5 transition-opacity hover:opacity-70" aria-label="关闭提示" @click="chat.error = null">
-                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-                  </svg>
+                  <AppIcon name="close" class="h-3.5 w-3.5" :stroke-width="2" />
                 </button>
               </div>
             </Transition>
@@ -1333,9 +1316,7 @@ onBeforeUnmount(() => {
               aria-label="关闭任务面板"
               @click="closeMobileDrawer"
             >
-              <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-              </svg>
+              <AppIcon name="close" class="h-4.5 w-4.5" :stroke-width="2" />
             </button>
           </div>
           <div class="min-h-0 flex-1">

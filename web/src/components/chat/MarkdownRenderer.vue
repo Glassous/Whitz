@@ -267,20 +267,21 @@ function renderKatexHtml(latex: string, displayMode: boolean, blockWrapper: bool
 }
 
 const COPY_ICON_SVG =
-  '<svg class="md-icon-copy" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">' +
-  '<rect x="9" y="9" width="11" height="11" rx="2.2"></rect>' +
-  '<path stroke-linecap="round" stroke-linejoin="round" d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path>' +
+  '<svg class="md-icon-copy icon-m icon-m-copy" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M5.5 15H4.8A1.8 1.8 0 0 1 3 13.2V4.8A1.8 1.8 0 0 1 4.8 3h8.4A1.8 1.8 0 0 1 15 4.8v.7"></path>' +
+  '<g class="icon-part icon-part-front"><rect class="icon-duotone-fill" x="9" y="9" width="11.5" height="11.5" rx="2.5"></rect><rect x="9" y="9" width="11.5" height="11.5" rx="2.5"></rect><path class="icon-grow" pathLength="1" d="M12.2 13.2h5.2"></path><path class="icon-grow icon-d1" pathLength="1" d="M12.2 16.2h3.4"></path></g>' +
   "</svg>";
 
 const CHECK_ICON_SVG =
-  '<svg class="md-icon-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">' +
-  '<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path>' +
+  '<svg class="md-icon-check icon-m icon-m-check-draw" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path class="icon-check-path" d="M5 12.8l4.4 4.4L19 7.5"></path>' +
   "</svg>";
 
 const PREVIEW_ICON_SVG =
-  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">' +
-  '<path stroke-linecap="round" stroke-linejoin="round" d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"></path>' +
-  '<circle cx="12" cy="12" r="3"></circle>' +
+  '<svg class="icon-m icon-m-pop" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path class="icon-duotone-fill" d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12Z"></path>' +
+  '<path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12Z"></path>' +
+  '<circle cx="12" cy="12" r="2.8"></circle>' +
   "</svg>";
 
 const md: MarkdownIt = new MarkdownIt({

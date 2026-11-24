@@ -12,6 +12,7 @@ import { isDesktopShell } from "../../host/chrome";
 import BaseButton from "../ui/BaseButton.vue";
 import BaseModal from "../ui/BaseModal.vue";
 import BaseInput from "../ui/BaseInput.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 const props = defineProps<{
   mainConversation: Conversation | null;
@@ -545,7 +546,7 @@ const isMainActive = computed(
         @mouseleave="hideTooltip"
         @click="selectMain"
       >
-        <span class="brand-mark-tight h-[15px] w-[23px]" aria-hidden="true" />
+        <span class="brand-mark-tight icon-m icon-m-lift h-[15px] w-[23px]" aria-hidden="true" />
       </button>
 
       <!-- Main Navigation Icons: Chat, Search, Library -->
@@ -567,13 +568,7 @@ const isMainActive = computed(
           @blur="hideTooltip"
           @click="onClickChatRail"
         >
-          <svg class="h-[20px] w-[20px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.95">
-            <path
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"
-            />
-          </svg>
+          <AppIcon name="chat" :active="activeView === 'chat'" class="h-[20px] w-[20px]" :stroke-width="1.85" />
         </button>
 
         <!-- 搜索 -->
@@ -587,10 +582,7 @@ const isMainActive = computed(
           @blur="hideTooltip"
           @click="onClickSearchRail"
         >
-          <svg class="h-[20px] w-[20px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="7" />
-            <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
-          </svg>
+          <AppIcon name="search" class="h-[20px] w-[20px]" :stroke-width="1.9" />
         </button>
 
         <!-- 资料库 -->
@@ -610,11 +602,7 @@ const isMainActive = computed(
           @blur="hideTooltip"
           @click="onClickLibraryRail"
         >
-          <svg class="h-[20px] w-[20px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M4 19.5A2.5 2.5 0 016.5 17H20" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
-            <path stroke-linecap="round" d="M9 7h7M9 11h5" />
-          </svg>
+          <AppIcon name="folder" :active="activeView === 'library'" class="h-[20px] w-[20px]" :stroke-width="1.85" />
         </button>
 
         <!-- 定时任务 -->
@@ -634,10 +622,7 @@ const isMainActive = computed(
           @blur="hideTooltip"
           @click="onClickSchedulesRail"
         >
-          <svg class="h-[20px] w-[20px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-            <circle cx="12" cy="12" r="9" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3.2 2" />
-          </svg>
+          <AppIcon name="clock" :active="activeView === 'schedules'" class="h-[20px] w-[20px]" :stroke-width="1.85" />
         </button>
       </nav>
 
@@ -689,10 +674,7 @@ const isMainActive = computed(
             class="focus-ring flex h-9.5 min-w-0 flex-1 items-center gap-2 rounded-full border border-line/80 bg-canvas/85 px-3 text-left text-[13.5px] text-fg-faint transition-colors hover:border-line-strong hover:text-fg-muted dark:bg-surface/80"
             @click="onClickSearchRail"
           >
-            <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="11" cy="11" r="7" />
-              <path stroke-linecap="round" d="M20 20l-3.5-3.5" />
-            </svg>
+            <AppIcon name="search" class="h-4 w-4 shrink-0" :stroke-width="1.95" />
             <span class="truncate">搜索</span>
           </button>
 
@@ -704,10 +686,7 @@ const isMainActive = computed(
             title="收起侧栏 (Ctrl+B)"
             @click="emit('toggle-collapse')"
           >
-            <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.95">
-              <rect x="3" y="4" width="18" height="16" rx="2.5" />
-              <path stroke-linecap="round" d="M9 4v16" />
-            </svg>
+            <AppIcon name="panel-left" class="h-4.5 w-4.5" :stroke-width="1.85" />
           </button>
 
           <!-- Mobile close drawer button -->
@@ -717,9 +696,7 @@ const isMainActive = computed(
             aria-label="关闭侧栏"
             @click="emit('close')"
           >
-            <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
-            </svg>
+            <AppIcon name="close" class="h-4.5 w-4.5" :stroke-width="2" />
           </button>
         </div>
 
@@ -772,9 +749,7 @@ const isMainActive = computed(
             title="新建旁聊"
             @click="createSide"
           >
-            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
-            </svg>
+            <AppIcon name="plus" class="h-4 w-4" :stroke-width="2.1" />
           </button>
         </div>
 
@@ -815,31 +790,21 @@ const isMainActive = computed(
                         v-if="isRunning(c)"
                         class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
                       />
-                      <svg
+                      <AppIcon
                         v-if="c.is_pinned"
+                        name="pin"
+                        motion="none"
                         class="h-3.5 w-3.5 shrink-0 text-fg-faint"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
+                        :stroke-width="1.9"
                         aria-label="已置顶"
-                      >
-                        <path
-                          stroke-linecap="round"
-                          stroke-linejoin="round"
-                          d="M12 17v5M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 2 2 0 000-4H8a2 2 0 000 4 1 1 0 011 1v3.76z"
-                        />
-                      </svg>
+                      />
                       <span class="min-w-0 flex-1 truncate">{{ displaySideTitle(c) }}</span>
                       <span
                         v-if="isScheduledSide(c)"
                         class="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-surface px-1.5 py-0.5 text-[10.5px] font-medium leading-none text-fg-muted dark:bg-canvas/70"
                         title="定时任务旁聊"
                       >
-                        <svg class="h-2.5 w-2.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
-                          <circle cx="12" cy="12" r="9" />
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 2" />
-                        </svg>
+                        <AppIcon name="clock" motion="none" class="h-2.5 w-2.5 shrink-0" :stroke-width="2.1" />
                         <span>定时</span>
                       </span>
                     </button>
@@ -851,11 +816,7 @@ const isMainActive = computed(
                       aria-label="更多操作"
                       @click.stop="toggleMenu(c)"
                     >
-                      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-                        <circle cx="5" cy="12" r="1.6" />
-                        <circle cx="12" cy="12" r="1.6" />
-                        <circle cx="19" cy="12" r="1.6" />
-                      </svg>
+                      <AppIcon name="more-horizontal" class="h-4 w-4" />
                     </button>
 
                     <div
@@ -869,13 +830,7 @@ const isMainActive = computed(
                         class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
                         @click="togglePin(c)"
                       >
-                        <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                          <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            d="M12 17v5M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 2 2 0 000-4H8a2 2 0 000 4 1 1 0 011 1v3.76z"
-                          />
-                        </svg>
+                        <AppIcon name="pin" class="h-4 w-4 shrink-0" :stroke-width="1.8" />
                         {{ c.is_pinned ? "取消置顶" : "置顶" }}
                       </button>
                       <button
@@ -883,9 +838,7 @@ const isMainActive = computed(
                         class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
                         @click="openRename(c)"
                       >
-                        <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-                        </svg>
+                        <AppIcon name="edit" class="h-4 w-4 shrink-0" :stroke-width="1.8" />
                         重命名
                       </button>
                       <button
@@ -893,9 +846,7 @@ const isMainActive = computed(
                         class="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-danger transition-colors hover:bg-danger-weak"
                         @click="askDelete(c)"
                       >
-                        <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
-                        </svg>
+                        <AppIcon name="trash" class="h-4 w-4 shrink-0" :stroke-width="1.8" />
                         删除
                       </button>
                     </div>
@@ -1017,38 +968,27 @@ const isMainActive = computed(
                 "
                 @click="setTheme(opt.value, 'bottom-left')"
               >
-                <svg
+                <AppIcon
                   v-if="opt.value === 'system'"
+                  name="monitor"
+                  :active="preference === opt.value"
                   class="h-3.5 w-3.5 shrink-0"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                >
-                  <rect x="3" y="4" width="18" height="12" rx="2" />
-                  <path stroke-linecap="round" d="M8 20h8M12 16v4" />
-                </svg>
-                <svg
+                  :stroke-width="1.85"
+                />
+                <AppIcon
                   v-else-if="opt.value === 'light'"
+                  name="sun"
+                  :active="preference === opt.value"
                   class="h-3.5 w-3.5 shrink-0"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                >
-                  <circle cx="12" cy="12" r="4" />
-                  <path stroke-linecap="round" d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
-                </svg>
-                <svg
+                  :stroke-width="1.85"
+                />
+                <AppIcon
                   v-else
+                  name="moon"
+                  :active="preference === opt.value"
                   class="h-3.5 w-3.5 shrink-0"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                >
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />
-                </svg>
+                  :stroke-width="1.85"
+                />
                 <span>{{ opt.label }}</span>
               </button>
             </div>
@@ -1061,19 +1001,10 @@ const isMainActive = computed(
             @click="goToSettings"
           >
             <span class="flex items-center gap-2">
-              <svg class="h-4 w-4 text-fg-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-                <circle cx="12" cy="12" r="3" />
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"
-                />
-              </svg>
+              <AppIcon name="settings" class="h-4 w-4 text-fg-muted" :stroke-width="1.85" />
               <span>设置</span>
             </span>
-            <svg class="h-4 w-4 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-            </svg>
+            <AppIcon name="chevron-right" class="h-4 w-4 text-fg-faint" :stroke-width="2" />
           </button>
         </div>
       </Transition>
@@ -1108,19 +1039,13 @@ const isMainActive = computed(
           <button
             type="button"
             class="focus-ring flex h-8.5 w-8.5 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
-            :class="renameGenerating ? 'animate-pulse text-fg' : ''"
+            :class="renameGenerating ? 'is-generating text-fg' : ''"
             :disabled="renameGenerating"
             :aria-label="renameGenerating ? '正在生成标题' : 'AI 生成标题'"
             :title="renameGenerating ? '正在生成标题…' : 'AI 生成标题'"
             @click="generateRenameTitle"
           >
-            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3zM18.5 14l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"
-              />
-            </svg>
+            <AppIcon name="sparkles" class="h-5 w-5" :stroke-width="1.95" />
           </button>
         </template>
       </BaseInput>

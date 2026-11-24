@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { PendingControl } from "../../types";
 import BaseButton from "../ui/BaseButton.vue";
+import AppIcon from "../ui/AppIcon.vue";
 
 defineProps<{
   control: PendingControl;
@@ -13,9 +14,7 @@ const emit = defineEmits<{ decide: ["once" | "deny"] }>();
   <div class="animate-rise rounded-2xl bg-surface p-4">
     <div class="flex gap-3">
       <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-warning-weak text-warning">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" />
-        </svg>
+        <AppIcon name="alert-triangle" class="h-4 w-4" :stroke-width="1.95" />
       </div>
       <div class="min-w-0 flex-1">
         <p class="text-sm font-semibold text-fg">需要你的批准</p>

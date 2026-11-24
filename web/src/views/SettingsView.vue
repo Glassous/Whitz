@@ -10,6 +10,7 @@ import { useCreditsStore } from "../stores/credits";
 import BaseButton from "../components/ui/BaseButton.vue";
 import BaseBadge from "../components/ui/BaseBadge.vue";
 import BaseModal from "../components/ui/BaseModal.vue";
+import AppIcon from "../components/ui/AppIcon.vue";
 import PersonaEditor from "../components/settings/PersonaEditor.vue";
 import MembershipPanel from "../components/settings/MembershipPanel.vue";
 import MemoryPanel from "../components/settings/MemoryPanel.vue";
@@ -565,9 +566,7 @@ async function disableProfileContext() {
           class="focus-ring inline-flex h-9 items-center gap-1.5 rounded-xl px-2.5 text-[13.5px] font-medium text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
           @click="goBackToChat"
         >
-          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
-          </svg>
+          <AppIcon name="chevron-left" class="h-4 w-4" :stroke-width="2.1" />
           <span>返回对话</span>
         </button>
       </div>
@@ -594,41 +593,27 @@ async function disableProfileContext() {
               :checked="preference === opt.value"
               @change="setTheme(opt.value, 'top-left')"
             />
-            <svg
+            <AppIcon
               v-if="opt.value === 'system'"
+              name="monitor"
+              :active="preference === opt.value"
               class="h-3.5 w-3.5 shrink-0"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.85"
-              aria-hidden="true"
-            >
-              <rect x="3" y="4" width="18" height="12" rx="2" />
-              <path stroke-linecap="round" d="M8 20h8M12 16v4" />
-            </svg>
-            <svg
+              :stroke-width="1.85"
+            />
+            <AppIcon
               v-else-if="opt.value === 'light'"
+              name="sun"
+              :active="preference === opt.value"
               class="h-3.5 w-3.5 shrink-0"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.85"
-              aria-hidden="true"
-            >
-              <circle cx="12" cy="12" r="4" />
-              <path stroke-linecap="round" d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
-            </svg>
-            <svg
+              :stroke-width="1.85"
+            />
+            <AppIcon
               v-else
+              name="moon"
+              :active="preference === opt.value"
               class="h-3.5 w-3.5 shrink-0"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.85"
-              aria-hidden="true"
-            >
-              <path stroke-linecap="round" stroke-linejoin="round" d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />
-            </svg>
+              :stroke-width="1.85"
+            />
             <span>{{ opt.label }}</span>
           </label>
         </div>
@@ -676,35 +661,14 @@ async function disableProfileContext() {
           @click="selectMainPage(item.key)"
         >
           <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-canvas/80 text-fg dark:bg-surface">
-            <svg v-if="item.key === 'profile'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <circle cx="12" cy="8" r="4" />
-              <path stroke-linecap="round" d="M4 20c0-3.5 3.6-6 8-6s8 2.5 8 6" />
-            </svg>
-            <svg v-else-if="item.key === 'library'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
-            </svg>
-            <svg v-else-if="item.key === 'memory'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M4 19.5A2.5 2.5 0 016.5 17H20" />
-              <path stroke-linecap="round" stroke-linejoin="round" d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
-              <path stroke-linecap="round" d="M9 7h7M9 11h5" />
-            </svg>
-            <svg v-else-if="item.key === 'skills'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
-            </svg>
-            <svg v-else-if="item.key === 'membership'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 8l4 3 5-6 5 6 4-3-2 11H5L3 8z" />
-            </svg>
-            <svg v-else-if="item.key === 'persona'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7L12 3zM5 17l.9 2.1L8 20l-2.1.9L5 23l-.9-2.1L2 20l2.1-.9L5 17z" />
-            </svg>
-            <svg v-else-if="item.key === 'feedback'" class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9 10h6M12 7v6" />
-            </svg>
-            <svg v-else class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <rect x="3" y="4" width="18" height="12" rx="2" />
-              <path stroke-linecap="round" d="M2 20h20" />
-            </svg>
+            <AppIcon v-if="item.key === 'profile'" name="user" :active="activePage === item.key" class="h-4.5 w-4.5" :stroke-width="1.85" />
+            <AppIcon v-else-if="item.key === 'library'" name="folder" :active="activePage === item.key" class="h-4.5 w-4.5" :stroke-width="1.85" />
+            <AppIcon v-else-if="item.key === 'memory'" name="book" :active="activePage === item.key" class="h-4.5 w-4.5" :stroke-width="1.85" />
+            <AppIcon v-else-if="item.key === 'skills'" name="wrench" :active="activePage === item.key" class="h-4.5 w-4.5" :stroke-width="1.85" />
+            <AppIcon v-else-if="item.key === 'membership'" name="crown" :active="activePage === item.key" class="h-4.5 w-4.5" :stroke-width="1.85" />
+            <AppIcon v-else-if="item.key === 'persona'" name="sparkles" :active="activePage === item.key" class="h-4.5 w-4.5" :stroke-width="1.85" />
+            <AppIcon v-else-if="item.key === 'feedback'" name="message-plus" :active="activePage === item.key" class="h-4.5 w-4.5" :stroke-width="1.85" />
+            <AppIcon v-else name="monitor" :active="activePage === item.key" class="h-4.5 w-4.5" :stroke-width="1.85" />
           </span>
           <span class="min-w-0 flex-1">
             <span class="block text-[14.5px] font-medium">{{ item.label }}</span>
@@ -720,9 +684,7 @@ async function disableProfileContext() {
           :href="adminUrl"
           class="focus-ring flex h-10 w-full items-center gap-2.5 rounded-xl px-3 text-[13.5px] font-medium text-fg-muted transition-colors hover:bg-hover/70 hover:text-fg"
         >
-          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l7 4v5c0 4.5-3 8.5-7 9-4-.5-7-4.5-7-9V7l7-4z" />
-          </svg>
+          <AppIcon name="shield" class="h-4 w-4" :stroke-width="1.85" />
           <span>管理后台</span>
         </a>
 
@@ -731,9 +693,7 @@ async function disableProfileContext() {
           class="focus-ring flex h-10 w-full items-center gap-2.5 rounded-xl px-3 text-[13.5px] font-medium text-danger transition-colors hover:bg-danger-weak"
           @click="logoutModalOpen = true"
         >
-          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" />
-          </svg>
+          <AppIcon name="logout" class="h-4 w-4" :stroke-width="1.85" />
           <span>退出登录</span>
         </button>
       </div>
@@ -752,9 +712,7 @@ async function disableProfileContext() {
           aria-label="返回对话"
           @click="goBackToChat"
         >
-          <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
-          </svg>
+          <AppIcon name="chevron-left" class="h-5 w-5" :stroke-width="2.1" />
         </button>
         <h1 class="text-[16px] font-semibold text-fg">设置</h1>
       </header>
@@ -827,9 +785,7 @@ async function disableProfileContext() {
               <span class="block text-[15px] font-medium text-fg">{{ item.label }}</span>
               <span class="mt-0.5 block truncate text-[12.5px] text-fg-faint">{{ item.desc }}</span>
             </span>
-            <svg class="h-4.5 w-4.5 shrink-0 text-fg-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-            </svg>
+            <AppIcon name="chevron-right" class="h-4.5 w-4.5 shrink-0 text-fg-faint" :stroke-width="2" />
           </button>
         </nav>
 
@@ -865,9 +821,7 @@ async function disableProfileContext() {
           :aria-label="activePage === 'password' ? '返回用户信息' : '返回设置'"
           @click="goBackFromMobilePage"
         >
-          <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
-          </svg>
+          <AppIcon name="chevron-left" class="h-5 w-5" :stroke-width="2.1" />
         </button>
         <h1 class="truncate text-[16px] font-semibold text-fg">{{ pageTitle }}</h1>
       </header>
@@ -908,10 +862,7 @@ async function disableProfileContext() {
                   class="absolute inset-0 flex items-center justify-center bg-black/45 text-white opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
                   aria-hidden="true"
                 >
-                  <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
-                    <circle cx="12" cy="13" r="4" />
-                  </svg>
+                  <AppIcon name="camera" class="h-5 w-5 scale-90 transition-transform duration-200 group-hover:scale-100" :stroke-width="1.9" />
                 </span>
               </button>
 
@@ -1203,9 +1154,7 @@ async function disableProfileContext() {
             </div>
             <BaseButton variant="secondary" rounded="full" class="shrink-0" @click="selectMainPage('devices')">
               <span>管理设备</span>
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-              </svg>
+              <AppIcon name="chevron-right" class="h-4 w-4" :stroke-width="2" />
             </BaseButton>
           </section>
 
@@ -1217,9 +1166,7 @@ async function disableProfileContext() {
             </div>
             <BaseButton variant="secondary" rounded="full" class="shrink-0" @click="openPasswordPage">
               <span>修改密码</span>
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
-              </svg>
+              <AppIcon name="chevron-right" class="h-4 w-4" :stroke-width="2" />
             </BaseButton>
           </section>
         </div>
@@ -1233,9 +1180,7 @@ async function disableProfileContext() {
               class="focus-ring inline-flex h-9 items-center gap-1.5 rounded-full bg-sidebar px-3.5 text-[13.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg dark:bg-surface"
               @click="activePage = 'profile'"
             >
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" aria-hidden="true">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
-              </svg>
+              <AppIcon name="chevron-left" class="h-4 w-4" :stroke-width="2.1" />
               <span>返回用户信息</span>
             </button>
             <h1 class="text-[20px] font-semibold tracking-tight text-fg">修改密码</h1>
