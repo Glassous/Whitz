@@ -7,6 +7,7 @@ import { ensureBuiltinKey } from "../runtime/localOpenAIGateway";
 import { readOpenCodeJsonDoc } from "../runtime/opencodeConfig";
 import { getStatus, startRuntime } from "../runtime/opencodeRuntime";
 import { OpenCodeClient, type PromptPartInput } from "./opencodeClient";
+import { notifyWorkEvent } from "./notifications";
 import { getWorkSettings } from "./settings";
 import {
   addMessage,
@@ -28,11 +29,13 @@ import type {
   WorkActiveRunSnapshot,
   WorkApprovalChoice,
   WorkAttachment,
+  WorkClarifyQuestion,
   WorkConversation,
   WorkConversationDetail,
   WorkEvent,
   WorkPendingControl,
   WorkSessionDiffItem,
+  WorkSessionRetryState,
   WorkTimelineItem,
   WorkTokenUsage,
 } from "../../shared/work-types";
@@ -46,16 +49,26 @@ interface ThinkParseState {
   pending: string;
 }
 
-interface PendingQuestionState {
-  requestId: string;
-  header: string;
+const modelContextLimitCache = new Map<string, number>();
+
+export function updateModelContextLimits(limits: Map<string, number>): void {
+  for (const [ref, limit] of limits.entries()) {
+    if (limit > 0) modelContextLimitCache.set(ref, limit);
+  }
+}
+
+function lookupContextLimit(modelRef?: string | null): number | null {
+  if (!modelRef) return null;
+  return modelContextLimitCache.get(modelRef) ?? null;
 }
 
 interface ActiveRun {
   runId: string;
   sessionId: string;
   childSessionIds: Set<string>;
+  subagentToolCounts: Map<string, number>;
   directory: string | null;
+  modelRef: string | null;
   controller: AbortController;
   userId: string;
   assistantId: string | null;
@@ -67,6 +80,7 @@ interface ActiveRun {
   reasoning: Array<Record<string, unknown>>;
   plan: Record<string, unknown> | null;
   usage: WorkTokenUsage | null;
+  retry: WorkSessionRetryState | null;
   userMessageIds: Set<string>;
   assistantMessageIds: Set<string>;
   partTypes: Map<string, PartKind>;
@@ -113,6 +127,7 @@ export function getActiveRunSnapshots(): WorkActiveRunSnapshot[] {
       pending_control: run.pendingControls[0] ?? null,
       pending_controls: [...run.pendingControls],
       usage: run.usage,
+      retry: run.retry,
     });
   }
   return out;
@@ -427,7 +442,9 @@ async function startRunWithPump(
     runId,
     sessionId,
     childSessionIds: new Set(),
+    subagentToolCounts: new Map(),
     directory: workspaceDir,
+    modelRef: options.modelRef ?? conversation.model_ref ?? null,
     controller: new AbortController(),
     userId: userMessage.id,
     assistantId: assistant.id,
@@ -439,6 +456,7 @@ async function startRunWithPump(
     reasoning: [],
     plan: null,
     usage: null,
+    retry: null,
     userMessageIds: new Set(),
     assistantMessageIds: new Set(),
     partTypes: new Map(),
@@ -644,6 +662,7 @@ function finalizeCompletedRun(conversationId: string, run: ActiveRun): void {
   if (run.finished || run.stopped) return;
   finalizeRunStreams(conversationId, run);
   run.finished = true;
+  run.retry = null;
   run.pendingControls = [];
   if (!run.content.trim() && run.lastTextOutput.trim()) {
     run.content = run.lastTextOutput;
@@ -667,6 +686,12 @@ function finalizeCompletedRun(conversationId: string, run: ActiveRun): void {
       usage: run.usage,
     },
   });
+  const convMeta = getConversationMeta(conversationId);
+  notifyWorkEvent({
+    title: "Whitz Work 任务已完成",
+    body: convMeta?.title ? `「${convMeta.title}」已生成结果` : "当前本地工作区任务已完成",
+    conversationId,
+  });
   run.controller.abort();
 }
 
@@ -681,8 +706,12 @@ function enqueuePermission(conversationId: string, client: OpenCodeClient, run: 
     return;
   }
   if (run.pendingControls.some((c) => c.request_id === requestId)) return;
-  const patterns = Array.isArray(props.patterns) ? props.patterns : [];
-  const metadata = props.metadata ?? null;
+  const patterns = Array.isArray(props.patterns) ? props.patterns.map(String).filter(Boolean) : [];
+  const alwaysPatterns = Array.isArray(props.always) ? props.always.map(String).filter(Boolean) : [];
+  const metadata =
+    props.metadata && typeof props.metadata === "object" && !Array.isArray(props.metadata)
+      ? (props.metadata as Record<string, unknown>)
+      : null;
   const preview = patterns.length ? { patterns, metadata } : metadata;
   const ctrl: WorkPendingControl = {
     kind: "approval",
@@ -690,6 +719,9 @@ function enqueuePermission(conversationId: string, client: OpenCodeClient, run: 
     execution_generation: 1,
     tool,
     preview,
+    patterns,
+    always_patterns: alwaysPatterns,
+    metadata,
     choices: ["once", "always", "deny"],
   };
   run.pendingControls.push(ctrl);
@@ -702,17 +734,41 @@ function enqueuePermission(conversationId: string, client: OpenCodeClient, run: 
       detail: props,
     },
   });
+  notifyWorkEvent({
+    title: "Whitz Work 需要你的授权",
+    body: `OpenCode 请求执行 ${tool}${patterns[0] ? `：${patterns[0]}` : ""}`,
+    conversationId,
+  });
+}
+
+function normalizeQuestionRequest(props: Record<string, unknown>): WorkClarifyQuestion[] {
+  const rawList = Array.isArray(props.questions) ? (props.questions as Array<Record<string, unknown>>) : [];
+  return rawList.map((item, idx) => {
+    const rawOpts = Array.isArray(item.options) ? (item.options as Array<Record<string, unknown>>) : [];
+    const options = rawOpts
+      .map((o) => ({
+        label: String(o.label ?? "").trim(),
+        description: typeof o.description === "string" && o.description.trim() ? o.description.trim() : undefined,
+      }))
+      .filter((o) => o.label);
+    return {
+      id: `q_${idx}`,
+      header: typeof item.header === "string" && item.header.trim() ? item.header.trim() : undefined,
+      question: String(item.question ?? "OpenCode 需要你的补充说明").trim(),
+      options,
+      multiple: Boolean(item.multiple),
+      custom: item.custom !== false,
+    };
+  });
 }
 
 function enqueueQuestion(conversationId: string, run: ActiveRun, props: Record<string, unknown>): void {
   const requestId = String(props.id ?? "");
   if (!requestId || run.pendingControls.some((c) => c.request_id === requestId)) return;
-  const questions = Array.isArray(props.questions) ? (props.questions as Array<Record<string, unknown>>) : [];
-  const first = questions[0] ?? {};
-  const opts = Array.isArray(first.options) ? (first.options as Array<Record<string, unknown>>) : [];
-  const choiceLabels = opts.map((o) => String(o.label ?? "")).filter(Boolean);
-  const preview = String(first.question ?? "OpenCode 需要你的补充说明");
-  const choices = choiceLabels.length ? choiceLabels : null;
+  const questions = normalizeQuestionRequest(props);
+  const first = questions[0];
+  const preview = first?.question ?? "OpenCode 需要你的补充说明";
+  const choices = first?.options.length ? first.options.map((o) => o.label) : null;
   const ctrl: WorkPendingControl = {
     kind: "clarify",
     request_id: requestId,
@@ -720,6 +776,7 @@ function enqueueQuestion(conversationId: string, run: ActiveRun, props: Record<s
     tool: "question",
     preview,
     choices,
+    questions: questions.length ? questions : null,
   };
   run.pendingControls.push(ctrl);
   if (run.assistantId) updateMessage(run.assistantId, { status: "waiting" });
@@ -730,6 +787,11 @@ function enqueueQuestion(conversationId: string, run: ActiveRun, props: Record<s
       pending_controls: [...run.pendingControls],
       detail: props,
     },
+  });
+  notifyWorkEvent({
+    title: "Whitz Work 需要你补充信息",
+    body: questions.length > 1 ? `OpenCode 有 ${questions.length} 个问题需要确认` : preview,
+    conversationId,
   });
 }
 
@@ -847,6 +909,15 @@ async function pump(
         const childId = typeof info?.id === "string" ? info.id : "";
         if (childId && (parentId === run.sessionId || run.childSessionIds.has(parentId))) {
           run.childSessionIds.add(childId);
+          run.subagentToolCounts.set(childId, 0);
+          emit(conversationId, {
+            event: "subagent.started",
+            data: {
+              subagent_id: childId,
+              goal: typeof info?.title === "string" && info.title.trim() ? info.title.trim() : "子代理任务",
+              status: "running",
+            },
+          });
         }
         continue;
       }
@@ -854,7 +925,26 @@ async function pump(
       const isMain = !evSessionId || evSessionId === run.sessionId;
       const isChild = Boolean(evSessionId && run.childSessionIds.has(evSessionId));
       if (!isMain && !isChild) continue;
-      if (isChild && !["permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"].includes(ev.type)) {
+      if (isChild) {
+        if (["permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"].includes(ev.type)) {
+          run.lastEventAt = Date.now();
+          handleOpenCodeEvent(conversationId, client, run, ev.type, ev.properties);
+        } else if (ev.type === "message.part.updated") {
+          const part = ev.properties.part as Record<string, unknown> | undefined;
+          if (part?.type === "tool") {
+            const count = (run.subagentToolCounts.get(evSessionId) ?? 0) + 1;
+            run.subagentToolCounts.set(evSessionId, count);
+            emit(conversationId, {
+              event: "subagent.progress",
+              data: { subagent_id: evSessionId, tool_count: count, status: "running" },
+            });
+          }
+        } else if (ev.type === "session.idle") {
+          emit(conversationId, {
+            event: "subagent.completed",
+            data: { subagent_id: evSessionId, status: "completed" },
+          });
+        }
         continue;
       }
       run.lastEventAt = Date.now();
@@ -1045,6 +1135,10 @@ function handleOpenCodeEvent(
           const cacheWrite = Number(cache.write ?? 0) || 0;
           const cost = Number(info.cost ?? 0) || 0;
           const total = input + output + reasoning + cacheRead + cacheWrite;
+          const infoProvider = typeof info.providerID === "string" ? info.providerID : "";
+          const infoModel = typeof info.modelID === "string" ? info.modelID : "";
+          const detectedRef = infoProvider && infoModel ? `${infoProvider}/${infoModel}` : run.modelRef;
+          const ctxLimit = lookupContextLimit(detectedRef) ?? run.usage?.context_limit ?? null;
           run.usage = {
             input,
             output,
@@ -1053,7 +1147,7 @@ function handleOpenCodeEvent(
             cache_write: cacheWrite,
             cost,
             total,
-            context_limit: run.usage?.context_limit ?? null,
+            context_limit: ctxLimit,
           };
           emit(conversationId, { event: "usage.updated", data: { usage: run.usage } });
         }
@@ -1150,6 +1244,14 @@ function handleOpenCodeEvent(
         const toolName = String(part.tool ?? "tool");
         const callId = String(part.callID ?? partId);
         const stateObj = (part.state as Record<string, unknown> | undefined) ?? {};
+        const stateMeta = (stateObj.metadata as Record<string, unknown> | undefined) ?? {};
+        const childSessionId =
+          typeof stateMeta.sessionId === "string"
+            ? stateMeta.sessionId
+            : typeof stateMeta.sessionID === "string"
+              ? stateMeta.sessionID
+              : null;
+        if (childSessionId) run.childSessionIds.add(childSessionId);
         const status = String(stateObj.status ?? "pending");
         const prevStatus = run.toolStates.get(callId);
         const targetId = ensureAssistantRow(conversationId, run);
@@ -1158,11 +1260,12 @@ function handleOpenCodeEvent(
           run.toolStates.set(callId, "running");
           const item: WorkTimelineItem = {
             id: callId,
-            kind: "tool",
+            kind: toolName === "task" ? "subagent" : "tool",
             tool: toolName,
             call_id: callId,
             title: stateObj.title ? String(stateObj.title) : null,
             args: stateObj.input ?? null,
+            child_session_id: childSessionId,
             status: "running",
           };
           upsertTimelineItem(conversationId, run, item);
@@ -1189,7 +1292,7 @@ function handleOpenCodeEvent(
           const prevItem = run.timeline.find((entry) => entry.id === callId);
           const item: WorkTimelineItem = {
             id: callId,
-            kind: "tool",
+            kind: toolName === "task" ? "subagent" : "tool",
             tool: toolName,
             call_id: callId,
             title: stateObj.title ? String(stateObj.title) : (prevItem?.title ?? null),
@@ -1197,6 +1300,7 @@ function handleOpenCodeEvent(
             result: resultPreview,
             duration,
             error: errorText,
+            child_session_id: childSessionId ?? prevItem?.child_session_id ?? null,
             status: errorText ? "failed" : "completed",
           };
           upsertTimelineItem(conversationId, run, item);
@@ -1212,7 +1316,86 @@ function handleOpenCodeEvent(
             },
           });
         }
+        return;
       }
+      if (partType === "subtask") {
+        promotePreToolContent(conversationId, run);
+        upsertTimelineItem(conversationId, run, {
+          id: `subtask:${partId}`,
+          kind: "subagent",
+          tool: "task",
+          title: String(part.description ?? part.agent ?? "子代理任务"),
+          text: String(part.prompt ?? ""),
+          status: "running",
+        });
+        return;
+      }
+      if (partType === "patch") {
+        const files = Array.isArray(part.files) ? part.files.map(String).filter(Boolean) : [];
+        if (files.length) {
+          upsertTimelineItem(conversationId, run, {
+            id: `patch:${partId}`,
+            kind: "patch",
+            title: `快照变更 ${files.length} 个文件`,
+            files,
+            status: "completed",
+          });
+        }
+        return;
+      }
+      if (partType === "compaction") {
+        upsertTimelineItem(conversationId, run, {
+          id: `compact:${partId}`,
+          kind: "compaction",
+          title: part.auto ? "自动压缩上下文" : "压缩上下文",
+          status: "completed",
+        });
+        return;
+      }
+      if (partType === "retry") {
+        const attempt = Number(part.attempt ?? 1) || 1;
+        upsertTimelineItem(conversationId, run, {
+          id: `retry:${partId}`,
+          kind: "retry",
+          title: `模型调用重试（第 ${attempt} 次）`,
+          attempt,
+          error: part.error ? extractErrorText(part.error) : null,
+          status: "running",
+        });
+        return;
+      }
+      return;
+    }
+
+    case "session.status": {
+      const st = props.status as Record<string, unknown> | undefined;
+      if (!st) return;
+      if (st.type === "retry") {
+        const retryState: WorkSessionRetryState = {
+          attempt: Number(st.attempt ?? 1) || 1,
+          message: String(st.message ?? "请求限流或网络波动，正在自动重试…"),
+          next: Number(st.next ?? 0) || 0,
+          action: (st.action as WorkSessionRetryState["action"]) ?? null,
+        };
+        run.retry = retryState;
+        emit(conversationId, { event: "run.retry", data: { retry: retryState } });
+      } else {
+        if (run.retry) {
+          run.retry = null;
+          emit(conversationId, { event: "run.retry", data: { retry: null } });
+        }
+      }
+      return;
+    }
+
+    case "session.diff": {
+      const diffs = Array.isArray(props.diff) ? props.diff : [];
+      emit(conversationId, { event: "session.diff", data: { diffs } });
+      return;
+    }
+
+    case "session.compacted": {
+      emit(conversationId, { event: "session.compacted", data: {} });
       return;
     }
 
@@ -1329,6 +1512,7 @@ export async function approveRun(
   requestId: string,
   _generation: number,
   choice: WorkApprovalChoice,
+  message?: string,
 ): Promise<void> {
   const run = active.get(conversationId);
   if (!run) throw new Error("当前没有等待审批的任务");
@@ -1336,7 +1520,7 @@ export async function approveRun(
   if (!reqId) throw new Error("缺少权限审批编号");
   const reply = choice === "deny" ? "reject" : choice === "always" ? "always" : "once";
   const client = new OpenCodeClient();
-  await client.replyPermission(reqId, run.directory, reply);
+  await client.replyPermission(reqId, run.directory, reply, choice === "deny" ? message : undefined);
   removePendingControl(conversationId, run, reqId, "approval.resolved", { choice });
   if (choice === "always") {
     void reconcileRunState(conversationId, client, run);
@@ -1347,14 +1531,26 @@ export async function clarifyRun(
   conversationId: string,
   requestId: string,
   _generation: number,
-  answer: string,
+  answers: string | string[][],
 ): Promise<void> {
   const run = active.get(conversationId);
   if (!run) throw new Error("当前没有等待确认的任务");
   const reqId = requestId || run.pendingControls.find((c) => c.kind === "clarify")?.request_id || "";
   if (!reqId) throw new Error("缺少提问请求编号");
-  await new OpenCodeClient().replyQuestion(reqId, run.directory, [[answer]]);
-  removePendingControl(conversationId, run, reqId, "clarify.resolved", { answer });
+  const normalized: string[][] = Array.isArray(answers)
+    ? answers.map((row) => (Array.isArray(row) ? row.map(String).filter(Boolean) : [String(row)]))
+    : [[String(answers)]];
+  await new OpenCodeClient().replyQuestion(reqId, run.directory, normalized);
+  removePendingControl(conversationId, run, reqId, "clarify.resolved", { answers: normalized });
+}
+
+export async function rejectClarifyRun(conversationId: string, requestId: string): Promise<void> {
+  const run = active.get(conversationId);
+  if (!run) throw new Error("当前没有等待确认的任务");
+  const reqId = requestId || run.pendingControls.find((c) => c.kind === "clarify")?.request_id || "";
+  if (!reqId) throw new Error("缺少提问请求编号");
+  await new OpenCodeClient().rejectQuestion(reqId, run.directory);
+  removePendingControl(conversationId, run, reqId, "clarify.resolved", { rejected: true });
 }
 
 export async function forkConversation(conversationId: string, messageId?: string | null): Promise<WorkConversation> {

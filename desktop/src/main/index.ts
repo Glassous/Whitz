@@ -11,6 +11,7 @@ import { startConnectivityWatch, stopConnectivityWatch } from "./net/connectivit
 import { ensureLocalOpenAIGateway, stopLocalOpenAIGateway } from "./runtime/localOpenAIGateway";
 import { ensureAutoStarted, getStatus, stopRuntime } from "./runtime/opencodeRuntime";
 import { closeDb } from "./work/db";
+import { initGlobalEventBus, stopGlobalEventBus } from "./work/eventBus";
 import { initUpdater } from "./updater";
 
 const logger = scoped("main");
@@ -39,6 +40,7 @@ if (!app.requestSingleInstanceLock()) {
     createTray();
     startConnectivityWatch();
     await ensureLocalOpenAIGateway().catch(() => undefined);
+    initGlobalEventBus();
     void refreshPolicy().finally(() => {
       void ensureAutoStarted();
     });
@@ -58,6 +60,7 @@ if (!app.requestSingleInstanceLock()) {
     if (quitting) return;
     quitting = true;
     stopConnectivityWatch();
+    stopGlobalEventBus();
     stopLocalOpenAIGateway();
     if (getStatus().running) {
       event.preventDefault();

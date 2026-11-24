@@ -56,6 +56,12 @@ export interface WorkAttachment {
   preview_url?: string;
 }
 
+export interface WorkConversationSummary {
+  additions: number;
+  deletions: number;
+  files: number;
+}
+
 export interface WorkConversation {
   id: string;
   title: string;
@@ -65,6 +71,11 @@ export interface WorkConversation {
   model_ref?: string | null;
   agent_name?: string | null;
   variant?: string | null;
+  share_url?: string | null;
+  worktree_name?: string | null;
+  worktree_branch?: string | null;
+  summary?: WorkConversationSummary | null;
+  total_cost?: number;
   created_at: string;
   updated_at: string;
 }
@@ -93,6 +104,20 @@ export interface WorkTokenUsage {
   context_limit: number | null;
 }
 
+export interface WorkClarifyOption {
+  label: string;
+  description?: string;
+}
+
+export interface WorkClarifyQuestion {
+  id: string;
+  header?: string;
+  question: string;
+  options: WorkClarifyOption[];
+  multiple?: boolean;
+  custom?: boolean;
+}
+
 export interface WorkPendingControl {
   kind: "approval" | "clarify";
   request_id: string;
@@ -100,9 +125,13 @@ export interface WorkPendingControl {
   tool: string | null;
   preview: unknown;
   choices?: string[] | null;
+  patterns?: string[];
+  always_patterns?: string[];
+  metadata?: Record<string, unknown> | null;
+  questions?: WorkClarifyQuestion[] | null;
 }
 
-export type WorkTimelineKind = "thinking" | "commentary" | "tool";
+export type WorkTimelineKind = "thinking" | "commentary" | "tool" | "subagent" | "patch" | "retry" | "compaction";
 
 export interface WorkTimelineItem {
   id: string;
@@ -116,6 +145,24 @@ export interface WorkTimelineItem {
   error?: string | null;
   duration?: number | null;
   status?: "running" | "completed" | "failed";
+  child_session_id?: string | null;
+  files?: string[];
+  attempt?: number;
+  next_retry_at?: number | null;
+}
+
+export interface WorkSessionRetryState {
+  attempt: number;
+  message: string;
+  next: number;
+  action?: {
+    reason?: string;
+    provider?: string;
+    title?: string;
+    message?: string;
+    label?: string;
+    link?: string;
+  } | null;
 }
 
 export interface WorkActiveRunSnapshot {
@@ -130,6 +177,7 @@ export interface WorkActiveRunSnapshot {
   pending_control: WorkPendingControl | null;
   pending_controls?: WorkPendingControl[];
   usage: WorkTokenUsage | null;
+  retry?: WorkSessionRetryState | null;
 }
 
 export interface WorkConversationDetail {
@@ -159,6 +207,8 @@ export interface WorkModelSettings {
   default_agent: string;
   default_variant: string;
   full_command_mode: boolean;
+  desktop_notifications: boolean;
+  auto_sync_cli_sessions: boolean;
 }
 
 export interface WorkSettings {
@@ -176,6 +226,8 @@ export interface WorkSettingsPatch {
   default_agent?: string;
   default_variant?: string;
   full_command_mode?: boolean;
+  desktop_notifications?: boolean;
+  auto_sync_cli_sessions?: boolean;
 }
 
 export interface LocalGatewayStatus {
@@ -284,13 +336,112 @@ export interface WorkLspStatus {
   status: "connected" | "error";
 }
 
+export interface WorkFormatterStatus {
+  name: string;
+  extensions: string[];
+  enabled: boolean;
+}
+
 export interface WorkSessionDiffItem {
   file: string;
+  patch?: string;
   before?: string;
   after?: string;
   additions?: number;
   deletions?: number;
   status?: "added" | "deleted" | "modified";
+}
+
+export interface WorkPtyInfo {
+  id: string;
+  title: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  status: "running" | "exited";
+  pid: number;
+  exitCode?: number | null;
+}
+
+export interface WorkShellOption {
+  name: string;
+  path: string;
+  args?: string[];
+  is_default?: boolean;
+}
+
+export interface WorkPtyConnectInfo {
+  pty_id: string;
+  ws_url: string;
+  ticket: string;
+}
+
+export interface WorkWorktreeInfo {
+  name: string;
+  branch?: string | null;
+  directory: string;
+}
+
+export interface WorkProviderAuthMethod {
+  type: "oauth" | "api";
+  label: string;
+  prompts?: Array<{
+    type: string;
+    key: string;
+    message: string;
+    placeholder?: string;
+  }>;
+}
+
+export interface WorkProviderOAuthStart {
+  url: string;
+  method: "auto" | "code";
+  instructions: string;
+}
+
+export interface WorkProviderCatalogItem {
+  id: string;
+  name: string;
+  connected: boolean;
+  source?: string;
+  model_count: number;
+  sample_models: string[];
+  auth_methods: WorkProviderAuthMethod[];
+  has_oauth: boolean;
+  has_api_key: boolean;
+}
+
+export interface WorkFindMatch {
+  path: string;
+  line_number: number;
+  lines: string;
+  submatches?: Array<{ match: string; start: number; end: number }>;
+}
+
+export interface WorkSymbolMatch {
+  name: string;
+  kind: number;
+  path: string;
+  line: number;
+}
+
+export interface WorkRemoteSessionSummary {
+  id: string;
+  title: string;
+  directory: string;
+  parent_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  share_url?: string | null;
+  summary?: WorkConversationSummary | null;
+  cost?: number;
+  linked_conversation_id: string | null;
+}
+
+export interface WorkGlobalEvent {
+  type: string;
+  directory?: string | null;
+  properties: Record<string, unknown>;
 }
 
 export interface WorkSessionPrefsPatch {

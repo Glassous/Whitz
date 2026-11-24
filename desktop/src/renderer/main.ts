@@ -1,6 +1,15 @@
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
+function syncTitleBarTheme() {
+  try {
+    const dark = document.documentElement.classList.contains("dark");
+    void window.whitzDesktop?.setThemeOverlay(dark).catch(() => undefined);
+  } catch {
+    /* ignore */
+  }
+}
+
 function applyTheme() {
   try {
     const saved = localStorage.getItem("whitz_theme");
@@ -10,8 +19,20 @@ function applyTheme() {
       saved === "dark" ||
       ((!saved || saved === "system") && window.matchMedia("(prefers-color-scheme: dark)").matches);
     document.documentElement.classList.toggle("dark", dark);
+    syncTitleBarTheme();
   } catch {
     /* ignore */
+  }
+}
+
+function watchThemeSync() {
+  if (typeof MutationObserver !== "undefined") {
+    const mo = new MutationObserver(() => syncTitleBarTheme());
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+  }
+  if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    mq.addEventListener("change", () => applyTheme());
   }
 }
 
@@ -35,6 +56,7 @@ import { useWorkStore } from "./stores/work";
 async function start() {
   document.documentElement.classList.add("desktop-shell");
   applyTheme();
+  watchThemeSync();
   const api = window.whitzDesktop;
   if (!api) {
     document.body.innerHTML = "<div style='padding:24px;font-family:system-ui'>桌面桥接加载失败，请重新安装 Whitz。</div>";

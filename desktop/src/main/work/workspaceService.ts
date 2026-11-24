@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { dialog, shell } from "electron";
+import { storagePaths } from "../config";
 import { getMainWindow } from "../window";
 import {
   getActiveWorkspacePath,
@@ -270,6 +271,30 @@ export function readWorkspaceFile(relPath: string): WorkspaceFileContent {
   }
   const ext = path.extname(abs).toLowerCase();
   const normalizedRel = path.relative(ws.path, abs).split(path.sep).join("/");
+  if (IMAGE_EXTS.has(ext) || ext === ".svg") {
+    const mime =
+      ext === ".png"
+        ? "image/png"
+        : ext === ".webp"
+          ? "image/webp"
+          : ext === ".gif"
+            ? "image/gif"
+            : ext === ".svg"
+              ? "image/svg+xml"
+              : "image/jpeg";
+    if (stat.size <= 4 * 1024 * 1024) {
+      const dataUrl = `data:${mime};base64,${fs.readFileSync(abs).toString("base64")}`;
+      return {
+        rel_path: normalizedRel,
+        abs_path: abs,
+        content: dataUrl,
+        language: "image",
+        size: stat.size,
+        truncated: false,
+        binary: false,
+      };
+    }
+  }
   return {
     rel_path: normalizedRel,
     abs_path: abs,
@@ -279,6 +304,31 @@ export function readWorkspaceFile(relPath: string): WorkspaceFileContent {
     truncated: stat.size > MAX_READ_BYTES,
     binary,
   };
+}
+
+export async function openFileInEditor(relPath: string): Promise<void> {
+  const ws = getActiveWorkspace();
+  if (!ws) throw new Error("请先选择本地工作区文件夹");
+  const abs = resolveWithinWorkspace(ws.path, relPath);
+  if (!fs.existsSync(abs)) throw new Error("文件不存在");
+  await shell.openPath(abs);
+}
+
+export async function revertGitFile(relPath: string): Promise<void> {
+  const ws = getActiveWorkspace();
+  if (!ws) throw new Error("请先选择本地工作区文件夹");
+  const safe = resolveWithinWorkspace(ws.path, relPath);
+  const rel = path.relative(fs.realpathSync(ws.path), safe).split(path.sep).join("/");
+  // Check if tracked
+  try {
+    await runGit(ws.path, ["ls-files", "--error-unmatch", "--", rel]);
+    await runGit(ws.path, ["checkout", "HEAD", "--", rel]);
+  } catch {
+    // Untracked file -> move to OS trash safely
+    if (fs.existsSync(safe)) {
+      await shell.trashItem(safe);
+    }
+  }
 }
 
 async function runGit(cwd: string, args: string[]): Promise<string> {
@@ -363,6 +413,69 @@ export async function getGitDiff(relPath?: string): Promise<string> {
   }
 }
 
+function buildAttachmentFromPath(filePath: string): WorkAttachment | null {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return null;
+    const ext = path.extname(filePath).toLowerCase();
+    const isImage = IMAGE_EXTS.has(ext);
+    let previewUrl: string | undefined;
+    if (isImage && stat.size <= 4 * 1024 * 1024) {
+      const mime =
+        ext === ".png"
+          ? "image/png"
+          : ext === ".webp"
+            ? "image/webp"
+            : ext === ".gif"
+              ? "image/gif"
+              : "image/jpeg";
+      previewUrl = `data:${mime};base64,${fs.readFileSync(filePath).toString("base64")}`;
+    }
+    return {
+      id: crypto.randomUUID(),
+      name: path.basename(filePath),
+      path: filePath,
+      kind: isImage ? "image" : "file",
+      size: stat.size,
+      preview_url: previewUrl,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function attachmentsFromPaths(filePaths: string[]): WorkAttachment[] {
+  const out: WorkAttachment[] = [];
+  for (const p of filePaths.slice(0, 10)) {
+    if (typeof p !== "string" || !p.trim()) continue;
+    const att = buildAttachmentFromPath(path.resolve(p));
+    if (att) out.push(att);
+  }
+  return out;
+}
+
+export function saveClipboardImage(dataUrl: string, name?: string): WorkAttachment {
+  const match = /^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,(.+)$/i.exec(dataUrl.trim());
+  if (!match) throw new Error("剪贴板图片格式不受支持");
+  const mime = match[1].toLowerCase();
+  const buf = Buffer.from(match[2], "base64");
+  if (buf.length > 10 * 1024 * 1024) throw new Error("图片大小超过 10MB 限制");
+  const ext = mime === "image/jpeg" || mime === "image/jpg" ? ".jpg" : mime === "image/webp" ? ".webp" : mime === "image/gif" ? ".gif" : ".png";
+  const dir = path.join(storagePaths().root, "clipboard");
+  fs.mkdirSync(dir, { recursive: true });
+  const fileName = (name?.trim() || `paste-${Date.now()}${ext}`).replace(/[\\/:*?"<>|]/g, "_");
+  const target = path.join(dir, `${crypto.randomUUID().slice(0, 8)}-${fileName}`);
+  fs.writeFileSync(target, buf);
+  return {
+    id: crypto.randomUUID(),
+    name: fileName,
+    path: target,
+    kind: "image",
+    size: buf.length,
+    preview_url: buf.length <= 4 * 1024 * 1024 ? dataUrl : undefined,
+  };
+}
+
 export async function pickAttachments(): Promise<WorkAttachment[]> {
   const win = getMainWindow();
   const options: Electron.OpenDialogOptions = {
@@ -372,37 +485,5 @@ export async function pickAttachments(): Promise<WorkAttachment[]> {
   };
   const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
   if (result.canceled || !result.filePaths.length) return [];
-
-  const attachments: WorkAttachment[] = [];
-  for (const filePath of result.filePaths.slice(0, 8)) {
-    try {
-      const stat = fs.statSync(filePath);
-      if (!stat.isFile()) continue;
-      const ext = path.extname(filePath).toLowerCase();
-      const isImage = IMAGE_EXTS.has(ext);
-      let previewUrl: string | undefined;
-      if (isImage && stat.size <= 4 * 1024 * 1024) {
-        const mime =
-          ext === ".png"
-            ? "image/png"
-            : ext === ".webp"
-              ? "image/webp"
-              : ext === ".gif"
-                ? "image/gif"
-                : "image/jpeg";
-        previewUrl = `data:${mime};base64,${fs.readFileSync(filePath).toString("base64")}`;
-      }
-      attachments.push({
-        id: crypto.randomUUID(),
-        name: path.basename(filePath),
-        path: filePath,
-        kind: isImage ? "image" : "file",
-        size: stat.size,
-        preview_url: previewUrl,
-      });
-    } catch {
-      /* ignore unreadable file */
-    }
-  }
-  return attachments;
+  return attachmentsFromPaths(result.filePaths.slice(0, 8));
 }

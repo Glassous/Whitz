@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "../../../web/src/styles/main.css";
+@import "@xterm/xterm/css/xterm.css";
 @source "../";
 @source "../../../web/src";
 
@@ -63,4 +64,19 @@
   .work-dot-live {
     animation: none;
   }
+}
+
+dialog.work-native-dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog.work-native-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.48);
+  backdrop-filter: blur(4px);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+dialog.work-native-dialog[open] {
+  display: flex;
 }

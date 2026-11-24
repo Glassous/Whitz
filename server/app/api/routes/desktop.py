@@ -51,7 +51,16 @@ async def list_models(user: User = Depends(desktop_key_user)) -> dict:
     alias = llm_gateway.model_alias()
     return {
         "object": "list",
-        "data": [{"id": alias, "object": "model", "owned_by": "whitz"}],
+        "data": [
+            {
+                "id": alias,
+                "object": "model",
+                "owned_by": "whitz",
+                "context_window": 128000,
+                "max_output_tokens": 16384,
+                "capabilities": {"reasoning": True, "vision": True, "tools": True},
+            }
+        ],
     }
 
 

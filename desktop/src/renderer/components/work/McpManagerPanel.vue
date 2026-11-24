@@ -116,6 +116,26 @@ async function toggleConnect(item: WorkMcpServerInfo) {
   }
 }
 
+async function authenticateServer(item: WorkMcpServerInfo) {
+  error.value = null;
+  message.value = null;
+  try {
+    await runtime.authMcpServer(item.name, work.activeWorkspace?.path);
+    message.value = `MCP「${item.name}」OAuth 授权已完成`;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : "MCP OAuth 授权失败";
+  }
+}
+
+async function clearServerAuth(item: WorkMcpServerInfo) {
+  try {
+    await runtime.removeMcpAuth(item.name, work.activeWorkspace?.path);
+    message.value = `已清除 MCP「${item.name}」授权凭据`;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : "清除 MCP 授权失败";
+  }
+}
+
 function statusMeta(status: WorkMcpServerInfo["status"]) {
   if (status === "connected") return { text: "已连接", color: "var(--success)" };
   if (status === "failed") return { text: "连接失败", color: "var(--danger)" };
@@ -263,6 +283,21 @@ onMounted(() => {
           </div>
 
           <div class="flex shrink-0 items-center gap-1.5">
+            <BaseButton
+              v-if="runtime.ready && (item.status === 'needs_auth' || item.status === 'needs_client_registration')"
+              size="sm"
+              @click="authenticateServer(item)"
+            >
+              OAuth 授权
+            </BaseButton>
+            <BaseButton
+              v-if="runtime.ready && item.config?.type === 'remote' && item.status === 'connected'"
+              size="sm"
+              variant="ghost"
+              @click="clearServerAuth(item)"
+            >
+              清除授权
+            </BaseButton>
             <BaseButton
               v-if="runtime.ready"
               size="sm"

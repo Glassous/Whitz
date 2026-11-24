@@ -12,6 +12,8 @@ import type {
   WorkMcpServerConfig,
   WorkMcpServerInfo,
   WorkMcpServerInput,
+  WorkProviderAuthMethod,
+  WorkProviderCatalogItem,
 } from "../../shared/work-types";
 import { localGatewayBaseUrl } from "./localOpenAIGateway";
 
@@ -201,6 +203,8 @@ export function buildBridgeConfigContent(): string | null {
         models: {
           "whitz-default": {
             name: "Whitz 内置模型",
+            limit: { context: 128000, output: 16384 },
+            modalities: { input: ["text", "image"], output: ["text"] },
           },
         },
       },
@@ -547,7 +551,11 @@ export function writeWhitzProviderToDisk(): OpenCodeConfigSnapshot {
     },
     models: {
       ...existingModels,
-      "whitz-default": { name: "Whitz 内置模型" },
+      "whitz-default": {
+        name: "Whitz 内置模型",
+        limit: { context: 128000, output: 16384 },
+        modalities: { input: ["text", "image"], output: ["text"] },
+      },
     },
   };
   doc.provider = provider;
@@ -634,6 +642,69 @@ export function deleteProviderFromDisk(id: string): OpenCodeConfigSnapshot {
   writeOpenCodeJsonDoc(doc);
   writeAuthKeyToDisk(cleanId, null);
   return buildConfigSnapshot();
+}
+
+export function buildProviderCatalog(
+  live?: LiveProviderPayload | null,
+  authMethods?: Record<string, WorkProviderAuthMethod[]> | null,
+): WorkProviderCatalogItem[] {
+  const connectedSet = new Set(live?.connected ?? []);
+  const { doc } = readOpenCodeJsonDoc();
+  const diskProviders = isRecord(doc.provider) ? doc.provider : {};
+  const map = new Map<string, WorkProviderCatalogItem>();
+
+  for (const item of live?.all ?? []) {
+    const models = Object.keys(item.models ?? {});
+    const methods = authMethods?.[item.id] ?? [{ type: "api", label: "API Key" }];
+    const connected = connectedSet.has(item.id) || Boolean(diskProviders[item.id]);
+    map.set(item.id, {
+      id: item.id,
+      name: item.name || item.id,
+      connected,
+      source: item.source,
+      model_count: models.length,
+      sample_models: models.slice(0, 5),
+      auth_methods: methods,
+      has_oauth: methods.some((m) => m.type === "oauth"),
+      has_api_key: methods.some((m) => m.type === "api") || methods.length === 0,
+    });
+  }
+
+  for (const [id, methods] of Object.entries(authMethods ?? {})) {
+    if (map.has(id)) continue;
+    map.set(id, {
+      id,
+      name: id,
+      connected: connectedSet.has(id) || Boolean(diskProviders[id]),
+      model_count: 0,
+      sample_models: [],
+      auth_methods: methods,
+      has_oauth: methods.some((m) => m.type === "oauth"),
+      has_api_key: methods.some((m) => m.type === "api") || methods.length === 0,
+    });
+  }
+
+  const POPULAR = new Set([
+    "anthropic",
+    "openai",
+    "google",
+    "github-copilot",
+    "deepseek",
+    "openrouter",
+    "xai",
+    "groq",
+    "mistral",
+    "ollama",
+    "whitz",
+  ]);
+
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.connected !== b.connected) return a.connected ? -1 : 1;
+    const ap = POPULAR.has(a.id) ? 0 : 1;
+    const bp = POPULAR.has(b.id) ? 0 : 1;
+    if (ap !== bp) return ap - bp;
+    return a.name.localeCompare(b.name);
+  });
 }
 
 export function saveOpenCodePreferencesOnDisk(patch: OpenCodeConfigSavePatch): OpenCodeConfigSnapshot {

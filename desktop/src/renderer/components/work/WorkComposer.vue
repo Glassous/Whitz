@@ -44,6 +44,9 @@ const canExpand = ref(false);
 const expanded = ref(false);
 const attachments = ref<WorkAttachment[]>([]);
 const selectedSkills = ref<string[]>([]);
+const isDraggingFile = ref(false);
+const historyIndex = ref(-1);
+let draftBeforeHistory = "";
 
 // Popovers
 const modelMenuOpen = ref(false);
@@ -365,9 +368,12 @@ function submit() {
     agentName: effectiveAgentName.value,
     variant: effectiveVariant.value,
   });
+  work.pushPromptHistory(val);
+  historyIndex.value = -1;
   text.value = "";
   attachments.value = [];
   selectedSkills.value = [];
+  work.setDraft(work.activeConversationId, { text: "", attachments: [], skills: [] });
   expanded.value = false;
   canExpand.value = false;
   void nextTick(updateExpandState);
@@ -402,6 +408,31 @@ function onKeydown(e: KeyboardEvent) {
     }
   }
 
+  // Up/Down prompt history recall when caret is on first/last line
+  if (e.key === "ArrowUp" && !e.shiftKey && !e.isComposing && work.promptHistory.length) {
+    const el = area.value;
+    const atStart = !text.value || (el && el.selectionStart === 0 && el.selectionEnd === 0);
+    if (atStart) {
+      e.preventDefault();
+      if (historyIndex.value === -1) draftBeforeHistory = text.value;
+      const nextIdx = Math.min(work.promptHistory.length - 1, historyIndex.value + 1);
+      historyIndex.value = nextIdx;
+      text.value = work.promptHistory[nextIdx] ?? "";
+      return;
+    }
+  }
+  if (e.key === "ArrowDown" && !e.shiftKey && !e.isComposing && historyIndex.value >= 0) {
+    const el = area.value;
+    const atEnd = !el || el.selectionStart === text.value.length;
+    if (atEnd) {
+      e.preventDefault();
+      const nextIdx = historyIndex.value - 1;
+      historyIndex.value = nextIdx;
+      text.value = nextIdx < 0 ? draftBeforeHistory : (work.promptHistory[nextIdx] ?? "");
+      return;
+    }
+  }
+
   if (e.key === "Tab" && !e.shiftKey && !e.isComposing && !props.streaming) {
     e.preventDefault();
     cycleAgent();
@@ -411,6 +442,61 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     submit();
+  }
+}
+
+async function onPaste(e: ClipboardEvent) {
+  if (props.disabled || props.streaming) return;
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of Array.from(items)) {
+    if (!item.type.startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (!file) continue;
+    e.preventDefault();
+    const reader = new FileReader();
+    reader.onload = async () => {
+      if (typeof reader.result !== "string") return;
+      try {
+        const saved = await window.whitzDesktop?.work.saveClipboardImage(reader.result, file.name || undefined);
+        if (saved) attachments.value = [...attachments.value, saved];
+      } catch (err) {
+        work.error = err instanceof Error ? err.message : "粘贴图片失败";
+      }
+    };
+    reader.readAsDataURL(file);
+  }
+}
+
+function onDragOver(e: DragEvent) {
+  if (props.disabled || props.streaming) return;
+  if (e.dataTransfer?.types.includes("Files")) {
+    e.preventDefault();
+    isDraggingFile.value = true;
+  }
+}
+
+function onDragLeave(e: DragEvent) {
+  const current = e.currentTarget as HTMLElement | null;
+  if (current && e.relatedTarget && current.contains(e.relatedTarget as Node)) return;
+  isDraggingFile.value = false;
+}
+
+async function onDrop(e: DragEvent) {
+  isDraggingFile.value = false;
+  if (props.disabled || props.streaming) return;
+  const files = Array.from(e.dataTransfer?.files ?? []);
+  if (!files.length) return;
+  e.preventDefault();
+  const paths = files
+    .map((f) => (f as File & { path?: string }).path ?? "")
+    .filter(Boolean);
+  if (paths.length) {
+    const added = (await window.whitzDesktop?.work.attachmentsFromPaths(paths).catch(() => [])) ?? [];
+    const existing = new Set(attachments.value.map((a) => a.path));
+    for (const att of added) {
+      if (!existing.has(att.path)) attachments.value.push(att);
+    }
   }
 }
 
@@ -442,6 +528,25 @@ function closePopovers() {
   agentMenuOpen.value = false;
   slashPopoverOpen.value = false;
 }
+
+watch(
+  () => work.activeConversationId,
+  (nextId, prevId) => {
+    if (prevId !== undefined) {
+      work.setDraft(prevId, {
+        text: text.value,
+        attachments: [...attachments.value],
+        skills: [...selectedSkills.value],
+      });
+    }
+    const saved = work.getDraft(nextId);
+    text.value = saved.text;
+    attachments.value = [...saved.attachments];
+    selectedSkills.value = [...saved.skills];
+    historyIndex.value = -1;
+    void nextTick(updateExpandState);
+  },
+);
 
 watch(text, () => void nextTick(updateExpandState));
 onMounted(() => document.addEventListener("click", closePopovers));
@@ -621,10 +726,20 @@ defineExpose({ insertPath });
       </button>
     </div>
 
-    <!-- Main Borderless Tonal Card (Identical Surface Styling to Web ChatInput.vue) -->
+    <!-- Main Borderless Tonal Card (Identical Surface Styling to Web ChatInput.vue + Drag/Drop & Paste) -->
     <div
       class="relative rounded-3xl bg-surface p-2 transition-[box-shadow,background-color] duration-200 sm:px-4 sm:py-3.5"
+      :class="isDraggingFile ? 'ring-2 ring-[color:var(--work-accent)] bg-hover/80' : ''"
+      @dragover="onDragOver"
+      @dragleave="onDragLeave"
+      @drop="onDrop"
     >
+      <div
+        v-if="isDraggingFile"
+        class="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-3xl bg-canvas/80 text-[13px] font-medium text-fg backdrop-blur-xs"
+      >
+        松开鼠标即可附加文件或图片到本轮任务
+      </div>
       <!-- Chips Row (Attachments + Selected Skills + Shell Mode Indicator) -->
       <div
         v-if="attachments.length || selectedSkills.length || isShellInput"
@@ -692,6 +807,7 @@ defineExpose({ insertPath });
             :style="{ maxHeight: expanded ? '320px' : '160px' }"
             @input="updateTrigger"
             @keydown="onKeydown"
+            @paste="onPaste"
           />
         </div>
 

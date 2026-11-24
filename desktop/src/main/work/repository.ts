@@ -4,12 +4,16 @@ import { getDb } from "./db";
 import type {
   WorkConversation,
   WorkConversationDetail,
+  WorkConversationSummary,
   WorkMessage,
   WorkRole,
   WorkWorkspace,
 } from "../../shared/work-types";
 
 const ACTIVE_WORKSPACE_KV = "active_workspace_path";
+
+const CONV_SELECT =
+  "id, title, opencode_session_id, workspace_path, is_pinned, model_ref, agent_name, variant, share_url, worktree_name, worktree_branch, summary_json, total_cost, created_at, updated_at";
 
 interface ConversationRow {
   id: string;
@@ -20,6 +24,11 @@ interface ConversationRow {
   model_ref: string | null;
   agent_name: string | null;
   variant: string | null;
+  share_url: string | null;
+  worktree_name: string | null;
+  worktree_branch: string | null;
+  summary_json: string | null;
+  total_cost: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -50,6 +59,21 @@ function now(): string {
 }
 
 function toConversation(row: ConversationRow): WorkConversation {
+  let summary: WorkConversationSummary | null = null;
+  if (row.summary_json) {
+    try {
+      const parsed = JSON.parse(row.summary_json) as Record<string, unknown>;
+      if (parsed && typeof parsed === "object") {
+        summary = {
+          additions: Number(parsed.additions ?? 0) || 0,
+          deletions: Number(parsed.deletions ?? 0) || 0,
+          files: Number(parsed.files ?? 0) || 0,
+        };
+      }
+    } catch {
+      summary = null;
+    }
+  }
   return {
     id: row.id,
     title: row.title,
@@ -59,6 +83,11 @@ function toConversation(row: ConversationRow): WorkConversation {
     model_ref: row.model_ref ?? null,
     agent_name: row.agent_name ?? null,
     variant: row.variant ?? null,
+    share_url: row.share_url ?? null,
+    worktree_name: row.worktree_name ?? null,
+    worktree_branch: row.worktree_branch ?? null,
+    summary,
+    total_cost: typeof row.total_cost === "number" ? row.total_cost : 0,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -92,14 +121,14 @@ export function listConversations(workspacePath?: string | null): WorkConversati
     workspacePath !== undefined && workspacePath !== null && workspacePath !== ""
       ? (getDb()
           .prepare(
-            `SELECT id, title, opencode_session_id, workspace_path, is_pinned, model_ref, agent_name, variant, created_at, updated_at
+            `SELECT ${CONV_SELECT}
              FROM conversations WHERE archived = 0 AND workspace_path = ?
              ORDER BY is_pinned DESC, updated_at DESC`,
           )
           .all(path.resolve(workspacePath)) as ConversationRow[])
       : (getDb()
           .prepare(
-            `SELECT id, title, opencode_session_id, workspace_path, is_pinned, model_ref, agent_name, variant, created_at, updated_at
+            `SELECT ${CONV_SELECT}
              FROM conversations WHERE archived = 0
              ORDER BY is_pinned DESC, updated_at DESC`,
           )
@@ -115,6 +144,11 @@ export function createConversation(
     model_ref?: string | null;
     agent_name?: string | null;
     variant?: string | null;
+    share_url?: string | null;
+    worktree_name?: string | null;
+    worktree_branch?: string | null;
+    summary?: WorkConversationSummary | null;
+    total_cost?: number;
   },
 ): WorkConversation {
   const id = crypto.randomUUID();
@@ -125,12 +159,32 @@ export function createConversation(
   const modelRef = init?.model_ref ?? null;
   const agentName = init?.agent_name ?? null;
   const variant = init?.variant ?? null;
+  const shareUrl = init?.share_url ?? null;
+  const worktreeName = init?.worktree_name ?? null;
+  const worktreeBranch = init?.worktree_branch ?? null;
+  const summaryJson = init?.summary ? JSON.stringify(init.summary) : null;
+  const totalCost = typeof init?.total_cost === "number" ? init.total_cost : 0;
   getDb()
     .prepare(
-      `INSERT INTO conversations (id, title, opencode_session_id, workspace_path, is_pinned, model_ref, agent_name, variant, created_at, updated_at, archived)
-       VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 0)`,
+      `INSERT INTO conversations (id, title, opencode_session_id, workspace_path, is_pinned, model_ref, agent_name, variant, share_url, worktree_name, worktree_branch, summary_json, total_cost, created_at, updated_at, archived)
+       VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
     )
-    .run(id, cleanTitle, opencodeSessionId, resolvedWorkspace, modelRef, agentName, variant, stamp, stamp);
+    .run(
+      id,
+      cleanTitle,
+      opencodeSessionId,
+      resolvedWorkspace,
+      modelRef,
+      agentName,
+      variant,
+      shareUrl,
+      worktreeName,
+      worktreeBranch,
+      summaryJson,
+      totalCost,
+      stamp,
+      stamp,
+    );
   return {
     id,
     title: cleanTitle,
@@ -140,6 +194,11 @@ export function createConversation(
     model_ref: modelRef,
     agent_name: agentName,
     variant,
+    share_url: shareUrl,
+    worktree_name: worktreeName,
+    worktree_branch: worktreeBranch,
+    summary: init?.summary ?? null,
+    total_cost: totalCost,
     created_at: stamp,
     updated_at: stamp,
   };
@@ -148,11 +207,69 @@ export function createConversation(
 export function getConversationMeta(id: string): ConversationRow | null {
   const row = getDb()
     .prepare(
-      `SELECT id, title, opencode_session_id, workspace_path, is_pinned, model_ref, agent_name, variant, created_at, updated_at
+      `SELECT ${CONV_SELECT}
        FROM conversations WHERE id = ? AND archived = 0`,
     )
     .get(id) as ConversationRow | undefined;
   return row ?? null;
+}
+
+export function getConversationByOpenCodeSession(sessionId: string): WorkConversation | null {
+  if (!sessionId) return null;
+  const row = getDb()
+    .prepare(
+      `SELECT ${CONV_SELECT}
+       FROM conversations WHERE opencode_session_id = ? AND archived = 0 LIMIT 1`,
+    )
+    .get(sessionId) as ConversationRow | undefined;
+  return row ? toConversation(row) : null;
+}
+
+export function updateConversationMeta(
+  id: string,
+  patch: {
+    title?: string;
+    share_url?: string | null;
+    summary?: WorkConversationSummary | null;
+    total_cost?: number;
+    worktree_name?: string | null;
+    worktree_branch?: string | null;
+  },
+): WorkConversation | null {
+  const row = getConversationMeta(id);
+  if (!row) return null;
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  if (patch.title !== undefined && patch.title.trim()) {
+    fields.push("title = ?");
+    values.push(patch.title.trim());
+  }
+  if (patch.share_url !== undefined) {
+    fields.push("share_url = ?");
+    values.push(patch.share_url);
+  }
+  if (patch.summary !== undefined) {
+    fields.push("summary_json = ?");
+    values.push(patch.summary ? JSON.stringify(patch.summary) : null);
+  }
+  if (patch.total_cost !== undefined) {
+    fields.push("total_cost = ?");
+    values.push(patch.total_cost);
+  }
+  if (patch.worktree_name !== undefined) {
+    fields.push("worktree_name = ?");
+    values.push(patch.worktree_name);
+  }
+  if (patch.worktree_branch !== undefined) {
+    fields.push("worktree_branch = ?");
+    values.push(patch.worktree_branch);
+  }
+  if (!fields.length) return toConversation(row);
+  fields.push("updated_at = ?");
+  values.push(now(), id);
+  getDb().prepare(`UPDATE conversations SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  const next = getConversationMeta(id);
+  return next ? toConversation(next) : null;
 }
 
 export function setConversationPrefs(

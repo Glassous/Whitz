@@ -16,6 +16,9 @@ const userLabel = computed(() => desktop.user?.display_name ?? "未登录");
 
 function switchTo(target: "chat" | "work") {
   if (target === "work" && !desktop.workEnabled) return;
+  if (target === "work" && work.firstWaitingConversationId) {
+    void work.select(work.firstWaitingConversationId);
+  }
   void router.push({ name: target === "chat" ? "chat" : "work" });
 }
 
@@ -66,10 +69,35 @@ async function toggleOffline() {
         :aria-selected="inWork"
         class="focus-ring flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] font-medium transition-colors"
         :class="inWork ? 'bg-canvas text-fg shadow-sm' : 'text-fg-muted hover:text-fg'"
+        :title="
+          work.totalWaitingCount > 0
+            ? `${work.totalWaitingCount} 个 Work 任务等待审批或回答`
+            : work.totalRunningCount > 0
+              ? `${work.totalRunningCount} 个 Work 任务正在后台运行`
+              : '切换到 Work 模式'
+        "
         @click="switchTo('work')"
       >
-        <span class="h-1.5 w-1.5 rounded-full" :style="{ background: inWork ? 'var(--work-accent)' : 'var(--line-strong)' }"></span>
-        Work
+        <span
+          class="h-1.5 w-1.5 rounded-full"
+          :class="{ 'animate-pulse': work.totalWaitingCount > 0 || work.totalRunningCount > 0 }"
+          :style="{
+            background:
+              work.totalWaitingCount > 0
+                ? 'var(--warning)'
+                : work.totalRunningCount > 0 || inWork
+                  ? 'var(--work-accent)'
+                  : 'var(--line-strong)',
+          }"
+        ></span>
+        <span>Work</span>
+        <span
+          v-if="!inWork && (work.totalWaitingCount > 0 || work.totalRunningCount > 0)"
+          class="rounded-full px-1.5 py-0.2 text-[10px] font-semibold leading-none tabular-nums"
+          :class="work.totalWaitingCount > 0 ? 'bg-warning-weak text-warning' : 'bg-surface text-fg'"
+        >
+          {{ work.totalWaitingCount > 0 ? work.totalWaitingCount : work.totalRunningCount }}
+        </span>
       </button>
     </div>
 

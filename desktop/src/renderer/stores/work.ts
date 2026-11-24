@@ -8,13 +8,17 @@ import type {
   WorkAgentInfo,
   WorkApprovalChoice,
   WorkAttachment,
+  WorkClarifyQuestion,
   WorkCommandInfo,
   WorkConversation,
   WorkConversationDetail,
   WorkEvent,
+  WorkGlobalEvent,
   WorkMessage,
+  WorkRemoteSessionSummary,
   WorkSessionDiffItem,
   WorkSessionPrefsPatch,
+  WorkSessionRetryState,
   WorkSkillItem,
   WorkTimelineItem,
   WorkTokenUsage,
@@ -43,6 +47,10 @@ export interface PendingControl {
   tool: string | null;
   preview: unknown;
   choices: string[] | null;
+  patterns?: string[];
+  alwaysPatterns?: string[];
+  metadata?: Record<string, unknown> | null;
+  questions?: WorkClarifyQuestion[] | null;
 }
 
 export interface SubagentActivity {
@@ -62,6 +70,15 @@ export interface WorkRunState {
   plan: Record<string, unknown> | null;
   subagents: SubagentActivity[];
   usage: WorkTokenUsage | null;
+  retry: WorkSessionRetryState | null;
+}
+
+export type WorkCommandPaletteMode = "commands" | "files" | "search";
+
+export interface WorkDraft {
+  text: string;
+  attachments: WorkAttachment[];
+  skills: string[];
 }
 
 export interface WorkProjectGroup {
@@ -85,6 +102,7 @@ function emptyRunState(): WorkRunState {
     plan: null,
     subagents: [],
     usage: null,
+    retry: null,
   };
 }
 
@@ -123,11 +141,24 @@ export const useWorkStore = defineStore("work", () => {
     typeof window !== "undefined" ? window.localStorage.getItem("whitz_work_inspector_open") !== "0" : true,
   );
   const inspectorTab = ref<WorkInspectorTab>("steps");
+  const terminalOpen = ref(
+    typeof window !== "undefined" ? window.localStorage.getItem("whitz_work_terminal_open") === "1" : false,
+  );
+  const commandPaletteOpen = ref(false);
+  const commandPaletteMode = ref<WorkCommandPaletteMode>("commands");
+  const diffModalOpen = ref(false);
+  const remoteSessions = ref<WorkRemoteSessionSummary[]>([]);
+  const remoteSessionsLoading = ref(false);
+  const draftsByConversation = ref<Record<string, WorkDraft>>({});
+  const promptHistory = ref<string[]>([]);
   const selectedTurnId = ref<string | null>(null);
   const stableKeys = ref<Record<string, string>>({});
   const latestTurnTriggerSeq = ref(0);
 
   let started = false;
+  let globalWorkspaceRefreshTimer: number | null = null;
+  let globalListRefreshTimer: number | null = null;
+  let focusHandler: ((conversationId: string) => void) | null = null;
 
   function stableKeyOf(id: string): string {
     return stableKeys.value[id] ?? id;
@@ -258,6 +289,30 @@ export const useWorkStore = defineStore("work", () => {
   const plan = computed(() => currentRun.value.plan);
   const subagents = computed(() => currentRun.value.subagents);
   const usage = computed(() => currentRun.value.usage);
+  const retryState = computed(() => currentRun.value.retry);
+
+  const totalRunningCount = computed(() => {
+    let n = 0;
+    for (const rs of Object.values(runsByConversation.value)) {
+      if (rs.streaming) n += 1;
+    }
+    return n;
+  });
+
+  const totalWaitingCount = computed(() => {
+    let n = 0;
+    for (const rs of Object.values(runsByConversation.value)) {
+      if (rs.pendingControls.length > 0) n += 1;
+    }
+    return n;
+  });
+
+  const firstWaitingConversationId = computed<string | null>(() => {
+    for (const [cid, rs] of Object.entries(runsByConversation.value)) {
+      if (rs.pendingControls.length > 0) return cid;
+    }
+    return null;
+  });
 
   const primaryAgents = computed(() => agents.value.filter((a) => a.mode === "primary" || a.mode === "all"));
   const subagentDefs = computed(() => agents.value.filter((a) => a.mode === "subagent" || a.mode === "all"));
@@ -350,11 +405,138 @@ export const useWorkStore = defineStore("work", () => {
     }
   }
 
+  function setTerminalOpen(open: boolean) {
+    terminalOpen.value = open;
+    try {
+      window.localStorage.setItem("whitz_work_terminal_open", open ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function openCommandPalette(mode: WorkCommandPaletteMode = "commands") {
+    commandPaletteMode.value = mode;
+    commandPaletteOpen.value = true;
+  }
+
+  function closeCommandPalette() {
+    commandPaletteOpen.value = false;
+  }
+
+  function getDraft(conversationId: string | null): WorkDraft {
+    const key = conversationId || "__draft__";
+    return draftsByConversation.value[key] ?? { text: "", attachments: [], skills: [] };
+  }
+
+  function setDraft(conversationId: string | null, draft: WorkDraft) {
+    const key = conversationId || "__draft__";
+    draftsByConversation.value[key] = draft;
+  }
+
+  function pushPromptHistory(text: string) {
+    const clean = text.trim();
+    if (!clean) return;
+    const filtered = promptHistory.value.filter((item) => item !== clean);
+    promptHistory.value = [clean, ...filtered].slice(0, 60);
+  }
+
+  function setFocusConversationHandler(cb: ((conversationId: string) => void) | null) {
+    focusHandler = cb;
+  }
+
+  function scheduleGlobalWorkspaceRefresh() {
+    if (globalWorkspaceRefreshTimer !== null) return;
+    globalWorkspaceRefreshTimer = window.setTimeout(() => {
+      globalWorkspaceRefreshTimer = null;
+      void refreshWorkspace();
+    }, 600);
+  }
+
+  function scheduleGlobalListRefresh() {
+    if (globalListRefreshTimer !== null) return;
+    globalListRefreshTimer = window.setTimeout(() => {
+      globalListRefreshTimer = null;
+      void loadList();
+      const curId = activeConversationId.value;
+      if (curId) {
+        void bridge()
+          .work.get(curId)
+          .then((detail) => {
+            if (current.value?.conversation.id === curId) {
+              current.value.conversation = detail.conversation;
+            }
+          })
+          .catch(() => undefined);
+      }
+    }, 450);
+  }
+
+  function handleGlobalEvent(ev: WorkGlobalEvent) {
+    const rt = useRuntimeStore();
+    switch (ev.type) {
+      case "file.watcher.updated":
+      case "file.edited":
+        scheduleGlobalWorkspaceRefresh();
+        return;
+      case "vcs.branch.updated": {
+        const branch = typeof ev.properties.branch === "string" ? ev.properties.branch.trim() : null;
+        if (branch) {
+          vcsBranch.value = branch;
+          if (gitStatus.value.is_repo) {
+            gitStatus.value = { ...gitStatus.value, branch };
+          }
+        }
+        return;
+      }
+      case "session.updated":
+      case "session.created":
+      case "session.deleted":
+        scheduleGlobalListRefresh();
+        return;
+      case "session.diff": {
+        const sid = typeof ev.properties.sessionID === "string" ? ev.properties.sessionID : "";
+        if (sid && current.value?.conversation.opencode_session_id === sid && Array.isArray(ev.properties.diff)) {
+          sessionDiffs.value = (ev.properties.diff as Array<Record<string, unknown>>)
+            .filter((x) => x && typeof x === "object")
+            .map((x) => ({
+              file: String(x.file ?? x.path ?? ""),
+              patch: typeof x.patch === "string" ? x.patch : undefined,
+              before: typeof x.before === "string" ? x.before : undefined,
+              after: typeof x.after === "string" ? x.after : undefined,
+              additions: typeof x.additions === "number" ? x.additions : undefined,
+              deletions: typeof x.deletions === "number" ? x.deletions : undefined,
+              status: (x.status === "added" || x.status === "deleted" || x.status === "modified"
+                ? x.status
+                : "modified") as WorkSessionDiffItem["status"],
+            }))
+            .filter((x) => x.file);
+        }
+        return;
+      }
+      case "lsp.updated":
+        void rt.loadLspStatus(activeWorkspace.value?.path ?? null);
+        return;
+      case "mcp.tools.changed":
+        void rt.loadMcpServers(activeWorkspace.value?.path ?? null);
+        return;
+      default:
+        return;
+    }
+  }
+
   function bindEvents() {
     if (started) return;
     started = true;
-    bridge().onWorkEvent(({ conversationId, event }) => {
+    const api = bridge();
+    api.onWorkEvent(({ conversationId, event }) => {
       handleEvent(conversationId, event);
+    });
+    api.onWorkGlobalEvent((ev) => {
+      handleGlobalEvent(ev);
+    });
+    api.onWorkFocusConversation((conversationId) => {
+      void select(conversationId);
+      focusHandler?.(conversationId);
     });
   }
 
@@ -365,6 +547,10 @@ export const useWorkStore = defineStore("work", () => {
     tool: string | null;
     preview: unknown;
     choices?: string[] | null;
+    patterns?: string[];
+    always_patterns?: string[];
+    metadata?: Record<string, unknown> | null;
+    questions?: WorkClarifyQuestion[] | null;
   }): PendingControl {
     return {
       kind: raw.kind,
@@ -373,6 +559,10 @@ export const useWorkStore = defineStore("work", () => {
       tool: raw.tool ? String(raw.tool) : null,
       preview: raw.preview ?? null,
       choices: Array.isArray(raw.choices) ? raw.choices : null,
+      patterns: Array.isArray(raw.patterns) ? raw.patterns : undefined,
+      alwaysPatterns: Array.isArray(raw.always_patterns) ? raw.always_patterns : undefined,
+      metadata: raw.metadata ?? null,
+      questions: Array.isArray(raw.questions) ? raw.questions : null,
     };
   }
 
@@ -382,6 +572,7 @@ export const useWorkStore = defineStore("work", () => {
     run.activeAssistantId = snap.assistant_id || null;
     run.plan = snap.plan ?? run.plan;
     run.usage = snap.usage ?? run.usage;
+    run.retry = snap.retry ?? null;
     if (Array.isArray(snap.pending_controls)) {
       run.pendingControls = snap.pending_controls.map(toPendingControl);
     } else if (snap.pending_control) {
@@ -489,6 +680,16 @@ export const useWorkStore = defineStore("work", () => {
     await bridge().workspace.openExplorer(targetPath);
   }
 
+  async function openInEditor(relPath: string) {
+    await bridge().workspace.openInEditor(relPath);
+  }
+
+  async function revertFile(relPath: string) {
+    await bridge().workspace.gitRevertFile(relPath);
+    if (previewDiff.value?.path === relPath) previewDiff.value = null;
+    await refreshWorkspace();
+  }
+
   async function loadTree(relDir = "") {
     if (!activeWorkspace.value) {
       childrenByDir.value = {};
@@ -586,12 +787,77 @@ export const useWorkStore = defineStore("work", () => {
     skills.value = await bridge().work.skills(activeWorkspace.value?.path ?? null).catch(() => []);
   }
 
-  async function create(title?: string, workspacePath?: string | null) {
+  async function create(
+    title?: string,
+    workspacePath?: string | null,
+    options?: { worktreeName?: string | null; worktreeBranch?: string | null },
+  ) {
     const targetPath = workspacePath !== undefined ? workspacePath : (activeWorkspace.value?.path ?? null);
-    const conversation = await bridge().work.create(title, targetPath);
+    const conversation = await bridge().work.create(title, targetPath, options);
     await loadList();
     await select(conversation.id);
     return conversation;
+  }
+
+  async function createWorktreeTask(workspacePath: string, name?: string) {
+    const wt = await bridge().worktree.create(name, workspacePath);
+    await bridge().workspace.select(wt.directory).catch(() => undefined);
+    workspaces.value = await bridge().workspace.list();
+    const conv = await create(
+      wt.branch ? `Worktree · ${wt.branch}` : `Worktree · ${wt.name}`,
+      wt.directory,
+      { worktreeName: wt.name, worktreeBranch: wt.branch ?? null },
+    );
+    return { worktree: wt, conversation: conv };
+  }
+
+  async function resetWorktree(directory: string, workspacePath?: string | null) {
+    await bridge().worktree.reset(directory, workspacePath);
+    await refreshWorkspace();
+  }
+
+  async function removeWorktree(directory: string, workspacePath?: string | null) {
+    await bridge().worktree.remove(directory, workspacePath);
+    await bridge().workspace.remove(directory).catch(() => undefined);
+    await loadWorkspaceState();
+    await loadList();
+  }
+
+  async function loadRemoteSessions(workspacePath?: string | null) {
+    remoteSessionsLoading.value = true;
+    try {
+      remoteSessions.value = await bridge().work.remoteSessions(workspacePath ?? activeWorkspace.value?.path ?? null);
+      return remoteSessions.value;
+    } finally {
+      remoteSessionsLoading.value = false;
+    }
+  }
+
+  async function importRemoteSession(sessionId: string, workspacePath?: string | null) {
+    const conv = await bridge().work.importSession(sessionId, workspacePath ?? activeWorkspace.value?.path ?? null);
+    await loadList();
+    await select(conv.id);
+    void loadRemoteSessions(workspacePath).catch(() => undefined);
+    return conv;
+  }
+
+  async function shareCurrent() {
+    if (!current.value) return null;
+    const res = await bridge().work.share(current.value.conversation.id);
+    current.value.conversation.share_url = res.url;
+    await loadList();
+    return res.url;
+  }
+
+  async function unshareCurrent() {
+    if (!current.value) return;
+    await bridge().work.unshare(current.value.conversation.id);
+    current.value.conversation.share_url = null;
+    await loadList();
+  }
+
+  async function exportJson(id: string) {
+    return bridge().work.exportJson(id);
   }
 
   async function ensureConversation() {
@@ -671,12 +937,13 @@ export const useWorkStore = defineStore("work", () => {
     if (current.value?.conversation.id === id) current.value.conversation.is_pinned = isPinned;
   }
 
-  async function remove(id: string) {
+  async function remove(id: string, deleteRemote = false) {
     clearDeltas(id);
     coalescersByConv.delete(id);
-    await bridge().work.delete(id);
+    await bridge().work.delete(id, { deleteRemote });
     delete detailCache.value[id];
     delete runsByConversation.value[id];
+    delete draftsByConversation.value[id];
     if (current.value?.conversation.id === id) current.value = null;
     await loadList();
   }
@@ -1231,6 +1498,33 @@ export const useWorkStore = defineStore("work", () => {
         }
         return;
       }
+      case "run.retry": {
+        run.retry = (data.retry as WorkSessionRetryState | null) ?? null;
+        return;
+      }
+      case "session.diff": {
+        if (conversationId === activeConversationId.value && Array.isArray(data.diffs)) {
+          sessionDiffs.value = (data.diffs as Array<Record<string, unknown>>)
+            .filter((x) => x && typeof x === "object")
+            .map((x) => ({
+              file: String(x.file ?? x.path ?? ""),
+              patch: typeof x.patch === "string" ? x.patch : undefined,
+              before: typeof x.before === "string" ? x.before : undefined,
+              after: typeof x.after === "string" ? x.after : undefined,
+              additions: typeof x.additions === "number" ? x.additions : undefined,
+              deletions: typeof x.deletions === "number" ? x.deletions : undefined,
+              status: (x.status === "added" || x.status === "deleted" || x.status === "modified"
+                ? x.status
+                : "modified") as WorkSessionDiffItem["status"],
+            }))
+            .filter((x) => x.file);
+        }
+        return;
+      }
+      case "session.compacted": {
+        void refreshConversation(conversationId);
+        return;
+      }
       case "approval.request":
       case "clarify.request": {
         if (Array.isArray(data.pending_controls)) {
@@ -1243,6 +1537,10 @@ export const useWorkStore = defineStore("work", () => {
             tool: data.tool ? String(data.tool) : null,
             preview: data.preview ?? null,
             choices: Array.isArray(data.choices) ? (data.choices as string[]) : null,
+            patterns: Array.isArray(data.patterns) ? (data.patterns as string[]) : undefined,
+            always_patterns: Array.isArray(data.always_patterns) ? (data.always_patterns as string[]) : undefined,
+            metadata: (data.metadata as Record<string, unknown> | null) ?? null,
+            questions: Array.isArray(data.questions) ? (data.questions as WorkClarifyQuestion[]) : null,
           });
           if (item.requestId && !run.pendingControls.some((c) => c.requestId === item.requestId)) {
             run.pendingControls = [...run.pendingControls, item];
@@ -1285,6 +1583,7 @@ export const useWorkStore = defineStore("work", () => {
           run.error = typeof data.error === "string" ? data.error : "任务执行失败";
         }
         run.streaming = false;
+        run.retry = null;
         run.pendingControls = [];
 
         if (conversationId !== activeConversationId.value && event.event === "run.completed") {
@@ -1344,11 +1643,11 @@ export const useWorkStore = defineStore("work", () => {
     await bridge().work.stop(current.value.conversation.id);
   }
 
-  async function approve(choice: WorkApprovalChoice) {
+  async function approve(choice: WorkApprovalChoice, message?: string) {
     if (!current.value || !pendingControl.value) return;
     const cid = current.value.conversation.id;
     const control = pendingControl.value;
-    await bridge().work.approve(cid, control.requestId, control.generation, choice);
+    await bridge().work.approve(cid, control.requestId, control.generation, choice, message);
     const run = ensureRun(cid);
     run.pendingControls = run.pendingControls.filter((c) => c.requestId !== control.requestId);
     if (run.pendingControls.length === 0) {
@@ -1356,11 +1655,23 @@ export const useWorkStore = defineStore("work", () => {
     }
   }
 
-  async function clarify(answer: string) {
+  async function clarify(answers: string | string[][]) {
     if (!current.value || !pendingControl.value) return;
     const cid = current.value.conversation.id;
     const control = pendingControl.value;
-    await bridge().work.clarify(cid, control.requestId, control.generation, answer);
+    await bridge().work.clarify(cid, control.requestId, control.generation, answers);
+    const run = ensureRun(cid);
+    run.pendingControls = run.pendingControls.filter((c) => c.requestId !== control.requestId);
+    if (run.pendingControls.length === 0) {
+      patchActive(cid, { status: "streaming" });
+    }
+  }
+
+  async function rejectClarify() {
+    if (!current.value || !pendingControl.value) return;
+    const cid = current.value.conversation.id;
+    const control = pendingControl.value;
+    await bridge().work.rejectClarify(cid, control.requestId);
     const run = ensureRun(cid);
     run.pendingControls = run.pendingControls.filter((c) => c.requestId !== control.requestId);
     if (run.pendingControls.length === 0) {
@@ -1395,6 +1706,10 @@ export const useWorkStore = defineStore("work", () => {
     plan,
     subagents,
     usage,
+    retryState,
+    totalRunningCount,
+    totalWaitingCount,
+    firstWaitingConversationId,
     activeAssistantId,
     activeConversationId,
     runsByConversation,
@@ -1418,11 +1733,25 @@ export const useWorkStore = defineStore("work", () => {
     commands,
     inspectorOpen,
     inspectorTab,
+    terminalOpen,
+    commandPaletteOpen,
+    commandPaletteMode,
+    diffModalOpen,
+    remoteSessions,
+    remoteSessionsLoading,
+    promptHistory,
     selectedTurnId,
     isConversationRunning,
     isConversationWaiting,
     hasUnreadDone,
     setInspectorOpen,
+    setTerminalOpen,
+    openCommandPalette,
+    closeCommandPalette,
+    getDraft,
+    setDraft,
+    pushPromptHistory,
+    setFocusConversationHandler,
     selectTurn,
     getTurnTimeline,
     getTurnLiveLabel,
@@ -1435,6 +1764,8 @@ export const useWorkStore = defineStore("work", () => {
     selectWorkspace,
     removeWorkspace,
     openInExplorer,
+    openInEditor,
+    revertFile,
     loadTree,
     toggleDir,
     openFilePreview,
@@ -1444,6 +1775,14 @@ export const useWorkStore = defineStore("work", () => {
     refreshWorkspace,
     loadSkills,
     create,
+    createWorktreeTask,
+    resetWorktree,
+    removeWorktree,
+    loadRemoteSessions,
+    importRemoteSession,
+    shareCurrent,
+    unshareCurrent,
+    exportJson,
     select,
     setSessionPrefs,
     rename,
@@ -1461,6 +1800,7 @@ export const useWorkStore = defineStore("work", () => {
     stop,
     approve,
     clarify,
+    rejectClarify,
     reset,
   };
 });

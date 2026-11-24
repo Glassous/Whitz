@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from "vue";
 import type { WorkMessage, WorkTokenUsage } from "@shared/work-types";
+import { useDesktopStore } from "../../stores/desktop";
 import { useWorkStore } from "../../stores/work";
 import { useSmartStreamScroll } from "@web/composables/useSmartStreamScroll";
 import MarkdownRenderer from "@web/components/chat/MarkdownRenderer.vue";
@@ -25,8 +26,10 @@ const emit = defineEmits<{
   unrevert: [];
   fork: [string];
   steps: [string];
+  sendToChat: [string];
 }>();
 
+const desktop = useDesktopStore();
 const work = useWorkStore();
 const scroller = ref<HTMLElement | null>(null);
 const wrapper = ref<HTMLElement | null>(null);
@@ -431,6 +434,15 @@ defineExpose({
                 @click="emit('fork', message.id)"
               >
                 分支对话
+              </button>
+              <button
+                v-if="desktop.loggedIn && desktop.online"
+                type="button"
+                class="focus-ring rounded-lg px-2 py-1 transition-colors hover:bg-hover hover:text-fg"
+                title="将此结果带入 Whitz 云端 Chat 继续讨论"
+                @click="emit('sendToChat', message.content)"
+              >
+                发往 Chat
               </button>
               <span v-if="usageOf(message)" class="ml-auto tabular-nums text-[11px] text-fg-faint">
                 {{ formatTokens(usageOf(message)!.total) }} tokens

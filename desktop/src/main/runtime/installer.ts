@@ -68,6 +68,10 @@ export function findOpenCodeCandidates(): Array<{ exe: string; source: RuntimeSo
   return [
     { exe: path.join(appData, "npm", "node_modules", "opencode-ai", "bin", "opencode.exe"), source: "npm" },
     { exe: path.join(home, ".opencode", "bin", "opencode.exe"), source: "system" },
+    { exe: path.join(home, ".bun", "bin", "opencode.exe"), source: "system" },
+    { exe: path.join(localAppData, "pnpm", "opencode.cmd"), source: "npm" },
+    { exe: path.join(home, ".volta", "bin", "opencode.exe"), source: "npm" },
+    { exe: path.join(home, ".cargo", "bin", "opencode.exe"), source: "system" },
     { exe: path.join(home, "scoop", "apps", "opencode", "current", "opencode.exe"), source: "scoop" },
     { exe: path.join(home, "scoop", "shims", "opencode.exe"), source: "scoop" },
     { exe: path.join(localAppData, "Microsoft", "WinGet", "Links", "opencode.exe"), source: "winget" },

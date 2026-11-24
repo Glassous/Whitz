@@ -8,9 +8,12 @@ import type {
   OpenCodeProviderInput,
   RuntimeProgress,
   RuntimeStatus,
+  WorkFormatterStatus,
   WorkLspStatus,
   WorkMcpServerInfo,
   WorkMcpServerInput,
+  WorkProviderCatalogItem,
+  WorkProviderOAuthStart,
   WorkSettings,
   WorkSettingsPatch,
 } from "@shared/work-types";
@@ -26,9 +29,12 @@ export const useRuntimeStore = defineStore("runtime", () => {
   const progress = ref<RuntimeProgress | null>(null);
   const settings = ref<WorkSettings | null>(null);
   const opencodeConfig = ref<OpenCodeConfigSnapshot | null>(null);
+  const providerCatalog = ref<WorkProviderCatalogItem[]>([]);
   const mcpServers = ref<WorkMcpServerInfo[]>([]);
   const lspStatuses = ref<WorkLspStatus[]>([]);
+  const formatterStatuses = ref<WorkFormatterStatus[]>([]);
   const busy = ref(false);
+  const upgrading = ref(false);
   const error = ref<string | null>(null);
 
   const ready = computed(() => status.value?.state === "ready");
@@ -164,6 +170,68 @@ export const useRuntimeStore = defineStore("runtime", () => {
     return lspStatuses.value;
   }
 
+  async function loadFormatterStatus(workspacePath?: string | null) {
+    formatterStatuses.value = await bridge().opencode.formatterStatus(workspacePath).catch(() => []);
+    return formatterStatuses.value;
+  }
+
+  async function authMcpServer(name: string, workspacePath?: string | null) {
+    mcpServers.value = await bridge().opencode.authMcp(name, workspacePath);
+    return mcpServers.value;
+  }
+
+  async function removeMcpAuth(name: string, workspacePath?: string | null) {
+    mcpServers.value = await bridge().opencode.removeMcpAuth(name, workspacePath);
+    return mcpServers.value;
+  }
+
+  async function loadProviderCatalog(workspacePath?: string | null) {
+    providerCatalog.value = await bridge().opencode.providerCatalog(workspacePath).catch(() => []);
+    return providerCatalog.value;
+  }
+
+  async function setProviderApiKey(providerId: string, apiKey: string) {
+    opencodeConfig.value = await bridge().opencode.setProviderApiKey(providerId, apiKey);
+    await Promise.all([loadSettings().catch(() => undefined), loadProviderCatalog().catch(() => undefined)]);
+    return opencodeConfig.value;
+  }
+
+  async function startProviderOAuth(
+    providerId: string,
+    methodIndex: number,
+    inputs?: Record<string, string>,
+    workspacePath?: string | null,
+  ): Promise<WorkProviderOAuthStart> {
+    return bridge().opencode.startProviderOAuth(providerId, methodIndex, inputs, workspacePath);
+  }
+
+  async function completeProviderOAuth(
+    providerId: string,
+    methodIndex: number,
+    code?: string,
+    workspacePath?: string | null,
+  ) {
+    opencodeConfig.value = await bridge().opencode.completeProviderOAuth(providerId, methodIndex, code, workspacePath);
+    await Promise.all([loadSettings().catch(() => undefined), loadProviderCatalog(workspacePath).catch(() => undefined)]);
+    return opencodeConfig.value;
+  }
+
+  async function upgrade(target?: string) {
+    upgrading.value = true;
+    error.value = null;
+    try {
+      const res = await bridge().runtime.upgrade(target);
+      apply(await bridge().runtime.status());
+      await loadOpenCodeConfig().catch(() => undefined);
+      return res;
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : "升级失败";
+      throw err;
+    } finally {
+      upgrading.value = false;
+    }
+  }
+
   async function setEnabledModels(refs: string[] | null) {
     return saveSettings({ enabled_models: refs });
   }
@@ -215,11 +283,14 @@ export const useRuntimeStore = defineStore("runtime", () => {
     progress,
     settings,
     opencodeConfig,
+    providerCatalog,
     mcpServers,
     lspStatuses,
+    formatterStatuses,
     allModels,
     enabledModels,
     busy,
+    upgrading,
     error,
     ready,
     installed,
@@ -230,15 +301,23 @@ export const useRuntimeStore = defineStore("runtime", () => {
     start,
     stop,
     restart,
+    upgrade,
     loadSettings,
     saveSettings,
     setEnabledModels,
     loadOpenCodeConfig,
+    loadProviderCatalog,
+    setProviderApiKey,
+    startProviderOAuth,
+    completeProviderOAuth,
     loadMcpServers,
     upsertMcpServer,
     deleteMcpServer,
     toggleMcpServer,
+    authMcpServer,
+    removeMcpAuth,
     loadLspStatus,
+    loadFormatterStatus,
     saveOpenCodeConfig,
     upsertOpenCodeProvider,
     deleteOpenCodeProvider,

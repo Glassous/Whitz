@@ -2,12 +2,15 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import type { WorkTimelineItem } from "@shared/work-types";
+import { buildFallbackPatch } from "../../lib/unifiedDiff";
 import { useRuntimeStore } from "../../stores/runtime";
 import { useWorkStore, type WorkInspectorTab } from "../../stores/work";
 import { useSmartStreamScroll } from "@web/composables/useSmartStreamScroll";
 import BaseButton from "@web/components/ui/BaseButton.vue";
 import WorkspaceTreeNode from "./WorkspaceTreeNode.vue";
 import WorkFilePreview from "./WorkFilePreview.vue";
+import WorkDiffViewer from "./WorkDiffViewer.vue";
+import WorkToolCard from "./WorkToolCard.vue";
 
 const emit = defineEmits<{
   insertPath: [string];
@@ -56,83 +59,9 @@ const planItems = computed(() => {
 const activeBranch = computed(() => work.vcsBranch || work.gitStatus.branch || null);
 const totalChangesBadge = computed(() => work.sessionDiffs.length || work.gitStatus.changes.length);
 
-function toolDisplayLabel(name: string | null | undefined): string {
-  const map: Record<string, string> = {
-    read: "读取文件",
-    read_file: "读取文件",
-    write: "写入文件",
-    write_file: "写入文件",
-    edit: "编辑文件",
-    multiedit: "批量编辑",
-    apply_patch: "应用补丁",
-    patch: "修改补丁",
-    glob: "文件匹配",
-    grep: "全文搜索",
-    list: "目录浏览",
-    search_files: "搜索工作区",
-    bash: "终端命令",
-    terminal: "终端命令",
-    execute_code: "代码执行",
-    webfetch: "抓取网页",
-    websearch: "网页检索",
-    web_search: "网页检索",
-    web_extract: "网页提取",
-    todowrite: "任务计划",
-    todo_list: "任务计划",
-    task: "子任务委派",
-    skill: "读取技能",
-  };
-  return (name && map[name]) || name || "工具调用";
-}
-
-function extractItemFilePath(item: WorkTimelineItem): string | null {
-  const tool = item.tool ?? "";
-  if (!["read", "write", "edit", "read_file", "write_file", "patch"].includes(tool)) return null;
-  const rawArgs = item.args;
-  if (!rawArgs) return null;
-  if (typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
-    const obj = rawArgs as Record<string, unknown>;
-    const p = obj.filePath ?? obj.path ?? obj.file_path ?? obj.target_file;
-    if (typeof p === "string" && p.trim()) return p.trim();
-  }
-  const raw = typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs);
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const p = parsed.filePath ?? parsed.path ?? parsed.file_path ?? parsed.target_file;
-    if (typeof p === "string" && p.trim()) return p.trim();
-  } catch {
-    const match = /["']?([a-zA-Z0-9_.\-\\/]+\.[a-zA-Z0-9]+)["']?/.exec(raw);
-    if (match) return match[1];
-  }
-  return null;
-}
-
-function formatPayloadValue(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function toolSummary(item: WorkTimelineItem): string {
-  if (item.title && item.title.trim()) return item.title.trim();
-  if (!item.args) return "";
-  const text = typeof item.args === "string" ? item.args : JSON.stringify(item.args);
-  return text.replace(/\s+/g, " ").slice(0, 90);
-}
-
 function previewStepFile(relPath: string) {
   void work.openFilePreview(relPath);
   work.inspectorTab = "files";
-}
-
-function stepDotColor(status?: string): string {
-  if (status === "running") return "var(--warning)";
-  if (status === "failed") return "var(--danger)";
-  return "var(--success)";
 }
 
 function switchTurn(delta: number) {
@@ -198,24 +127,28 @@ function openSessionDiffItem(file: string) {
   selectedSessionDiffFile.value = file;
   const item = work.sessionDiffs.find((d) => d.file === file);
   if (!item) return;
-  const beforeLines = (item.before ?? "").split("\n");
-  const afterLines = (item.after ?? "").split("\n");
-  const unified = [
-    `--- a/${item.file}`,
-    `+++ b/${item.file}`,
-    `@@ -1,${beforeLines.length} +1,${afterLines.length} @@`,
-    ...beforeLines.slice(0, 60).map((l) => `- ${l}`),
-    ...afterLines.slice(0, 80).map((l) => `+ ${l}`),
-  ].join("\n");
-  work.previewDiff = { path: item.file, diff: unified };
+  const patch = item.patch?.trim()
+    ? item.patch
+    : buildFallbackPatch(item.file, item.before ?? "", item.after ?? "");
+  work.previewDiff = { path: item.file, diff: patch };
+}
+
+async function handleRevertFile(relPath: string) {
+  try {
+    await work.revertFile(relPath);
+  } catch (err) {
+    work.error = err instanceof Error ? err.message : "回滚文件失败";
+  }
 }
 
 watch(
   () => work.inspectorTab,
   (tab) => {
+    const dir = work.activeWorkspace?.path ?? null;
     if (tab === "runtime") {
-      void runtime.loadMcpServers(work.activeWorkspace?.path ?? null);
-      void runtime.loadLspStatus(work.activeWorkspace?.path ?? null);
+      void runtime.loadMcpServers(dir);
+      void runtime.loadLspStatus(dir);
+      void runtime.loadFormatterStatus(dir);
     } else if (tab === "git") {
       void work.refreshSessionDiff();
       if (!work.sessionDiffs.length && work.gitStatus.changes.length) {
@@ -228,7 +161,7 @@ watch(
 
 <template>
   <aside class="flex h-full w-full flex-col bg-sidebar">
-    <!-- Top Tabs Header (Borderless, Single-Line, Aligned with PlanPanel.vue) -->
+    <!-- Top Tabs Header -->
     <div class="flex h-13 shrink-0 items-center justify-between gap-2 px-3 pr-14 pt-1">
       <div class="flex min-w-0 items-center gap-0.5 rounded-xl bg-surface/65 p-0.5">
         <button
@@ -268,13 +201,12 @@ watch(
       </button>
     </div>
 
-    <!-- Tab 1: Chronological Steps & Deep Thinking + Plan -->
+    <!-- Tab 1: Chronological Steps & Deep Thinking + Plan + Subagents -->
     <div
       v-if="work.inspectorTab === 'steps'"
       ref="stepsScroller"
       class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto custom-scrollbar p-3"
     >
-      <!-- Turn switcher when conversation has multiple turns -->
       <div
         v-if="assistantTurns.length > 1"
         class="flex items-center justify-between gap-2 rounded-xl bg-canvas/75 px-3 py-1.5 text-[11.5px] text-fg-muted"
@@ -329,7 +261,7 @@ watch(
         </ol>
       </section>
 
-      <!-- Subagents -->
+      <!-- Live Subagents -->
       <section v-if="work.subagents.length" class="rounded-2xl bg-canvas/85 p-3.5">
         <div class="flex items-center justify-between">
           <span class="text-[11px] font-medium uppercase tracking-[0.14em] text-fg-faint">子代理委派</span>
@@ -338,8 +270,11 @@ watch(
         <div class="mt-2.5 space-y-2">
           <div v-for="sub in work.subagents" :key="sub.id" class="rounded-xl bg-surface/65 px-3 py-2 text-[12px]">
             <div class="flex items-center justify-between gap-2">
-              <span class="font-medium text-fg">{{ sub.goal }}</span>
-              <span class="text-[10.5px] text-fg-faint">{{ sub.status }}</span>
+              <span class="truncate font-medium text-fg">{{ sub.goal }}</span>
+              <span class="shrink-0 text-[10.5px] tabular-nums text-fg-faint">
+                <template v-if="sub.toolCount">{{ sub.toolCount }} 工具 · </template>
+                {{ sub.status === "running" ? "运行中" : "已完成" }}
+              </span>
             </div>
             <p v-if="sub.summary" class="mt-1 text-[11.5px] text-fg-muted">{{ sub.summary }}</p>
           </div>
@@ -350,7 +285,7 @@ watch(
       <div v-if="!selectedTimeline.length && !planItems.length" class="flex flex-1 flex-col items-center justify-center rounded-2xl bg-canvas/55 p-6 text-center">
         <p class="text-[13px] font-medium text-fg">暂无执行步骤</p>
         <p class="mt-1.5 text-[12px] leading-relaxed text-fg-faint">
-          深度思考过程、过程说明与终端/文件工具调用会按时间顺序实时显示在这里，主对话区仅保留最终结果。
+          深度思考、命令输出、补丁改动与子代理委派会按时间顺序实时显示在这里，主对话区仅保留最终结果。
         </p>
       </div>
 
@@ -386,46 +321,14 @@ watch(
             <p class="whitespace-pre-wrap break-words">{{ item.text }}</p>
           </div>
 
-          <!-- Tool Invocation Card -->
-          <details
+          <!-- Specialized Tool / Subagent / Patch / Retry / Compaction Card -->
+          <WorkToolCard
             v-else
-            class="disclosure-card rounded-2xl bg-canvas/85 text-[12px]"
-            :open="item.status === 'running' || item.status === 'failed'"
-          >
-            <summary class="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2 select-none">
-              <span
-                class="h-1.5 w-1.5 shrink-0 rounded-full"
-                :class="{ 'animate-pulse': item.status === 'running' }"
-                :style="{ background: stepDotColor(item.status) }"
-              />
-              <span class="shrink-0 font-medium text-fg">{{ toolDisplayLabel(item.tool) }}</span>
-              <span class="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-faint">
-                {{ extractItemFilePath(item) || toolSummary(item) }}
-              </span>
-              <button
-                v-if="extractItemFilePath(item)"
-                type="button"
-                class="shrink-0 rounded-lg bg-surface px-2 py-0.5 text-[10.5px] text-fg-muted transition-colors hover:text-fg"
-                @click.stop.prevent="previewStepFile(extractItemFilePath(item)!)"
-              >
-                预览
-              </button>
-              <span v-if="typeof item.duration === 'number'" class="shrink-0 text-[10.5px] tabular-nums text-fg-faint">
-                {{ item.duration.toFixed(1) }}s
-              </span>
-            </summary>
-            <div class="space-y-2 px-3.5 pb-3 pt-1">
-              <pre
-                v-if="item.args"
-                class="max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-code px-3 py-2 font-mono text-[11px] leading-relaxed text-[#c6c5be]"
-              >{{ formatPayloadValue(item.args) }}</pre>
-              <pre
-                v-if="item.result || item.error"
-                class="max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-code px-3 py-2 font-mono text-[11px] leading-relaxed"
-                :class="item.status === 'failed' ? 'text-[#f3a6a0]' : 'text-[#d6d5ce]'"
-              >{{ formatPayloadValue(item.error ?? item.result ?? "") }}</pre>
-            </div>
-          </details>
+            :item="item"
+            :workspace-path="work.activeWorkspace?.path"
+            @preview-file="previewStepFile"
+            @open-diff-tab="work.inspectorTab = 'git'; work.refreshSessionDiff()"
+          />
         </template>
       </template>
     </div>
@@ -446,11 +349,14 @@ watch(
             {{ work.activeWorkspace.name }}
           </span>
           <div class="flex shrink-0 items-center gap-2 text-[11px] text-fg-faint">
+            <button type="button" class="hover:text-fg" title="快速定位文件 (Ctrl+P)" @click="work.openCommandPalette('files')">
+              搜索
+            </button>
             <button type="button" class="hover:text-fg" title="由 OpenCode 自动分析生成项目 AGENTS.md" @click="work.initAgentsMd()">
               /init
             </button>
             <button type="button" class="hover:text-fg" @click="work.openInExplorer()">
-              打开目录
+              目录
             </button>
           </div>
         </div>
@@ -478,12 +384,13 @@ watch(
           :file="work.previewFile"
           @close="work.previewFile = null"
           @open-explorer="work.openInExplorer($event)"
+          @open-editor="work.openInEditor($event)"
           @insert-path="emit('insertPath', $event)"
         />
       </template>
     </div>
 
-    <!-- Tab 2: Session Diff & Git Changes -->
+    <!-- Tab 3: Session Diff & Git Changes with Unified/Split Viewer -->
     <div v-else-if="work.inspectorTab === 'git'" class="flex min-h-0 flex-1 flex-col gap-2.5 p-3">
       <div class="flex items-center justify-between gap-2 px-1 text-[12px]">
         <div class="flex items-center gap-1 rounded-xl bg-surface/75 p-0.5">
@@ -505,16 +412,27 @@ watch(
           </button>
         </div>
 
-        <span v-if="activeBranch" class="truncate font-mono text-[11px] text-fg-faint" :title="`当前分支: ${activeBranch}`">
-          ⎇ {{ activeBranch }}
-        </span>
+        <div class="flex min-w-0 items-center gap-1.5">
+          <span v-if="activeBranch" class="truncate font-mono text-[11px] text-fg-faint" :title="`当前分支: ${activeBranch}`">
+            ⎇ {{ activeBranch }}
+          </span>
+          <button
+            v-if="work.sessionDiffs.length || work.gitStatus.changes.length"
+            type="button"
+            class="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-fg-faint hover:bg-hover hover:text-fg"
+            title="全屏评审变更"
+            @click="work.diffModalOpen = true"
+          >
+            放大
+          </button>
+        </div>
       </div>
 
       <!-- Session-level Diff -->
       <template v-if="diffScope === 'session'">
         <div
           class="min-h-0 overflow-y-auto custom-scrollbar rounded-2xl bg-canvas/70 p-1.5"
-          :class="work.previewDiff ? 'max-h-[40%] shrink-0' : 'flex-1'"
+          :class="work.previewDiff ? 'max-h-[38%] shrink-0' : 'flex-1'"
         >
           <div v-if="!work.sessionDiffs.length" class="p-4 text-center text-[12px] text-fg-faint">
             当前会话尚未产生文件快照改动
@@ -527,7 +445,7 @@ watch(
             :class="activeSessionDiff?.file === item.file ? 'bg-active text-fg font-medium' : 'text-fg-muted'"
             @click="openSessionDiffItem(item.file)"
           >
-            <span class="min-w-0 flex-1 truncate">{{ item.file }}</span>
+            <span class="min-w-0 flex-1 truncate font-mono text-[11.5px]">{{ item.file }}</span>
             <span class="shrink-0 font-mono text-[11px] tabular-nums" :class="gitBadgeColor(item.status ?? 'modified')">
               <template v-if="item.additions !== undefined || item.deletions !== undefined">
                 +{{ item.additions ?? 0 }} / -{{ item.deletions ?? 0 }}
@@ -546,7 +464,7 @@ watch(
         <div
           v-else
           class="min-h-0 overflow-y-auto custom-scrollbar rounded-2xl bg-canvas/70 p-1.5"
-          :class="work.previewDiff ? 'max-h-[40%] shrink-0' : 'flex-1'"
+          :class="work.previewDiff ? 'max-h-[38%] shrink-0' : 'flex-1'"
         >
           <div v-if="!work.gitStatus.changes.length" class="p-4 text-center text-[12px] text-fg-faint">
             工作区干净，暂无未提交改动
@@ -559,7 +477,7 @@ watch(
             :class="work.previewDiff?.path === change.path ? 'bg-active text-fg font-medium' : 'text-fg-muted'"
             @click="work.openDiffPreview(change.path)"
           >
-            <span class="min-w-0 flex-1 truncate">{{ change.path }}</span>
+            <span class="min-w-0 flex-1 truncate font-mono text-[11.5px]">{{ change.path }}</span>
             <span class="shrink-0 font-mono text-[11px] font-semibold" :class="gitBadgeColor(change.status)">
               {{ change.status }}
             </span>
@@ -567,16 +485,24 @@ watch(
         </div>
       </template>
 
-      <WorkFilePreview
+      <WorkDiffViewer
         v-if="work.previewDiff"
-        :diff="work.previewDiff"
+        :file-path="work.previewDiff.path"
+        :patch="work.previewDiff.diff"
+        :additions="activeSessionDiff?.additions"
+        :deletions="activeSessionDiff?.deletions"
+        :can-revert="Boolean(work.gitStatus.is_repo && work.previewDiff.path !== '全部变更')"
+        :can-expand="true"
         @close="work.previewDiff = null; selectedSessionDiffFile = null"
+        @open-file="work.openFilePreview($event)"
         @open-explorer="work.openInExplorer($event)"
         @insert-path="emit('insertPath', $event)"
+        @revert-file="handleRevertFile"
+        @expand="work.diffModalOpen = true"
       />
     </div>
 
-    <!-- Tab 4: Runtime + MCP + LSP + Context Compact -->
+    <!-- Tab 4: Runtime + MCP + LSP + Formatter -->
     <div v-else class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto custom-scrollbar p-3">
       <section class="rounded-2xl bg-canvas/85 p-3.5">
         <div class="flex items-center justify-between">
@@ -596,7 +522,10 @@ watch(
         </p>
         <div class="mt-3 flex flex-wrap gap-2">
           <BaseButton size="sm" variant="secondary" :loading="runtime.busy" @click="runtime.restart()">重启服务</BaseButton>
-          <BaseButton size="sm" variant="ghost" @click="router.push({ name: 'work-settings' })">Work 设置</BaseButton>
+          <BaseButton size="sm" variant="ghost" @click="work.setTerminalOpen(!work.terminalOpen)">
+            {{ work.terminalOpen ? "收起终端" : "打开终端" }}
+          </BaseButton>
+          <BaseButton size="sm" variant="ghost" @click="router.push({ name: 'work-settings' })">设置</BaseButton>
         </div>
       </section>
 
@@ -619,23 +548,42 @@ watch(
             class="flex items-center justify-between gap-2 rounded-xl bg-surface/55 px-2.5 py-1.5 text-[12px]"
           >
             <span class="truncate text-fg">{{ m.name }}</span>
-            <button
-              type="button"
-              class="shrink-0 rounded-md px-1.5 py-0.5 text-[10.5px]"
-              :style="{ color: m.status === 'connected' ? 'var(--success)' : m.status === 'failed' ? 'var(--danger)' : 'var(--fg-faint)' }"
-              @click="runtime.toggleMcpServer(m.name, m.status !== 'connected', work.activeWorkspace?.path)"
-            >
-              {{ m.status === "connected" ? "已连接" : m.status === "disabled" ? "已停用" : m.status }}
-            </button>
+            <div class="flex shrink-0 items-center gap-1">
+              <button
+                v-if="m.status === 'needs_auth'"
+                type="button"
+                class="rounded-md bg-warning-weak px-1.5 py-0.5 text-[10.5px] font-medium text-warning"
+                @click="runtime.authMcpServer(m.name, work.activeWorkspace?.path)"
+              >
+                OAuth 鉴权
+              </button>
+              <button
+                type="button"
+                class="rounded-md px-1.5 py-0.5 text-[10.5px]"
+                :style="{ color: m.status === 'connected' ? 'var(--success)' : m.status === 'failed' ? 'var(--danger)' : 'var(--fg-faint)' }"
+                @click="runtime.toggleMcpServer(m.name, m.status !== 'connected', work.activeWorkspace?.path)"
+              >
+                {{ m.status === "connected" ? "已连接" : m.status === "disabled" ? "已停用" : m.status }}
+              </button>
+            </div>
           </div>
         </div>
         <p v-else class="mt-2 text-[11.5px] text-fg-faint">暂未配置 MCP 服务器</p>
       </section>
 
       <!-- LSP Status Strip -->
-      <section v-if="runtime.lspStatuses.length" class="rounded-2xl bg-canvas/85 p-3.5">
-        <span class="text-[11px] font-medium uppercase tracking-[0.14em] text-fg-faint">LSP 语言服务器</span>
-        <div class="mt-2 space-y-1">
+      <section class="rounded-2xl bg-canvas/85 p-3.5">
+        <div class="flex items-center justify-between">
+          <span class="text-[11px] font-medium uppercase tracking-[0.14em] text-fg-faint">LSP 语言服务器</span>
+          <button
+            type="button"
+            class="text-[11px] text-fg-faint hover:text-fg"
+            @click="runtime.loadLspStatus(work.activeWorkspace?.path)"
+          >
+            刷新
+          </button>
+        </div>
+        <div v-if="runtime.lspStatuses.length" class="mt-2 space-y-1">
           <div
             v-for="lsp in runtime.lspStatuses"
             :key="lsp.id"
@@ -643,9 +591,26 @@ watch(
           >
             <span class="truncate">{{ lsp.name }}</span>
             <span class="text-[10.5px]" :style="{ color: lsp.status === 'connected' ? 'var(--success)' : 'var(--danger)' }">
-              {{ lsp.status }}
+              {{ lsp.status === "connected" ? "已就绪" : "异常" }}
             </span>
           </div>
+        </div>
+        <p v-else class="mt-2 text-[11.5px] text-fg-faint">打开项目源码后自动按语言激活 LSP</p>
+      </section>
+
+      <!-- Formatter Status Strip -->
+      <section v-if="runtime.formatterStatuses.length" class="rounded-2xl bg-canvas/85 p-3.5">
+        <span class="text-[11px] font-medium uppercase tracking-[0.14em] text-fg-faint">代码格式化器</span>
+        <div class="mt-2 flex flex-wrap gap-1.5">
+          <span
+            v-for="fmt in runtime.formatterStatuses"
+            :key="fmt.name"
+            class="rounded-lg bg-surface/75 px-2 py-0.5 text-[11px]"
+            :class="fmt.enabled ? 'text-fg' : 'text-fg-faint opacity-60'"
+            :title="fmt.extensions.join(', ')"
+          >
+            {{ fmt.name }}
+          </span>
         </div>
       </section>
     </div>

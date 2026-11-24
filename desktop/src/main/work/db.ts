@@ -79,7 +79,23 @@ function migrate(conn: Database.Database): void {
   if (!convNames.has("variant")) {
     conn.exec("ALTER TABLE conversations ADD COLUMN variant TEXT");
   }
+  if (!convNames.has("share_url")) {
+    conn.exec("ALTER TABLE conversations ADD COLUMN share_url TEXT");
+  }
+  if (!convNames.has("worktree_name")) {
+    conn.exec("ALTER TABLE conversations ADD COLUMN worktree_name TEXT");
+  }
+  if (!convNames.has("worktree_branch")) {
+    conn.exec("ALTER TABLE conversations ADD COLUMN worktree_branch TEXT");
+  }
+  if (!convNames.has("summary_json")) {
+    conn.exec("ALTER TABLE conversations ADD COLUMN summary_json TEXT");
+  }
+  if (!convNames.has("total_cost")) {
+    conn.exec("ALTER TABLE conversations ADD COLUMN total_cost REAL NOT NULL DEFAULT 0");
+  }
   conn.exec("CREATE INDEX IF NOT EXISTS ix_conversations_workspace ON conversations(workspace_path, updated_at)");
+  conn.exec("CREATE INDEX IF NOT EXISTS ix_conversations_oc_session ON conversations(opencode_session_id)");
 
   const msgCols = conn.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
   const msgNames = new Set(msgCols.map((c) => c.name));

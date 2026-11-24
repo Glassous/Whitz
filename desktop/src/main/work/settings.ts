@@ -20,6 +20,8 @@ interface RawWorkSettings {
   default_agent: string;
   default_variant: string;
   full_command_mode: boolean;
+  desktop_notifications: boolean;
+  auto_sync_cli_sessions: boolean;
   updated_at: string;
 }
 
@@ -54,21 +56,22 @@ function normalizeEnabledModels(raw: unknown): string[] | null {
 
 function readRaw(): RawWorkSettings {
   const fallbackMode = inferDefaultMode();
+  const defaults = (): RawWorkSettings => ({
+    mode: fallbackMode,
+    builtin_model: "whitz-default",
+    custom_opencode_exe: "",
+    enabled_models: null,
+    default_composer_model: "",
+    default_agent: "build",
+    default_variant: "",
+    full_command_mode: false,
+    desktop_notifications: true,
+    auto_sync_cli_sessions: true,
+    updated_at: new Date().toISOString(),
+  });
   try {
     const file = settingsFile();
-    if (!fs.existsSync(file)) {
-      return {
-        mode: fallbackMode,
-        builtin_model: "whitz-default",
-        custom_opencode_exe: "",
-        enabled_models: null,
-        default_composer_model: "",
-        default_agent: "build",
-        default_variant: "",
-        full_command_mode: false,
-        updated_at: new Date().toISOString(),
-      };
-    }
+    if (!fs.existsSync(file)) return defaults();
     const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as StoredWorkSettings;
     const rawMode = parsed.model?.mode ?? (parsed.model?.protocol === "builtin" ? "builtin" : undefined);
     const mode: WorkAccessMode = rawMode === "builtin" || rawMode === "opencode_local" ? rawMode : fallbackMode;
@@ -81,20 +84,12 @@ function readRaw(): RawWorkSettings {
       default_agent: parsed.model?.default_agent?.trim() || "build",
       default_variant: parsed.model?.default_variant?.trim() || "",
       full_command_mode: Boolean(parsed.model?.full_command_mode),
+      desktop_notifications: parsed.model?.desktop_notifications !== false,
+      auto_sync_cli_sessions: parsed.model?.auto_sync_cli_sessions !== false,
       updated_at: parsed.updated_at ?? new Date().toISOString(),
     };
   } catch {
-    return {
-      mode: fallbackMode,
-      builtin_model: "whitz-default",
-      custom_opencode_exe: "",
-      enabled_models: null,
-      default_composer_model: "",
-      default_agent: "build",
-      default_variant: "",
-      full_command_mode: false,
-      updated_at: new Date().toISOString(),
-    };
+    return defaults();
   }
 }
 
@@ -119,6 +114,8 @@ export function getWorkSettings(): WorkSettings {
       default_agent: raw.default_agent,
       default_variant: raw.default_variant,
       full_command_mode: raw.full_command_mode,
+      desktop_notifications: raw.desktop_notifications,
+      auto_sync_cli_sessions: raw.auto_sync_cli_sessions,
     },
     updated_at: raw.updated_at,
   };
@@ -138,6 +135,10 @@ export function saveWorkSettings(patch: WorkSettingsPatch): WorkSettings {
     default_agent: patch.default_agent !== undefined ? patch.default_agent.trim() || "build" : raw.default_agent,
     default_variant: patch.default_variant !== undefined ? patch.default_variant.trim() : raw.default_variant,
     full_command_mode: patch.full_command_mode !== undefined ? Boolean(patch.full_command_mode) : raw.full_command_mode,
+    desktop_notifications:
+      patch.desktop_notifications !== undefined ? Boolean(patch.desktop_notifications) : raw.desktop_notifications,
+    auto_sync_cli_sessions:
+      patch.auto_sync_cli_sessions !== undefined ? Boolean(patch.auto_sync_cli_sessions) : raw.auto_sync_cli_sessions,
     updated_at: new Date().toISOString(),
   };
 
@@ -157,6 +158,8 @@ export function saveWorkSettings(patch: WorkSettingsPatch): WorkSettings {
           default_agent: next.default_agent,
           default_variant: next.default_variant,
           full_command_mode: next.full_command_mode,
+          desktop_notifications: next.desktop_notifications,
+          auto_sync_cli_sessions: next.auto_sync_cli_sessions,
         },
         updated_at: next.updated_at,
       },

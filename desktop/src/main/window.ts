@@ -168,6 +168,27 @@ export function toggleWindow(): void {
   }
 }
 
+export function setWindowThemeOverlay(dark: boolean): void {
+  try {
+    nativeTheme.themeSource = dark ? "dark" : "light";
+  } catch {
+    /* ignore */
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    if (process.platform === "win32" && typeof mainWindow.setTitleBarOverlay === "function") {
+      mainWindow.setTitleBarOverlay({
+        color: "#00000000",
+        symbolColor: dark ? "#A1A1AA" : "#52525B",
+        height: 40,
+      });
+    }
+    mainWindow.setBackgroundColor(dark ? "#000000" : "#FFFFFF");
+  } catch {
+    /* ignore */
+  }
+}
+
 export function quitApp(): void {
   app.quit();
 }

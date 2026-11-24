@@ -72,6 +72,21 @@ const modelsErr = ref<string | null>(null);
 const permissionPreset = ref<Exclude<OpenCodePermissionPreset, "custom">>("smart");
 const fullCommandConfirmOpen = ref(false);
 const fullCommandMode = computed(() => Boolean(runtime.settings?.model.full_command_mode));
+const desktopNotifications = computed(() => runtime.settings?.model.desktop_notifications !== false);
+
+function toggleDesktopNotifications() {
+  void runtime.saveSettings({ desktop_notifications: !desktopNotifications.value });
+}
+
+async function runRuntimeUpgrade() {
+  runtimeMsg.value = null;
+  try {
+    const res = await runtime.upgrade();
+    runtimeMsg.value = res.detail || "OpenCode 已更新至最新版本";
+  } catch (err) {
+    runtimeMsg.value = err instanceof Error ? err.message : "升级失败";
+  }
+}
 
 function toggleFullCommandFromSettings() {
   if (fullCommandMode.value) {
@@ -538,26 +553,40 @@ onBeforeUnmount(() => {
                     {{ credits.tierLabel }} 额度：本周剩余 {{ credits.status.weekly.limit ? `${credits.weeklyPercent}%` : "不限" }}
                     <template v-if="credits.tier !== 'pro'"> · 5小时剩余 {{ credits.fiveHourPercent }}%</template>
                   </p>
+                  <p v-if="cfg?.whitz_configured && !cfg.whitz_port_matches" class="text-[11px] text-warning">
+                    检测到 opencode.json 中记录的端口与当前本地网关不一致，建议点击右侧同步端口。
+                  </p>
                 </div>
 
-                <BaseButton
-                  v-if="!cfg?.whitz_configured"
-                  size="sm"
-                  variant="secondary"
-                  :loading="savingMode"
-                  @click="writeWhitzToConfig"
-                >
-                  写入 opencode.json
-                </BaseButton>
-                <BaseButton
-                  v-else
-                  size="sm"
-                  variant="ghost"
-                  :loading="savingMode"
-                  @click="removeWhitzFromConfig"
-                >
-                  移除内置写入
-                </BaseButton>
+                <div class="flex shrink-0 items-center gap-1.5">
+                  <BaseButton
+                    v-if="cfg?.whitz_configured && !cfg.whitz_port_matches"
+                    size="sm"
+                    variant="secondary"
+                    :loading="savingMode"
+                    @click="writeWhitzToConfig"
+                  >
+                    同步端口
+                  </BaseButton>
+                  <BaseButton
+                    v-if="!cfg?.whitz_configured"
+                    size="sm"
+                    variant="secondary"
+                    :loading="savingMode"
+                    @click="writeWhitzToConfig"
+                  >
+                    写入 opencode.json
+                  </BaseButton>
+                  <BaseButton
+                    v-else
+                    size="sm"
+                    variant="ghost"
+                    :loading="savingMode"
+                    @click="removeWhitzFromConfig"
+                  >
+                    移除内置写入
+                  </BaseButton>
+                </div>
               </div>
 
               <div v-if="testResult" class="rounded-xl bg-canvas px-3.5 py-2 text-[12px]">
@@ -698,6 +727,29 @@ onBeforeUnmount(() => {
                   <span
                     class="inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform"
                     :class="fullCommandMode ? 'translate-x-4.5' : 'translate-x-1'"
+                  />
+                </button>
+              </div>
+
+              <!-- Desktop Notification Switch Card -->
+              <div class="flex items-center justify-between gap-3 rounded-xl bg-canvas/85 px-4 py-3">
+                <div class="min-w-0 flex-1">
+                  <span class="text-[13.5px] font-semibold text-fg">后台任务与审批桌面通知</span>
+                  <p class="mt-0.5 text-[12px] text-fg-muted">
+                    窗口未聚焦时，若并行任务完成或需要你授权/补充信息，弹出系统通知并支持点击直达会话。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  :aria-checked="desktopNotifications"
+                  class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors"
+                  :style="{ background: desktopNotifications ? 'var(--work-accent)' : 'var(--hover)' }"
+                  @click="toggleDesktopNotifications"
+                >
+                  <span
+                    class="inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform"
+                    :class="desktopNotifications ? 'translate-x-4.5' : 'translate-x-1'"
                   />
                 </button>
               </div>
@@ -856,6 +908,9 @@ onBeforeUnmount(() => {
 
               <div class="flex flex-wrap gap-2">
                 <BaseButton size="sm" variant="secondary" :loading="runtime.busy" @click="runtime.restart()">重启 OpenCode</BaseButton>
+                <BaseButton size="sm" variant="secondary" :loading="runtime.upgrading" :disabled="!runtime.installed" @click="runRuntimeUpgrade">
+                  检查并升级 OpenCode
+                </BaseButton>
                 <BaseButton size="sm" variant="ghost" @click="runtime.redetect()">重新检测</BaseButton>
                 <BaseButton size="sm" variant="ghost" @click="openLogs">打开日志</BaseButton>
                 <BaseButton size="sm" variant="ghost" @click="router.push({ name: 'work-setup' })">安装指引</BaseButton>

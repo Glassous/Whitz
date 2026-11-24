@@ -20,8 +20,9 @@ import {
 } from "../auth/authService";
 import { ensureAutoStarted, getStatus, restartRuntime, runtimeEvents, startRuntime, stopRuntime } from "../runtime/opencodeRuntime";
 import { autoDetectRuntime, pickOpenCodeExe, redetectRuntime } from "../runtime/installer";
-import { setWorkEventSink } from "../work/runner";
-import { getMainWindow } from "../window";
+import { hasAnyActiveRun, setWorkEventSink } from "../work/runner";
+import { OpenCodeClient } from "../work/opencodeClient";
+import { getMainWindow, setWindowThemeOverlay } from "../window";
 import { checkForUpdates, quitAndInstall } from "../updater";
 import { scoped } from "../logger";
 import { registerWorkHandlers } from "./workHandlers";
@@ -56,10 +57,17 @@ export function registerIpc(): void {
     else win.maximize();
   });
 
+  handle(IPC.appSetThemeOverlay, (dark: boolean) => {
+    setWindowThemeOverlay(Boolean(dark));
+  });
+
   handle(IPC.appQuit, () => app.quit());
   handle(IPC.updaterCheck, () => checkForUpdates());
   handle(IPC.updaterInstall, async () => {
-    if (getStatus().running) throw new Error("本地智能体运行中，请先停止 Work 任务再更新");
+    if (hasAnyActiveRun()) throw new Error("当前仍有运行中的 Work 任务，请等待完成或手动停止后再更新");
+    if (getStatus().running) {
+      await stopRuntime(true).catch(() => undefined);
+    }
     quitAndInstall();
   });
 
@@ -101,6 +109,17 @@ export function registerIpc(): void {
   handle(IPC.runtimeRestart, async () => {
     await restartRuntime();
     return { status: getStatus(), policy: getPolicy() };
+  });
+  handle(IPC.runtimeUpgrade, async (target?: string) => {
+    if (!getStatus().running) {
+      await startRuntime();
+    }
+    await new OpenCodeClient().upgradeGlobal(target);
+    redetectRuntime();
+    await restartRuntime().catch(() => undefined);
+    const next = getStatus();
+    runtimeEvents.emit("status", next);
+    return { ok: true, detail: `已升级至 OpenCode ${next.version ?? ""}`.trim() };
   });
   handle(IPC.runtimeOpenLogs, async () => {
     const dir = storagePaths().logs;

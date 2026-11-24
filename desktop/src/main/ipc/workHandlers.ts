@@ -24,6 +24,7 @@ import {
   getConversationDiff,
   hasAnyActiveRun,
   initConversationAgents,
+  rejectClarifyRun,
   revertToMessage,
   runShellCommand,
   runSlashCommand,
@@ -31,19 +32,42 @@ import {
   steerRun,
   stopRun,
   unrevertConversation,
+  updateModelContextLimits,
 } from "../work/runner";
+import {
+  exportConversationJson,
+  getSubsessionTimeline,
+  importRemoteSession,
+  listRemoteSessions,
+  shareConversation,
+  syncDeleteToOpenCode,
+  syncRenameToOpenCode,
+  unshareConversation,
+} from "../work/sessionSync";
+import {
+  createPtySession,
+  getPtyConnectInfo,
+  listActivePtys,
+  listPtyShells,
+  removePtySession,
+  updatePtySession,
+} from "../work/ptyService";
 import { getWorkSettings, saveWorkSettings } from "../work/settings";
 import {
+  attachmentsFromPaths,
   deleteWorkspace,
   getActiveWorkspace,
   getGitDiff,
   getGitStatus,
   listDirectoryTree,
   listSavedWorkspaces,
+  openFileInEditor,
   openInExplorer,
   pickAttachments,
   pickWorkspaceFolder,
   readWorkspaceFile,
+  revertGitFile,
+  saveClipboardImage,
   searchWorkspaceFiles,
   selectWorkspace,
 } from "../work/workspaceService";
@@ -52,6 +76,7 @@ import { resetRuntimeDetectCache } from "../runtime/installer";
 import { ensureBuiltinKey, getLocalGatewayStatus, localGatewayBaseUrl } from "../runtime/localOpenAIGateway";
 import {
   buildConfigSnapshot,
+  buildProviderCatalog,
   deleteMcpFromDisk,
   deleteProviderFromDisk,
   listMcpServersFromDisk,
@@ -78,12 +103,16 @@ import type {
   WorkApprovalChoice,
   WorkAttachment,
   WorkCommandInfo,
+  WorkFindMatch,
+  WorkFormatterStatus,
   WorkLspStatus,
   WorkMcpServerInfo,
   WorkMcpServerInput,
+  WorkProviderCatalogItem,
   WorkSessionPrefsPatch,
   WorkSettingsPatch,
   WorkSkillItem,
+  WorkSymbolMatch,
 } from "../../shared/work-types";
 
 const logger = scoped("ipc:work");
@@ -223,6 +252,15 @@ async function getLspList(workspacePath?: string | null): Promise<WorkLspStatus[
   }
 }
 
+async function getFormatterList(workspacePath?: string | null): Promise<WorkFormatterStatus[]> {
+  if (!getStatus().running) return [];
+  try {
+    return await new OpenCodeClient().getFormatterStatus(workspacePath ?? getActiveWorkspace()?.path ?? null);
+  } catch {
+    return [];
+  }
+}
+
 async function getVcsBranch(workspacePath?: string | null): Promise<{ branch: string | null }> {
   if (!getStatus().running) return { branch: null };
   try {
@@ -230,6 +268,16 @@ async function getVcsBranch(workspacePath?: string | null): Promise<{ branch: st
   } catch {
     return { branch: null };
   }
+}
+
+function cacheContextLimits(snapshot: OpenCodeConfigSnapshot): void {
+  const limits = new Map<string, number>();
+  for (const m of snapshot.available_models) {
+    if (m.context_limit && m.context_limit > 0) {
+      limits.set(m.ref, m.context_limit);
+    }
+  }
+  updateModelContextLimits(limits);
 }
 
 async function getOpenCodeSnapshot(): Promise<OpenCodeConfigSnapshot> {
@@ -241,27 +289,63 @@ async function getOpenCodeSnapshot(): Promise<OpenCodeConfigSnapshot> {
         client.listProviders(dir),
         client.getMcpStatus(dir).catch(() => null),
       ]);
-      return buildConfigSnapshot(live, liveMcp);
+      const snap = buildConfigSnapshot(live, liveMcp);
+      cacheContextLimits(snap);
+      return snap;
     } catch {
       /* fallback to disk only */
     }
   }
-  return buildConfigSnapshot();
+  const snap = buildConfigSnapshot();
+  cacheContextLimits(snap);
+  return snap;
+}
+
+async function getProviderCatalog(workspacePath?: string | null): Promise<WorkProviderCatalogItem[]> {
+  const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+  if (!getStatus().running) return buildProviderCatalog();
+  try {
+    const client = new OpenCodeClient();
+    const [live, authMethods] = await Promise.all([
+      client.listProviders(dir),
+      client.listProviderAuthMethods(dir).catch(() => ({})),
+    ]);
+    return buildProviderCatalog(live, authMethods);
+  } catch {
+    return buildProviderCatalog();
+  }
 }
 
 export function registerWorkHandlers(): void {
   handle(IPC.workList, (workspacePath?: string | null) => listConversations(workspacePath));
-  handle(IPC.workCreate, (title?: string, workspacePath?: string | null) =>
-    createConversation(title, workspacePath),
+  handle(
+    IPC.workCreate,
+    (
+      title?: string,
+      workspacePath?: string | null,
+      options?: { worktreeName?: string | null; worktreeBranch?: string | null },
+    ) =>
+      createConversation(title, workspacePath, {
+        worktree_name: options?.worktreeName ?? null,
+        worktree_branch: options?.worktreeBranch ?? null,
+      }),
   );
   handle(IPC.workGet, (id: string) => {
     const detail = getConversation(id);
     if (!detail) throw new Error("对话不存在");
     return detail;
   });
-  handle(IPC.workRename, (id: string, title: string) => renameConversation(id, title));
+  handle(IPC.workRename, async (id: string, title: string) => {
+    renameConversation(id, title);
+    await syncRenameToOpenCode(id, title);
+  });
   handle(IPC.workPin, (id: string, isPinned: boolean) => pinConversation(id, isPinned));
-  handle(IPC.workDelete, (id: string) => deleteConversation(id));
+  handle(IPC.workDelete, async (id: string, options?: { deleteRemote?: boolean }) => {
+    if (options?.deleteRemote) {
+      await syncDeleteToOpenCode(id);
+    }
+    deleteConversation(id);
+  });
   handle(IPC.workSetPrefs, (id: string, prefs: WorkSessionPrefsPatch) => setConversationPrefs(id, prefs));
   handle(IPC.workActiveRuns, () => getActiveRunSnapshots());
   handle(
@@ -282,11 +366,16 @@ export function registerWorkHandlers(): void {
   handle(IPC.workStop, (conversationId: string) => stopRun(conversationId));
   handle(
     IPC.workApprove,
-    (conversationId: string, requestId: string, generation: number, choice: WorkApprovalChoice) =>
-      approveRun(conversationId, requestId, generation, choice),
+    (conversationId: string, requestId: string, generation: number, choice: WorkApprovalChoice, message?: string) =>
+      approveRun(conversationId, requestId, generation, choice, message),
   );
-  handle(IPC.workClarify, (conversationId: string, requestId: string, generation: number, answer: string) =>
-    clarifyRun(conversationId, requestId, generation, answer),
+  handle(
+    IPC.workClarify,
+    (conversationId: string, requestId: string, generation: number, answers: string | string[][]) =>
+      clarifyRun(conversationId, requestId, generation, answers),
+  );
+  handle(IPC.workClarifyReject, (conversationId: string, requestId: string) =>
+    rejectClarifyRun(conversationId, requestId),
   );
   handle(IPC.workFork, (conversationId: string, messageId?: string | null) =>
     forkConversation(conversationId, messageId),
@@ -314,6 +403,15 @@ export function registerWorkHandlers(): void {
       runShellCommand(conversationId, command, options),
   );
   handle(IPC.workSessionDiff, (conversationId: string) => getConversationDiff(conversationId));
+  handle(IPC.workShare, (conversationId: string) => shareConversation(conversationId));
+  handle(IPC.workUnshare, (conversationId: string) => unshareConversation(conversationId));
+  handle(IPC.workRemoteSessions, (workspacePath?: string | null) => listRemoteSessions(workspacePath));
+  handle(IPC.workImportSession, (sessionId: string, workspacePath?: string | null) =>
+    importRemoteSession(sessionId, workspacePath),
+  );
+  handle(IPC.workSubsessionMessages, (childSessionId: string, workspacePath?: string | null) =>
+    getSubsessionTimeline(childSessionId, workspacePath),
+  );
   handle(IPC.workAgentsList, (workspacePath?: string | null) => listWorkAgents(workspacePath));
   handle(IPC.workCommandsList, (workspacePath?: string | null) => listWorkCommands(workspacePath));
 
@@ -331,8 +429,11 @@ export function registerWorkHandlers(): void {
   });
   handle(IPC.workTestModel, () => testModel());
   handle(IPC.workExport, (id: string) => exportConversation(id));
+  handle(IPC.workExportJson, (id: string) => exportConversationJson(id));
   handle(IPC.workSkillsList, (workspacePath?: string | null) => listWorkSkills(workspacePath));
   handle(IPC.workPickAttachments, () => pickAttachments());
+  handle(IPC.workSaveClipboardImage, (dataUrl: string, name?: string) => saveClipboardImage(dataUrl, name));
+  handle(IPC.workAttachmentsFromPaths, (filePaths: string[]) => attachmentsFromPaths(filePaths));
 
   handle(IPC.opencodeConfigGet, () => getOpenCodeSnapshot());
   handle(IPC.opencodeConfigSave, async (patch: OpenCodeConfigSavePatch) => {
@@ -361,6 +462,43 @@ export function registerWorkHandlers(): void {
     runtimeEvents.emit("status", getStatus());
     return getOpenCodeSnapshot();
   });
+  handle(IPC.opencodeProviderCatalog, (workspacePath?: string | null) => getProviderCatalog(workspacePath));
+  handle(IPC.opencodeProviderSetKey, async (providerId: string, apiKey: string) => {
+    const cleanId = providerId.trim();
+    const cleanKey = apiKey.trim();
+    if (!cleanId) throw new Error("缺少 Provider ID");
+    if (getStatus().running) {
+      const client = new OpenCodeClient();
+      if (cleanKey) await client.setAuth(cleanId, cleanKey);
+      else await client.removeAuth(cleanId);
+    }
+    await reloadIfConfigChanged();
+    runtimeEvents.emit("status", getStatus());
+    return getOpenCodeSnapshot();
+  });
+  handle(
+    IPC.opencodeProviderOAuthStart,
+    async (providerId: string, methodIndex: number, inputs?: Record<string, string>, workspacePath?: string | null) => {
+      if (!getStatus().running) throw new Error("请先等待 OpenCode 服务就绪");
+      const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+      const result = await new OpenCodeClient().authorizeProviderOAuth(providerId, methodIndex, inputs, dir);
+      if (result.url && /^https?:\/\//i.test(result.url)) {
+        void shell.openExternal(result.url).catch(() => undefined);
+      }
+      return result;
+    },
+  );
+  handle(
+    IPC.opencodeProviderOAuthCallback,
+    async (providerId: string, methodIndex: number, code?: string, workspacePath?: string | null) => {
+      if (!getStatus().running) throw new Error("请先等待 OpenCode 服务就绪");
+      const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+      await new OpenCodeClient().callbackProviderOAuth(providerId, methodIndex, code, dir);
+      await reloadIfConfigChanged();
+      runtimeEvents.emit("status", getStatus());
+      return getOpenCodeSnapshot();
+    },
+  );
   handle(IPC.opencodeWriteWhitz, async () => {
     writeWhitzProviderToDisk();
     await reloadIfConfigChanged();
@@ -400,10 +538,63 @@ export function registerWorkHandlers(): void {
     }
     return getMcpList(dir);
   });
+  handle(IPC.opencodeMcpAuth, async (name: string, workspacePath?: string | null) => {
+    const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+    if (!getStatus().running) throw new Error("OpenCode 服务尚未就绪");
+    await new OpenCodeClient().authenticateMcp(name, dir);
+    return getMcpList(dir);
+  });
+  handle(IPC.opencodeMcpAuthRemove, async (name: string, workspacePath?: string | null) => {
+    const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+    if (getStatus().running) {
+      await new OpenCodeClient().removeMcpAuth(name, dir);
+    }
+    return getMcpList(dir);
+  });
   handle(IPC.opencodeLspStatus, (workspacePath?: string | null) => getLspList(workspacePath));
+  handle(IPC.opencodeFormatterStatus, (workspacePath?: string | null) => getFormatterList(workspacePath));
   handle(IPC.opencodeVcsInfo, (workspacePath?: string | null) => getVcsBranch(workspacePath));
   handle(IPC.gatewayStatus, () => getLocalGatewayStatus());
 
+  // ---- PTY ----
+  handle(IPC.ptyShells, (workspacePath?: string | null) => listPtyShells(workspacePath));
+  handle(IPC.ptyList, (workspacePath?: string | null) => listActivePtys(workspacePath));
+  handle(
+    IPC.ptyCreate,
+    (options?: { command?: string; args?: string[]; cwd?: string; title?: string; workspacePath?: string | null }) =>
+      createPtySession(options),
+  );
+  handle(
+    IPC.ptyUpdate,
+    (ptyId: string, patch: { title?: string; size?: { rows: number; cols: number } }, workspacePath?: string | null) =>
+      updatePtySession(ptyId, patch, workspacePath),
+  );
+  handle(IPC.ptyRemove, (ptyId: string, workspacePath?: string | null) => removePtySession(ptyId, workspacePath));
+  handle(IPC.ptyConnectInfo, (ptyId: string, workspacePath?: string | null) => getPtyConnectInfo(ptyId, workspacePath));
+
+  // ---- Worktrees ----
+  handle(IPC.worktreeList, async (workspacePath?: string | null) => {
+    if (!getStatus().running) return [];
+    const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+    return new OpenCodeClient().listWorktrees(dir).catch(() => []);
+  });
+  handle(IPC.worktreeCreate, async (name?: string, workspacePath?: string | null) => {
+    if (!getStatus().running) throw new Error("OpenCode 服务尚未就绪");
+    const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+    return new OpenCodeClient().createWorktree(name, dir);
+  });
+  handle(IPC.worktreeRemove, async (directory: string, workspacePath?: string | null) => {
+    if (!getStatus().running) throw new Error("OpenCode 服务尚未就绪");
+    const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+    await new OpenCodeClient().removeWorktree(directory, dir);
+  });
+  handle(IPC.worktreeReset, async (directory: string, workspacePath?: string | null) => {
+    if (!getStatus().running) throw new Error("OpenCode 服务尚未就绪");
+    const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+    await new OpenCodeClient().resetWorktree(directory, dir);
+  });
+
+  // ---- Workspace & Search ----
   handle(IPC.workspaceList, () => listSavedWorkspaces());
   handle(IPC.workspaceActive, () => getActiveWorkspace());
   handle(IPC.workspacePick, async () => {
@@ -421,13 +612,44 @@ export function registerWorkHandlers(): void {
     runtimeEvents.emit("status", getStatus());
   });
   handle(IPC.workspaceOpenExplorer, (targetPath?: string) => openInExplorer(targetPath));
+  handle(IPC.workspaceOpenInEditor, (relPath: string) => openFileInEditor(relPath));
   handle(IPC.workspaceFsTree, (relDir?: string, includeHidden?: boolean) =>
     listDirectoryTree(relDir ?? "", Boolean(includeHidden)),
   );
-  handle(IPC.workspaceFsSearch, (query: string) => searchWorkspaceFiles(query));
+  handle(IPC.workspaceFsSearch, async (query: string) => {
+    const ws = getActiveWorkspace();
+    if (ws && getStatus().running) {
+      try {
+        const res = await new OpenCodeClient().findFiles(query, ws.path);
+        if (res.length) return res.slice(0, 50);
+      } catch {
+        /* fallback to local fs scan */
+      }
+    }
+    return searchWorkspaceFiles(query);
+  });
+  handle(IPC.workspaceFindText, async (pattern: string, workspacePath?: string | null): Promise<WorkFindMatch[]> => {
+    if (!pattern.trim() || !getStatus().running) return [];
+    const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+    try {
+      return await new OpenCodeClient().findText(pattern.trim(), dir);
+    } catch {
+      return [];
+    }
+  });
+  handle(IPC.workspaceFindSymbols, async (query: string, workspacePath?: string | null): Promise<WorkSymbolMatch[]> => {
+    if (!query.trim() || !getStatus().running) return [];
+    const dir = workspacePath ?? getActiveWorkspace()?.path ?? null;
+    try {
+      return await new OpenCodeClient().findSymbols(query.trim(), dir);
+    } catch {
+      return [];
+    }
+  });
   handle(IPC.workspaceFsRead, (relPath: string) => readWorkspaceFile(relPath));
   handle(IPC.workspaceGitStatus, () => getGitStatus());
   handle(IPC.workspaceGitDiff, (relPath?: string) => getGitDiff(relPath));
+  handle(IPC.workspaceGitRevertFile, (relPath: string) => revertGitFile(relPath));
 
   logger.info("work ipc registered");
 }

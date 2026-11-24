@@ -15,6 +15,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: [];
   "drag-progress": [number | null];
+  openRemoteSessions: [string | null];
+  createWorktree: [string];
 }>();
 
 const work = useWorkStore();
@@ -35,6 +37,7 @@ const renamingId = ref<string | null>(null);
 const renameText = ref("");
 const deletingId = ref<string | null>(null);
 const deletingTitle = ref("");
+const deleteRemoteSession = ref(false);
 const noticeMessage = ref<string | null>(null);
 
 const DEFAULT_VISIBLE_PER_PROJECT = 6;
@@ -163,12 +166,28 @@ function askDelete(conv: WorkConversation) {
   menuConvId.value = null;
   deletingId.value = conv.id;
   deletingTitle.value = conv.title;
+  deleteRemoteSession.value = false;
 }
 
 async function confirmDelete() {
   if (!deletingId.value) return;
-  await work.remove(deletingId.value);
+  await work.remove(deletingId.value, deleteRemoteSession.value);
   deletingId.value = null;
+}
+
+async function handleExportJson(id: string) {
+  menuConvId.value = null;
+  try {
+    const res = await work.exportJson(id);
+    if (res?.path) {
+      noticeMessage.value = `已导出 JSON 至 ${res.path}`;
+      setTimeout(() => {
+        noticeMessage.value = null;
+      }, 3000);
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 async function handleExport(id: string) {
@@ -439,7 +458,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeMenus));
             <!-- Project Dropdown Menu -->
             <div
               v-if="menuGroupKey === group.key && group.path"
-              class="absolute right-1 top-8 z-30 w-36 rounded-xl bg-canvas p-1 text-[12.5px] dark:bg-[#1a1a19]"
+              class="absolute right-1 top-8 z-30 w-44 rounded-xl bg-canvas p-1 text-[12.5px] dark:bg-[#1a1a19]"
               style="box-shadow: var(--shadow)"
               @click.stop
             >
@@ -449,6 +468,20 @@ onBeforeUnmount(() => document.removeEventListener("click", closeMenus));
                 @click="menuGroupKey = null; work.selectWorkspace(group.path!)"
               >
                 设为当前工作区
+              </button>
+              <button
+                type="button"
+                class="flex w-full rounded-lg px-2.5 py-1.5 text-left text-fg-muted hover:bg-hover hover:text-fg"
+                @click="menuGroupKey = null; emit('createWorktree', group.path!)"
+              >
+                隔离 Worktree 新建任务
+              </button>
+              <button
+                type="button"
+                class="flex w-full rounded-lg px-2.5 py-1.5 text-left text-fg-muted hover:bg-hover hover:text-fg"
+                @click="menuGroupKey = null; emit('openRemoteSessions', group.path!)"
+              >
+                同步 OpenCode CLI 会话
               </button>
               <button
                 type="button"
@@ -509,6 +542,12 @@ onBeforeUnmount(() => document.removeEventListener("click", closeMenus));
                 />
 
                 <span class="min-w-0 flex-1 truncate">{{ conv.title }}</span>
+                <span
+                  v-if="conv.summary && (conv.summary.additions || conv.summary.deletions)"
+                  class="hidden shrink-0 font-mono text-[10px] text-fg-faint group-hover/item:hidden xl:inline"
+                >
+                  +{{ conv.summary.additions }}
+                </span>
               </button>
 
               <!-- Right timestamp (fades out on hover to show ···) -->
@@ -570,6 +609,13 @@ onBeforeUnmount(() => document.removeEventListener("click", closeMenus));
                 </button>
                 <button
                   type="button"
+                  class="flex w-full rounded-lg px-2.5 py-1.5 text-left text-fg-muted hover:bg-hover hover:text-fg"
+                  @click="handleExportJson(conv.id)"
+                >
+                  导出 OpenCode JSON
+                </button>
+                <button
+                  type="button"
                   class="flex w-full rounded-lg px-2.5 py-1.5 text-left text-danger hover:bg-hover"
                   @click="askDelete(conv)"
                 >
@@ -613,10 +659,14 @@ onBeforeUnmount(() => document.removeEventListener("click", closeMenus));
   </BaseModal>
 
   <!-- Delete Confirm Modal -->
-  <BaseModal :open="Boolean(deletingId)" title="删除任务" max-width="400px" @close="deletingId = null">
+  <BaseModal :open="Boolean(deletingId)" title="删除任务" max-width="420px" @close="deletingId = null">
     <p class="text-[13.5px] leading-relaxed text-fg-muted">
       确认删除本地任务「<span class="font-medium text-fg">{{ deletingTitle }}</span>」？删除后无法恢复。
     </p>
+    <label class="mt-3 flex cursor-pointer items-center gap-2 rounded-xl bg-surface/70 px-3 py-2 text-[12px] text-fg-muted">
+      <input v-model="deleteRemoteSession" type="checkbox" class="accent-primary" />
+      <span>同时删除本机 OpenCode 底层历史会话</span>
+    </label>
     <div class="mt-5 flex justify-end gap-2">
       <BaseButton size="sm" variant="ghost" @click="deletingId = null">取消</BaseButton>
       <BaseButton size="sm" variant="danger" @click="confirmDelete">删除</BaseButton>
