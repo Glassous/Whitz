@@ -23,6 +23,7 @@ from app.api.routes import (
     library,
     mcp,
     memory,
+    posts,
     schedules,
     search,
     skills,
@@ -32,7 +33,7 @@ from app.core.config import get_settings
 from app.core.metrics import metrics_middleware, render_prometheus_metrics
 from app.core.redis import close_redis, get_redis
 from app.db.session import SessionLocal, detect_pgvector, engine
-from app.services import bootstrap, embeddings, rag_jobs, run_supervisor, scheduler_service
+from app.services import bootstrap, embeddings, posts_service, rag_jobs, run_supervisor, scheduler_service
 from app.services.agent_client import aclose_shared_agent_clients
 
 logging.basicConfig(level=logging.INFO)
@@ -53,9 +54,11 @@ async def lifespan(app: FastAPI):
             logger.warning("启动初始化失败（数据库或卷可能尚未就绪）: %s", exc)
     run_supervisor.start_reconciler()
     scheduler_service.start_scheduler()
+    posts_service.start_post_scheduler()
     rag_jobs.start_rag_job_worker()
     yield
     await rag_jobs.stop_rag_job_worker()
+    await posts_service.stop_post_scheduler()
     await scheduler_service.stop_scheduler()
     await run_supervisor.stop_reconciler_and_supervisors()
     await aclose_shared_agent_clients()
@@ -118,6 +121,7 @@ def create_app() -> FastAPI:
     app.include_router(search.router)
     app.include_router(skills.router)
     app.include_router(schedules.router)
+    app.include_router(posts.router)
     app.include_router(mcp.router)
     app.include_router(chat.router)
     app.include_router(chat.events_router)

@@ -28,6 +28,8 @@ export interface User {
   memory_consented_at: string | null;
   memory_require_confirm: boolean;
   ai_reactions_enabled?: boolean;
+  ai_posts_enabled?: boolean;
+  ai_posts_consented_at?: string | null;
   created_at: string;
 }
 
@@ -691,4 +693,78 @@ export interface SchedulePreviewResult {
   schedule_description: string;
   next_runs: string[];
   error?: string | null;
+}
+
+export type PostKind = "opinion" | "digest" | "insight" | "inspiration" | "note" | string;
+
+export interface PostWebSource {
+  title: string;
+  url: string;
+  site_name?: string;
+  published_at?: string;
+}
+
+export interface PostCommentItem {
+  id: string;
+  post_id: string;
+  author_type: "user" | "ai";
+  content: string;
+  reply_to_id?: string | null;
+  reply_to_author_type?: "user" | "ai" | null;
+  reply_to_excerpt?: string | null;
+  ai_liked: boolean;
+  created_at: string;
+}
+
+export interface PostItem {
+  id: string;
+  author_type: "ai" | "user";
+  post_kind: PostKind;
+  title: string;
+  content: string;
+  tags: string[];
+  web_sources: PostWebSource[];
+  source_collection_id?: string | null;
+  source_collection_name?: string | null;
+  source_memory_ids: string[];
+  memory_entry_id?: string | null;
+  is_liked: boolean;
+  ai_liked: boolean;
+  is_bookmarked: boolean;
+  conversation_id?: string | null;
+  comment_count: number;
+  comments: PostCommentItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PostQuotaSummary {
+  ai_posts_enabled: boolean;
+  ai_posts_consented_at?: string | null;
+  memory_enabled: boolean;
+  tier: MembershipTier | string;
+  tier_label: string;
+  max_daily_cap: number;
+  memory_entry_count: number;
+  active_collection_count: number;
+  estimated_daily_count: number;
+  today_generated_count: number;
+  today_status?: string | null;
+  local_date: string;
+}
+
+export interface PostListResponse {
+  items: PostItem[];
+  next_cursor: string | null;
+  quota: PostQuotaSummary;
+}
+
+export interface PostCommentCreateResponse {
+  comment: PostCommentItem;
+  ai_reply_scheduled: boolean;
+}
+
+export interface PostDiscussResponse {
+  conversation_id: string;
+  prefill_prompt: string;
 }

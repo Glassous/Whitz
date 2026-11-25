@@ -26,6 +26,7 @@ import DeliverableModal from "../components/chat/DeliverableModal.vue";
 import ImageLightboxModal from "../components/chat/ImageLightboxModal.vue";
 import LibraryPanel from "../components/settings/LibraryPanel.vue";
 import ScheduledTasksPanel from "../components/schedules/ScheduledTasksPanel.vue";
+import PostsFeedPanel from "../components/posts/PostsFeedPanel.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -44,7 +45,7 @@ let openSeq = 0;
 const routeConversationId = computed(() => (typeof route.params.id === "string" && route.params.id ? route.params.id : null));
 const isNewSideDraft = computed(() => route.query.new === "1");
 
-const activeView = ref<"chat" | "library" | "schedules">("chat");
+const activeView = ref<"chat" | "posts" | "library" | "schedules">("chat");
 
 const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
 const assistantAvatarUrl = computed(() => auth.user?.assistant_avatar_url ?? null);
@@ -55,6 +56,7 @@ const isCurrentScheduled = computed(() => {
   return Boolean(cur.is_scheduled || (cur.title || "").startsWith("[定时]"));
 });
 const headerTitle = computed(() => {
+  if (activeView.value === "posts") return "动态";
   if (activeView.value === "library") return "资料库";
   if (activeView.value === "schedules") return "定时任务";
   if (isMainChat.value) return "主要聊天";
@@ -309,13 +311,24 @@ function createSideConversation() {
   void router.push({ name: "chat", query: { new: "1" } });
 }
 
-function onSwitchView(view: "chat" | "library" | "schedules") {
+function onSwitchView(view: "chat" | "posts" | "library" | "schedules") {
   activeView.value = view;
-  if (view === "library" || view === "schedules") {
+  if (view === "posts" || view === "library" || view === "schedules") {
     previewTarget.value = null;
     mobileStepsOpen.value = false;
   } else if (!conversations.current && !isNewSideDraft.value) {
     void openMainConversation();
+  }
+}
+
+async function onDiscussPostInChat(payload: { conversationId: string; prefillPrompt: string }) {
+  await conversations.fetchList();
+  await onSelect(payload.conversationId);
+  if (payload.prefillPrompt) {
+    const input = chatInputRef.value as any;
+    if (input && typeof input.setText === "function") {
+      input.setText(payload.prefillPrompt);
+    }
   }
 }
 
@@ -933,8 +946,31 @@ onBeforeUnmount(() => {
     />
 
     <main class="relative flex min-w-0 flex-1" :inert="(!isDesktop && sidebarOpen) || undefined">
+      <!-- Embedded Private Posts Feed inside Homepage Main Area -->
+      <template v-if="activeView === 'posts'">
+        <div class="relative flex min-w-0 flex-1 flex-col">
+          <div class="flex shrink-0 items-center gap-2.5 border-b border-line/60 px-3.5 py-3">
+            <button
+              type="button"
+              class="focus-ring flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
+              :aria-label="sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
+              :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
+              @click="onSidebarToggleClick"
+            >
+              <AppIcon name="menu-lines" class="h-[22px] w-[22px]" :stroke-width="2.1" />
+            </button>
+            <h1 class="min-w-0 truncate text-[16px] font-semibold text-fg">动态</h1>
+          </div>
+          <div v-scrollbar class="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+            <div class="mx-auto w-full max-w-4xl">
+              <PostsFeedPanel @discuss-in-chat="onDiscussPostInChat" />
+            </div>
+          </div>
+        </div>
+      </template>
+
       <!-- Embedded Library View inside Homepage Main Area -->
-      <template v-if="activeView === 'library'">
+      <template v-else-if="activeView === 'library'">
         <div class="relative flex min-w-0 flex-1 flex-col">
           <div class="flex shrink-0 items-center gap-2.5 border-b border-line/60 px-3.5 py-3">
             <button

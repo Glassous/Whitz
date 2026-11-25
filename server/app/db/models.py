@@ -150,6 +150,8 @@ class User(Base):
     memory_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     memory_require_confirm: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     ai_reactions_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    ai_posts_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    ai_posts_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     agent_namespace: Mapped[str] = mapped_column(String(64), unique=True)
     agent_api_key: Mapped[str] = mapped_column(String(128))
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -925,4 +927,120 @@ class ScheduledTaskPendingProposal(Base):
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AiPostDailyRun(Base):
+    """Per-user per-local-date idempotency record for daily AI auto-posting."""
+
+    __tablename__ = "ai_post_daily_runs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "local_date", name="uq_ai_post_daily_runs_user_date"),
+        Index("ix_ai_post_daily_runs_user_date", "user_id", "local_date"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    local_date: Mapped[date] = mapped_column(Date)
+    tier: Mapped[str] = mapped_column(String(16), default="free", server_default="free")
+    memory_entry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    active_collection_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    target_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    generated_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    status: Mapped[str] = mapped_column(String(32), default="running", server_default="running")
+    tokens_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Post(Base):
+    """Private feed post (AI-generated or user-authored), strictly visible only to its owner."""
+
+    __tablename__ = "posts"
+    __table_args__ = (
+        Index("ix_posts_user_created", "user_id", "created_at"),
+        Index("ix_posts_user_author_created", "user_id", "author_type", "created_at"),
+        Index("ix_posts_user_bookmarked", "user_id", "is_bookmarked", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    author_type: Mapped[str] = mapped_column(String(16), default="ai", server_default="ai")
+    post_kind: Mapped[str] = mapped_column(String(24), default="opinion", server_default="opinion")
+    title: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    content: Mapped[str] = mapped_column(Text)
+    tags: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    web_sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    source_collection_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("memory_collections.id", ondelete="SET NULL"), nullable=True
+    )
+    source_collection_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    source_memory_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    memory_entry_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("memory_entries.id", ondelete="SET NULL"), nullable=True
+    )
+    is_liked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    ai_liked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    is_bookmarked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    daily_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ai_post_daily_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    comments: Mapped[list["PostComment"]] = relationship(
+        back_populates="post",
+        cascade="all, delete-orphan",
+        order_by="PostComment.created_at",
+        lazy="noload",
+    )
+
+
+class PostComment(Base):
+    """Comment on a private post, supporting both user and AI comments with threaded replies."""
+
+    __tablename__ = "post_comments"
+    __table_args__ = (Index("ix_post_comments_post_created", "post_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    post_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    author_type: Mapped[str] = mapped_column(String(16), default="user", server_default="user")
+    content: Mapped[str] = mapped_column(Text)
+    reply_to_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("post_comments.id", ondelete="SET NULL"), nullable=True
+    )
+    ai_liked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    post: Mapped[Post] = relationship(back_populates="comments")
+
+
+class AiPostPendingInteraction(Base):
+    """Delayed AI engagement job for realistic non-instant likes and comments on user posts/comments."""
+
+    __tablename__ = "ai_post_pending_interactions"
+    __table_args__ = (
+        Index("ix_ai_post_interactions_user", "user_id"),
+        Index("ix_ai_post_interactions_due", "status", "scheduled_for"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    post_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"))
+    trigger_comment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("post_comments.id", ondelete="CASCADE"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24), default="pending", server_default="pending")
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tokens_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

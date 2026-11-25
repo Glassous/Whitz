@@ -4,6 +4,7 @@ import { streamSSEGet } from "../api/sse";
 import { useChatStore } from "./chat";
 import { sortConversations, useConversationsStore } from "./conversations";
 import { useFilesStore } from "./files";
+import { usePostsStore } from "./posts";
 import { useSchedulesStore } from "./schedules";
 
 /**
@@ -174,6 +175,37 @@ export const useRealtimeStore = defineStore("realtime", () => {
         schedules.pending = schedules.pending.filter((p) => p.id !== d.proposal_id);
         chat.pendingSchedules = chat.pendingSchedules.filter((p) => p.id !== d.proposal_id);
       }
+      return;
+    }
+
+    if (event === "post.created") {
+      const posts = usePostsStore();
+      posts.hasUnread = true;
+      void posts.fetchFeed(true);
+      return;
+    }
+
+    if (event === "post.updated") {
+      const posts = usePostsStore();
+      posts.applyRealtimeUpdate(d);
+      posts.hasUnread = true;
+      return;
+    }
+
+    if (event === "post.comment_created") {
+      const posts = usePostsStore();
+      const postId = typeof d.post_id === "string" ? d.post_id : null;
+      if (postId && d.comment && typeof d.comment === "object") {
+        posts.appendComment(
+          postId,
+          d.comment,
+          typeof d.liked_comment_id === "string" ? d.liked_comment_id : null,
+        );
+        if (d.comment.author_type === "ai") {
+          posts.hasUnread = true;
+        }
+      }
+      return;
     }
   }
 

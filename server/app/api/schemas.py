@@ -106,6 +106,8 @@ class UserOut(BaseModel):
     memory_consented_at: datetime | None = None
     memory_require_confirm: bool = False
     ai_reactions_enabled: bool = True
+    ai_posts_enabled: bool = False
+    ai_posts_consented_at: datetime | None = None
     email_verified_at: datetime | None = None
     membership_tier: str
     membership_expires_at: datetime | None
@@ -1086,3 +1088,91 @@ class ScheduleOverviewOut(BaseModel):
     tasks: list[ScheduledTaskOut] = Field(default_factory=list)
     pending: list[ScheduledTaskPendingOut] = Field(default_factory=list)
     quota: ScheduleQuotaOut
+
+
+class UpdateAiPostsRequest(BaseModel):
+    ai_posts_enabled: bool
+
+
+class PostWebSourceOut(BaseModel):
+    title: str = ""
+    url: str = ""
+    site_name: str = ""
+    published_at: str = ""
+
+
+class PostCreateRequest(BaseModel):
+    title: str = Field(default="", max_length=120)
+    content: str = Field(min_length=1, max_length=4000)
+    tags: list[str] = Field(default_factory=list, max_length=6)
+
+
+class PostCommentCreateRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    reply_to_id: uuid.UUID | None = None
+    trigger_ai_reply: bool = True
+
+
+class PostCommentOut(BaseModel):
+    id: uuid.UUID
+    post_id: uuid.UUID
+    author_type: Literal["user", "ai"]
+    content: str
+    reply_to_id: uuid.UUID | None = None
+    reply_to_author_type: Literal["user", "ai"] | None = None
+    reply_to_excerpt: str | None = None
+    ai_liked: bool = False
+    created_at: datetime
+
+
+class PostCommentCreateResponse(BaseModel):
+    comment: PostCommentOut
+    ai_reply_scheduled: bool = False
+
+
+class PostOut(BaseModel):
+    id: uuid.UUID
+    author_type: Literal["ai", "user"]
+    post_kind: str = "opinion"
+    title: str = ""
+    content: str
+    tags: list[str] = Field(default_factory=list)
+    web_sources: list[PostWebSourceOut] = Field(default_factory=list)
+    source_collection_id: uuid.UUID | None = None
+    source_collection_name: str | None = None
+    source_memory_ids: list[str] = Field(default_factory=list)
+    memory_entry_id: uuid.UUID | None = None
+    is_liked: bool = False
+    ai_liked: bool = False
+    is_bookmarked: bool = False
+    conversation_id: uuid.UUID | None = None
+    comment_count: int = 0
+    comments: list[PostCommentOut] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class PostQuotaSummaryOut(BaseModel):
+    ai_posts_enabled: bool = False
+    ai_posts_consented_at: datetime | None = None
+    memory_enabled: bool = True
+    tier: str = "free"
+    tier_label: str = "Free"
+    max_daily_cap: int = 2
+    memory_entry_count: int = 0
+    active_collection_count: int = 0
+    estimated_daily_count: int = 0
+    today_generated_count: int = 0
+    today_status: str | None = None
+    local_date: str
+
+
+class PostListOut(BaseModel):
+    items: list[PostOut] = Field(default_factory=list)
+    next_cursor: datetime | None = None
+    quota: PostQuotaSummaryOut
+
+
+class PostDiscussOut(BaseModel):
+    conversation_id: uuid.UUID
+    prefill_prompt: str

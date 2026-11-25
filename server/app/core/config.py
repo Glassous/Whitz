@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     scheduler_batch_size: int = 20
     scheduler_max_consecutive_failures: int = 5
 
+    post_scheduler_enabled: bool = True
+    post_scheduler_poll_interval_seconds: float = 300.0
+    post_interaction_poll_interval_seconds: float = 15.0
+    post_scheduler_batch_size: int = 20
+    post_scheduler_trigger_hour: int = 8
+    post_ai_post_delay_min_seconds: int = 60
+    post_ai_post_delay_max_seconds: int = 480
+    post_ai_comment_delay_min_seconds: int = 20
+    post_ai_comment_delay_max_seconds: int = 180
+
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
@@ -75,6 +85,7 @@ class Settings(BaseSettings):
 
     search_api_key: str = ""
     bocha_api_key: str = ""
+    bocha_search_url: str = "https://api.bochaai.com/v1/web-search"
 
     agent_base_url: str = "http://localhost:8642"
     agent_internal_token: str = "dev-agent-token"

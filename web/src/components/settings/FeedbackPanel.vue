@@ -31,6 +31,7 @@ const category = ref<(typeof CATEGORIES)[number]["value"]>("general");
 const content = ref("");
 const submitting = ref(false);
 const savingToggle = ref(false);
+const savingPostsToggle = ref(false);
 const loadingHistory = ref(false);
 const feedbackList = ref<UserFeedbackItem[]>([]);
 const message = ref<string | null>(null);
@@ -62,6 +63,26 @@ async function toggleAiReactions() {
     error.value = e?.message || "更新偏好失败";
   } finally {
     savingToggle.value = false;
+  }
+}
+
+async function toggleAiPosts() {
+  if (!auth.user || savingPostsToggle.value) return;
+  savingPostsToggle.value = true;
+  error.value = null;
+  const nextVal = !(auth.user.ai_posts_enabled ?? false);
+  try {
+    const updated = await api.put<User>("/users/me/ai-posts", {
+      ai_posts_enabled: nextVal,
+    });
+    auth.user = updated;
+    message.value = nextVal
+      ? "已开启 AI 每日联网动态（正常消耗账号积分）"
+      : "已关闭 AI 每日联网动态";
+  } catch (e: any) {
+    error.value = e?.message || "更新偏好失败";
+  } finally {
+    savingPostsToggle.value = false;
   }
 }
 
@@ -134,6 +155,33 @@ onMounted(() => {
         <span
           class="inline-block h-5.5 w-5.5 transform rounded-full bg-white shadow transition-transform"
           :class="(auth.user?.ai_reactions_enabled ?? true) ? 'translate-x-5.5' : 'translate-x-1'"
+        />
+      </button>
+    </div>
+
+    <!-- AI Daily Private Posts Preference -->
+    <div class="flex flex-wrap items-center justify-between gap-4 rounded-[24px] bg-sidebar p-5 dark:bg-surface">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <p class="text-[15px] font-semibold text-fg">AI 每日联网动态</p>
+          <BaseBadge tone="amber">默认关闭 · 消耗积分</BaseBadge>
+        </div>
+        <p class="mt-1 text-[13px] leading-relaxed text-fg-muted">
+          开启后，助手将每日根据你的长期记忆分类与联网搜索结果为你生成仅自己可见的专属动态，并在你发帖或评论后间隔一段时间进行点赞与回复。上述调用均正常计入积分消耗，记忆为 0 或额度不足时自动跳过。
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        :aria-checked="auth.user?.ai_posts_enabled ?? false"
+        :disabled="savingPostsToggle"
+        class="focus-ring relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-60"
+        :class="(auth.user?.ai_posts_enabled ?? false) ? 'bg-accent' : 'bg-line-strong'"
+        @click="toggleAiPosts"
+      >
+        <span
+          class="inline-block h-5.5 w-5.5 transform rounded-full bg-white shadow transition-transform"
+          :class="(auth.user?.ai_posts_enabled ?? false) ? 'translate-x-5.5' : 'translate-x-1'"
         />
       </button>
     </div>

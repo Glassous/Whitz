@@ -6,6 +6,7 @@ import type { Conversation } from "../../types";
 import { useAuthStore } from "../../stores/auth";
 import { sortConversations } from "../../stores/conversations";
 import { useCreditsStore } from "../../stores/credits";
+import { usePostsStore } from "../../stores/posts";
 import { useTheme, type ThemePreference } from "../../lib/theme";
 import { isDesktopHost } from "../../host";
 import { isDesktopShell } from "../../host/chrome";
@@ -18,7 +19,7 @@ const props = defineProps<{
   mainConversation: Conversation | null;
   sideConversations: Conversation[];
   currentId: string | null;
-  activeView: "chat" | "library" | "schedules";
+  activeView: "chat" | "posts" | "library" | "schedules";
   loading?: boolean;
   open?: boolean;
   collapsed?: boolean;
@@ -30,7 +31,7 @@ const emit = defineEmits<{
   select: [string];
   "select-main": [];
   "create-side": [];
-  "switch-view": ["chat" | "library" | "schedules"];
+  "switch-view": ["chat" | "posts" | "library" | "schedules"];
   "toggle-collapse": [];
   rename: [string, string];
   pin: [string, boolean];
@@ -43,6 +44,7 @@ const emit = defineEmits<{
 const router = useRouter();
 const auth = useAuthStore();
 const credits = useCreditsStore();
+const postsStore = usePostsStore();
 const { preference, set: setTheme } = useTheme();
 
 const themeOptions: { value: ThemePreference; label: string }[] = [
@@ -235,6 +237,14 @@ function onClickLibraryRail() {
   hideTooltip();
   quickCardOpen.value = false;
   emit("switch-view", "library");
+  emit("close");
+}
+
+function onClickPostsRail() {
+  hideTooltip();
+  quickCardOpen.value = false;
+  postsStore.markRead();
+  emit("switch-view", "posts");
   emit("close");
 }
 
@@ -569,6 +579,31 @@ const isMainActive = computed(
           @click="onClickChatRail"
         >
           <AppIcon name="chat" :active="activeView === 'chat'" class="h-[20px] w-[20px]" :stroke-width="1.85" />
+        </button>
+
+        <!-- 动态 -->
+        <button
+          type="button"
+          class="focus-ring relative flex h-10 w-10 items-center justify-center rounded-full transition-colors"
+          :class="
+            activeView === 'posts'
+              ? 'bg-hover text-fg shadow-xs dark:bg-active'
+              : 'text-fg-muted hover:bg-hover/70 hover:text-fg'
+          "
+          :aria-current="activeView === 'posts' ? 'page' : undefined"
+          aria-label="动态"
+          @mouseenter="showTooltip($event, '动态', '仅你可见的 AI 与私人动态')"
+          @mouseleave="hideTooltip"
+          @focus="showTooltip($event, '动态', '仅你可见的 AI 与私人动态')"
+          @blur="hideTooltip"
+          @click="onClickPostsRail"
+        >
+          <AppIcon name="compass" :active="activeView === 'posts'" class="h-[20px] w-[20px]" :stroke-width="1.85" />
+          <span
+            v-if="postsStore.hasUnread && activeView !== 'posts'"
+            class="absolute right-2 top-2 h-2 w-2 rounded-full bg-danger ring-2 ring-sidebar"
+            aria-hidden="true"
+          />
         </button>
 
         <!-- 搜索 -->

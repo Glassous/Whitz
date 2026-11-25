@@ -60,7 +60,10 @@ export type IconName =
   | "logout"
   | "smartphone"
   | "tablet"
-  | "globe";
+  | "globe"
+  | "heart"
+  | "bookmark"
+  | "compass";
 
 export type IconMotion =
   | "auto"
@@ -172,6 +175,9 @@ const AUTO_MOTION_MAP: Record<IconName, Exclude<IconMotion, "auto">> = {
   smartphone: "screen",
   tablet: "screen",
   globe: "pop",
+  heart: "pop",
+  bookmark: "lift",
+  compass: "sparkle",
 };
 
 const props = withDefaults(
@@ -680,6 +686,28 @@ const motionClass = computed(() => [
       <circle class="icon-duotone-fill" cx="12" cy="12" r="9" />
       <circle cx="12" cy="12" r="9" />
       <path d="M3.5 9h17M3.5 15h17M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+    </template>
+
+    <!-- Heart (Like) -->
+    <template v-else-if="name === 'heart'">
+      <path
+        class="icon-duotone-fill"
+        d="M12 20.4s-7.2-4.6-9-8.8C1.5 8.1 3.7 4.8 7.2 4.8c2 0 3.7 1.1 4.8 2.7 1.1-1.6 2.8-2.7 4.8-2.7 3.5 0 5.7 3.3 4.2 6.8-1.8 4.2-9 8.8-9 8.8Z"
+      />
+      <path d="M12 20.4s-7.2-4.6-9-8.8C1.5 8.1 3.7 4.8 7.2 4.8c2 0 3.7 1.1 4.8 2.7 1.1-1.6 2.8-2.7 4.8-2.7 3.5 0 5.7 3.3 4.2 6.8-1.8 4.2-9 8.8-9 8.8Z" />
+    </template>
+
+    <!-- Bookmark -->
+    <template v-else-if="name === 'bookmark'">
+      <path class="icon-duotone-fill" d="M6.5 4.2h11a1.5 1.5 0 0 1 1.5 1.5v14.8l-7-4.4-7 4.4V5.7a1.5 1.5 0 0 1 1.5-1.5Z" />
+      <path d="M6.5 4.2h11a1.5 1.5 0 0 1 1.5 1.5v14.8l-7-4.4-7 4.4V5.7a1.5 1.5 0 0 1 1.5-1.5Z" />
+    </template>
+
+    <!-- Compass (Private Feed / Posts) -->
+    <template v-else-if="name === 'compass'">
+      <circle class="icon-duotone-fill" cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="9" />
+      <polygon points="15.8,8.2 13.5,13.5 8.2,15.8 10.5,10.5" />
     </template>
   </svg>
 </template>

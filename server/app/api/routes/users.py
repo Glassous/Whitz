@@ -21,6 +21,7 @@ from app.api.schemas import (
     CreditStatusOut,
     ProfileContextUpdateRequest,
     RedeemRequest,
+    UpdateAiPostsRequest,
     UpdateAiReactionsRequest,
     UpdateAssistantRequest,
     UpdatePersonaRequest,
@@ -608,6 +609,32 @@ async def update_ai_reactions(
             target_id=user.id,
             request=request,
             diff={"before": {"ai_reactions_enabled": prev}, "after": {"ai_reactions_enabled": next_val}},
+        )
+    return user
+
+
+@router.put("/me/ai-posts", response_model=UserOut)
+async def update_ai_posts(
+    body: UpdateAiPostsRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    prev = bool(user.ai_posts_enabled)
+    next_val = bool(body.ai_posts_enabled)
+    if prev != next_val or (next_val and user.ai_posts_consented_at is None):
+        user.ai_posts_enabled = next_val
+        if next_val:
+            user.ai_posts_consented_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(user)
+        await audit.record(
+            "user.ai_posts_toggle",
+            actor=user,
+            target_type="user",
+            target_id=user.id,
+            request=request,
+            diff={"before": {"ai_posts_enabled": prev}, "after": {"ai_posts_enabled": next_val}},
         )
     return user
 
