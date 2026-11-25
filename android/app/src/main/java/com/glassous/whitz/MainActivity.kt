@@ -36,6 +36,7 @@ import com.glassous.whitz.feature.chat.ChatScreen
 import com.glassous.whitz.feature.chat.ChatViewModel
 import com.glassous.whitz.feature.chat.LibraryScreen
 import com.glassous.whitz.feature.chat.TaskDetailScreen
+import com.glassous.whitz.feature.posts.PostComposeScreen
 import com.glassous.whitz.feature.posts.PostsGuideScreen
 import com.glassous.whitz.feature.posts.PostsScreen
 import com.glassous.whitz.feature.schedules.ScheduleEditorScreen
@@ -190,6 +191,7 @@ private fun WhitzRoot(container: AppContainer) {
                 val chatVm: ChatViewModel = viewModel(chatEntry, factory = factory)
                 PostsScreen(
                     vm = chatVm,
+                    onOpenCompose = { navController.navigate("posts_compose") },
                     onOpenGuide = { navController.navigate("posts_guide") },
                     onOpenMemorySettings = { navController.navigate(SettingsRoutes.MEMORY) },
                     onOpenConversation = { convId, _ ->
@@ -197,6 +199,19 @@ private fun WhitzRoot(container: AppContainer) {
                         chatVm.openConversation(convId)
                         navController.popBackStack("chat", inclusive = false)
                     },
+                    onBack = { navController.popBackStack() },
+                )
+            }
+        }
+        composable("posts_compose") { backStackEntry ->
+            val chatEntry = remember(backStackEntry) {
+                runCatching { navController.getBackStackEntry("chat") }.getOrNull()
+            }
+            if (chatEntry != null) {
+                val chatVm: ChatViewModel = viewModel(chatEntry, factory = factory)
+                PostComposeScreen(
+                    vm = chatVm,
+                    onPublished = { navController.popBackStack() },
                     onBack = { navController.popBackStack() },
                 )
             }

@@ -92,8 +92,8 @@ function commentAuthorLabel(authorType: "user" | "ai"): string {
 </script>
 
 <template>
-  <article class="border-b border-line/65 px-4 py-3.5 transition-colors hover:bg-hover/25">
-    <div class="flex items-start gap-3">
+  <article class="border-b border-line/65 px-4 py-4 transition-colors hover:bg-hover/25 sm:px-6 lg:px-8">
+    <div class="flex items-start gap-3.5">
       <!-- Left Avatar Column (X-style) -->
       <div class="shrink-0 pt-0.5">
         <img
@@ -204,8 +204,8 @@ function commentAuthorLabel(authorType: "user" | "ai"): string {
           <span>{{ assistantName }} 赞了</span>
         </div>
 
-        <!-- X-style Horizontal Action Row -->
-        <div class="mt-2.5 -ml-2 flex max-w-[420px] items-center justify-between text-[12.5px] text-fg-faint">
+        <!-- Horizontal Action Row -->
+        <div class="mt-3 -ml-2 flex max-w-xl items-center justify-between text-[12.5px] text-fg-faint">
           <button
             type="button"
             class="focus-ring group inline-flex items-center gap-1 rounded-full px-2 py-1 transition-colors hover:bg-hover hover:text-fg"

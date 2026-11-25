@@ -18,6 +18,10 @@ function onDiscussInChat(payload: { conversationId: string; prefillPrompt: strin
 function onOpenGuide() {
   void router.push({ name: "posts-guide" });
 }
+
+function onOpenCompose() {
+  void router.push({ name: "posts-compose" });
+}
 </script>
 
 <template>
@@ -25,6 +29,7 @@ function onOpenGuide() {
     <PostsFeedPanel
       @open-mobile-nav="shell?.openMobileNav()"
       @open-guide="onOpenGuide"
+      @open-compose="onOpenCompose"
       @discuss-in-chat="onDiscussInChat"
     />
   </div>

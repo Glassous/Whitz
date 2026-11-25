@@ -5,6 +5,7 @@ import { useAuthStore } from "@web/stores/auth";
 import AppShellLayout from "@web/layouts/AppShellLayout.vue";
 import ChatView from "@web/views/ChatView.vue";
 import PostsView from "@web/views/PostsView.vue";
+import PostsComposeView from "@web/views/PostsComposeView.vue";
 import PostsGuideView from "@web/views/PostsGuideView.vue";
 import LibraryView from "@web/views/LibraryView.vue";
 import SchedulesView from "@web/views/SchedulesView.vue";
@@ -34,6 +35,7 @@ export const desktopRoutes: RouteRecordRaw[] = [
       { path: "chat", name: "chat", component: ChatView },
       { path: "c/:id", name: "chat-conversation", component: ChatView },
       { path: "posts", name: "posts", component: PostsView },
+      { path: "posts/compose", name: "posts-compose", component: PostsComposeView },
       { path: "posts/guide", name: "posts-guide", component: PostsGuideView },
       { path: "library", name: "library", component: LibraryView },
       { path: "schedules", name: "schedules", component: SchedulesView },

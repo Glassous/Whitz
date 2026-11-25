@@ -116,6 +116,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun PostsScreen(
     vm: ChatViewModel,
+    onOpenCompose: () -> Unit,
     onOpenGuide: () -> Unit,
     onOpenMemorySettings: () -> Unit,
     onOpenConversation: (conversationId: String, prefillPrompt: String) -> Unit,
@@ -128,7 +129,6 @@ fun PostsScreen(
 
     val isEnabled = user?.aiPostsEnabled == true
     val assistantName = user?.resolvedAssistantName() ?: "Whitz"
-    var showComposer by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<PostItem?>(null) }
 
     LaunchedEffect(isEnabled) {
@@ -186,7 +186,7 @@ fun PostsScreen(
         floatingActionButton = {
             if (isEnabled) {
                 FloatingActionButton(
-                    onClick = { showComposer = true },
+                    onClick = onOpenCompose,
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
                     shape = CircleShape,
@@ -243,19 +243,6 @@ fun PostsScreen(
                 }
             }
         }
-    }
-
-    if (showComposer) {
-        PostComposerSheet(
-            assistantName = assistantName,
-            publishing = ui.publishing,
-            onDismiss = { if (!ui.publishing) showComposer = false },
-            onPublish = { title, content, tags ->
-                vm.posts.createUserPost(title, content, tags) {
-                    showComposer = false
-                }
-            },
-        )
     }
 
     deleteTarget?.let { target ->
