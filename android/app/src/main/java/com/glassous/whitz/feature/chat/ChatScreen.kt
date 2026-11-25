@@ -349,9 +349,11 @@ fun ChatScreen(
     onOpenMemorySettings: () -> Unit = onOpenSettings,
     onOpenLibrary: () -> Unit,
     onOpenSchedules: () -> Unit,
+    onOpenPosts: () -> Unit,
     onOpenTaskDetails: (Int) -> Unit,
 ) {
     val ui by vm.ui.collectAsState()
+    val postsUi by vm.posts.ui.collectAsState()
     val user by vm.user.collectAsState()
     val authReady by vm.authReady.collectAsState()
     val colors = LocalWhitzColors.current
@@ -721,6 +723,11 @@ fun ChatScreen(
                             onCreateSide = { vm.createSideConversation() },
                             onOpenLibrary = onOpenLibrary,
                             onOpenSchedules = onOpenSchedules,
+                            onOpenPosts = {
+                                vm.posts.markRead()
+                                onOpenPosts()
+                            },
+                            hasUnreadPosts = postsUi.hasUnread,
                             onOpenSearch = { showSearch = true },
                             onRefreshConversations = { vm.refreshConversations() },
                             onSelectConv = { vm.openConversation(it) },
@@ -2170,6 +2177,12 @@ fun ChatScreen(
                                 scope.launch { drawerState.close() }
                                 onOpenSchedules()
                             },
+                            onOpenPosts = {
+                                vm.posts.markRead()
+                                scope.launch { drawerState.close() }
+                                onOpenPosts()
+                            },
+                            hasUnreadPosts = postsUi.hasUnread,
                             onOpenSearch = { showSearch = true },
                             onRefreshConversations = { vm.refreshConversations() },
                             onSelectConv = {
@@ -2369,6 +2382,8 @@ private fun SidebarContent(
     onCreateSide: () -> Unit,
     onOpenLibrary: () -> Unit,
     onOpenSchedules: () -> Unit,
+    onOpenPosts: () -> Unit,
+    hasUnreadPosts: Boolean = false,
     onOpenSearch: () -> Unit,
     onRefreshConversations: () -> Unit,
     onSelectConv: (String) -> Unit,
@@ -2437,6 +2452,33 @@ private fun SidebarContent(
 
         // Top Action Rows: Row 1 = Search, Row 2 = Library (above Main Chat)
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onOpenPosts)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box {
+                    Icon(Icons.Filled.AutoAwesome, contentDescription = "动态", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
+                    if (hasUnreadPosts) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(colors.danger),
+                        )
+                    }
+                }
+                if (!collapsed) {
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("动态", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                }
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

@@ -4,13 +4,14 @@ import { useRouter } from "vue-router";
 import { useAuthStore } from "../../stores/auth";
 import { usePostsStore, type PostFeedFilter } from "../../stores/posts";
 import AppIcon from "../ui/AppIcon.vue";
-import BaseBadge from "../ui/BaseBadge.vue";
 import BaseButton from "../ui/BaseButton.vue";
 import Spinner from "../ui/Spinner.vue";
 import PostCard from "./PostCard.vue";
 import PostsOnboardingView from "./PostsOnboardingView.vue";
 
 const emit = defineEmits<{
+  "open-mobile-nav": [];
+  "open-guide": [];
   "discuss-in-chat": [{ conversationId: string; prefillPrompt: string }];
 }>();
 
@@ -19,6 +20,7 @@ const auth = useAuthStore();
 const posts = usePostsStore();
 
 const togglingEnable = ref(false);
+const showExtraFields = ref(false);
 const composerTitle = ref("");
 const composerContent = ref("");
 const composerTagsRaw = ref("");
@@ -28,11 +30,13 @@ const actionError = ref<string | null>(null);
 
 const isEnabled = computed(() => Boolean(auth.user?.ai_posts_enabled));
 const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
+const userAvatarUrl = computed(() => auth.user?.avatar_url ?? null);
+const userInitial = computed(() => (auth.user?.display_name || auth.user?.email || "U").slice(0, 1).toUpperCase());
 
 const filters: { key: PostFeedFilter; label: string }[] = [
   { key: "all", label: "全部" },
   { key: "ai", label: "AI 动态" },
-  { key: "user", label: "我的动态" },
+  { key: "user", label: "我的" },
   { key: "bookmarked", label: "已收藏" },
 ];
 
@@ -53,19 +57,6 @@ async function onEnablePosts() {
     await posts.setAiPostsEnabled(true);
   } catch (e: any) {
     actionError.value = e?.detail?.detail || e?.message || "开启失败，请稍后重试";
-  } finally {
-    togglingEnable.value = false;
-  }
-}
-
-async function onDisablePosts() {
-  if (togglingEnable.value) return;
-  togglingEnable.value = true;
-  actionError.value = null;
-  try {
-    await posts.setAiPostsEnabled(false);
-  } catch (e: any) {
-    actionError.value = e?.detail?.detail || e?.message || "关闭失败，请稍后重试";
   } finally {
     togglingEnable.value = false;
   }
@@ -94,8 +85,9 @@ async function publishUserPost() {
     composerTitle.value = "";
     composerContent.value = "";
     composerTagsRaw.value = "";
+    showExtraFields.value = false;
     publishHint.value = created.memory_entry_id
-      ? `已发布并同步至长期记忆，${assistantName.value} 稍后会来互动`
+      ? `已发布并入记忆，${assistantName.value} 稍后会来互动`
       : `已发布，${assistantName.value} 稍后会来互动`;
   } catch (e: any) {
     actionError.value = e?.detail?.detail || e?.message || "发布失败，请稍后重试";
@@ -165,162 +157,193 @@ function goMemorySettings() {
 </script>
 
 <template>
-  <div class="space-y-5">
-    <Transition
-      mode="out-in"
-      enter-active-class="transition duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-      enter-from-class="opacity-0 translate-y-2"
-      enter-to-class="opacity-100 translate-y-0"
-      leave-active-class="transition duration-200 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0 -translate-y-1"
-    >
-      <!-- Disabled state: Animated Onboarding View -->
+  <div class="flex min-h-0 flex-1 flex-col bg-canvas">
+    <!-- Disabled State: Full-area minimal onboarding -->
+    <template v-if="!isEnabled">
+      <div class="flex shrink-0 items-center justify-between border-b border-line/60 px-4 py-3 md:hidden">
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class="focus-ring flex h-9 w-9 items-center justify-center rounded-xl text-fg-muted hover:bg-hover hover:text-fg"
+            aria-label="打开导航"
+            @click="emit('open-mobile-nav')"
+          >
+            <AppIcon name="menu-lines" class="h-[20px] w-[20px]" :stroke-width="2.1" />
+          </button>
+          <h1 class="text-[16px] font-semibold text-fg">动态</h1>
+        </div>
+        <button
+          type="button"
+          class="focus-ring inline-flex items-center gap-1 rounded-full px-3 py-1 text-[12.5px] font-medium text-fg-muted hover:bg-hover hover:text-fg"
+          @click="emit('open-guide')"
+        >
+          <AppIcon name="info" class="h-4 w-4" />
+          <span>说明</span>
+        </button>
+      </div>
       <PostsOnboardingView
-        v-if="!isEnabled"
-        key="onboarding"
-        :quota="posts.quota"
         :enabling="togglingEnable"
         @enable="onEnablePosts"
+        @open-guide="emit('open-guide')"
       />
+    </template>
 
-      <!-- Enabled state: Full Private Feed -->
-      <div v-else key="feed" class="space-y-5">
-        <!-- Quota & Memory Status Summary -->
-        <div class="rounded-[24px] border border-line/75 bg-sidebar/80 p-4 sm:p-5 dark:bg-surface/75">
-          <div class="flex flex-wrap items-center justify-between gap-3">
-            <div class="space-y-1">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="text-[14.5px] font-semibold text-fg">AI 每日联网动态已开启</span>
-                <BaseBadge tone="brand">{{ posts.quota?.tier_label || "Free" }}</BaseBadge>
-                <BaseBadge tone="gray">
-                  预计每日 {{ posts.quota?.estimated_daily_count ?? 0 }} / {{ posts.quota?.max_daily_cap ?? 2 }} 条
-                </BaseBadge>
-              </div>
-              <p class="text-[12.5px] text-fg-muted">
-                当前已启用长期记忆 {{ posts.quota?.memory_entry_count ?? 0 }} 条（覆盖 {{ posts.quota?.active_collection_count ?? 0 }} 个分类），系统将于每日后台自动联网生成，正常消耗积分额度。
-              </p>
+    <!-- Enabled State: X-style centered single-column timeline -->
+    <div v-else v-scrollbar class="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
+      <div class="mx-auto flex min-h-full w-full max-w-[620px] flex-col sm:border-x sm:border-line/65">
+        <!-- Sticky Frosted Top Bar + X-style Tabs -->
+        <header class="sticky top-0 z-20 border-b border-line/65 bg-canvas/85 backdrop-blur-md">
+          <div class="flex items-center justify-between px-4 py-2.5">
+            <div class="flex items-center gap-2.5">
+              <button
+                type="button"
+                class="focus-ring flex h-9 w-9 items-center justify-center rounded-full text-fg-muted hover:bg-hover hover:text-fg md:hidden"
+                aria-label="打开导航"
+                @click="emit('open-mobile-nav')"
+              >
+                <AppIcon name="menu-lines" class="h-[20px] w-[20px]" :stroke-width="2.1" />
+              </button>
+              <h1 class="text-[17px] font-bold tracking-tight text-fg">动态</h1>
             </div>
 
-            <div class="flex items-center gap-2">
-              <BaseButton size="sm" variant="ghost" @click="goMemorySettings">
-                管理记忆
-              </BaseButton>
-              <BaseButton size="sm" variant="ghost" :disabled="togglingEnable" @click="onDisablePosts">
-                {{ togglingEnable ? "关闭中..." : "关闭功能" }}
-              </BaseButton>
+            <div class="flex items-center gap-1">
+              <button
+                type="button"
+                class="focus-ring inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+                title="查看动态说明与配额"
+                @click="emit('open-guide')"
+              >
+                <AppIcon name="info" class="h-4 w-4" :stroke-width="1.85" />
+                <span>说明</span>
+              </button>
+              <button
+                type="button"
+                class="focus-ring flex h-8 w-8 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+                aria-label="刷新"
+                title="刷新"
+                :disabled="posts.loading"
+                @click="posts.fetchFeed(true)"
+              >
+                <AppIcon name="refresh" class="h-4 w-4" :class="posts.loading ? 'animate-spin' : ''" />
+              </button>
             </div>
           </div>
 
-          <!-- Zero memory friendly notice -->
-          <div
-            v-if="posts.quota && posts.quota.memory_entry_count === 0"
-            class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-line bg-canvas/85 px-3.5 py-2.5 text-[12.5px] text-fg-muted"
-          >
-            <span>当前长期记忆为 0 条，{{ assistantName }} 还不知道发什么（今日将发 0 条）。发一条你的动态或去添加记忆即可唤醒它！</span>
-            <button
-              type="button"
-              class="shrink-0 font-medium text-fg underline underline-offset-4"
-              @click="goMemorySettings"
-            >
-              添加记忆 →
-            </button>
-          </div>
-        </div>
-
-        <!-- User Private Post Composer -->
-        <form
-          class="rounded-[24px] border border-line/75 bg-canvas p-4 sm:p-5 dark:bg-sidebar/75"
-          @submit.prevent="publishUserPost"
-        >
-          <div class="flex items-center justify-between gap-2">
-            <span class="text-[13.5px] font-semibold text-fg">记录一条私人动态</span>
-            <span class="text-[11.5px] text-fg-faint">仅自己可见 · 自动同步至长期记忆</span>
-          </div>
-          <input
-            v-model="composerTitle"
-            type="text"
-            maxlength="120"
-            placeholder="标题（可选）"
-            class="focus-ring mt-2.5 w-full rounded-xl border border-line/80 bg-surface/60 px-3.5 py-2 text-[13.5px] text-fg placeholder:text-fg-faint"
-          />
-          <textarea
-            v-model="composerContent"
-            rows="3"
-            maxlength="4000"
-            placeholder="分享你此刻的想法、灵感、近期计划或想追踪的话题……"
-            class="focus-ring mt-2 w-full resize-none rounded-xl border border-line/80 bg-surface/60 px-3.5 py-2.5 text-[13.5px] leading-relaxed text-fg placeholder:text-fg-faint"
-          />
-          <div class="mt-2.5 flex flex-wrap items-center justify-between gap-2.5">
-            <input
-              v-model="composerTagsRaw"
-              type="text"
-              maxlength="120"
-              placeholder="标签（空格或逗号分隔，可选）"
-              class="focus-ring min-w-[180px] flex-1 rounded-full border border-line/80 bg-surface/60 px-3.5 py-1.5 text-[12.5px] text-fg placeholder:text-fg-faint"
-            />
-            <BaseButton type="submit" size="sm" :disabled="!composerContent.trim() || publishing">
-              <Spinner v-if="publishing" class="h-3.5 w-3.5" />
-              <span v-else>发布动态</span>
-            </BaseButton>
-          </div>
-          <p v-if="publishHint" class="mt-2 text-[12px] text-success">{{ publishHint }}</p>
-        </form>
-
-        <!-- Error Banner -->
-        <div
-          v-if="actionError || posts.error"
-          class="rounded-2xl border border-danger/30 bg-danger-weak px-4 py-2.5 text-[13px] text-danger"
-        >
-          {{ actionError || posts.error }}
-        </div>
-
-        <!-- Filter Bar -->
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <div class="inline-flex items-center gap-1 rounded-full border border-line bg-surface/70 p-1">
+          <!-- 4-way X-style Underline Tabs -->
+          <div class="grid grid-cols-4">
             <button
               v-for="f in filters"
               :key="f.key"
               type="button"
-              class="focus-ring rounded-full px-3.5 py-1 text-[12.5px] font-medium transition-colors"
-              :class="
-                posts.filter === f.key
-                  ? 'bg-canvas text-fg shadow-xs dark:bg-active'
-                  : 'text-fg-muted hover:text-fg'
-              "
+              class="focus-ring relative flex h-11 items-center justify-center text-[13.5px] font-medium transition-colors hover:bg-hover/50"
+              :class="posts.filter === f.key ? 'font-semibold text-fg' : 'text-fg-muted'"
               @click="posts.setFilter(f.key)"
             >
-              {{ f.label }}
+              <span>{{ f.label }}</span>
+              <span
+                v-if="posts.filter === f.key"
+                class="absolute bottom-0 h-[3px] w-12 rounded-full bg-fg"
+                aria-hidden="true"
+              />
             </button>
           </div>
+        </header>
 
+        <!-- X-style Inline Composer -->
+        <form class="border-b border-line/65 px-4 py-3.5" @submit.prevent="publishUserPost">
+          <div class="flex items-start gap-3">
+            <img
+              v-if="userAvatarUrl"
+              :src="userAvatarUrl"
+              alt=""
+              class="h-10 w-10 shrink-0 rounded-full bg-surface object-cover ring-1 ring-line/70"
+            />
+            <span
+              v-else
+              class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface text-[13.5px] font-semibold text-fg ring-1 ring-line/70"
+            >
+              {{ userInitial }}
+            </span>
+
+            <div class="min-w-0 flex-1">
+              <input
+                v-if="showExtraFields"
+                v-model="composerTitle"
+                type="text"
+                maxlength="120"
+                placeholder="标题（可选）"
+                class="mb-1.5 w-full bg-transparent text-[15px] font-semibold text-fg placeholder:text-fg-faint focus:outline-none"
+              />
+              <textarea
+                v-model="composerContent"
+                rows="2"
+                maxlength="4000"
+                placeholder="有什么新鲜事或想追踪的话题？"
+                class="w-full resize-none bg-transparent text-[15px] leading-relaxed text-fg placeholder:text-fg-faint focus:outline-none"
+                @focus="showExtraFields = true"
+              />
+              <input
+                v-if="showExtraFields"
+                v-model="composerTagsRaw"
+                type="text"
+                maxlength="120"
+                placeholder="#标签（空格分隔，可选）"
+                class="mt-1 w-full bg-transparent text-[12.5px] text-fg-muted placeholder:text-fg-faint focus:outline-none"
+              />
+
+              <div class="mt-2.5 flex items-center justify-between gap-2 border-t border-line/50 pt-2.5">
+                <span class="truncate text-[12px] text-fg-faint">
+                  {{ publishHint || "仅自己可见 · 自动同步至长期记忆" }}
+                </span>
+                <button
+                  type="submit"
+                  class="focus-ring inline-flex h-8 shrink-0 items-center justify-center rounded-full bg-primary px-4 text-[13px] font-semibold text-primary-fg transition-opacity hover:opacity-90 disabled:opacity-45"
+                  :disabled="!composerContent.trim() || publishing"
+                >
+                  <Spinner v-if="publishing" class="h-3.5 w-3.5" />
+                  <span v-else>发布</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </form>
+
+        <!-- Compact 0-memory Notice Strip -->
+        <div
+          v-if="posts.quota && posts.quota.memory_entry_count === 0"
+          class="flex items-center justify-between gap-3 border-b border-line/65 bg-surface/55 px-4 py-2.5 text-[12.5px] text-fg-muted"
+        >
+          <span>当前长期记忆为 0，{{ assistantName }} 今日将发 0 条。</span>
           <button
             type="button"
-            class="focus-ring inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] text-fg-muted transition-colors hover:bg-hover hover:text-fg"
-            :disabled="posts.loading"
-            @click="posts.fetchFeed(true)"
+            class="shrink-0 font-medium text-fg hover:underline"
+            @click="goMemorySettings"
           >
-            <AppIcon name="refresh" class="h-3.5 w-3.5" :class="posts.loading ? 'animate-spin' : ''" />
-            <span>刷新</span>
+            添加记忆 →
           </button>
         </div>
 
-        <!-- Feed List -->
-        <div v-if="posts.loading && posts.items.length === 0" class="flex items-center justify-center py-16 text-fg-faint">
+        <!-- Error Strip -->
+        <div
+          v-if="actionError || posts.error"
+          class="border-b border-danger/25 bg-danger-weak px-4 py-2.5 text-[13px] text-danger"
+        >
+          {{ actionError || posts.error }}
+        </div>
+
+        <!-- Timeline Stream -->
+        <div v-if="posts.loading && posts.items.length === 0" class="flex flex-1 items-center justify-center py-20 text-fg-faint">
           <Spinner class="h-6 w-6" />
         </div>
 
-        <div
-          v-else-if="posts.items.length === 0"
-          class="rounded-[24px] border border-dashed border-line-strong/80 bg-surface/40 px-6 py-14 text-center"
-        >
-          <p class="text-[15px] font-medium text-fg">这里暂时还没有动态</p>
+        <div v-else-if="posts.items.length === 0" class="px-6 py-16 text-center">
+          <p class="text-[15px] font-semibold text-fg">还没有动态</p>
           <p class="mt-1.5 text-[13px] text-fg-muted">
-            你可以先在上方写下第一条私人动态，{{ assistantName }} 也会在每日后台自动结合你的记忆与联网搜索为你更新动态。
+            发一条你的私人想法，或等待 {{ assistantName }} 每日联网为你更新。
           </p>
         </div>
 
-        <div v-else class="space-y-4">
+        <template v-else>
           <PostCard
             v-for="item in posts.items"
             :key="item.id"
@@ -333,14 +356,14 @@ function goMemorySettings() {
             @delete-comment="handleDeleteComment"
           />
 
-          <div v-if="posts.nextCursor" class="flex justify-center pt-2">
-            <BaseButton variant="ghost" :disabled="posts.loadingMore" @click="posts.fetchFeed(false)">
+          <div v-if="posts.nextCursor" class="flex justify-center py-5">
+            <BaseButton variant="ghost" size="sm" :disabled="posts.loadingMore" @click="posts.fetchFeed(false)">
               <Spinner v-if="posts.loadingMore" class="mr-1.5 h-3.5 w-3.5" />
-              <span>{{ posts.loadingMore ? "加载中..." : "加载更多动态" }}</span>
+              <span>{{ posts.loadingMore ? "加载中..." : "加载更多" }}</span>
             </BaseButton>
           </div>
-        </div>
+        </template>
       </div>
-    </Transition>
+    </div>
   </div>
 </template>

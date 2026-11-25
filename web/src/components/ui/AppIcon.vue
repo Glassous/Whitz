@@ -63,7 +63,8 @@ export type IconName =
   | "globe"
   | "heart"
   | "bookmark"
-  | "compass";
+  | "compass"
+  | "info";
 
 export type IconMotion =
   | "auto"
@@ -178,6 +179,7 @@ const AUTO_MOTION_MAP: Record<IconName, Exclude<IconMotion, "auto">> = {
   heart: "pop",
   bookmark: "lift",
   compass: "sparkle",
+  info: "pop",
 };
 
 const props = withDefaults(
@@ -708,6 +710,13 @@ const motionClass = computed(() => [
       <circle class="icon-duotone-fill" cx="12" cy="12" r="9" />
       <circle cx="12" cy="12" r="9" />
       <polygon points="15.8,8.2 13.5,13.5 8.2,15.8 10.5,10.5" />
+    </template>
+
+    <!-- Info -->
+    <template v-else-if="name === 'info'">
+      <circle class="icon-duotone-fill" cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 16v-4M12 8h.01" />
     </template>
   </svg>
 </template>

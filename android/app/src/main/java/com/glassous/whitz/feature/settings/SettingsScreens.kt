@@ -1876,6 +1876,56 @@ fun FeedbackSettingsScreen(
                 }
             }
 
+            // AI Daily Private Posts Preference
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = colors.surface,
+                border = BorderStroke(0.5.dp, colors.line),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("AI 每日联网动态", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = colors.fg)
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = colors.warningWeak,
+                            ) {
+                                Text(
+                                    text = "消耗积分",
+                                    fontSize = 11.sp,
+                                    color = colors.warning,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                )
+                            }
+                        }
+                        Text(
+                            text = "开启后，助手将每日根据你的长期记忆与联网搜索结果生成仅自己可见的专属动态，并在你发帖或评论后间隔一段时间来点赞与回复。正常计入积分消耗，记忆为 0 或额度不足时自动跳过。",
+                            fontSize = 12.5.sp,
+                            lineHeight = 18.sp,
+                            color = colors.fgMuted,
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Switch(
+                        checked = user?.aiPostsEnabled ?: false,
+                        enabled = !ui.aiPostsSaving,
+                        onCheckedChange = { vm.toggleAiPosts(it) },
+                    )
+                }
+            }
+
             // Submit Feedback Form
             Surface(
                 modifier = Modifier.fillMaxWidth(),

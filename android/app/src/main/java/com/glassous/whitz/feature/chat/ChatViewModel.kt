@@ -59,6 +59,7 @@ import com.glassous.whitz.core.network.RenameFileRequest
 import com.glassous.whitz.core.network.SchedulePendingResolveRequest
 import com.glassous.whitz.core.network.SseEvent
 import com.glassous.whitz.core.network.TicketRequest
+import com.glassous.whitz.feature.posts.PostsController
 import com.glassous.whitz.feature.schedules.ScheduleController
 import com.glassous.whitz.core.network.UpdateAssistantRequest
 import com.glassous.whitz.core.network.UpdateFileContentRequest
@@ -216,6 +217,7 @@ class ChatViewModel(
     val authReady = container.authManager.ready
     val library = LibraryController(viewModelScope, container)
     val schedules = ScheduleController(viewModelScope, container)
+    val posts = PostsController(viewModelScope, container)
 
     fun resolveAssetUrl(pathOrUrl: String?): String? = container.resolveAssetUrl(pathOrUrl)
 
@@ -3223,6 +3225,9 @@ class ChatViewModel(
                         }
                     }
                 }
+            }
+            "post.created", "post.updated", "post.comment_created" -> {
+                posts.handleRealtimeEvent(event, d)
             }
         }
     }

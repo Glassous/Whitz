@@ -236,23 +236,23 @@ function onClickSearchRail() {
 function onClickLibraryRail() {
   hideTooltip();
   quickCardOpen.value = false;
-  emit("switch-view", "library");
   emit("close");
+  void router.push({ name: "library" });
 }
 
 function onClickPostsRail() {
   hideTooltip();
   quickCardOpen.value = false;
   postsStore.markRead();
-  emit("switch-view", "posts");
   emit("close");
+  void router.push({ name: "posts" });
 }
 
 function onClickSchedulesRail() {
   hideTooltip();
   quickCardOpen.value = false;
-  emit("switch-view", "schedules");
   emit("close");
+  void router.push({ name: "schedules" });
 }
 
 const tierBadgeClass = computed(() => {
@@ -542,9 +542,9 @@ const isMainActive = computed(
     @touchcancel="resetSwipe"
     @keydown="onDrawerKeydown"
   >
-    <!-- Column 1: Fixed Primary Icon Rail (never expands; Avatar pinned to bottom) -->
+    <!-- Column 1: Mobile-only Primary Icon Rail (Desktop rail lives in AppShellLayout) -->
     <div
-      class="relative z-20 flex w-[60px] shrink-0 flex-col items-center border-r border-line/65 bg-sidebar py-3.5"
+      class="relative z-20 flex w-[60px] shrink-0 flex-col items-center border-r border-line/65 bg-sidebar py-3.5 md:hidden"
     >
       <!-- Web Brand Mark (Desktop title bar owns the brand) -->
       <button

@@ -36,6 +36,8 @@ import com.glassous.whitz.feature.chat.ChatScreen
 import com.glassous.whitz.feature.chat.ChatViewModel
 import com.glassous.whitz.feature.chat.LibraryScreen
 import com.glassous.whitz.feature.chat.TaskDetailScreen
+import com.glassous.whitz.feature.posts.PostsGuideScreen
+import com.glassous.whitz.feature.posts.PostsScreen
 import com.glassous.whitz.feature.schedules.ScheduleEditorScreen
 import com.glassous.whitz.feature.schedules.SchedulesScreen
 import com.glassous.whitz.feature.settings.AddMemoryScreen
@@ -176,8 +178,41 @@ private fun WhitzRoot(container: AppContainer) {
                 onOpenMemorySettings = { navController.navigate(SettingsRoutes.MEMORY) },
                 onOpenLibrary = { navController.navigate("library") },
                 onOpenSchedules = { navController.navigate("schedules") },
+                onOpenPosts = { navController.navigate("posts") },
                 onOpenTaskDetails = { tab -> navController.navigate("task_details?tab=$tab") },
             )
+        }
+        composable("posts") { backStackEntry ->
+            val chatEntry = remember(backStackEntry) {
+                runCatching { navController.getBackStackEntry("chat") }.getOrNull()
+            }
+            if (chatEntry != null) {
+                val chatVm: ChatViewModel = viewModel(chatEntry, factory = factory)
+                PostsScreen(
+                    vm = chatVm,
+                    onOpenGuide = { navController.navigate("posts_guide") },
+                    onOpenMemorySettings = { navController.navigate(SettingsRoutes.MEMORY) },
+                    onOpenConversation = { convId, _ ->
+                        chatVm.refreshConversations()
+                        chatVm.openConversation(convId)
+                        navController.popBackStack("chat", inclusive = false)
+                    },
+                    onBack = { navController.popBackStack() },
+                )
+            }
+        }
+        composable("posts_guide") { backStackEntry ->
+            val chatEntry = remember(backStackEntry) {
+                runCatching { navController.getBackStackEntry("chat") }.getOrNull()
+            }
+            if (chatEntry != null) {
+                val chatVm: ChatViewModel = viewModel(chatEntry, factory = factory)
+                PostsGuideScreen(
+                    vm = chatVm,
+                    onOpenMemorySettings = { navController.navigate(SettingsRoutes.MEMORY) },
+                    onBack = { navController.popBackStack() },
+                )
+            }
         }
         composable("library") { backStackEntry ->
             val chatEntry = remember(backStackEntry) {

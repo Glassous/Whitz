@@ -35,6 +35,8 @@ data class User(
     @SerialName("memory_consented_at") val memoryConsentedAt: String? = null,
     @SerialName("memory_require_confirm") val memoryRequireConfirm: Boolean = false,
     @SerialName("ai_reactions_enabled") val aiReactionsEnabled: Boolean = true,
+    @SerialName("ai_posts_enabled") val aiPostsEnabled: Boolean = false,
+    @SerialName("ai_posts_consented_at") val aiPostsConsentedAt: String? = null,
     @SerialName("created_at") val createdAt: String = "",
 )
 
@@ -875,3 +877,82 @@ fun resolveServerAssetUrl(apiBaseUrl: String, pathOrUrl: String?): String? {
         raw
     }
 }
+
+@Serializable
+data class PostWebSource(
+    val title: String = "",
+    val url: String = "",
+    @SerialName("site_name") val siteName: String = "",
+    @SerialName("published_at") val publishedAt: String = "",
+)
+
+@Serializable
+data class PostCommentItem(
+    val id: String,
+    @SerialName("post_id") val postId: String,
+    @SerialName("author_type") val authorType: String = "user",
+    val content: String = "",
+    @SerialName("reply_to_id") val replyToId: String? = null,
+    @SerialName("reply_to_author_type") val replyToAuthorType: String? = null,
+    @SerialName("reply_to_excerpt") val replyToExcerpt: String? = null,
+    @SerialName("ai_liked") val aiLiked: Boolean = false,
+    @SerialName("created_at") val createdAt: String = "",
+)
+
+@Serializable
+data class PostItem(
+    val id: String,
+    @SerialName("author_type") val authorType: String = "ai",
+    @SerialName("post_kind") val postKind: String = "opinion",
+    val title: String = "",
+    val content: String = "",
+    val tags: List<String> = emptyList(),
+    @SerialName("web_sources") val webSources: List<PostWebSource> = emptyList(),
+    @SerialName("source_collection_id") val sourceCollectionId: String? = null,
+    @SerialName("source_collection_name") val sourceCollectionName: String? = null,
+    @SerialName("source_memory_ids") val sourceMemoryIds: List<String> = emptyList(),
+    @SerialName("memory_entry_id") val memoryEntryId: String? = null,
+    @SerialName("is_liked") val isLiked: Boolean = false,
+    @SerialName("ai_liked") val aiLiked: Boolean = false,
+    @SerialName("is_bookmarked") val isBookmarked: Boolean = false,
+    @SerialName("conversation_id") val conversationId: String? = null,
+    @SerialName("comment_count") val commentCount: Int = 0,
+    val comments: List<PostCommentItem> = emptyList(),
+    @SerialName("created_at") val createdAt: String = "",
+    @SerialName("updated_at") val updatedAt: String = "",
+)
+
+@Serializable
+data class PostQuotaSummary(
+    @SerialName("ai_posts_enabled") val aiPostsEnabled: Boolean = false,
+    @SerialName("ai_posts_consented_at") val aiPostsConsentedAt: String? = null,
+    @SerialName("memory_enabled") val memoryEnabled: Boolean = true,
+    val tier: String = "free",
+    @SerialName("tier_label") val tierLabel: String = "Free",
+    @SerialName("max_daily_cap") val maxDailyCap: Int = 2,
+    @SerialName("memory_entry_count") val memoryEntryCount: Int = 0,
+    @SerialName("active_collection_count") val activeCollectionCount: Int = 0,
+    @SerialName("estimated_daily_count") val estimatedDailyCount: Int = 0,
+    @SerialName("today_generated_count") val todayGeneratedCount: Int = 0,
+    @SerialName("today_status") val todayStatus: String? = null,
+    @SerialName("local_date") val localDate: String = "",
+)
+
+@Serializable
+data class PostListResponse(
+    val items: List<PostItem> = emptyList(),
+    @SerialName("next_cursor") val nextCursor: String? = null,
+    val quota: PostQuotaSummary = PostQuotaSummary(),
+)
+
+@Serializable
+data class PostCommentCreateResponse(
+    val comment: PostCommentItem,
+    @SerialName("ai_reply_scheduled") val aiReplyScheduled: Boolean = false,
+)
+
+@Serializable
+data class PostDiscussResponse(
+    @SerialName("conversation_id") val conversationId: String,
+    @SerialName("prefill_prompt") val prefillPrompt: String = "",
+)

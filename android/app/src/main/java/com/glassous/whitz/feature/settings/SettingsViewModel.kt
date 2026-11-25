@@ -30,6 +30,7 @@ import com.glassous.whitz.core.network.PendingActionRequest
 import com.glassous.whitz.core.network.ProfileContextRequest
 import com.glassous.whitz.core.network.RedeemRequest
 import com.glassous.whitz.core.network.SkillPatchRequest
+import com.glassous.whitz.core.network.UpdateAiPostsRequest
 import com.glassous.whitz.core.network.UpdateAiReactionsRequest
 import com.glassous.whitz.core.network.UpdateAssistantRequest
 import com.glassous.whitz.core.network.UpdatePasswordRequest
@@ -69,6 +70,7 @@ data class SettingsUiState(
     val feedbacks: List<UserFeedbackItem> = emptyList(),
     val feedbackSubmitting: Boolean = false,
     val aiReactionSaving: Boolean = false,
+    val aiPostsSaving: Boolean = false,
 )
 
 class SettingsViewModel(
@@ -674,6 +676,25 @@ class SettingsViewModel(
                 }
             } catch (t: Throwable) {
                 _ui.update { it.copy(aiReactionSaving = false, error = extractErrorMessage(t, "更新偏好失败")) }
+            }
+        }
+    }
+
+    fun toggleAiPosts(enabled: Boolean) {
+        if (_ui.value.aiPostsSaving) return
+        viewModelScope.launch {
+            _ui.update { it.copy(aiPostsSaving = true, error = null, message = null) }
+            try {
+                val updated = container.network.api.updateAiPosts(UpdateAiPostsRequest(enabled))
+                container.authManager.updateUser(updated)
+                _ui.update {
+                    it.copy(
+                        aiPostsSaving = false,
+                        message = if (enabled) "已开启 AI 每日联网动态（正常消耗积分）" else "已关闭 AI 每日联网动态",
+                    )
+                }
+            } catch (t: Throwable) {
+                _ui.update { it.copy(aiPostsSaving = false, error = extractErrorMessage(t, "更新偏好失败")) }
             }
         }
     }

@@ -12,8 +12,19 @@ export const appRoutes: RouteRecordRaw[] = [
   { path: "/login", name: "login", component: () => import("../views/LoginView.vue"), meta: { guestOnly: true } },
   { path: "/register", name: "register", component: () => import("../views/RegisterView.vue"), meta: { guestOnly: true } },
   { path: "/forgot", name: "forgot", component: () => import("../views/ForgotPasswordView.vue"), meta: { guestOnly: true } },
-  { path: "/", name: "chat", component: () => import("../views/ChatView.vue"), meta: { requiresAuth: true } },
-  { path: "/c/:id", name: "chat-conversation", component: () => import("../views/ChatView.vue"), meta: { requiresAuth: true } },
+  {
+    path: "/",
+    component: () => import("../layouts/AppShellLayout.vue"),
+    meta: { requiresAuth: true },
+    children: [
+      { path: "", name: "chat", component: () => import("../views/ChatView.vue") },
+      { path: "c/:id", name: "chat-conversation", component: () => import("../views/ChatView.vue") },
+      { path: "posts", name: "posts", component: () => import("../views/PostsView.vue") },
+      { path: "posts/guide", name: "posts-guide", component: () => import("../views/PostsGuideView.vue") },
+      { path: "library", name: "library", component: () => import("../views/LibraryView.vue") },
+      { path: "schedules", name: "schedules", component: () => import("../views/SchedulesView.vue") },
+    ],
+  },
   { path: "/settings", name: "settings", component: () => import("../views/SettingsView.vue"), meta: { requiresAuth: true } },
   { path: "/:pathMatch(.*)*", redirect: "/" },
 ];

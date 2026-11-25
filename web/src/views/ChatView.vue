@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { APP_SHELL_KEY } from "../layouts/AppShellLayout.vue";
 import { useConversationsStore } from "../stores/conversations";
 import { useChatStore } from "../stores/chat";
 import { useAuthStore } from "../stores/auth";
@@ -24,12 +25,10 @@ import SearchModal from "../components/chat/SearchModal.vue";
 import ContextStateModal from "../components/chat/ContextStateModal.vue";
 import DeliverableModal from "../components/chat/DeliverableModal.vue";
 import ImageLightboxModal from "../components/chat/ImageLightboxModal.vue";
-import LibraryPanel from "../components/settings/LibraryPanel.vue";
-import ScheduledTasksPanel from "../components/schedules/ScheduledTasksPanel.vue";
-import PostsFeedPanel from "../components/posts/PostsFeedPanel.vue";
 
 const route = useRoute();
 const router = useRouter();
+const shell = inject(APP_SHELL_KEY, null);
 const conversations = useConversationsStore();
 const chat = useChatStore();
 const auth = useAuthStore();
@@ -45,7 +44,7 @@ let openSeq = 0;
 const routeConversationId = computed(() => (typeof route.params.id === "string" && route.params.id ? route.params.id : null));
 const isNewSideDraft = computed(() => route.query.new === "1");
 
-const activeView = ref<"chat" | "posts" | "library" | "schedules">("chat");
+const activeView = ref<"chat">("chat");
 
 const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
 const assistantAvatarUrl = computed(() => auth.user?.assistant_avatar_url ?? null);
@@ -56,9 +55,6 @@ const isCurrentScheduled = computed(() => {
   return Boolean(cur.is_scheduled || (cur.title || "").startsWith("[定时]"));
 });
 const headerTitle = computed(() => {
-  if (activeView.value === "posts") return "动态";
-  if (activeView.value === "library") return "资料库";
-  if (activeView.value === "schedules") return "定时任务";
   if (isMainChat.value) return "主要聊天";
   const raw = conversations.current?.title ?? "新旁聊";
   if (isCurrentScheduled.value) {
@@ -312,23 +308,20 @@ function createSideConversation() {
 }
 
 function onSwitchView(view: "chat" | "posts" | "library" | "schedules") {
-  activeView.value = view;
-  if (view === "posts" || view === "library" || view === "schedules") {
-    previewTarget.value = null;
-    mobileStepsOpen.value = false;
-  } else if (!conversations.current && !isNewSideDraft.value) {
-    void openMainConversation();
+  if (view === "posts") {
+    void router.push({ name: "posts" });
+    return;
   }
-}
-
-async function onDiscussPostInChat(payload: { conversationId: string; prefillPrompt: string }) {
-  await conversations.fetchList();
-  await onSelect(payload.conversationId);
-  if (payload.prefillPrompt) {
-    const input = chatInputRef.value as any;
-    if (input && typeof input.setText === "function") {
-      input.setText(payload.prefillPrompt);
-    }
+  if (view === "library") {
+    void router.push({ name: "library" });
+    return;
+  }
+  if (view === "schedules") {
+    void router.push({ name: "schedules" });
+    return;
+  }
+  if (!conversations.current && !isNewSideDraft.value) {
+    void openMainConversation();
   }
 }
 
@@ -870,6 +863,14 @@ onMounted(async () => {
   } else {
     await openMainConversation();
   }
+  shell?.registerChatRailToggle(toggleSidebarCollapsed);
+  const prefill = typeof route.query.prefill === "string" ? route.query.prefill.trim() : "";
+  if (prefill) {
+    const input = chatInputRef.value as any;
+    if (input && typeof input.setText === "function") {
+      input.setText(prefill);
+    }
+  }
 });
 
 watch(bottomOverlayRef, (el, prev) => {
@@ -899,13 +900,13 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", onVisibilityRecovery);
   mediaQuery?.removeEventListener("change", onMediaChange);
   if (pollTimer) window.clearTimeout(pollTimer);
-  realtime.stop();
+  shell?.registerChatRailToggle(null);
   chat.abort();
 });
 </script>
 
 <template>
-  <div class="flex h-dvh overflow-hidden bg-canvas">
+  <div class="flex h-full min-w-0 flex-1 overflow-hidden bg-canvas">
     <Transition
       enter-active-class="transition duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
       enter-from-class="opacity-0"
@@ -946,77 +947,7 @@ onBeforeUnmount(() => {
     />
 
     <main class="relative flex min-w-0 flex-1" :inert="(!isDesktop && sidebarOpen) || undefined">
-      <!-- Embedded Private Posts Feed inside Homepage Main Area -->
-      <template v-if="activeView === 'posts'">
-        <div class="relative flex min-w-0 flex-1 flex-col">
-          <div class="flex shrink-0 items-center gap-2.5 border-b border-line/60 px-3.5 py-3">
-            <button
-              type="button"
-              class="focus-ring flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
-              :aria-label="sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
-              :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
-              @click="onSidebarToggleClick"
-            >
-              <AppIcon name="menu-lines" class="h-[22px] w-[22px]" :stroke-width="2.1" />
-            </button>
-            <h1 class="min-w-0 truncate text-[16px] font-semibold text-fg">动态</h1>
-          </div>
-          <div v-scrollbar class="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
-            <div class="mx-auto w-full max-w-4xl">
-              <PostsFeedPanel @discuss-in-chat="onDiscussPostInChat" />
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <!-- Embedded Library View inside Homepage Main Area -->
-      <template v-else-if="activeView === 'library'">
-        <div class="relative flex min-w-0 flex-1 flex-col">
-          <div class="flex shrink-0 items-center gap-2.5 border-b border-line/60 px-3.5 py-3">
-            <button
-              type="button"
-              class="focus-ring flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
-              :aria-label="sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
-              :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
-              @click="onSidebarToggleClick"
-            >
-              <AppIcon name="menu-lines" class="h-[22px] w-[22px]" :stroke-width="2.1" />
-            </button>
-            <h1 class="min-w-0 truncate text-[16px] font-semibold text-fg">资料库</h1>
-          </div>
-          <div v-scrollbar class="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
-            <div class="mx-auto w-full max-w-6xl">
-              <LibraryPanel embedded />
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <!-- Embedded Scheduled Tasks View inside Homepage Main Area -->
-      <template v-else-if="activeView === 'schedules'">
-        <div class="relative flex min-w-0 flex-1 flex-col">
-          <div class="flex shrink-0 items-center gap-2.5 border-b border-line/60 px-3.5 py-3">
-            <button
-              type="button"
-              class="focus-ring flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-fg-muted transition-colors hover:bg-hover/80 hover:text-fg"
-              :aria-label="sidebarCollapsed ? '展开侧栏' : '切换侧栏'"
-              :title="sidebarCollapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'"
-              @click="onSidebarToggleClick"
-            >
-              <AppIcon name="menu-lines" class="h-[22px] w-[22px]" :stroke-width="2.1" />
-            </button>
-            <h1 class="min-w-0 truncate text-[16px] font-semibold text-fg">定时任务</h1>
-          </div>
-          <div v-scrollbar class="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
-            <div class="mx-auto w-full max-w-5xl">
-              <ScheduledTasksPanel @open-conversation="onSelect" />
-            </div>
-          </div>
-        </div>
-      </template>
-
       <!-- Chat Workspace View (Main Chat & Side Chats) -->
-      <template v-else>
       <!-- Fixed task panel toggle (top-right inside panel when expanded, same position when collapsed) -->
       <button
         type="button"
@@ -1327,7 +1258,6 @@ onBeforeUnmount(() => {
           />
         </div>
       </aside>
-      </template>
     </main>
 
     <Transition

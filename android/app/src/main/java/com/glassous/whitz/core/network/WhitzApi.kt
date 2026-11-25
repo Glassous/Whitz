@@ -17,6 +17,11 @@ import com.glassous.whitz.core.model.LibraryContentSearchResponse
 import com.glassous.whitz.core.model.MemoryOverview
 import com.glassous.whitz.core.model.MemorySearchResponse
 import com.glassous.whitz.core.model.MessageReaction
+import com.glassous.whitz.core.model.PostCommentCreateResponse
+import com.glassous.whitz.core.model.PostDiscussResponse
+import com.glassous.whitz.core.model.PostItem
+import com.glassous.whitz.core.model.PostListResponse
+import com.glassous.whitz.core.model.PostQuotaSummary
 import com.glassous.whitz.core.model.PresignResponse
 import com.glassous.whitz.core.model.ScheduleOverview
 import com.glassous.whitz.core.model.SchedulePendingResolveResponse
@@ -264,6 +269,25 @@ data class LibraryFilePatchRequest(@SerialName("is_global") val isGlobal: Boolea
 @Serializable
 data class UpdateAiReactionsRequest(
     @SerialName("ai_reactions_enabled") val aiReactionsEnabled: Boolean,
+)
+
+@Serializable
+data class UpdateAiPostsRequest(
+    @SerialName("ai_posts_enabled") val aiPostsEnabled: Boolean,
+)
+
+@Serializable
+data class PostCreateRequest(
+    val title: String = "",
+    val content: String,
+    val tags: List<String> = emptyList(),
+)
+
+@Serializable
+data class PostCommentCreateRequest(
+    val content: String,
+    @SerialName("reply_to_id") val replyToId: String? = null,
+    @SerialName("trigger_ai_reply") val triggerAiReply: Boolean = true,
 )
 
 @Serializable
@@ -686,4 +710,51 @@ interface WhitzApi {
 
     @POST("schedules/{id}/run-now")
     suspend fun runScheduleNow(@Path("id") id: String): ScheduledTaskRun
+
+    // --- Private AI & User Posts ---
+    @PUT("users/me/ai-posts")
+    suspend fun updateAiPosts(@Body body: UpdateAiPostsRequest): User
+
+    @GET("posts")
+    suspend fun getPosts(
+        @Query("author_type") authorType: String? = null,
+        @Query("bookmarked_only") bookmarkedOnly: Boolean = false,
+        @Query("collection_id") collectionId: String? = null,
+        @Query("post_kind") postKind: String? = null,
+        @Query("cursor") cursor: String? = null,
+        @Query("limit") limit: Int = 20,
+    ): PostListResponse
+
+    @GET("posts/quota")
+    suspend fun getPostQuota(): PostQuotaSummary
+
+    @POST("posts")
+    suspend fun createPost(@Body body: PostCreateRequest): PostItem
+
+    @GET("posts/{id}")
+    suspend fun getPostDetail(@Path("id") id: String): PostItem
+
+    @DELETE("posts/{id}")
+    suspend fun deletePost(@Path("id") id: String): Response<Unit>
+
+    @POST("posts/{id}/like")
+    suspend fun togglePostLike(@Path("id") id: String): PostItem
+
+    @POST("posts/{id}/bookmark")
+    suspend fun togglePostBookmark(@Path("id") id: String): PostItem
+
+    @POST("posts/{id}/comments")
+    suspend fun createPostComment(
+        @Path("id") id: String,
+        @Body body: PostCommentCreateRequest,
+    ): PostCommentCreateResponse
+
+    @DELETE("posts/{postId}/comments/{commentId}")
+    suspend fun deletePostComment(
+        @Path("postId") postId: String,
+        @Path("commentId") commentId: String,
+    ): Response<Unit>
+
+    @POST("posts/{id}/discuss")
+    suspend fun discussPostInChat(@Path("id") id: String): PostDiscussResponse
 }

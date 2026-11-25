@@ -2,7 +2,12 @@ import type { RouteRecordRaw } from "vue-router";
 import { createWebHashHistory } from "vue-router";
 import { createAppRouter } from "@web/router";
 import { useAuthStore } from "@web/stores/auth";
+import AppShellLayout from "@web/layouts/AppShellLayout.vue";
 import ChatView from "@web/views/ChatView.vue";
+import PostsView from "@web/views/PostsView.vue";
+import PostsGuideView from "@web/views/PostsGuideView.vue";
+import LibraryView from "@web/views/LibraryView.vue";
+import SchedulesView from "@web/views/SchedulesView.vue";
 import LoginView from "@web/views/LoginView.vue";
 import RegisterView from "@web/views/RegisterView.vue";
 import ForgotPasswordView from "@web/views/ForgotPasswordView.vue";
@@ -21,8 +26,19 @@ export const desktopRoutes: RouteRecordRaw[] = [
     name: "home",
     redirect: () => (useAuthStore().isAuthenticated ? { name: "chat" } : { name: "work" }),
   },
-  { path: "/chat", name: "chat", component: ChatView, meta: { requiresAuth: true } },
-  { path: "/c/:id", name: "chat-conversation", component: ChatView, meta: { requiresAuth: true } },
+  {
+    path: "/",
+    component: AppShellLayout,
+    meta: { requiresAuth: true },
+    children: [
+      { path: "chat", name: "chat", component: ChatView },
+      { path: "c/:id", name: "chat-conversation", component: ChatView },
+      { path: "posts", name: "posts", component: PostsView },
+      { path: "posts/guide", name: "posts-guide", component: PostsGuideView },
+      { path: "library", name: "library", component: LibraryView },
+      { path: "schedules", name: "schedules", component: SchedulesView },
+    ],
+  },
   { path: "/chat-gate", name: "chat-gate", component: ChatGateView },
   { path: "/work", name: "work", component: WorkView },
   { path: "/work/setup", name: "work-setup", component: WorkSetupView },
