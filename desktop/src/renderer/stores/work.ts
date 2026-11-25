@@ -1316,7 +1316,10 @@ export const useWorkStore = defineStore("work", () => {
               tool_name: null,
               tool_payload: { reasoning: [] },
               run_id: null,
-              created_at: new Date().toISOString(),
+              created_at:
+                typeof data.assistant_created_at === "string" && data.assistant_created_at
+                  ? data.assistant_created_at
+                  : new Date().toISOString(),
             });
           }
           return;
@@ -1327,6 +1330,9 @@ export const useWorkStore = defineStore("work", () => {
             const stable = stableKeyOf(tempUser.id);
             if (data.user_message_id !== stable) stableKeys.value[data.user_message_id] = stable;
             tempUser.id = data.user_message_id;
+            if (typeof data.user_created_at === "string" && data.user_created_at) {
+              tempUser.created_at = data.user_created_at;
+            }
           }
           const prevAssistantId = run.activeAssistantId;
           const assistant = detail.messages.find((m) => m.id === prevAssistantId);
@@ -1334,6 +1340,9 @@ export const useWorkStore = defineStore("work", () => {
             const stable = stableKeyOf(assistant.id);
             if (data.assistant_message_id !== stable) stableKeys.value[data.assistant_message_id] = stable;
             assistant.id = data.assistant_message_id;
+            if (typeof data.assistant_created_at === "string" && data.assistant_created_at) {
+              assistant.created_at = data.assistant_created_at;
+            }
             run.activeAssistantId = data.assistant_message_id;
             if (selectedTurnId.value === prevAssistantId) {
               selectedTurnId.value = data.assistant_message_id;

@@ -126,6 +126,7 @@ class SupervisedRun:
         self.live_status: str = "running"
         self.live_pending_control: dict[str, Any] | None = None
         self.live_tools: list[dict[str, Any]] = []
+        self.assistant_created_at: str | None = None
         self._seed_events = list(seed_events or [])
         self.task: asyncio.Task[Any] | None = None
 
@@ -168,6 +169,7 @@ class SupervisedRun:
             "run_id": self.run_id,
             "conversation_id": str(self.conv_id),
             "assistant_message_id": str(self.assistant_id),
+            "created_at": self.assistant_created_at,
             "status": self.live_status,
             "output": content,
             "reasoning": reasoning,
@@ -200,6 +202,7 @@ class SupervisedRun:
                 if conv is None or assistant is None:
                     self.broadcast(chat_stream.sse("error", {"code": "not_found"}))
                     return
+                self.assistant_created_at = assistant.created_at.isoformat() if assistant.created_at else None
 
                 pipeline = chat_stream.ChatPipeline(
                     db,

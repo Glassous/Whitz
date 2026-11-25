@@ -185,6 +185,31 @@ private val DISLIKE_REASON_OPTIONS = listOf(
     "other" to "其他",
 )
 
+@Composable
+fun ChatTimeDivider(
+    label: String,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalWhitzColors.current
+    Box(
+        modifier = modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = colors.surface.copy(alpha = 0.78f),
+        ) {
+            Text(
+                text = label,
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = colors.fgFaint,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun MessageBubble(

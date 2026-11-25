@@ -638,6 +638,9 @@ export const useChatStore = defineStore("chat", () => {
           const stable = stableKeyOf(userMsg.id);
           if (d.user_message_id !== stable) stableKeys.value[d.user_message_id] = stable;
           userMsg.id = d.user_message_id;
+          if (typeof d.user_created_at === "string" && d.user_created_at) {
+            userMsg.created_at = d.user_created_at;
+          }
         }
         pendingUserTargetId = null;
         const a = assistant();
@@ -646,6 +649,9 @@ export const useChatStore = defineStore("chat", () => {
           const stable = stableKeyOf(previousId);
           if (d.assistant_message_id !== stable) stableKeys.value[d.assistant_message_id] = stable;
           a.id = d.assistant_message_id;
+          if (typeof d.assistant_created_at === "string" && d.assistant_created_at) {
+            a.created_at = d.assistant_created_at;
+          }
           activeAssistantId.value = d.assistant_message_id;
           if (selectedTurnId.value === previousId) selectedTurnId.value = d.assistant_message_id;
         }
@@ -685,6 +691,7 @@ export const useChatStore = defineStore("chat", () => {
         if (typeof d.last_event_id === "string" && d.last_event_id !== "0-0") {
           lastEventId = d.last_event_id;
         }
+        const snapCreatedAt = typeof d.created_at === "string" && d.created_at ? d.created_at : null;
         let a = assistant();
         if (!a && activeAssistantId.value) {
           const created: Message = {
@@ -695,12 +702,13 @@ export const useChatStore = defineStore("chat", () => {
             tool_payload: null,
             status: "streaming",
             run_id: activeRunId.value,
-            created_at: new Date().toISOString(),
+            created_at: snapCreatedAt ?? new Date().toISOString(),
           };
           messages.value.push(created);
           a = created;
         }
         if (a) {
+          if (snapCreatedAt) a.created_at = snapCreatedAt;
           if (typeof d.output === "string") a.content = d.output;
           if (typeof d.status === "string") {
             a.status =

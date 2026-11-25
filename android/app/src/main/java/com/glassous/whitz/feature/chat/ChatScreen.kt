@@ -60,6 +60,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -184,6 +185,7 @@ import com.glassous.whitz.core.model.displaySideTitle
 import com.glassous.whitz.core.model.isScheduledSide
 import com.glassous.whitz.core.model.quotaPercentLabel
 import com.glassous.whitz.core.model.resolvedAssistantName
+import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzBrandMark
 import com.glassous.whitz.ui.theme.WhitzGlassCircleButton
@@ -198,6 +200,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import java.time.ZonedDateTime
 import java.util.Calendar
 import kotlin.math.roundToInt
 
@@ -797,6 +800,13 @@ fun ChatScreen(
                                 )
                             }
                         } else {
+                            var nowZdt by remember { mutableStateOf(ZonedDateTime.now()) }
+                            LaunchedEffect(Unit) {
+                                while (true) {
+                                    delay(60_000L)
+                                    nowZdt = ZonedDateTime.now()
+                                }
+                            }
                             key(conversationScrollKey) {
                                 LazyColumn(
                                     state = listState,
@@ -812,11 +822,19 @@ fun ChatScreen(
                                     ),
                                     verticalArrangement = Arrangement.spacedBy(16.dp),
                                 ) {
-                                    items(
+                                    itemsIndexed(
                                         items = visibleMessages,
-                                        key = { ui.stableKeys[it.id] ?: it.id },
-                                    ) { msg ->
+                                        key = { _, msg -> ui.stableKeys[msg.id] ?: msg.id },
+                                    ) { index, msg ->
                                         val isActiveStreamingItem = ui.streaming && msg.id == ui.activeAssistantId
+                                        val prevMsg = if (index > 0) visibleMessages[index - 1] else null
+                                        val dividerLabel = remember(msg.id, msg.createdAt, prevMsg?.createdAt, nowZdt) {
+                                            if (DateTimeUtils.shouldShowChatTimeDivider(prevMsg?.createdAt, msg.createdAt)) {
+                                                DateTimeUtils.formatChatDivider(msg.createdAt, nowZdt).ifBlank { null }
+                                            } else {
+                                                null
+                                            }
+                                        }
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -829,7 +847,13 @@ fun ChatScreen(
                                                 ),
                                             contentAlignment = Alignment.Center,
                                         ) {
-                                            Box(modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth()) {
+                                            Column(modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth()) {
+                                                if (dividerLabel != null) {
+                                                    ChatTimeDivider(
+                                                        label = dividerLabel,
+                                                        modifier = Modifier.padding(top = 4.dp, bottom = 14.dp),
+                                                    )
+                                                }
                                                 val isSelected = msg.id == resolvedTurn.turnId
                                                 MessageBubble(
                                                     message = msg,

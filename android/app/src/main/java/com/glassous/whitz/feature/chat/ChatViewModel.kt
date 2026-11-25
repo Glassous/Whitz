@@ -1575,6 +1575,8 @@ class ChatViewModel(
             "message.created" -> {
                 val userMsgId = d.str("user_message_id")
                 val asstMsgId = d.str("assistant_message_id")
+                val userCreatedAt = d.str("user_created_at")?.takeIf { it.isNotBlank() }
+                val asstCreatedAt = d.str("assistant_created_at")?.takeIf { it.isNotBlank() }
                 _ui.update { state ->
                     var updatedUser = false
                     val nextStableKeys = state.stableKeys.toMutableMap()
@@ -1585,11 +1587,11 @@ class ChatViewModel(
                             updatedUser = true
                             val stable = state.stableKeys[m.id] ?: m.id
                             if (userMsgId != stable) nextStableKeys[userMsgId] = stable
-                            m.copy(id = userMsgId)
+                            m.copy(id = userMsgId, createdAt = userCreatedAt ?: m.createdAt)
                         } else if (asstMsgId != null && m.id == state.activeAssistantId) {
                             val stable = state.stableKeys[m.id] ?: m.id
                             if (asstMsgId != stable) nextStableKeys[asstMsgId] = stable
-                            m.copy(id = asstMsgId)
+                            m.copy(id = asstMsgId, createdAt = asstCreatedAt ?: m.createdAt)
                         } else {
                             m
                         }
@@ -1642,6 +1644,7 @@ class ChatViewModel(
             "run.snapshot" -> {
                 val asstId = d.str("assistant_message_id")
                 val runId = d.str("run_id")
+                val snapCreatedAt = d.str("created_at")?.takeIf { it.isNotBlank() }
                 val snapLastId = d.str("last_event_id")
                 if (!snapLastId.isNullOrBlank() && snapLastId != "0-0") {
                     lastEventId = snapLastId
@@ -1697,6 +1700,7 @@ class ChatViewModel(
                             m.copy(
                                 content = output ?: m.content,
                                 status = mappedStatus ?: m.status,
+                                createdAt = snapCreatedAt ?: m.createdAt,
                                 toolPayload = prevPayload.copy(
                                     reasoning = nextReasoning,
                                     plan = nextPlan,
@@ -1719,7 +1723,7 @@ class ChatViewModel(
                                 artifacts = parsedArtifacts.ifEmpty { null },
                                 citations = nextCitations.ifEmpty { null },
                             ),
-                            createdAt = Instant.now().toString(),
+                            createdAt = snapCreatedAt ?: Instant.now().toString(),
                         )
                     } else {
                         mappedMsgs

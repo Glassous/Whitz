@@ -3,6 +3,9 @@ import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, wa
 import type { CitationItem, ConversationFile, DeliverableTarget, Message } from "../../types";
 import { useChatStore } from "../../stores/chat";
 import { useSmartStreamScroll } from "../../composables/useSmartStreamScroll";
+import { useChatTimeNow } from "../../composables/useChatTimeNow";
+import { formatChatDividerTime, shouldShowChatTimeDivider } from "../../lib/chatTime";
+import ChatTimeDivider from "./ChatTimeDivider.vue";
 import MessageBubble from "./MessageBubble.vue";
 
 const props = defineProps<{
@@ -41,8 +44,19 @@ let resizeObserver: ResizeObserver | null = null;
 let highlightTimer: number | null = null;
 
 const smartScroll = useSmartStreamScroll(container);
+const nowMs = useChatTimeNow();
 
 const visibleMessages = computed(() => props.messages.filter((m) => m.role !== "tool"));
+
+const dividerLabels = computed(() => {
+  const msgs = visibleMessages.value;
+  const now = nowMs.value;
+  return msgs.map((m, idx) => {
+    const prev = idx > 0 ? msgs[idx - 1] : null;
+    if (!shouldShowChatTimeDivider(prev?.created_at, m.created_at)) return null;
+    return formatChatDividerTime(m.created_at, now) || null;
+  });
+});
 
 const latestTurnStartIndex = computed(() => {
   const msgs = visibleMessages.value;
@@ -240,26 +254,34 @@ defineExpose({
       <div
         v-for="(m, idx) in visibleMessages"
         :key="chat.stableKeyOf(m.id)"
-        :ref="(el) => setItemRef(idx, el as HTMLElement | null)"
-        class="-mx-2 rounded-2xl px-2 py-1 transition-colors duration-700"
-        :class="[
-          highlightedId === m.id ? 'bg-accent-weak/75' : '',
-          idx < visibleMessages.length - 6 ? 'message-deferred' : '',
-        ]"
+        class="flex flex-col"
+        :class="idx < visibleMessages.length - 6 ? 'message-deferred' : ''"
       >
-        <MessageBubble
-          :message="m"
-          :downloading-file-id="downloadingFileId"
-          @steps="emit('steps', m.id)"
-          @regenerate="emit('regenerate', $event)"
-          @edit="(id, content) => emit('edit', id, content)"
-          @preview-html="emit('preview-html', $event)"
-          @preview-file="emit('preview-file', $event)"
-          @open-deliverable="emit('open-deliverable', $event)"
-          @open-lightbox="(f, list) => emit('open-lightbox', f, list)"
-          @download-file="emit('download-file', $event)"
-          @open-citation="emit('open-citation', $event)"
+        <ChatTimeDivider
+          v-if="dividerLabels[idx]"
+          :datetime="m.created_at"
+          :label="dividerLabels[idx]!"
+          class="mb-4 mt-1"
         />
+        <div
+          :ref="(el) => setItemRef(idx, el as HTMLElement | null)"
+          class="-mx-2 rounded-2xl px-2 py-1 transition-colors duration-700"
+          :class="highlightedId === m.id ? 'bg-accent-weak/75' : ''"
+        >
+          <MessageBubble
+            :message="m"
+            :downloading-file-id="downloadingFileId"
+            @steps="emit('steps', m.id)"
+            @regenerate="emit('regenerate', $event)"
+            @edit="(id, content) => emit('edit', id, content)"
+            @preview-html="emit('preview-html', $event)"
+            @preview-file="emit('preview-file', $event)"
+            @open-deliverable="emit('open-deliverable', $event)"
+            @open-lightbox="(f, list) => emit('open-lightbox', f, list)"
+            @download-file="emit('download-file', $event)"
+            @open-citation="emit('open-citation', $event)"
+          />
+        </div>
       </div>
       <div
         aria-hidden="true"

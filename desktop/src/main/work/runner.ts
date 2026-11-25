@@ -181,7 +181,7 @@ function ensureAssistantRow(conversationId: string, run: ActiveRun): string {
   run.assistantId = msg.id;
   emit(conversationId, {
     event: "message.created",
-    data: { assistant_message_id: msg.id },
+    data: { assistant_message_id: msg.id, assistant_created_at: msg.created_at },
   });
   return msg.id;
 }
@@ -435,7 +435,12 @@ async function startRunWithPump(
   });
   emit(conversationId, {
     event: "message.created",
-    data: { user_message_id: userMessage.id, assistant_message_id: assistant.id },
+    data: {
+      user_message_id: userMessage.id,
+      assistant_message_id: assistant.id,
+      user_created_at: userMessage.created_at,
+      assistant_created_at: assistant.created_at,
+    },
   });
 
   const run: ActiveRun = {

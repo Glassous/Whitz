@@ -20,6 +20,7 @@ import com.glassous.whitz.core.model.resolvedAssistantName
 import com.glassous.whitz.core.network.SseParser
 import com.glassous.whitz.core.network.WhitzJson
 import com.glassous.whitz.core.util.ConversationSorter
+import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.feature.chat.computeLiveStepLabel
 import com.glassous.whitz.feature.chat.computeStepsCount
 import com.glassous.whitz.feature.chat.filterVisibleMessages
@@ -393,5 +394,33 @@ class WhitzCoreTests {
         )
         assertEquals("联网搜索 · 博查", toolDisplayName(bochaTool))
         assertEquals("联网搜索 · Tavily", toolDisplayName(tavilyTool))
+    }
+
+    @Test
+    fun dateTimeUtils_chatDividerRulesAndChineseFormat() {
+        val zone = java.time.ZoneId.of("Asia/Shanghai")
+        val nowZdt = java.time.ZonedDateTime.of(2026, 11, 25, 18, 35, 0, 0, zone)
+        fun isoAt(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int = 0): String =
+            java.time.ZonedDateTime.of(year, month, day, hour, minute, second, 0, zone).toInstant().toString()
+
+        val t1 = isoAt(2026, 11, 25, 10, 0)
+        val t2 = isoAt(2026, 11, 25, 10, 4, 59)
+        val t3 = isoAt(2026, 11, 25, 10, 5, 0)
+        val prevNight = isoAt(2026, 11, 24, 23, 59)
+        val midnight = isoAt(2026, 11, 25, 0, 0, 30)
+
+        assertTrue(DateTimeUtils.shouldShowChatTimeDivider(null, t1, zone))
+        assertFalse(DateTimeUtils.shouldShowChatTimeDivider(t1, null, zone))
+        assertFalse(DateTimeUtils.shouldShowChatTimeDivider(t1, t2, zone))
+        assertTrue(DateTimeUtils.shouldShowChatTimeDivider(t1, t3, zone))
+        assertTrue(DateTimeUtils.shouldShowChatTimeDivider(prevNight, midnight, zone))
+
+        assertEquals("09:05", DateTimeUtils.formatChatDivider(isoAt(2026, 11, 25, 9, 5), nowZdt))
+        assertEquals("昨天 22:18", DateTimeUtils.formatChatDivider(isoAt(2026, 11, 24, 22, 18), nowZdt))
+        assertEquals("星期一 14:00", DateTimeUtils.formatChatDivider(isoAt(2026, 11, 23, 14, 0), nowZdt))
+        assertEquals("星期四 08:30", DateTimeUtils.formatChatDivider(isoAt(2026, 11, 19, 8, 30), nowZdt))
+        assertEquals("11月18日 08:30", DateTimeUtils.formatChatDivider(isoAt(2026, 11, 18, 8, 30), nowZdt))
+        assertEquals("2025年12月31日 23:59", DateTimeUtils.formatChatDivider(isoAt(2025, 12, 31, 23, 59), nowZdt))
+        assertEquals("", DateTimeUtils.formatChatDivider("invalid", nowZdt))
     }
 }

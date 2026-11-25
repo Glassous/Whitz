@@ -1571,7 +1571,12 @@ async def stream_chat(
             await usage.record_message(db, user_id)
             yield sse(
                 "message.created",
-                {"user_message_id": str(user_msg.id), "assistant_message_id": str(assistant.id)},
+                {
+                    "user_message_id": str(user_msg.id),
+                    "assistant_message_id": str(assistant.id),
+                    "user_created_at": user_msg.created_at.isoformat(),
+                    "assistant_created_at": assistant.created_at.isoformat(),
+                },
             )
 
             sup, q, run_id = await _launch_supervised_turn(
@@ -1777,6 +1782,8 @@ async def stream_regenerate(
                     "user_message_id": str(user_msg.id),
                     "assistant_message_id": str(assistant.id),
                     "replaced_message_id": str(target_message_id),
+                    "user_created_at": user_msg.created_at.isoformat(),
+                    "assistant_created_at": assistant.created_at.isoformat(),
                 },
             )
 
@@ -1969,6 +1976,8 @@ async def stream_edit(
                     "user_message_id": str(user_msg.id),
                     "assistant_message_id": str(assistant.id),
                     "replaced_message_id": str(target_message_id),
+                    "user_created_at": user_msg.created_at.isoformat(),
+                    "assistant_created_at": assistant.created_at.isoformat(),
                 },
             )
 
@@ -2040,6 +2049,7 @@ async def stream_reconnect(
     assistant_id_str = ""
     assistant_status = ""
     assistant_content = ""
+    assistant_created_at: str | None = None
     assistant_payload: dict[str, Any] = {}
     conv_plan: dict[str, Any] | None = None
     conv_pending_control: dict[str, Any] | None = None
@@ -2063,6 +2073,7 @@ async def stream_reconnect(
         assistant_id_str = str(assistant.id)
         assistant_status = str(assistant.status or "")
         assistant_content = assistant.content or ""
+        assistant_created_at = assistant.created_at.isoformat() if assistant.created_at else None
         assistant_payload = dict(assistant.tool_payload or {})
         conv_plan = conv.plan
         conv_pending_control = conv.pending_control
@@ -2087,6 +2098,7 @@ async def stream_reconnect(
                 "run_id": run_id,
                 "conversation_id": str(conv_id),
                 "assistant_message_id": assistant_id_str,
+                "created_at": assistant_created_at,
                 "status": assistant_status,
                 "output": assistant_content,
                 "reasoning": assistant_payload.get("reasoning") or [],
@@ -2123,6 +2135,8 @@ async def stream_reconnect(
             if ev_name == "run.snapshot":
                 payload = dict(payload)
                 payload.setdefault("assistant_message_id", assistant_id_str)
+                if assistant_created_at:
+                    payload.setdefault("created_at", assistant_created_at)
                 if not payload.get("pending_control") and isinstance(payload.get("pending_controls"), list):
                     ctls = payload["pending_controls"]
                     payload["pending_control"] = ctls[0] if ctls else conv_pending_control

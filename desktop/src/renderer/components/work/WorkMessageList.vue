@@ -4,6 +4,9 @@ import type { WorkMessage, WorkTokenUsage } from "@shared/work-types";
 import { useDesktopStore } from "../../stores/desktop";
 import { useWorkStore } from "../../stores/work";
 import { useSmartStreamScroll } from "@web/composables/useSmartStreamScroll";
+import { useChatTimeNow } from "@web/composables/useChatTimeNow";
+import { formatChatDividerTime, shouldShowChatTimeDivider } from "@web/lib/chatTime";
+import ChatTimeDivider from "@web/components/chat/ChatTimeDivider.vue";
 import MarkdownRenderer from "@web/components/chat/MarkdownRenderer.vue";
 
 const TOP_CLEARANCE = 16;
@@ -44,6 +47,7 @@ let turnRevealInitialized = false;
 let resizeObserver: ResizeObserver | null = null;
 
 const smartScroll = useSmartStreamScroll(scroller);
+const nowMs = useChatTimeNow();
 
 function isLongUserInput(content: string): boolean {
   if (!content) return false;
@@ -63,6 +67,16 @@ function toggleUserExpand(id: string) {
 }
 
 const visibleMessages = computed(() => props.messages.filter((m) => m.role !== "tool"));
+
+const dividerLabels = computed(() => {
+  const msgs = visibleMessages.value;
+  const now = nowMs.value;
+  return msgs.map((m, idx) => {
+    const prev = idx > 0 ? msgs[idx - 1] : null;
+    if (!shouldShowChatTimeDivider(prev?.created_at, m.created_at)) return null;
+    return formatChatDividerTime(m.created_at, now) || null;
+  });
+});
 
 const latestTurnStartIndex = computed(() => {
   const msgs = visibleMessages.value;
@@ -286,13 +300,23 @@ defineExpose({
     </div>
 
     <div v-else ref="wrapper" class="relative mx-auto flex w-full max-w-4xl flex-col gap-5">
-      <article
+      <div
         v-for="(message, idx) in visibleMessages"
         :key="work.stableKeyOf(message.id)"
-        :ref="(el) => setItemRef(idx, el as HTMLElement | null)"
-        class="w-full"
-        :class="message.role === 'user' ? 'group/user flex flex-col items-end' : 'group/assistant'"
+        class="flex flex-col"
+        :class="idx < visibleMessages.length - 6 ? 'message-deferred' : ''"
       >
+        <ChatTimeDivider
+          v-if="dividerLabels[idx]"
+          :datetime="message.created_at"
+          :label="dividerLabels[idx]!"
+          class="mb-4 mt-1"
+        />
+        <article
+          :ref="(el) => setItemRef(idx, el as HTMLElement | null)"
+          class="w-full"
+          :class="message.role === 'user' ? 'group/user flex flex-col items-end' : 'group/assistant'"
+        >
         <!-- User Message Bubble (Aligned with MessageBubble.vue) -->
         <template v-if="message.role === 'user'">
           <div class="flex max-w-[82%] flex-col items-end space-y-1.5">
@@ -454,6 +478,7 @@ defineExpose({
           </div>
         </template>
       </article>
+      </div>
 
       <!-- Redo banner when messages were undone via /undo -->
       <div
