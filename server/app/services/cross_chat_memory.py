@@ -978,6 +978,7 @@ async def load_cursor_aligned_history(
     min_messages: int = CURSOR_HISTORY_MIN_MESSAGES,
     max_messages: int = CURSOR_HISTORY_MAX_MESSAGES,
     max_tokens: int = CURSOR_HISTORY_MAX_TOKENS,
+    exclude_msg_id: uuid.UUID | None = None,
 ) -> list[dict[str, str]]:
     """Load cursor-aligned verbatim history with ZERO black-hole gaps and ZERO redundant archived overlap.
 
@@ -1005,6 +1006,8 @@ async def load_cursor_aligned_history(
     rows.reverse()
     completed: list[tuple[Message, str]] = []
     for m in rows:
+        if exclude_msg_id is not None and m.id == exclude_msg_id:
+            continue
         if m.role == "assistant" and m.status in ("failed", "cancelled", "streaming", "waiting"):
             continue
         rendered = format_history_message_content(m)

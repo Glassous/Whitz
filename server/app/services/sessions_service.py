@@ -66,13 +66,13 @@ async def list_user_active_sessions(
                     existing["client_ip"] = row.client_ip
 
     try:
-        revoked_map = await are_sessions_revoked(list(grouped.keys()))
+        revoked_ids = await are_sessions_revoked(list(grouped.keys()))
     except Exception:
-        revoked_map = {}
+        revoked_ids = set()
 
     sessions: list[UserSessionOut] = []
     for sid, item in grouped.items():
-        if revoked_map.get(sid, False):
+        if str(sid) in revoked_ids:
             continue
         sessions.append(UserSessionOut(**item))
 

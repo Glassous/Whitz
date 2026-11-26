@@ -299,7 +299,7 @@ async def test_send_message_injects_profile_skills_global_file_artifacts_graph_a
     inst = recorded_runs[0]["instructions"] or ""
     assert "算法工程师" in inst
     assert "viz-helper" in inst
-    assert "company-spec.md" in inst
+    assert any(att.get("filename") == "company-spec.md" for att in (recorded_runs[0].get("attachments") or []))
     assert "stream@test.local" not in inst
 
     detail = (await client.get(f"/api/conversations/{conv_id}", headers=headers)).json()

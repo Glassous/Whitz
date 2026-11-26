@@ -194,7 +194,7 @@ async def test_sessions_service_uses_batch_mget(monkeypatch):
     async def fake_are_revoked(sids):
         nonlocal batch_called
         batch_called += 1
-        return {sid1: False, sid2: True}
+        return {str(sid2)}
 
     monkeypatch.setattr(sessions_service, "are_sessions_revoked", fake_are_revoked)
 

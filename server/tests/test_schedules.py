@@ -232,7 +232,7 @@ async def test_dispatch_due_tasks_executes_without_hitl_and_handles_once(registe
     assert len(launched) == 1
     assert launched[0]["scheduled_run_id"] is not None
 
-    # Second tick must not re-fire
+    # Second tick must not re-fire (next_run_at cleared while execution is in flight)
     dispatched_again = await scheduler_service.dispatch_due_tasks(
         session_factory=session_factory,
         execute_inline=True,
@@ -240,8 +240,7 @@ async def test_dispatch_due_tasks_executes_without_hitl_and_handles_once(registe
     assert dispatched_again == 0
 
     await db.refresh(task)
-    assert task.enabled is False
-    assert task.status == "completed"
+    assert task.next_run_at is None
     assert task.run_count == 1
     assert task.conversation_id is not None
 
@@ -274,6 +273,10 @@ async def test_dispatch_due_tasks_executes_without_hitl_and_handles_once(registe
     assert run_row.status == "completed"
     assert run_row.tokens_used == 128
     assert "系统运行正常" in (run_row.summary or "")
+
+    await db.refresh(task)
+    assert task.enabled is False
+    assert task.status == "completed"
 
 
 async def test_dispatch_skips_when_credits_exhausted(register, engine, db):

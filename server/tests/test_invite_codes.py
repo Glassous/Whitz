@@ -43,8 +43,10 @@ async def test_redeem_upgrades_user(admin, register, client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["tier"] == "plus"
-    assert body["weekly"]["limit"] == 500
-    assert body["five_hour"]["limit"] == 100
+    from app.services.membership import PLANS
+
+    assert body["weekly"]["limit"] == PLANS["plus"].weekly_credits
+    assert body["five_hour"]["limit"] == PLANS["plus"].five_hour_credits
     expires = datetime.fromisoformat(body["expires_at"])
     delta = expires - datetime.now(timezone.utc)
     assert timedelta(days=29) < delta < timedelta(days=31)

@@ -74,11 +74,13 @@ async def test_admin_grant_extends_quota(register, db):
     await db.commit()
     assert (await membership.status(db, user))["remaining"] == 17.0
 
+    # Positive grants go to the non-expiring bonus bucket: plan usage is untouched,
+    # while the overall remaining balance grows by the granted amount.
     await membership.adjust(db, user, 20, note="test grant")
     info = await membership.status(db, user)
     assert info["remaining"] == 37.0
-    assert info["weekly"]["used"] == 0.0
-    assert info["five_hour"]["used"] == 0.0
+    assert info["weekly"]["used"] == 3.0
+    assert info["five_hour"]["used"] == 3.0
 
 
 async def test_settle_is_idempotent(register, db):
@@ -154,6 +156,10 @@ async def test_expired_membership_normalizes_to_free(register, client, db):
     assert resp.status_code == 200, resp.text
     assert resp.json()["tier"] == "free"
 
+    # The credits endpoint reports the effective tier; persisting the lapse is done by
+    # membership.normalize_expired (invoked from admin flows).
+    assert await membership.normalize_expired(db, user) is True
     await db.refresh(user)
     assert user.membership_tier == "free"
     assert user.membership_expires_at is None
+    assert await membership.normalize_expired(db, user) is False

@@ -74,9 +74,12 @@ async def test_client_disconnect_mid_stream_still_persists_and_settles_once(
     from app.services import embeddings as emb_svc
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.services import rag_jobs
+
     monkeypatch.setattr(chat_stream, "SessionLocal", session_factory)
     monkeypatch.setattr(run_supervisor, "SessionLocal", session_factory)
     monkeypatch.setattr(cross_chat_memory, "SessionLocal", session_factory)
+    monkeypatch.setattr(rag_jobs, "SessionLocal", session_factory)
     monkeypatch.setattr(emb_svc, "is_embedding_configured", lambda: False)
 
     gate = asyncio.Event()
@@ -89,13 +92,13 @@ async def test_client_disconnect_mid_stream_still_persists_and_settles_once(
             return {"run_id": "run-detach-1"}
 
         async def stream_events_with_id(self, run_id: str, *, last_event_id: str | None = None, include_snapshot: bool = False):
-            yield ("message.delta", {"text": "第一段 "}, "1-0")
+            yield ("message.delta", {"text": "第一段：整体采用分层控制面与异步执行器架构；"}, "1-0")
             await gate.wait()
-            yield ("message.delta", {"text": "第二段完整输出"}, "2-0")
+            yield ("message.delta", {"text": "第二段完整输出：支持多端断线重连与幂等结算。"}, "2-0")
             yield (
                 "run.completed",
                 {
-                    "output": "第一段 第二段完整输出",
+                    "output": "第一段：整体采用分层控制面与异步执行器架构；第二段完整输出：支持多端断线重连与幂等结算。",
                     "usage": {"prompt_tokens": 120, "completion_tokens": 80, "total_tokens": 200},
                 },
                 "3-0",
@@ -113,7 +116,7 @@ async def test_client_disconnect_mid_stream_still_persists_and_settles_once(
         user.id,
         user.agent_namespace,
         user.agent_api_key,
-        "请帮我写一段完整回复",
+        "请帮我写一段关于系统架构设计的完整技术回复说明",
         run_slot=None,
     )
     seen = []
@@ -150,7 +153,7 @@ async def test_client_disconnect_mid_stream_still_persists_and_settles_once(
         ).scalars().all()
         assert len(msgs) == 1
         assert msgs[0].status == "completed"
-        assert msgs[0].content == "第一段 第二段完整输出"
+        assert msgs[0].content == "第一段：整体采用分层控制面与异步执行器架构；第二段完整输出：支持多端断线重连与幂等结算。"
 
         # Credits settled strictly once
         ledger_count = await check_db.scalar(
@@ -194,9 +197,12 @@ async def test_multi_device_reconnect_receives_snapshot_without_duplication_or_d
     from app.services import embeddings as emb_svc
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.services import rag_jobs
+
     monkeypatch.setattr(chat_stream, "SessionLocal", session_factory)
     monkeypatch.setattr(run_supervisor, "SessionLocal", session_factory)
     monkeypatch.setattr(cross_chat_memory, "SessionLocal", session_factory)
+    monkeypatch.setattr(rag_jobs, "SessionLocal", session_factory)
     monkeypatch.setattr(emb_svc, "is_embedding_configured", lambda: False)
 
     first_chunk_emitted = asyncio.Event()

@@ -400,17 +400,31 @@ async def test_refresh_from_cookie(register, client):
     assert reuse.status_code == 401
 
 
-async def test_password_change_invalidates_access_token(register, client):
+async def test_password_change_keeps_current_device_and_revokes_others(register, client):
     data = await register(email="rotate@test.local", password="Passw0rd!")
+    other = await client.post(
+        "/api/auth/login",
+        json={"email": "rotate@test.local", "password": "Passw0rd!"},
+        headers={"User-Agent": "OtherDevice/1.0"},
+    )
+    assert other.status_code == 200
+    other_access = other.json()["access_token"]
+    other_refresh = other.json()["refresh_token"]
+
     change = await client.put(
         "/api/users/me/password",
         json={"old_password": "Passw0rd!", "new_password": "NewPassw0rd!"},
         headers=auth_header(data["access_token"]),
     )
     assert change.status_code == 204
-    stale = await client.get("/api/users/me", headers=auth_header(data["access_token"]))
+
+    # The device that changed the password stays signed in...
+    current = await client.get("/api/users/me", headers=auth_header(data["access_token"]))
+    assert current.status_code == 200
+    # ...while every other device is revoked immediately.
+    stale = await client.get("/api/users/me", headers=auth_header(other_access))
     assert stale.status_code == 401
-    reuse = await client.post("/api/auth/refresh", json={"refresh_token": data["refresh_token"]})
+    reuse = await client.post("/api/auth/refresh", json={"refresh_token": other_refresh})
     assert reuse.status_code == 401
 
 

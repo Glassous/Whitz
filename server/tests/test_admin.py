@@ -73,7 +73,10 @@ async def test_admin_updates_membership_and_credits(admin, register, client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["tier"] == "pro"
-    assert body["weekly"]["limit"] == 1250
+    from app.services.membership import PLANS
+
+    pro_weekly = float(PLANS["pro"].weekly_credits)
+    assert body["weekly"]["limit"] == pro_weekly
     assert body["five_hour"]["limit"] is None
     assert body["expires_at"]
 
@@ -83,7 +86,7 @@ async def test_admin_updates_membership_and_credits(admin, register, client):
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["remaining"] == 1450.0
+    assert resp.json()["remaining"] == pro_weekly + 200.0
 
     resp = await client.patch(
         f"/api/admin/users/{user_id}/membership", json={"tier": "free"}, headers=headers

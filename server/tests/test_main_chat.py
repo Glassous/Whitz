@@ -94,14 +94,16 @@ def test_cross_chat_memory_helpers_and_extractive_fallbacks():
     assert parsed[1] == ["每用户唯一主聊", "文件全局共享"]
     assert parsed[2] == ["主聊", "资料库"]
 
-    # Extractive rolling summary stays strictly bounded under ROLLING_SUMMARY_MAX_CHARS
-    long_msgs = [
-        SimpleNamespace(role="user" if i % 2 == 0 else "assistant", content=f"第 {i} 轮讨论细节：" + ("内容" * 200), status="done")
-        for i in range(40)
-    ]
-    rolled = ccm._extractive_rolling_summary("旧摘要：" + ("历史" * 1500), long_msgs)  # type: ignore[arg-type]
-    assert len(rolled) <= ccm.ROLLING_SUMMARY_MAX_CHARS
-    assert "第 39 轮讨论细节" in rolled
+    # L1 working state normalization, patching & prompt rendering stay bounded
+    ws = ccm.normalize_working_state(None)
+    patched = ccm.apply_working_state_patch(
+        ws,
+        {"active_goals": ["完成主聊记忆测试"], "recent_decisions": ["采用 L1+L2 情景归档"], "open_questions": ["待确认阈值"]},
+    )
+    rendered = ccm.format_working_state_prompt(patched)
+    assert "完成主聊记忆测试" in rendered
+    assert "采用 L1+L2 情景归档" in rendered
+    assert len(rendered) <= ccm.ROLLING_SUMMARY_MAX_CHARS
 
 
 # ---------------------------------------------------------------------------
@@ -252,10 +254,9 @@ async def test_library_direct_upload_and_cross_chat_digest_and_compaction(client
         )
     await db.commit()
 
-    compacted = await ccm.compact_main_conversation_if_needed(db, main_conv)
-    assert compacted
+    await ccm.compact_main_conversation_if_needed(db, main_conv)
     await db.refresh(main_conv)
-    assert main_conv.rolling_summary
+    assert main_conv.working_state_cursor_msg_id is not None
     assert main_conv.summary_cursor_msg_id is not None
-    assert len(main_conv.rolling_summary) <= ccm.ROLLING_SUMMARY_MAX_CHARS
+    assert len(main_conv.rolling_summary or "") <= ccm.ROLLING_SUMMARY_MAX_CHARS
     get_settings.cache_clear()
