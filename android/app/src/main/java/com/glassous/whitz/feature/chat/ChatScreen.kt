@@ -759,7 +759,9 @@ fun ChatScreen(
                             .fillMaxSize()
                             .hazeSource(headerHazeState),
                     ) {
-                        if (visibleMessages.isEmpty()) {
+                        if (ui.switchingConversation && visibleMessages.isEmpty()) {
+                            Box(modifier = Modifier.fillMaxSize())
+                        } else if (visibleMessages.isEmpty()) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()

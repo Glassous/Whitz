@@ -12,6 +12,7 @@ import { api } from "../api/client";
 import { extractFileIdsFromText } from "../lib/fileTokens";
 import type { AgentStatus, CitationItem, ConversationFile, DeliverableTarget, PreviewTarget, TaskPanelTab } from "../types";
 import ConversationSidebar from "../components/chat/ConversationSidebar.vue";
+import ConversationLoadingState from "../components/chat/ConversationLoadingState.vue";
 import MessageList from "../components/chat/MessageList.vue";
 import ScrollToBottomButton from "../components/ui/ScrollToBottomButton.vue";
 import AppIcon from "../components/ui/AppIcon.vue";
@@ -40,24 +41,33 @@ const realtime = useRealtimeStore();
 const sendingMessage = ref(false);
 const deletingFileId = ref<string | null>(null);
 const downloadingFileId = ref<string | null>(null);
+const loadingConversationId = ref<string | null>(null);
 let openSeq = 0;
 
 const routeConversationId = computed(() => (typeof route.params.id === "string" && route.params.id ? route.params.id : null));
 const isNewSideDraft = computed(() => route.query.new === "1");
+const isConversationLoading = computed(() => loadingConversationId.value !== null);
 
 const activeView = ref<"chat">("chat");
 
 const assistantName = computed(() => auth.user?.assistant_name?.trim() || "Whitz");
 const assistantAvatarUrl = computed(() => auth.user?.assistant_avatar_url ?? null);
-const isMainChat = computed(() => conversations.current?.kind === "main");
+const pendingConversationMeta = computed(() => {
+  const targetId = loadingConversationId.value;
+  if (!targetId) return null;
+  if (targetId === "__main__") return conversations.mainConversation;
+  return conversations.conversations.find((c) => c.id === targetId) ?? null;
+});
+const activeConversationMeta = computed(() => conversations.current ?? pendingConversationMeta.value);
+const isMainChat = computed(() => activeConversationMeta.value?.kind === "main");
 const isCurrentScheduled = computed(() => {
-  const cur = conversations.current;
+  const cur = activeConversationMeta.value;
   if (!cur || cur.kind === "main") return false;
   return Boolean(cur.is_scheduled || (cur.title || "").startsWith("[定时]"));
 });
 const headerTitle = computed(() => {
   if (isMainChat.value) return "主要聊天";
-  const raw = conversations.current?.title ?? "新旁聊";
+  const raw = activeConversationMeta.value?.title ?? (isConversationLoading.value ? "加载对话…" : "新旁聊");
   if (isCurrentScheduled.value) {
     return raw.replace(/^\[定时\]\s*/, "").trim() || raw;
   }
@@ -260,19 +270,31 @@ async function loadAgent() {
   }
 }
 
+function clearTransientConversationState() {
+  chat.abort();
+  chat.reset();
+  filesStore.reset();
+  previewTarget.value = null;
+  selectedSkills.value = [];
+}
+
 async function openConversation(id: string): Promise<boolean> {
   const seq = ++openSeq;
+  loadingConversationId.value = id;
+  conversations.clearCurrent();
+  clearTransientConversationState();
   try {
     const detail = await conversations.open(id);
     if (seq !== openSeq) return false;
+    loadingConversationId.value = null;
     chat.loadFromConversation(detail);
     void filesStore.load(id, detail.kind === "main" ? mainFileScope.value : "conversation");
     return true;
   } catch {
     if (seq !== openSeq) return false;
+    loadingConversationId.value = null;
     conversations.clearCurrent();
-    chat.reset();
-    filesStore.reset();
+    clearTransientConversationState();
     return false;
   }
 }
@@ -283,17 +305,30 @@ async function openMainConversation() {
   mobileStepsOpen.value = false;
   focusMessageId.value = null;
   const mainId = conversations.mainConversation?.id;
-  if (mainId && mainId === conversations.current?.id) {
+  if (mainId && mainId === conversations.current?.id && !loadingConversationId.value) {
     if (routeConversationId.value !== mainId) {
       void router.replace({ name: "chat-conversation", params: { id: mainId } });
     }
     return;
   }
-  chat.abort();
-  previewTarget.value = null;
-  selectedSkills.value = [];
+  if (mainId) {
+    showPlan.value = true;
+    planTab.value = "steps";
+    if (routeConversationId.value !== mainId) {
+      void router.replace({ name: "chat-conversation", params: { id: mainId } });
+    } else {
+      await openConversation(mainId);
+    }
+    return;
+  }
+  const seq = ++openSeq;
+  loadingConversationId.value = "__main__";
+  conversations.clearCurrent();
+  clearTransientConversationState();
   try {
-    const detail = mainId ? await conversations.open(mainId) : await conversations.openMain();
+    const detail = await conversations.openMain();
+    if (seq !== openSeq) return;
+    loadingConversationId.value = null;
     chat.loadFromConversation(detail);
     void filesStore.load(detail.id, mainFileScope.value);
     showPlan.value = true;
@@ -302,18 +337,19 @@ async function openMainConversation() {
       void router.replace({ name: "chat-conversation", params: { id: detail.id } });
     }
   } catch {
-    /* ignore */
+    if (seq !== openSeq) return;
+    loadingConversationId.value = null;
+    conversations.clearCurrent();
+    clearTransientConversationState();
   }
 }
 
 function createSideConversation() {
   activeView.value = "chat";
-  chat.abort();
+  openSeq++;
+  loadingConversationId.value = null;
   conversations.clearCurrent();
-  chat.reset();
-  filesStore.reset();
-  previewTarget.value = null;
-  selectedSkills.value = [];
+  clearTransientConversationState();
   showPlan.value = false;
   planTab.value = "steps";
   void router.push({ name: "chat", query: { new: "1" } });
@@ -342,40 +378,33 @@ async function onSelect(id: string) {
   sidebarOpen.value = false;
   mobileStepsOpen.value = false;
   focusMessageId.value = null;
-  if (id === conversations.current?.id) {
+  if (id === conversations.current?.id && !loadingConversationId.value) {
     if (routeConversationId.value !== id) {
       void router.push({ name: "chat-conversation", params: { id } });
     }
     return;
   }
-  chat.abort();
-  previewTarget.value = null;
-  selectedSkills.value = [];
-  const ok = await openConversation(id);
-  if (ok) {
-    showPlan.value = true;
-    if (routeConversationId.value !== id) {
-      void router.push({ name: "chat-conversation", params: { id } });
-    }
+  showPlan.value = true;
+  if (routeConversationId.value !== id) {
+    void router.push({ name: "chat-conversation", params: { id } });
+    return;
   }
+  await openConversation(id);
 }
 
 async function onSelectFromSearch(conversationId: string, messageId: string | null) {
   activeView.value = "chat";
   sidebarOpen.value = false;
   mobileStepsOpen.value = false;
-  if (conversationId !== conversations.current?.id) {
-    chat.abort();
-    previewTarget.value = null;
-    selectedSkills.value = [];
-    const ok = await openConversation(conversationId);
-    if (!ok) return;
-  }
+  focusMessageId.value = messageId;
+  showPlan.value = true;
   if (routeConversationId.value !== conversationId) {
     void router.push({ name: "chat-conversation", params: { id: conversationId } });
+    return;
   }
-  showPlan.value = true;
-  focusMessageId.value = messageId;
+  if (conversationId !== conversations.current?.id) {
+    await openConversation(conversationId);
+  }
 }
 
 function buildSyntheticFile(fileId: string, filename: string, conversationId: string | null): ConversationFile {
@@ -450,20 +479,17 @@ async function onPin(id: string, isPinned: boolean) {
 }
 
 async function onDelete(id: string) {
-  const wasCurrent = conversations.current?.id === id;
+  const wasCurrent = conversations.current?.id === id || loadingConversationId.value === id;
   await conversations.remove(id);
   if (wasCurrent) {
-    chat.reset();
-    previewTarget.value = null;
-    selectedSkills.value = [];
+    clearTransientConversationState();
     const fallback = conversations.sideConversations[0] ?? conversations.mainConversation;
     if (fallback) {
-      const ok = await openConversation(fallback.id);
-      if (ok) {
-        showPlan.value = true;
+      showPlan.value = true;
+      if (routeConversationId.value !== fallback.id) {
         void router.replace({ name: "chat-conversation", params: { id: fallback.id } });
       } else {
-        void openMainConversation();
+        await openConversation(fallback.id);
       }
     } else {
       void openMainConversation();
@@ -830,30 +856,25 @@ watch(
 watch([routeConversationId, isNewSideDraft], async ([nextId, draft]) => {
   if (nextId) {
     activeView.value = "chat";
-    if (nextId !== conversations.current?.id) {
-      chat.abort();
-      previewTarget.value = null;
-      selectedSkills.value = [];
+    if (nextId !== conversations.current?.id && nextId !== loadingConversationId.value) {
       const ok = await openConversation(nextId);
       if (ok) {
         showPlan.value = true;
-      } else {
+      } else if (routeConversationId.value === nextId) {
         showPlan.value = false;
         void openMainConversation();
       }
     }
   } else if (draft) {
     activeView.value = "chat";
+    openSeq++;
+    loadingConversationId.value = null;
     if (conversations.current) {
-      chat.abort();
       conversations.clearCurrent();
-      chat.reset();
-      filesStore.reset();
-      previewTarget.value = null;
-      selectedSkills.value = [];
+      clearTransientConversationState();
       showPlan.value = false;
     }
-  } else if (!conversations.current && conversations.mainConversation) {
+  } else if (!conversations.current && conversations.mainConversation && !loadingConversationId.value) {
     void openMainConversation();
   }
 });
@@ -958,7 +979,7 @@ onBeforeUnmount(() => {
     <ConversationSidebar
       :main-conversation="conversations.mainConversation"
       :side-conversations="conversations.sideConversations"
-      :current-id="conversations.current?.id ?? null"
+      :current-id="activeConversationMeta?.id ?? null"
       :active-view="activeView"
       :loading="conversations.loading"
       :open="sidebarOpen"
@@ -1036,8 +1057,13 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="relative min-h-0 flex-1">
+          <ConversationLoadingState
+            v-if="isConversationLoading"
+            :bottom-inset="bottomOverlayHeight"
+          />
+
           <MessageList
-            v-if="chat.messages.length"
+            v-else-if="chat.messages.length"
             ref="messageListRef"
             :key="chat.convId ?? 'draft'"
             :messages="chat.messages"

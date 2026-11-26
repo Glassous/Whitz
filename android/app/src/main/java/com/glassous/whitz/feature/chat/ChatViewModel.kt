@@ -518,16 +518,13 @@ class ChatViewModel(
         }
     }
 
-    fun openMainConversation() {
-        val state = _ui.value
-        val knownMainId = state.mainConversation?.id
-        if (knownMainId != null &&
-            state.currentConvId == knownMainId &&
-            state.currentConvKind == "main"
-        ) {
-            return
-        }
-        val mySeq = ++openSeq
+    private fun prepareConversationSwitch(
+        targetId: String?,
+        targetKind: String? = null,
+        targetTitle: String? = null,
+        focusMessageId: String? = null,
+        clearSelectedSkills: Boolean = false,
+    ) {
         pendingPollJob?.cancel()
         pendingPollJob = null
         runFinishedSyncJob?.cancel()
@@ -536,15 +533,71 @@ class ChatViewModel(
         streamJob = null
         cancelActiveUploads()
         deltaCoalescer.clear()
-        _ui.update {
-            it.copy(
+        lastEventId = null
+        pendingUserTargetId = null
+        _ui.update { state ->
+            val matched = targetId?.let { id ->
+                state.conversations.find { it.id == id }
+                    ?: state.mainConversation?.takeIf { it.id == id }
+            }
+            val resolvedKind = targetKind ?: matched?.kind ?: if (targetId == null) "main" else "side"
+            val resolvedTitle = targetTitle
+                ?: matched?.title
+                ?: if (resolvedKind == "main") "主聊" else "加载对话…"
+            state.copy(
+                currentConvId = targetId ?: state.mainConversation?.id,
+                currentConvKind = resolvedKind,
+                currentConvTitle = resolvedTitle,
                 isNewSideDraft = false,
                 switchingConversation = true,
+                showingCachedData = false,
+                messages = emptyList(),
+                stableKeys = emptyMap(),
+                plan = null,
+                reasoning = emptyList(),
+                selectedTurnId = null,
+                activeRunId = null,
+                activeAssistantId = null,
+                streaming = false,
+                sendingMessage = false,
+                waitingFirstByte = false,
+                stopping = false,
+                reconnecting = false,
+                approvingChoice = null,
+                submittingClarify = false,
+                pendingControl = null,
+                pendingMemory = emptyList(),
+                pendingSkills = emptyList(),
+                pendingSchedules = emptyList(),
+                citations = emptyList(),
+                ragPrefetching = false,
                 previewTarget = null,
                 uploads = emptyList(),
-                selectedSkillNames = emptyList(),
+                attachedIds = emptyList(),
+                error = null,
+                pendingFocusMessageId = focusMessageId,
+                selectedSkillNames = if (clearSelectedSkills) emptyList() else state.selectedSkillNames,
             )
         }
+    }
+
+    fun openMainConversation() {
+        val state = _ui.value
+        val knownMainId = state.mainConversation?.id
+        if (knownMainId != null &&
+            state.currentConvId == knownMainId &&
+            state.currentConvKind == "main" &&
+            !state.switchingConversation
+        ) {
+            return
+        }
+        val mySeq = ++openSeq
+        prepareConversationSwitch(
+            targetId = knownMainId,
+            targetKind = "main",
+            targetTitle = state.mainConversation?.title ?: "主聊",
+            clearSelectedSkills = true,
+        )
         viewModelScope.launch {
             try {
                 val detail = if (knownMainId != null) {
@@ -569,26 +622,11 @@ class ChatViewModel(
 
     fun openConversation(convId: String) {
         val state = _ui.value
-        if (state.currentConvId == convId && state.messages.isNotEmpty()) {
+        if (state.currentConvId == convId && state.messages.isNotEmpty() && !state.switchingConversation) {
             return
         }
         val mySeq = ++openSeq
-        pendingPollJob?.cancel()
-        pendingPollJob = null
-        runFinishedSyncJob?.cancel()
-        runFinishedSyncJob = null
-        streamJob?.cancel()
-        streamJob = null
-        cancelActiveUploads()
-        deltaCoalescer.clear()
-        _ui.update {
-            it.copy(
-                isNewSideDraft = false,
-                switchingConversation = true,
-                previewTarget = null,
-                uploads = emptyList(),
-            )
-        }
+        prepareConversationSwitch(targetId = convId)
         viewModelScope.launch {
             try {
                 val detail = container.network.api.getConversation(convId)
@@ -2677,29 +2715,17 @@ class ChatViewModel(
 
     fun openConversationAndFocus(convId: String, messageId: String?) {
         val current = _ui.value
-        if (convId == current.currentConvId && current.messages.isNotEmpty()) {
+        if (convId == current.currentConvId && current.messages.isNotEmpty() && !current.switchingConversation) {
             if (!messageId.isNullOrBlank()) {
                 _ui.update { it.copy(pendingFocusMessageId = messageId) }
             }
             return
         }
         val mySeq = ++openSeq
-        pendingPollJob?.cancel()
-        pendingPollJob = null
-        runFinishedSyncJob?.cancel()
-        runFinishedSyncJob = null
-        streamJob?.cancel()
-        streamJob = null
-        cancelActiveUploads()
-        _ui.update {
-            it.copy(
-                isNewSideDraft = false,
-                switchingConversation = true,
-                previewTarget = null,
-                uploads = emptyList(),
-                pendingFocusMessageId = messageId,
-            )
-        }
+        prepareConversationSwitch(
+            targetId = convId,
+            focusMessageId = messageId,
+        )
         viewModelScope.launch {
             try {
                 val detail = container.network.api.getConversation(convId)
