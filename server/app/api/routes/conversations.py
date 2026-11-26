@@ -30,7 +30,7 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
-from app.services import audit, cross_chat_memory, realtime_bus, titles
+from app.services import audit, cross_chat_memory, realtime_bus, run_supervisor, titles
 from app.services.agent_client import AgentClient, AgentError
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -49,9 +49,57 @@ async def _scheduled_conversation_ids(db: AsyncSession, user_id: uuid.UUID) -> s
 def _apply_scheduled_flag(convs: list[Conversation], scheduled_ids: set[uuid.UUID]) -> None:
     for conv in convs:
         is_sched = conv.kind != "main" and (
-            conv.id in scheduled_ids or (conv.title or "").startswith("[定时]")
+            bool(getattr(conv, "is_scheduled", False))
+            or conv.id in scheduled_ids
+            or (conv.title or "").startswith("[定时]")
         )
         setattr(conv, "is_scheduled", is_sched)
+
+
+async def _load_conversation_with_messages(
+    db: AsyncSession,
+    conv_id: uuid.UUID,
+    *,
+    before_id: uuid.UUID | None = None,
+    limit: int | None = None,
+) -> Conversation:
+    conv = await db.get(Conversation, conv_id)
+    assert conv is not None
+    role_order = {"user": 0, "assistant": 1, "tool": 2}
+    if limit is not None or before_id is not None:
+        page_size = max(1, min(int(limit or 60), 200))
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == conv_id)
+            .options(selectinload(Message.reactions))
+        )
+        if before_id is not None:
+            anchor = await db.get(Message, before_id)
+            if anchor is not None and anchor.conversation_id == conv_id:
+                stmt = stmt.where(Message.created_at < anchor.created_at)
+        rows = list(
+            (await db.execute(stmt.order_by(Message.created_at.desc()).limit(page_size + 1)))
+            .scalars()
+            .all()
+        )
+        has_more = len(rows) > page_size
+        page = rows[:page_size]
+        page.sort(key=lambda m: (m.created_at, role_order.get(m.role, 3), str(m.id)))
+        conv.messages = page
+        setattr(conv, "has_more_messages", has_more)
+        setattr(conv, "next_before_id", str(page[0].id) if (has_more and page) else None)
+        return conv
+
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.id == conv_id)
+        .options(selectinload(Conversation.messages).selectinload(Message.reactions))
+    )
+    loaded = result.scalar_one()
+    loaded.messages.sort(key=lambda m: (m.created_at, role_order.get(m.role, 3), str(m.id)))
+    setattr(loaded, "has_more_messages", False)
+    setattr(loaded, "next_before_id", None)
+    return loaded
 
 
 @router.get("", response_model=list[ConversationOut])
@@ -79,18 +127,13 @@ async def list_conversations(
 
 @router.get("/main", response_model=ConversationDetail)
 async def get_main_conversation(
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    before_id: uuid.UUID | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=200),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> Conversation:
     main_conv = await cross_chat_memory.ensure_main_conversation(db, user)
-    result = await db.execute(
-        select(Conversation)
-        .where(Conversation.id == main_conv.id)
-        .options(selectinload(Conversation.messages).selectinload(Message.reactions))
-    )
-    conv = result.scalar_one()
-    role_order = {"user": 0, "assistant": 1, "tool": 2}
-    conv.messages.sort(key=lambda m: (m.created_at, role_order.get(m.role, 3), str(m.id)))
-    return conv
+    return await _load_conversation_with_messages(db, main_conv.id, before_id=before_id, limit=limit)
 
 
 def _escape_like(term: str) -> str:
@@ -240,21 +283,16 @@ async def create_conversation(
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
 async def get_conversation(
+    before_id: uuid.UUID | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=200),
     conv: Conversation = Depends(get_owned_conversation),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Conversation:
-    result = await db.execute(
-        select(Conversation)
-        .where(Conversation.id == conv.id)
-        .options(selectinload(Conversation.messages).selectinload(Message.reactions))
-    )
-    conv = result.scalar_one()
-    role_order = {"user": 0, "assistant": 1, "tool": 2}
-    conv.messages.sort(key=lambda m: (m.created_at, role_order.get(m.role, 3), str(m.id)))
+    loaded = await _load_conversation_with_messages(db, conv.id, before_id=before_id, limit=limit)
     scheduled_ids = await _scheduled_conversation_ids(db, user.id)
-    _apply_scheduled_flag([conv], scheduled_ids)
-    return conv
+    _apply_scheduled_flag([loaded], scheduled_ids)
+    return loaded
 
 
 @router.patch("/{conversation_id}", response_model=ConversationOut)
@@ -426,6 +464,8 @@ async def generate_conversation_title(
     conv: Conversation = Depends(get_owned_conversation),
     db: AsyncSession = Depends(get_db),
 ):
+    if conv.kind == "main":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "主聊天不支持自动生成标题")
     result = await db.execute(
         select(Message.content)
         .where(Message.conversation_id == conv.id, Message.role == "user")
@@ -450,6 +490,15 @@ async def delete_conversation(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "主聊天不可删除")
 
     conv_id = conv.id
+    if conv.active_run_id and conv.active_run_id != "pending":
+        await run_supervisor.cancel_local_supervisor(conv.active_run_id)
+        client = AgentClient(user.agent_namespace, user.agent_api_key)
+        try:
+            await client.cancel_run(conv.active_run_id)
+        except AgentError:
+            pass
+        finally:
+            await client.aclose()
     if conv.thread_id:
         client = AgentClient(user.agent_namespace, user.agent_api_key)
         try:

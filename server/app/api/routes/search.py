@@ -4,12 +4,13 @@ import re
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from whitz_rag import UnifiedKnowledgeRetriever
 
 from app.api.deps import get_current_user
+from app.core.ratelimit import unified_search_limiter
 from app.db.models import Conversation, Message, User
 from app.db.session import detect_pgvector, get_db
 from app.services import embeddings
@@ -45,6 +46,8 @@ async def unified_semantic_search(
     term = q.strip()
     if not term:
         return {"query": "", "files": [], "memories": [], "chats": [], "total": 0}
+    if not await unified_search_limiter.allow(str(user.id)):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "搜索过于频繁，请稍后再试")
 
     await detect_pgvector(db)
     target_sources = ["file", "memory", "chat"] if sources == "all" else [sources]
@@ -128,7 +131,48 @@ async def unified_semantic_search(
                 }
             )
 
-    # Supplement exact literal conversation/message hits so brand-new unindexed messages remain instantly searchable
+    # Supplement conversation title matches & exact literal message hits (excluding failed/cancelled)
+    if "chat" in target_sources and len(chats_out) < limit:
+        pattern = f"%{_escape_like(term)}%"
+        try:
+            title_rows = (
+                await db.execute(
+                    select(Conversation)
+                    .where(
+                        Conversation.user_id == user.id,
+                        Conversation.title.ilike(pattern, escape="\\"),
+                    )
+                    .order_by(Conversation.last_message_at.desc().nullslast(), Conversation.updated_at.desc())
+                    .limit(max(4, limit // 2))
+                )
+            ).scalars().all()
+            for conv in title_rows:
+                ckey = f"{conv.id}:title"
+                if ckey in seen_chat_keys:
+                    continue
+                seen_chat_keys.add(ckey)
+                chats_out.append(
+                    {
+                        "type": "chat",
+                        "match_in": "title",
+                        "conversation_id": str(conv.id),
+                        "conversation_kind": "main" if conv.kind == "main" else "side",
+                        "conversation_title": assistant_label if conv.kind == "main" else conv.title,
+                        "message_id": None,
+                        "role": None,
+                        "snippet": conv.title,
+                        "score": 0.65,
+                        "confidence": "high",
+                        "created_at": (conv.last_message_at or conv.updated_at).isoformat()
+                        if (conv.last_message_at or conv.updated_at)
+                        else None,
+                    }
+                )
+                if len(chats_out) >= limit:
+                    break
+        except Exception:
+            pass
+
     if "chat" in target_sources and len(chats_out) < limit:
         pattern = f"%{_escape_like(term)}%"
         try:
@@ -139,6 +183,7 @@ async def unified_semantic_search(
                     .where(
                         Conversation.user_id == user.id,
                         Message.role.in_(("user", "assistant")),
+                        Message.status.notin_(("failed", "cancelled")),
                         Message.content.ilike(pattern, escape="\\"),
                     )
                     .order_by(Message.created_at.desc())

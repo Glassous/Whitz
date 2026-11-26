@@ -101,6 +101,7 @@ class ParsedFileCache:
 
 
 _GLOBAL_CACHE = ParsedFileCache()
+_INFLIGHT_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def get_file_cache() -> ParsedFileCache:
@@ -124,7 +125,7 @@ async def get_or_parse_file(
     raw: bytes | None = None,
     settings: Settings | None = None,
 ) -> ParsedFileData:
-    """Return cached parsed file structure or download from COS once and parse off-loop."""
+    """Return cached parsed file structure or download from COS once and parse off-loop (singleflight per key)."""
     cache = get_file_cache()
     key = cache.build_key(record.id, _version_tag(record))
     if raw is None:
@@ -132,36 +133,50 @@ async def get_or_parse_file(
         if cached is not None:
             return cached
 
-    s = settings or get_settings()
-    if raw is None:
-        max_download = max(s.max_file_size_bytes, 25 * 1024 * 1024)
-        raw = await cos.get_object_bytes(
-            record.storage_key,
-            max_bytes=max_download,
-            settings=s,
-        )
+    lock = _INFLIGHT_LOCKS.setdefault(key, asyncio.Lock())
+    try:
+        async with lock:
+            if raw is None:
+                cached = cache.get(key)
+                if cached is not None:
+                    return cached
 
-    parsed_dict = await asyncio.to_thread(
-        file_parser.parse_file_for_cache,
-        raw,
-        filename=record.filename,
-        ext=record.ext,
-        mime_type=record.mime_type,
-    )
-    entry = ParsedFileData(
-        format=parsed_dict["format"],
-        ext=parsed_dict["ext"],
-        mime_type=parsed_dict["mime_type"],
-        size_bytes=int(record.size_bytes or len(raw)),
-        approx_bytes=int(parsed_dict["approx_bytes"]),
-        lines=parsed_dict.get("lines") or [],
-        pdf_pages=parsed_dict.get("pdf_pages") or [],
-        is_scanned_pdf=bool(parsed_dict.get("is_scanned_pdf", False)),
-        xlsx_sheets=parsed_dict.get("xlsx_sheets") or [],
-        xlsx_rows_by_sheet=parsed_dict.get("xlsx_rows_by_sheet") or {},
-        image_width=parsed_dict.get("image_width"),
-        image_height=parsed_dict.get("image_height"),
-        outline=parsed_dict.get("outline") or {},
-    )
-    cache.set(key, entry)
-    return entry
+            s = settings or get_settings()
+            raw_bytes = raw
+            if raw_bytes is None:
+                max_download = max(s.max_file_size_bytes, 25 * 1024 * 1024)
+                raw_bytes = await cos.get_object_bytes(
+                    record.storage_key,
+                    max_bytes=max_download,
+                    settings=s,
+                )
+
+            parsed_dict = await asyncio.to_thread(
+                file_parser.parse_file_for_cache,
+                raw_bytes,
+                filename=record.filename,
+                ext=record.ext,
+                mime_type=record.mime_type,
+            )
+            # Account for Python list/str object overhead (~2x UTF-8 payload) so LRU stays 2C4G-safe
+            est_bytes = max(512, int(parsed_dict["approx_bytes"]) * 2)
+            entry = ParsedFileData(
+                format=parsed_dict["format"],
+                ext=parsed_dict["ext"],
+                mime_type=parsed_dict["mime_type"],
+                size_bytes=int(record.size_bytes or len(raw_bytes)),
+                approx_bytes=est_bytes,
+                lines=parsed_dict.get("lines") or [],
+                pdf_pages=parsed_dict.get("pdf_pages") or [],
+                is_scanned_pdf=bool(parsed_dict.get("is_scanned_pdf", False)),
+                xlsx_sheets=parsed_dict.get("xlsx_sheets") or [],
+                xlsx_rows_by_sheet=parsed_dict.get("xlsx_rows_by_sheet") or {},
+                image_width=parsed_dict.get("image_width"),
+                image_height=parsed_dict.get("image_height"),
+                outline=parsed_dict.get("outline") or {},
+            )
+            cache.set(key, entry)
+            return entry
+    finally:
+        if not lock.locked() and _INFLIGHT_LOCKS.get(key) is lock:
+            _INFLIGHT_LOCKS.pop(key, None)

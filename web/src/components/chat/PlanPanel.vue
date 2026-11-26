@@ -706,7 +706,6 @@ function submitCreateFile() {
           <section v-if="steps.length" class="mb-4">
             <div class="mb-2 flex items-center justify-between">
               <h4 class="text-[13.5px] font-medium text-fg-muted">执行步骤</h4>
-              <span class="text-[12.5px] tabular-nums text-fg-faint">{{ done }} / {{ items.length }}</span>
             </div>
             <div class="mb-3 h-1 overflow-hidden rounded-full bg-surface">
               <div class="h-full rounded-full bg-accent transition-all duration-500" :style="{ width: pct + '%' }" />

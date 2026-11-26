@@ -10,6 +10,7 @@ from app.api.schemas import (
     MemoryEntryCreateRequest,
     MemoryEntryUpdateRequest,
     MemoryOverviewOut,
+    MemoryPendingOut,
     MemoryPendingResolveRequest,
     MemorySearchRequest,
     MemorySearchResponse,
@@ -28,6 +29,17 @@ async def get_memory_overview(
     db: AsyncSession = Depends(get_db),
 ) -> MemoryOverviewOut:
     return MemoryOverviewOut(**(await memory_service.get_overview(db, user)))
+
+
+@router.get("/pending", response_model=list[MemoryPendingOut])
+async def list_pending_memories(
+    conversation_id: str | None = Query(default=None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[MemoryPendingOut]:
+    """Lightweight pending memory proposals list (avoids fetching all entries on every turn)."""
+    items = await memory_service.list_pending(db, user.id, conversation_id=conversation_id)
+    return [MemoryPendingOut(**it) for it in items]
 
 
 @router.put("/settings", response_model=MemoryOverviewOut)

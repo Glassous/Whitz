@@ -9,6 +9,7 @@ import { useCreditsStore } from "../stores/credits";
 import { useFilesStore } from "../stores/files";
 import { useRealtimeStore } from "../stores/realtime";
 import { api } from "../api/client";
+import { extractFileIdsFromText } from "../lib/fileTokens";
 import type { AgentStatus, CitationItem, ConversationFile, DeliverableTarget, PreviewTarget, TaskPanelTab } from "../types";
 import ConversationSidebar from "../components/chat/ConversationSidebar.vue";
 import MessageList from "../components/chat/MessageList.vue";
@@ -18,9 +19,11 @@ import ChatInput from "../components/chat/ChatInput.vue";
 import PlanPanel from "../components/chat/PlanPanel.vue";
 import ApprovalCard from "../components/chat/ApprovalCard.vue";
 import ClarifyCard from "../components/chat/ClarifyCard.vue";
+import MemoryPendingCard from "../components/chat/MemoryPendingCard.vue";
 import SkillPendingCard from "../components/chat/SkillPendingCard.vue";
 import SchedulePendingCard from "../components/chat/SchedulePendingCard.vue";
 import SearchModal from "../components/chat/SearchModal.vue";
+import ContextStateModal from "../components/chat/ContextStateModal.vue";
 import DeliverableModal from "../components/chat/DeliverableModal.vue";
 import ImageLightboxModal from "../components/chat/ImageLightboxModal.vue";
 
@@ -137,8 +140,10 @@ function onWindowResize() {
   panelWidth.value = clampPanelWidth(panelWidth.value);
 }
 const searchOpen = ref(false);
+const contextStateOpen = ref(false);
 const focusMessageId = ref<string | null>(null);
 let pollTimer: number | null = null;
+let agentRetryBackoffMs = 5000;
 
 function onPanelResizePointerDown(e: PointerEvent) {
   if (!showPlan.value) return;
@@ -235,13 +240,23 @@ const greeting = computed(() => {
 const userName = computed(() => auth.user?.display_name?.trim() ?? "");
 
 async function loadAgent() {
+  if (pollTimer) {
+    window.clearTimeout(pollTimer);
+    pollTimer = null;
+  }
   try {
     agent.value = await api.get<AgentStatus>("/agent/status");
+    if (agent.value?.ready) {
+      agentRetryBackoffMs = 5000;
+      return;
+    }
   } catch {
     agent.value = { ready: false, status: "error" };
   }
-  if (agent.value && !agent.value.ready && agent.value.status === "warming_up") {
-    pollTimer = window.setTimeout(loadAgent, 5000);
+  if (agent.value && !agent.value.ready) {
+    const delay = agent.value.status === "warming_up" ? 5000 : agentRetryBackoffMs;
+    agentRetryBackoffMs = Math.min(agentRetryBackoffMs + 5000, 15000);
+    pollTimer = window.setTimeout(loadAgent, delay);
   }
 }
 
@@ -395,6 +410,18 @@ function buildSyntheticFile(fileId: string, filename: string, conversationId: st
 function onSelectFileFromSearch(fileId: string, filename: string, conversationId: string | null) {
   activeView.value = "chat";
   onPreviewFile(buildSyntheticFile(fileId, filename, conversationId));
+}
+
+function onSelectMemoryFromSearch(_entryId: string) {
+  void router.push({ path: "/settings", query: { tab: "memory" } });
+}
+
+function onJumpContextMessage(messageId: string) {
+  contextStateOpen.value = false;
+  focusMessageId.value = null;
+  void Promise.resolve().then(() => {
+    focusMessageId.value = messageId;
+  });
 }
 
 async function onOpenCitation(citation: CitationItem) {
@@ -638,7 +665,6 @@ async function onSend(content: string, inlineFileIds: string[] = []) {
     const sendPromise = chat.send(content, combined, skillNames);
     sendingMessage.value = false;
     await sendPromise;
-    await conversations.fetchList();
     if (conversations.current?.id) {
       void filesStore.load(
         conversations.current.id,
@@ -656,7 +682,6 @@ async function onRegenerate(assistantMessageId: string) {
   if (chat.streaming || filesStore.hasActiveUploads) return;
   try {
     await chat.regenerate(assistantMessageId);
-    await conversations.fetchList();
   } catch (e: any) {
     chat.error = e?.detail?.detail ?? e?.message ?? "重新生成失败，请稍后重试";
   }
@@ -667,29 +692,63 @@ async function onEditMessage(userMessageId: string, content: string) {
   try {
     const original = chat.messages.find((m) => m.id === userMessageId && m.role === "user");
     const existingAttachments = original?.tool_payload?.attachments ?? [];
-    const resolvedAttached: ConversationFile[] = existingAttachments.map((att) => {
+    const seenIds = new Set<string>();
+    const resolvedAttached: ConversationFile[] = [];
+    for (const att of existingAttachments) {
+      if (seenIds.has(att.id)) continue;
+      seenIds.add(att.id);
       const found = filesStore.files.find((f) => f.id === att.id);
-      if (found) return found;
-      return {
-        id: att.id,
-        conversation_id: chat.convId,
-        filename: att.filename,
-        ext: att.ext,
-        mime_type: "",
-        category: att.category,
-        size_bytes: att.size_bytes,
-        status: "ready",
-        source: "user",
-        is_global: false,
-        created_at: original?.created_at ?? new Date().toISOString(),
-        updated_at: original?.created_at ?? new Date().toISOString(),
-      };
-    });
+      if (found) {
+        resolvedAttached.push(found);
+      } else {
+        resolvedAttached.push({
+          id: att.id,
+          conversation_id: chat.convId,
+          filename: att.filename,
+          ext: att.ext,
+          mime_type: "",
+          category: att.category,
+          size_bytes: att.size_bytes,
+          status: "ready",
+          source: "user",
+          is_global: false,
+          created_at: original?.created_at ?? new Date().toISOString(),
+          updated_at: original?.created_at ?? new Date().toISOString(),
+        });
+      }
+    }
+    for (const inlineId of extractFileIdsFromText(content)) {
+      if (seenIds.has(inlineId)) continue;
+      const found = filesStore.files.find((f) => f.id === inlineId);
+      if (found) {
+        seenIds.add(inlineId);
+        resolvedAttached.push(found);
+      }
+    }
     const existingSkills = original?.tool_payload?.skills ?? [];
     await chat.editAndResend(userMessageId, content, resolvedAttached, existingSkills);
-    await conversations.fetchList();
   } catch (e: any) {
     chat.error = e?.detail?.detail ?? e?.message ?? "保存并重发失败，请稍后重试";
+  }
+}
+
+async function onResolveMemory(id: string, action: "approve" | "reject", content?: string) {
+  const nextBusy = new Set(pendingBusyIds.value);
+  nextBusy.add(id);
+  pendingBusyIds.value = nextBusy;
+  const { [id]: _, ...restErrors } = pendingErrors.value;
+  pendingErrors.value = restErrors;
+  try {
+    await chat.resolvePendingMemory(id, action, content);
+  } catch (e: any) {
+    pendingErrors.value = {
+      ...pendingErrors.value,
+      [id]: e?.detail?.detail ?? e?.message ?? "操作失败，请重试",
+    };
+  } finally {
+    const afterBusy = new Set(pendingBusyIds.value);
+    afterBusy.delete(id);
+    pendingBusyIds.value = afterBusy;
   }
 }
 
@@ -964,6 +1023,16 @@ onBeforeUnmount(() => {
             <AppIcon name="clock" motion="none" class="h-3 w-3 shrink-0" :stroke-width="2" />
             <span>定时</span>
           </span>
+          <button
+            v-if="conversations.current?.id"
+            type="button"
+            class="focus-ring pointer-events-auto ml-auto inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-surface/85 px-2.5 text-[12px] font-medium text-fg-muted backdrop-blur-sm transition-colors hover:bg-hover hover:text-fg"
+            title="查看对话上下文记忆与归档状态"
+            @click="contextStateOpen = true"
+          >
+            <AppIcon name="database" class="h-3.5 w-3.5" :stroke-width="1.9" />
+            <span class="hidden sm:inline">上下文</span>
+          </button>
         </div>
 
         <div class="relative min-h-0 flex-1">
@@ -1052,6 +1121,15 @@ onBeforeUnmount(() => {
                 @submit="chat.clarify"
               />
             </Transition>
+
+            <MemoryPendingCard
+              v-for="item in chat.pendingMemory"
+              :key="`mem-${item.id}`"
+              :item="item"
+              :busy="pendingBusyIds.has(item.id)"
+              :error="pendingErrors[item.id] ?? null"
+              @resolve="onResolveMemory"
+            />
 
             <SkillPendingCard
               v-for="item in chat.pendingSkills"
@@ -1286,6 +1364,15 @@ onBeforeUnmount(() => {
       @close="searchOpen = false"
       @select="onSelectFromSearch"
       @select-file="onSelectFileFromSearch"
+      @select-memory="onSelectMemoryFromSearch"
+    />
+    <ContextStateModal
+      :open="contextStateOpen"
+      :conversation-id="conversations.current?.id ?? null"
+      :conversation-title="headerTitle"
+      @close="contextStateOpen = false"
+      @jump-message="onJumpContextMessage"
+      @open-memory-settings="contextStateOpen = false; router.push({ path: '/settings', query: { tab: 'memory' } })"
     />
     <DeliverableModal
       :target="deliverableTarget"

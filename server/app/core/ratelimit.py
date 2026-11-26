@@ -40,4 +40,8 @@ email_code_ip_limiter = RateLimiter(max_attempts=30, window_seconds=3600, prefix
 email_code_addr_limiter = RateLimiter(max_attempts=10, window_seconds=3600, prefix="email_code_addr")
 reset_password_limiter = RateLimiter(max_attempts=20, window_seconds=3600, prefix="reset_password")
 login_code_limiter = RateLimiter(max_attempts=20, window_seconds=3600, prefix="login_code")
+login_ip_limiter = RateLimiter(max_attempts=40, window_seconds=900, prefix="login_ip")
+login_account_limiter = RateLimiter(max_attempts=15, window_seconds=900, prefix="login_acct")
+register_ip_limiter = RateLimiter(max_attempts=20, window_seconds=3600, prefix="register_ip")
+unified_search_limiter = RateLimiter(max_attempts=30, window_seconds=60, prefix="unified_search")
 redeem_limiter = RateLimiter(max_attempts=5, window_seconds=60, prefix="redeem")

@@ -267,13 +267,31 @@ class EmbeddingClient:
 
             bs = self._batch_size
             ttl = self._cache_ttl
-            for start in range(0, len(missing_indices), bs):
-                sub_idxs = missing_indices[start : start + bs]
+            batches = [
+                missing_indices[start : start + bs]
+                for start in range(0, len(missing_indices), bs)
+            ]
+            sem = asyncio.Semaphore(4)
+
+            async def _fetch_batch(sub_idxs: list[int]) -> tuple[list[int], list[list[float]] | None]:
                 sub_texts = [items[i] or " " for i in sub_idxs]
-                vecs = await self._post_batch(url, headers, sub_texts, dim)
+                async with sem:
+                    vecs = await self._post_batch(url, headers, sub_texts, dim)
+                return sub_idxs, vecs
+
+            if len(batches) == 1:
+                batch_results = [await _fetch_batch(batches[0])]
+            else:
+                batch_results = list(await asyncio.gather(*(_fetch_batch(b) for b in batches)))
+
+            pipe = (
+                self.redis.pipeline(transaction=False)
+                if (self.redis is not None and hasattr(self.redis, "pipeline"))
+                else None
+            )
+            for sub_idxs, vecs in batch_results:
                 if vecs is None:
                     return None
-                pipe = self.redis.pipeline(transaction=False) if (self.redis is not None and hasattr(self.redis, "pipeline")) else None
                 for i, vec in zip(sub_idxs, vecs):
                     results[i] = vec
                     if pipe is not None:
@@ -283,11 +301,11 @@ class EmbeddingClient:
                             await self.redis.set(cache_keys[i], json.dumps(vec, separators=(",", ":")), ex=ttl)
                         except Exception:
                             pass
-                if pipe is not None:
-                    try:
-                        await pipe.execute()
-                    except Exception:
-                        pass
+            if pipe is not None:
+                try:
+                    await pipe.execute()
+                except Exception:
+                    pass
 
         if any(v is None for v in results):
             return None

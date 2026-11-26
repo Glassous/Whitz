@@ -82,6 +82,7 @@ import com.glassous.whitz.ui.theme.FolderOpen
 import com.glassous.whitz.ui.theme.Image
 import com.glassous.whitz.ui.theme.MyLocation
 import com.glassous.whitz.ui.theme.OpenInFull
+import com.glassous.whitz.ui.theme.Psychology
 import com.glassous.whitz.ui.theme.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import com.glassous.whitz.ui.theme.Schedule
@@ -373,6 +374,7 @@ fun ChatScreen(
     var composerExpanded by remember { mutableStateOf(false) }
     var plusMenuExpanded by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }
+    var showContextState by remember { mutableStateOf(false) }
     var showSkillPicker by remember { mutableStateOf(false) }
     var showLibraryPicker by remember { mutableStateOf(false) }
     var showCreateFile by remember { mutableStateOf(false) }
@@ -514,8 +516,8 @@ fun ChatScreen(
         if (asstId == null) false
         else visibleMessages.lastOrNull { it.id == asstId }?.content?.isNotBlank() == true
     }
-    val runningToolName = remember(ui.messages, ui.streaming) {
-        if (ui.streaming) computeRunningTool(ui.messages) else null
+    val runningToolName = remember(ui.messages, ui.reasoning, ui.streaming) {
+        if (ui.streaming) computeRunningTool(ui.messages, ui.reasoning) else null
     }
     val currentStepInfo = remember(ui.plan, ui.streaming) {
         if (ui.streaming) computeCurrentStep(ui.plan) else null
@@ -668,6 +670,7 @@ fun ChatScreen(
     BackHandler(enabled = selectingTextMessageId != null) { selectingTextMessageId = null }
     BackHandler(enabled = editingMessage != null) { cancelEdit() }
     BackHandler(enabled = showSearch) { showSearch = false }
+    BackHandler(enabled = showContextState) { showContextState = false }
     BackHandler(enabled = showSkillPicker) { showSkillPicker = false }
     BackHandler(enabled = showLibraryPicker) { showLibraryPicker = false }
     BackHandler(enabled = plusMenuExpanded) { dismissPlusMenu() }
@@ -995,6 +998,24 @@ fun ChatScreen(
                         }
 
                         if (ui.isMainChat) {
+                            if (ui.currentConvId != null && !mainPanelOpen) {
+                                WhitzGlassCircleButton(
+                                    hazeState = headerHazeState,
+                                    showBorder = visibleMessages.isNotEmpty(),
+                                    modifier = Modifier.align(Alignment.TopEnd),
+                                    onClick = {
+                                        showContextState = true
+                                        vm.loadContextState()
+                                    },
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Psychology,
+                                        contentDescription = "认知记忆状态",
+                                        tint = colors.fgMuted,
+                                        modifier = Modifier.size(21.dp),
+                                    )
+                                }
+                            }
                             val mainAvatarUrl = vm.resolveAssetUrl(user?.assistantAvatarUrl)
                             androidx.compose.animation.AnimatedVisibility(
                                 visible = !mainPanelOpen,
@@ -1077,6 +1098,23 @@ fun ChatScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
+                                if (ui.currentConvId != null) {
+                                    WhitzGlassCircleButton(
+                                        hazeState = headerHazeState,
+                                        showBorder = visibleMessages.isNotEmpty(),
+                                        onClick = {
+                                            showContextState = true
+                                            vm.loadContextState()
+                                        },
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Psychology,
+                                            contentDescription = "认知记忆状态",
+                                            tint = colors.fgMuted,
+                                            modifier = Modifier.size(21.dp),
+                                        )
+                                    }
+                                }
                                 androidx.compose.animation.AnimatedVisibility(
                                     visible = visibleMessages.isNotEmpty(),
                                     enter = fadeIn(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()),
@@ -1256,6 +1294,14 @@ fun ChatScreen(
                                         onSubmit = { vm.clarifyControl(it.answer, it.answers) },
                                     )
                                 }
+                            }
+
+                            ui.pendingMemory.forEach { mem ->
+                                MemoryPendingCard(
+                                    item = mem,
+                                    busy = mem.id in ui.resolvingMemoryIds,
+                                    onResolve = { id, act, c -> vm.resolvePendingMemory(id, act, c) },
+                                )
                             }
 
                             ui.pendingSkills.forEach { sk ->
@@ -2116,6 +2162,28 @@ fun ChatScreen(
                 scope.launch { drawerState.close() }
             },
             onDismiss = { showSearch = false },
+        )
+    }
+
+    if (showContextState) {
+        ContextStateSheet(
+            state = ui.contextState,
+            loading = ui.contextStateLoading,
+            saving = ui.contextStateSaving,
+            archiving = ui.contextStateArchiving,
+            error = ui.contextStateError,
+            onRefresh = { vm.loadContextState() },
+            onUpdateWorkingState = { vm.updateWorkingState(it) },
+            onArchiveNow = { vm.archiveEpisodeNow() },
+            onLocateMessage = { msgId ->
+                showContextState = false
+                vm.focusMessageInCurrentConversation(msgId)
+            },
+            onOpenMemorySettings = {
+                showContextState = false
+                onOpenSettings()
+            },
+            onDismiss = { showContextState = false },
         )
     }
 

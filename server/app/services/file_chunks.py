@@ -282,8 +282,10 @@ def _chunk_code_lines(lines: list[str], max_chars: int = CHUNK_MAX_CHARS) -> tup
                 current_symbol = sym
 
         if buf and buf_len + len(line) + 1 > max_chars:
+            # Capture overlap line BEFORE _flush clears `buf`!
+            prev_last = buf[-1] if buf else ""
+            overlap_line = prev_last if len(prev_last) <= CHUNK_OVERLAP_CHARS else ""
             _flush(idx - 1)
-            overlap_line = buf[-1] if (buf and len(buf[-1]) <= CHUNK_OVERLAP_CHARS) else ""
             if overlap_line:
                 buf = [overlap_line, line]
                 buf_len = len(overlap_line) + 1 + len(line)
@@ -306,14 +308,14 @@ def _chunk_code_lines(lines: list[str], max_chars: int = CHUNK_MAX_CHARS) -> tup
 
 
 def _chunk_table_rows(
-    rows: list[str],
+    rows: list[str] | list[tuple[int, str]],
     *,
     header_row: str,
     sheet_name: str = "",
     max_chars: int = CHUNK_MAX_CHARS,
     budget: int = MAX_CHUNKS_PER_FILE,
 ) -> tuple[list[ChunkSpec], bool]:
-    """Chunk tabular rows (XLSX / CSV) while prepending the header row to EVERY chunk."""
+    """Chunk tabular rows (XLSX / CSV) while prepending the header row to EVERY chunk and tracking real row numbers."""
     if not rows or budget <= 0:
         return [], False
     specs: list[ChunkSpec] = []
@@ -321,29 +323,34 @@ def _chunk_table_rows(
     header_prefix = f"表头: {header_row}\n" if header_row else ""
     effective_max = max(250, max_chars - len(header_prefix))
 
+    normalized: list[tuple[int, str]] = [
+        (r[0], r[1]) if isinstance(r, tuple) else ((2 if header_row else 1) + idx, str(r))
+        for idx, r in enumerate(rows)
+    ]
+
     buf: list[str] = []
     buf_len = 0
-    start_row = 2 if header_row else 1
+    start_row = normalized[0][0]
+    last_row_in_buf = start_row
 
     def _loc(s: int, e: int) -> str:
         return f"工作表 {sheet_name} 第 {s}-{e} 行" if sheet_name else f"第 {s}-{e} 行"
 
-    for offset, row_text in enumerate(rows):
-        row_no = (2 if header_row else 1) + offset
+    for row_no, row_text in normalized:
         if len(specs) >= budget:
             truncated = True
             break
         if buf and buf_len + len(row_text) + 1 > effective_max:
             specs.append(
                 ChunkSpec(
-                    locator=_loc(start_row, row_no - 1),
+                    locator=_loc(start_row, last_row_in_buf),
                     section_path=f"工作表: {sheet_name}" if sheet_name else "表格数据",
                     content=(header_prefix + "\n".join(buf)).strip(),
                     chunk_type="table",
                     chunk_meta={
                         **({"sheet_name": sheet_name} if sheet_name else {}),
                         "row_start": start_row,
-                        "row_end": row_no - 1,
+                        "row_end": last_row_in_buf,
                         "has_header": bool(header_row),
                     },
                 )
@@ -351,24 +358,25 @@ def _chunk_table_rows(
             buf = [row_text]
             buf_len = len(row_text)
             start_row = row_no
+            last_row_in_buf = row_no
         else:
             if not buf:
                 start_row = row_no
             buf.append(row_text)
             buf_len += len(row_text) + (1 if len(buf) > 1 else 0)
+            last_row_in_buf = row_no
 
     if buf and len(specs) < budget:
-        last_row = (2 if header_row else 1) + len(rows) - 1
         specs.append(
             ChunkSpec(
-                locator=_loc(start_row, last_row),
+                locator=_loc(start_row, last_row_in_buf),
                 section_path=f"工作表: {sheet_name}" if sheet_name else "表格数据",
                 content=(header_prefix + "\n".join(buf)).strip(),
                 chunk_type="table",
                 chunk_meta={
                     **({"sheet_name": sheet_name} if sheet_name else {}),
                     "row_start": start_row,
-                    "row_end": last_row,
+                    "row_end": last_row_in_buf,
                     "has_header": bool(header_row),
                 },
             )
@@ -523,7 +531,8 @@ def _chunk_file_bytes_structured(raw: bytes, *, ext: str) -> tuple[list[ChunkSpe
             for sheet in wb.sheetnames:
                 ws = wb[sheet]
                 header_row = ""
-                data_rows: list[str] = []
+                header_idx = 1
+                data_rows: list[tuple[int, str]] = []
                 for idx, row in enumerate(ws.iter_rows(values_only=True), 1):
                     if idx > 5000:
                         truncated = True
@@ -534,14 +543,15 @@ def _chunk_file_bytes_structured(raw: bytes, *, ext: str) -> tuple[list[ChunkSpe
                     joined = " | ".join(cells)
                     if not header_row:
                         header_row = joined
+                        header_idx = idx
                     else:
-                        data_rows.append(joined)
+                        data_rows.append((idx, joined))
                 rem = MAX_CHUNKS_PER_FILE - len(specs)
                 if rem <= 0:
                     truncated = True
                     break
                 if not data_rows and header_row:
-                    data_rows = [header_row]
+                    data_rows = [(header_idx, header_row)]
                     header_row = ""
                 sheet_specs, sheet_trunc = _chunk_table_rows(
                     data_rows, header_row=header_row, sheet_name=sheet, budget=rem
@@ -558,7 +568,8 @@ def _chunk_file_bytes_structured(raw: bytes, *, ext: str) -> tuple[list[ChunkSpe
         delim = "\t" if norm_ext == ".tsv" else ","
         reader_csv = csv.reader(io.StringIO(text), delimiter=delim)
         header_row = ""
-        data_rows = []
+        header_idx = 1
+        data_rows_csv: list[tuple[int, str]] = []
         truncated = False
         for idx, row in enumerate(reader_csv, 1):
             if idx > 5000:
@@ -570,12 +581,13 @@ def _chunk_file_bytes_structured(raw: bytes, *, ext: str) -> tuple[list[ChunkSpe
             joined = " | ".join(cells)
             if not header_row:
                 header_row = joined
+                header_idx = idx
             else:
-                data_rows.append(joined)
-        if not data_rows and header_row:
-            data_rows = [header_row]
+                data_rows_csv.append((idx, joined))
+        if not data_rows_csv and header_row:
+            data_rows_csv = [(header_idx, header_row)]
             header_row = ""
-        csv_specs, csv_trunc = _chunk_table_rows(data_rows, header_row=header_row)
+        csv_specs, csv_trunc = _chunk_table_rows(data_rows_csv, header_row=header_row)
         return csv_specs, (truncated or csv_trunc)
 
     text = file_parser.decode_text(raw)
@@ -616,22 +628,54 @@ def _build_extractive_summary(filename: str, specs: list[ChunkSpec]) -> tuple[st
     return summary, keywords
 
 
-async def _caption_image_with_vision(raw: bytes, *, filename: str, mime_type: str) -> str | None:
-    """Use configured vision LLM to generate a searchable caption + OCR text for an uploaded image."""
+def _is_vision_caption_configured() -> bool:
     settings = get_settings()
     if not getattr(settings, "rag_image_indexing_enabled", True):
-        return None
-    if not raw or len(raw) > MAX_IMAGE_CAPTION_BYTES:
+        return False
+    base = (settings.llm_vision_base_url or settings.llm_base_url or "").strip().rstrip("/")
+    model = (settings.llm_vision_model or (settings.llm_model if settings.llm_supports_vision else "")).strip()
+    return bool(base and model and not base.startswith("http://llm.test"))
+
+
+async def _caption_image_with_vision(
+    raw: bytes | None,
+    *,
+    filename: str,
+    mime_type: str,
+    storage_key: str = "",
+    size_bytes: int = 0,
+) -> str | None:
+    """Use configured vision LLM to generate a searchable caption + OCR text for an uploaded image.
+
+    Prefers native COS signed URL (zero RAM / zero base64 inflation), falling back to base64 if URL is unavailable.
+    """
+    settings = get_settings()
+    if not _is_vision_caption_configured():
         return None
 
     base = (settings.llm_vision_base_url or settings.llm_base_url or "").strip().rstrip("/")
     api_key = (settings.llm_vision_api_key or settings.llm_api_key or "").strip()
     model = (settings.llm_vision_model or (settings.llm_model if settings.llm_supports_vision else "")).strip()
-    if not base or not model or base.startswith("http://llm.test"):
-        return None
 
-    sniffed = file_parser._sniff_image_mime(raw) or mime_type or "image/png"
-    b64 = base64.b64encode(raw).decode("ascii")
+    image_url_value: str | None = None
+    if storage_key and settings.cos_configured:
+        try:
+            image_url_value = cos.presign_ai_media_url(
+                key=storage_key,
+                size_bytes=int(size_bytes or (len(raw) if raw else 0)),
+                expires_seconds=600,
+                settings=settings,
+            )
+        except cos.CosError:
+            image_url_value = None
+
+    if not image_url_value:
+        if not raw or len(raw) > MAX_IMAGE_CAPTION_BYTES:
+            return None
+        sniffed = file_parser._sniff_image_mime(raw) or mime_type or "image/png"
+        b64 = base64.b64encode(raw).decode("ascii")
+        image_url_value = f"data:{sniffed};base64,{b64}"
+
     url = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -650,7 +694,7 @@ async def _caption_image_with_vision(raw: bytes, *, filename: str, mime_type: st
                             "不要寒暄，直接输出纯文本。"
                         ),
                     },
-                    {"type": "image_url", "image_url": {"url": f"data:{sniffed};base64,{b64}"}},
+                    {"type": "image_url", "image_url": {"url": image_url_value}},
                 ],
             }
         ],
@@ -724,7 +768,7 @@ async def index_file_chunks(
     await detect_pgvector(db)
 
     settings = get_settings()
-    if raw is None:
+    if raw is None and record.category != "image":
         if not settings.cos_configured or not record.storage_key:
             record.index_status = "ready"
             record.indexed_chunks = 0
@@ -739,9 +783,19 @@ async def index_file_chunks(
 
     specs: list[ChunkSpec] = []
     truncated = False
+    vision_failed = False
 
     if record.category == "image":
-        caption = await _caption_image_with_vision(raw, filename=record.filename, mime_type=record.mime_type)
+        vision_configured = _is_vision_caption_configured()
+        if raw is None and vision_configured and not (settings.cos_configured and record.storage_key):
+            vision_configured = False
+        caption = await _caption_image_with_vision(
+            raw,
+            filename=record.filename,
+            mime_type=record.mime_type,
+            storage_key=record.storage_key or "",
+            size_bytes=int(record.size_bytes or 0),
+        )
         if caption:
             specs = [
                 ChunkSpec(
@@ -752,15 +806,17 @@ async def index_file_chunks(
                     chunk_meta={"mime_type": record.mime_type, "size_bytes": record.size_bytes},
                 )
             ]
+        elif vision_configured:
+            vision_failed = True
     else:
         # Run CPU-bound PDF/DOCX/XLSX/Code parsing off the asyncio event loop
-        specs, truncated = await asyncio.to_thread(_chunk_file_bytes_structured, raw, ext=record.ext)
+        specs, truncated = await asyncio.to_thread(_chunk_file_bytes_structured, raw or b"", ext=record.ext)
 
     await db.execute(delete(FileChunk).where(FileChunk.file_id == record.id))
     if not specs:
-        record.index_status = "ready"
+        record.index_status = "failed" if vision_failed else "ready"
         record.indexed_chunks = 0
-        record.index_error = None
+        record.index_error = "视觉摘要生成失败，请稍后重试索引" if vision_failed else None
         record.indexed_at = datetime.now(timezone.utc)
         await db.commit()
         return 0
@@ -787,10 +843,13 @@ async def index_file_chunks(
 
     vectors: list[list[float]] | None = None
     model_tag: str | None = None
+    embedding_failed = False
     if embeddings.is_embedding_configured():
         vectors = await embeddings.embed_texts(embed_inputs)
         if vectors:
             model_tag = embeddings.current_embedding_model_tag() or None
+        else:
+            embedding_failed = True
 
     rows: list[FileChunk] = []
     for idx, (spec, ctx_header) in enumerate(zip(specs, headers)):
@@ -816,12 +875,12 @@ async def index_file_chunks(
             )
         )
     db.add_all(rows)
-    record.index_status = "partial" if truncated else "ready"
+    record.index_status = "partial" if (truncated or embedding_failed) else "ready"
     record.indexed_chunks = len(rows)
     record.summary = summary_text
     record.keywords = keywords
     record.embedding_model = model_tag
-    record.index_error = None
+    record.index_error = "向量化服务暂不可用，仅完成全文索引" if embedding_failed else None
     record.indexed_at = datetime.now(timezone.utc)
     await db.commit()
     return len(rows)

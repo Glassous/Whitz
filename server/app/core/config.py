@@ -9,7 +9,11 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     database_url: str = "postgresql+asyncpg://whitz:whitz_dev_password@localhost:5432/whitz"
+    db_pool_size: int = 20
+    db_max_overflow: int = 20
+    db_pool_timeout: int = 30
     jwt_secret: str = "dev-secret-change-me"
+    audit_hmac_secret: str = ""
     jwt_access_ttl_minutes: int = 15
     jwt_refresh_ttl_days: int = 15
     auth_refresh_grace_seconds: int = 30
@@ -35,6 +39,10 @@ class Settings(BaseSettings):
     forwarded_allow_ips: str = "127.0.0.1"
     allowed_hosts: str = "*"
     audit_enabled: bool = True
+    alert_evaluator_enabled: bool = True
+    alert_evaluator_interval_seconds: float = 60.0
+    github_token: str = ""
+    user_storage_quota_mb: int = 500
 
     scheduler_enabled: bool = True
     scheduler_poll_interval_seconds: float = 10.0

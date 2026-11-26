@@ -31,6 +31,27 @@ logger = logging.getLogger("whitz.desktop_llm")
 
 KEY_PREFIX = "whitz-dk-"
 
+_SHARED_CLIENT: httpx.AsyncClient | None = None
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    global _SHARED_CLIENT
+    if _SHARED_CLIENT is None or _SHARED_CLIENT.is_closed:
+        settings = get_settings()
+        _SHARED_CLIENT = httpx.AsyncClient(
+            timeout=httpx.Timeout(settings.desktop_llm_request_timeout_seconds, connect=15.0),
+            limits=httpx.Limits(max_connections=64, max_keepalive_connections=16),
+            trust_env=False,
+        )
+    return _SHARED_CLIENT
+
+
+async def aclose_shared_client() -> None:
+    global _SHARED_CLIENT
+    if _SHARED_CLIENT is not None and not _SHARED_CLIENT.is_closed:
+        await _SHARED_CLIENT.aclose()
+    _SHARED_CLIENT = None
+
 
 def hash_key(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -135,29 +156,66 @@ def sanitize_body(body: dict) -> dict:
 
 
 def client() -> httpx.AsyncClient:
-    settings = get_settings()
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(settings.desktop_llm_request_timeout_seconds, connect=15.0),
-        trust_env=False,
-    )
+    """Return a shared pooled HTTP client (kept as helper for test monkeypatching)."""
+    return _get_shared_client()
+
+
+def _parse_sse_data_line(line: bytes) -> tuple[int, int]:
+    """Parse one complete SSE line; return ``(usage_tokens, delta_output_chars)``."""
+    stripped = line.strip()
+    if not stripped.startswith(b"data:"):
+        return 0, 0
+    raw = stripped[5:].strip()
+    if not raw or raw == b"[DONE]":
+        return 0, 0
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return 0, 0
+    if not isinstance(parsed, dict):
+        return 0, 0
+
+    tok = 0
+    if isinstance(parsed.get("usage"), dict):
+        tok = usage.tokens_from_usage(parsed["usage"])
+
+    chars = 0
+    choices = parsed.get("choices")
+    if isinstance(choices, list):
+        for ch in choices:
+            if not isinstance(ch, dict):
+                continue
+            delta = ch.get("delta") if isinstance(ch.get("delta"), dict) else {}
+            for key in ("content", "reasoning_content", "reasoning"):
+                val = delta.get(key)
+                if isinstance(val, str):
+                    chars += len(val)
+            tool_calls = delta.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for tc in tool_calls:
+                    fn = tc.get("function") if isinstance(tc, dict) and isinstance(tc.get("function"), dict) else {}
+                    args = fn.get("arguments")
+                    if isinstance(args, str):
+                        chars += len(args)
+    return tok, chars
 
 
 async def proxy_non_stream(user: User, body: dict) -> dict:
     payload = sanitize_body(body)
     started = time.monotonic()
-    async with client() as http:
-        try:
-            resp = await http.post(
-                f"{upstream_base()}/chat/completions",
-                headers={"Authorization": f"Bearer {get_settings().llm_api_key}"},
-                json=payload,
-            )
-        except httpx.HTTPError as exc:
-            logger.warning("desktop llm upstream unreachable: %s", exc)
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "模型服务暂不可用") from exc
-        if resp.status_code >= 400:
-            raise HTTPException(resp.status_code, resp.text[:400])
-        data = resp.json()
+    http = client()
+    try:
+        resp = await http.post(
+            f"{upstream_base()}/chat/completions",
+            headers={"Authorization": f"Bearer {get_settings().llm_api_key}"},
+            json=payload,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("desktop llm upstream unreachable: %s", exc)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "模型服务暂不可用") from exc
+    if resp.status_code >= 400:
+        raise HTTPException(resp.status_code, resp.text[:400])
+    data = resp.json()
     tokens = usage.tokens_from_usage(data.get("usage")) or _estimate_tokens(payload) + _estimate_tokens(
         data.get("choices") or []
     )
@@ -173,45 +231,53 @@ async def proxy_stream(user: User, body: dict) -> AsyncIterator[bytes]:
     payload["stream_options"] = {**options, "include_usage": True}
     tokens = 0
     output_chars = 0
+    upstream_ok = False
+    line_buf = b""
     try:
-        async with client() as http:
-            async with http.stream(
-                "POST",
-                f"{upstream_base()}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {get_settings().llm_api_key}",
-                    "Accept": "text/event-stream",
-                    "Accept-Encoding": "identity",
-                },
-                json=payload,
-            ) as resp:
-                if resp.status_code >= 400:
-                    detail = (await resp.aread()).decode("utf-8", "ignore")[:400]
-                    raise HTTPException(resp.status_code, detail)
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
-                    output_chars += chunk.count(b"content")
-                    if b'"usage"' in chunk:
-                        tokens = max(tokens, _extract_usage(chunk))
+        http = client()
+        async with http.stream(
+            "POST",
+            f"{upstream_base()}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {get_settings().llm_api_key}",
+                "Accept": "text/event-stream",
+                "Accept-Encoding": "identity",
+            },
+            json=payload,
+        ) as resp:
+            if resp.status_code >= 400:
+                detail = (await resp.aread()).decode("utf-8", "ignore")[:400]
+                raise HTTPException(resp.status_code, detail)
+            upstream_ok = True
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+                line_buf += chunk
+                while b"\n" in line_buf:
+                    line, line_buf = line_buf.split(b"\n", 1)
+                    tok, ch = _parse_sse_data_line(line)
+                    if tok > 0:
+                        tokens = max(tokens, tok)
+                    output_chars += ch
+            if line_buf.strip():
+                tok, ch = _parse_sse_data_line(line_buf)
+                if tok > 0:
+                    tokens = max(tokens, tok)
+                output_chars += ch
     except httpx.HTTPError as exc:
         logger.warning("desktop llm stream unreachable: %s", exc)
         yield b'data: {"error":{"message":"model_unavailable"}}\n\n'
     finally:
-        await _settle(user.id, tokens or _estimate_tokens(payload) + output_chars)
+        if upstream_ok:
+            billed = tokens or (_estimate_tokens(payload, output_chars) if output_chars > 0 else 0)
+            if billed > 0:
+                await _settle(user.id, billed)
 
 
 def _extract_usage(chunk: bytes) -> int:
+    """Backward-compatible helper for extracting usage tokens from an SSE byte chunk."""
+    best = 0
     for line in chunk.split(b"\n"):
-        line = line.strip()
-        if not line.startswith(b"data:"):
-            continue
-        raw = line[5:].strip()
-        if raw == b"[DONE]":
-            continue
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(parsed, dict) and isinstance(parsed.get("usage"), dict):
-            return usage.tokens_from_usage(parsed["usage"])
-    return 0
+        tok, _ = _parse_sse_data_line(line)
+        if tok > best:
+            best = tok
+    return best

@@ -147,11 +147,15 @@ class SupervisedRun:
     def broadcast(self, ev: dict[str, Any] | None) -> None:
         if ev is not None and ev.get("id"):
             self.last_event_id = str(ev["id"])
+        ev_name = str(ev.get("event") or "") if isinstance(ev, dict) else ""
+        is_delta = ev_name in ("message.delta", "reasoning.delta")
         for q in list(self.subscribers):
             try:
                 q.put_nowait(ev)
             except asyncio.QueueFull:
-                # Drop oldest delta if a slow client falls behind; supervisor never blocks on slow clients
+                if is_delta:
+                    # Drop incoming delta for congested client rather than evicting structural events
+                    continue
                 try:
                     q.get_nowait()
                     q.put_nowait(ev)
@@ -190,10 +194,21 @@ class SupervisedRun:
         from app.services import chat_stream
 
         lease_key = f"srv:run_writer:{self.run_id}"
+        lease_ttl = 60
         try:
-            await get_redis().set(lease_key, "1", ex=max(120, (self.max_seconds or 1200) + 60))
+            await get_redis().set(lease_key, "1", ex=lease_ttl)
         except Exception:
             pass
+
+        async def _renew_lease() -> None:
+            while not self.done:
+                await asyncio.sleep(20.0)
+                try:
+                    await get_redis().set(lease_key, "1", ex=lease_ttl)
+                except Exception:
+                    pass
+
+        lease_task = asyncio.create_task(_renew_lease(), name=f"run-lease-{self.run_id}")
 
         try:
             async with self.session_factory() as db:
@@ -375,7 +390,7 @@ class SupervisedRun:
 
                     async for ev in chat_stream._auto_title_events(db, conv, assistant):
                         self.broadcast(ev)
-                        if ev.get("event") == "conversation.title_updated":
+                        if ev.get("event") in ("title.updated", "conversation.title_updated"):
                             try:
                                 td = json.loads(ev.get("data") or "{}")
                                 await realtime_bus.publish_user_event(
@@ -398,6 +413,9 @@ class SupervisedRun:
                             "pending_control": None,
                         },
                     )
+        except asyncio.CancelledError:
+            # Cancelled explicitly by stop_run / delete_conversation or graceful shutdown
+            raise
         except AgentError as exc:
             logger.warning("Supervised run %s agent error: %s", self.run_id, exc)
             await self._mark_failed_in_db()
@@ -410,6 +428,11 @@ class SupervisedRun:
             self.broadcast(chat_stream.sse("error", {"code": "internal_error", "detail": str(exc)}))
         finally:
             self.done = True
+            lease_task.cancel()
+            try:
+                await lease_task
+            except (asyncio.CancelledError, Exception):
+                pass
             self.broadcast(None)
             _ACTIVE_SUPERVISORS.pop(self.run_id, None)
             if self.run_slot:
@@ -463,6 +486,20 @@ def get_supervisor(run_id: str) -> SupervisedRun | None:
     if sup is not None and not sup.done:
         return sup
     return None
+
+
+async def cancel_local_supervisor(run_id: str) -> bool:
+    """Stop a local SupervisedRun immediately (e.g., on user stop_run or conversation delete)."""
+    sup = _ACTIVE_SUPERVISORS.get(run_id)
+    if sup is None or sup.done:
+        return False
+    if sup.task is not None and not sup.task.done():
+        sup.task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(sup.task), timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            pass
+    return True
 
 
 def start_supervised_run(
@@ -558,9 +595,10 @@ async def reconcile_orphaned_runs() -> int:
                         reconciled += 1
                     continue
 
-                # Skip if another server instance currently holds the writer lease
+                # Atomically claim writer lease via SET NX so multi-worker reconcilers never double-attach
                 try:
-                    if await get_redis().exists(f"srv:run_writer:{run_id}"):
+                    claimed = await get_redis().set(f"srv:run_writer:{run_id}", "1", ex=60, nx=True)
+                    if not claimed:
                         continue
                 except Exception:
                     pass
@@ -671,7 +709,19 @@ async def stop_reconciler_and_supervisors() -> None:
         except (asyncio.CancelledError, Exception):
             pass
         _RECONCILER_TASK = None
-    # Give active supervisors up to 5s to flush current DB state on graceful server shutdown
-    tasks = [s.task for s in list(_ACTIVE_SUPERVISORS.values()) if s.task is not None and not s.task.done()]
+    # Give active supervisors up to 5s to flush current DB state on graceful server shutdown,
+    # then cancel any remaining tasks and explicitly release Redis writer leases so another worker can recover immediately.
+    active = list(_ACTIVE_SUPERVISORS.values())
+    tasks = [s.task for s in active if s.task is not None and not s.task.done()]
     if tasks:
-        await asyncio.wait(tasks, timeout=5.0)
+        _, pending = await asyncio.wait(tasks, timeout=5.0)
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+    r = get_redis()
+    for sup in active:
+        try:
+            await r.delete(f"srv:run_writer:{sup.run_id}")
+        except Exception:
+            pass

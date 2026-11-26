@@ -1,3 +1,4 @@
+from contextlib import aclosing
 import uuid
 from datetime import datetime, timezone
 
@@ -20,7 +21,16 @@ from app.api.schemas import (
 )
 from app.db.models import Conversation, Message, RunTelemetry, User
 from app.db.session import get_db
-from app.services import audit, chat_stream, chat_tickets, limits, membership, reactions, realtime_bus
+from app.services import (
+    audit,
+    chat_stream,
+    chat_tickets,
+    limits,
+    membership,
+    reactions,
+    realtime_bus,
+    run_supervisor,
+)
 from app.services.agent_client import AgentClient, AgentError
 
 router = APIRouter(prefix="/api/conversations", tags=["chat"])
@@ -36,10 +46,11 @@ async def user_events_stream(
 
     async def _gen():
         yield chat_stream.sse("sync.connected", {"user_id": str(user.id)})
-        async for ev_name, payload in realtime_bus.subscribe_user_events(user.id):
-            if await request.is_disconnected():
-                return
-            yield chat_stream.sse(ev_name, payload)
+        async with aclosing(realtime_bus.subscribe_user_events(user.id)) as stream:
+            async for ev_name, payload in stream:
+                if await request.is_disconnected():
+                    return
+                yield chat_stream.sse(ev_name, payload)
 
     return EventSourceResponse(_gen(), ping=15)
 
@@ -118,14 +129,6 @@ async def _preflight_chat_turn(
         request=request,
         metadata=audit_metadata,
     )
-
-    client = await _client_for(user)
-    try:
-        ready = await client.health()
-    finally:
-        await client.aclose()
-    if not ready:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "agent_warming_up")
 
     sse_slot = await limits.acquire_sse(user.id)
     if sse_slot is None:
@@ -337,6 +340,7 @@ async def stop_run(
     run_id = conv.active_run_id
     result: dict = {"id": run_id, "run_id": run_id, "status": "cancelled"}
     if run_id != "pending":
+        await run_supervisor.cancel_local_supervisor(run_id)
         client = await _client_for(user)
         try:
             result = await client.cancel_run(run_id)
@@ -421,6 +425,13 @@ async def approval(
     if assistant is not None and assistant.status == "waiting":
         assistant.status = "streaming"
     if body.choice == "deny":
+        # Persist hitl_denied_count into assistant runtime metadata so telemetry captures it at run completion
+        if assistant is not None:
+            extra = dict(assistant.tool_payload or {})
+            rt = dict(extra.get("runtime") or {})
+            rt["hitl_denied_count"] = int(rt.get("hitl_denied_count") or 0) + 1
+            extra["runtime"] = rt
+            assistant.tool_payload = extra
         await db.execute(
             update(RunTelemetry)
             .where(RunTelemetry.run_id == run_id)

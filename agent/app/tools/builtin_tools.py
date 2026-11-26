@@ -674,8 +674,10 @@ async def web_extract(
         status_code = 200
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(15.0),
-            follow_redirects=False,
+            follow_redirects=True,
+            max_redirects=5,
             headers={"User-Agent": "WhitzAgent/1.0"},
+            event_hooks={"request": [_ssrf_request_hook]},
         ) as client:
             async with client.stream("GET", cleaned) as resp:
                 status_code = resp.status_code
@@ -796,7 +798,7 @@ async def http_request(
             timeout=httpx.Timeout(clamped_timeout),
             follow_redirects=bool(follow_redirects),
             max_redirects=5,
-            verify=bool(verify_ssl),
+            verify=True,
             event_hooks={"request": [_ssrf_request_hook]},
         ) as client:
             request_kwargs: dict[str, Any] = {
@@ -1244,9 +1246,10 @@ def get_builtin_tools(
     include_cross_chat: bool = True,
     include_user_reaction: bool = True,
 ) -> list[BaseTool]:
+    # Note: `rag_search_workspace` is intentionally omitted from default bound tools because
+    # `knowledge_search(sources=["file"])` is a strict superset; the tool remains importable for compat.
     tools: list[BaseTool] = [
         knowledge_search,
-        rag_search_workspace,
         memory_search,
         memory_list,
         memory_propose,

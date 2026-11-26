@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
@@ -490,6 +491,7 @@ def _scan_builtin_skills(disabled_set: set[str]) -> list[dict[str, Any]]:
 def _serialize_user_skill(row: UserSkill) -> dict[str, Any]:
     parsed = parse_skill_markdown(row.content or "", fallback_name=row.name)
     tags = row.tags if isinstance(row.tags, list) else parsed["tags"]
+    file_names = sorted(str(k) for k in (row.files or {}).keys()) if isinstance(row.files, dict) else []
     return {
         "name": row.name,
         "title": row.title or parsed["title"] or row.name,
@@ -500,6 +502,7 @@ def _serialize_user_skill(row: UserSkill) -> dict[str, Any]:
         "editable": (row.source or "custom") != "builtin",
         "repo_url": row.repo_url,
         "content": row.content,
+        "files": file_names,
         "tags": [str(t) for t in tags if str(t).strip()],
         "updated_at": row.updated_at,
     }
@@ -519,7 +522,8 @@ async def list_skills(db: AsyncSession, user: User) -> list[dict[str, Any]]:
             by_name[row.name] = _serialize_user_skill(row)
 
     disabled_builtins = {name for name, enabled in builtin_enabled_overrides.items() if not enabled}
-    for item in _scan_builtin_skills(disabled_builtins):
+    builtin_items = await asyncio.to_thread(_scan_builtin_skills, disabled_builtins)
+    for item in builtin_items:
         if not item.get("available"):
             continue
         if item["name"] in by_name:
@@ -725,7 +729,7 @@ def _is_public_ip(ip_str: str) -> bool:
     )
 
 
-def _validate_remote_url(raw_url: str) -> str:
+def _validate_remote_url(raw_url: str, *, resolve_dns: bool = False) -> str:
     parsed = urlsplit(raw_url)
     if parsed.scheme.lower() != "https":
         raise SkillSsrfError("仅允许使用 HTTPS 协议访问 GitHub 仓库", 400)
@@ -743,15 +747,22 @@ def _validate_remote_url(raw_url: str) -> str:
     else:
         raise SkillSsrfError("禁止直接通过 IP 地址访问", 400)
 
-    try:
-        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-    except OSError:
-        infos = []
-    for info in infos:
-        sockaddr = info[4]
-        if sockaddr and not _is_public_ip(sockaddr[0]):
-            raise SkillSsrfError("目标域名解析到内网或受限 IP，已拒绝访问", 400)
+    if resolve_dns:
+        try:
+            infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise SkillSsrfError(f"无法解析目标域名 {host}", 502) from exc
+        if not infos:
+            raise SkillSsrfError(f"目标域名 {host} 未返回有效解析地址", 502)
+        for info in infos:
+            sockaddr = info[4]
+            if sockaddr and not _is_public_ip(sockaddr[0]):
+                raise SkillSsrfError("目标域名解析到内网或受限 IP，已拒绝访问", 400)
     return raw_url
+
+
+async def _validate_remote_url_async(raw_url: str) -> str:
+    return await asyncio.to_thread(_validate_remote_url, raw_url, resolve_dns=True)
 
 
 def _clean_ref(ref: str | None) -> str | None:
@@ -871,14 +882,14 @@ async def _http_get_bytes(
     max_bytes: int,
     headers: dict[str, str] | None = None,
 ) -> bytes:
-    current_url = _validate_remote_url(url)
+    current_url = await _validate_remote_url_async(url)
     for _ in range(4):
         async with client.stream("GET", current_url, headers=headers) as resp:
             if resp.status_code in (301, 302, 303, 307, 308):
                 location = resp.headers.get("location")
                 if not location:
                     raise SkillServiceError("GitHub 重定向响应缺少 Location", 502)
-                current_url = _validate_remote_url(location)
+                current_url = await _validate_remote_url_async(location)
                 continue
             if resp.status_code == 404:
                 raise SkillServiceError("目标 GitHub 仓库或文件不存在", 404)
@@ -924,13 +935,17 @@ async def _fetch_directory_skill_files(
     subpath: str | None,
 ) -> tuple[dict[str, str], str | None]:
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "Whitz-Skills/1.0"}
+    gh_token = (getattr(get_settings(), "github_token", "") or "").strip()
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
     files: dict[str, str] = {}
-    total_bytes = 0
+    file_entries: list[tuple[str, str, int]] = []
+    total_hint_bytes = 0
     base_prefix = f"{subpath}/" if subpath else ""
     visited_dirs: set[str] = set()
 
     async def _walk(api_path: str, depth: int = 0) -> None:
-        nonlocal total_bytes
+        nonlocal total_hint_bytes
         if depth > 10 or api_path in visited_dirs:
             return
         visited_dirs.add(api_path)
@@ -971,27 +986,37 @@ async def _fetch_directory_skill_files(
             _, ext = os.path.splitext(ename.lower())
             if ext not in SAFE_SUPPORT_EXTS:
                 continue
-            if len(files) >= MAX_GITHUB_FILES:
+            if len(file_entries) >= MAX_GITHUB_FILES:
                 raise SkillServiceError(f"GitHub 技能文件数量超过上限（最多 {MAX_GITHUB_FILES} 个文件）", 400)
 
             size_hint = int(entry.get("size") or 0)
-            if total_bytes + size_hint > MAX_GITHUB_TOTAL_BYTES:
+            if total_hint_bytes + size_hint > MAX_GITHUB_TOTAL_BYTES:
                 raise SkillServiceError("GitHub 技能总大小超过 512 KB 上限", 400)
 
             download_url = entry.get("download_url")
             if not isinstance(download_url, str) or not download_url:
                 continue
-            remaining = MAX_GITHUB_TOTAL_BYTES - total_bytes
-            content_bytes = await _http_get_bytes(client, download_url, max_bytes=remaining)
-            total_bytes += len(content_bytes)
-            try:
-                text = content_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-            files[rel] = text
+            total_hint_bytes += size_hint
+            file_entries.append((rel, download_url, size_hint))
 
     try:
         await _walk(subpath or "")
+        sem = asyncio.Semaphore(4)
+
+        async def _download_one(rel: str, download_url: str) -> tuple[str, bytes]:
+            async with sem:
+                return rel, await _http_get_bytes(client, download_url, max_bytes=MAX_GITHUB_TOTAL_BYTES)
+
+        downloaded = await asyncio.gather(*(_download_one(rel, durl) for rel, durl, _ in file_entries))
+        actual_total = 0
+        for rel, content_bytes in downloaded:
+            actual_total += len(content_bytes)
+            if actual_total > MAX_GITHUB_TOTAL_BYTES:
+                raise SkillServiceError("GitHub 技能总大小超过 512 KB 上限", 400)
+            try:
+                files[rel] = content_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
     except SkillServiceError as exc:
         if exc.status_code != 502:
             raise
@@ -1093,6 +1118,7 @@ async def _install_skill_files(
     ref: str | None = None,
     path: str | None = None,
     enabled: bool = True,
+    commit: bool = True,
 ) -> dict[str, Any]:
     clean_name = validate_skill_name(name)
     if "SKILL.md" not in files:
@@ -1160,9 +1186,41 @@ async def _install_skill_files(
             path=path,
         )
         db.add(row)
-    await db.commit()
-    await db.refresh(row)
+    if commit:
+        await db.commit()
+        await db.refresh(row)
+    else:
+        await db.flush()
     return _serialize_user_skill(row)
+
+
+async def sync_github_skill(
+    db: AsyncSession,
+    user: User,
+    name: str,
+) -> dict[str, Any]:
+    """Re-fetch and update an installed GitHub skill from its recorded repo_url/ref/path."""
+    clean_name = validate_skill_name(name)
+    row = (
+        await db.execute(
+            select(UserSkill).where(
+                UserSkill.user_id == user.id,
+                UserSkill.name == clean_name,
+                UserSkill.source == "github",
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None or not row.repo_url:
+        raise SkillServiceError("该技能并非从 GitHub 安装，无法同步更新", 404)
+    return await install_github_skill(
+        db,
+        user,
+        row.repo_url,
+        name=row.name,
+        ref=row.ref,
+        path=row.path,
+        enabled=bool(row.enabled),
+    )
 
 
 async def install_github_skill(
@@ -1261,11 +1319,13 @@ async def stage_pending_skill(
 
 
 def _serialize_pending_skill(row: SkillPendingProposal) -> dict[str, Any]:
+    file_names = sorted(str(k) for k in (row.files or {}).keys()) if isinstance(row.files, dict) else []
     return {
         "id": str(row.id),
         "name": row.name,
         "description": row.description or "",
         "content": row.content,
+        "files": file_names,
         "action": row.action or "create",
         "source": row.source or "agent",
         "conversation_id": row.conversation_id,
@@ -1339,6 +1399,7 @@ async def resolve_pending(
         ref=proposal.ref,
         path=proposal.path,
         enabled=enabled,
+        commit=False,
     )
     await db.delete(proposal)
     await db.commit()

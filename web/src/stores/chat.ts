@@ -11,7 +11,6 @@ import type {
   ClarifySubmitPayload,
   ConversationDetail,
   ConversationFile,
-  MemoryOverview,
   MemoryPendingItem,
   Message,
   MessageReaction,
@@ -67,6 +66,7 @@ export const useChatStore = defineStore("chat", () => {
   const selectedTurnId = ref<string | null>(null);
   const stableKeys = ref<Record<string, string>>({});
   const latestTurnTriggerSeq = ref(0);
+  const contextStateVersion = ref(0);
   let controller: AbortController | null = null;
   let pendingUserTargetId: string | null = null;
   let lastEventId: string | null = null;
@@ -124,6 +124,20 @@ export const useChatStore = defineStore("chat", () => {
   });
 
   const runningTool = computed(() => {
+    for (let i = reasoning.value.length - 1; i >= 0; i--) {
+      const tList = reasoning.value[i].tools;
+      if (!tList?.length) continue;
+      const active = tList.findLast((t) => t.status === "running");
+      if (active) {
+        if (
+          pendingControl.value &&
+          (pendingControl.value.tool === active.name || active.name === "clarify" || active.name === "execute_code")
+        ) {
+          return null;
+        }
+        return active.label || active.name;
+      }
+    }
     const row = messages.value.findLast((m) => m.role === "tool" && m.status === "running");
     if (!row?.tool_name) return null;
     if (pendingControl.value && (pendingControl.value.tool === row.tool_name || row.tool_name === "clarify" || row.tool_name === "execute_code")) {
@@ -156,7 +170,12 @@ export const useChatStore = defineStore("chat", () => {
               .filter((t: any) => t && typeof t.name === "string")
               .map((t: any) => ({
                 name: t.name,
+                label: typeof t.label === "string" ? t.label : null,
+                ui_kind: typeof t.ui_kind === "string" ? t.ui_kind : null,
+                summary: typeof t.summary === "string" ? t.summary : null,
                 call_id: t.call_id != null ? String(t.call_id) : null,
+                parent_call_id: t.parent_call_id != null ? String(t.parent_call_id) : null,
+                subagent_role: typeof t.subagent_role === "string" ? t.subagent_role : null,
                 args: typeof t.args === "string" ? t.args : undefined,
                 result: typeof t.result === "string" ? t.result : undefined,
                 status: typeof t.status === "string" ? t.status : undefined,
@@ -223,13 +242,15 @@ export const useChatStore = defineStore("chat", () => {
   async function loadConversationPending(targetConvId: string) {
     try {
       const [memRes, skillRes, schedRes] = await Promise.allSettled([
-        api.get<MemoryOverview>("/users/me/memory"),
+        api.get<MemoryPendingItem[]>(
+          `/users/me/memory/pending?conversation_id=${encodeURIComponent(targetConvId)}`,
+        ),
         api.get<SkillPendingItem[]>("/skills/pending"),
         api.get<ScheduledTaskPendingItem[]>("/schedules/pending"),
       ]);
       if (convId.value !== targetConvId) return;
-      if (memRes.status === "fulfilled" && Array.isArray(memRes.value?.pending)) {
-        pendingMemory.value = memRes.value.pending.filter(
+      if (memRes.status === "fulfilled" && Array.isArray(memRes.value)) {
+        pendingMemory.value = memRes.value.filter(
           (item) => (!item.conversation_id || item.conversation_id === targetConvId) && (item.status ?? "pending") === "pending",
         );
       }
@@ -410,11 +431,8 @@ export const useChatStore = defineStore("chat", () => {
     messages.value = detail.messages.map((m) => ({ ...m }));
     stableKeys.value = {};
     plan.value = detail.plan;
-    const lastReasoned = detail.messages.findLast(
-      (m) => m.role === "assistant" && Array.isArray(m.tool_payload?.reasoning) && m.tool_payload.reasoning.length,
-    );
-    reasoning.value = normalizeReasoning(lastReasoned?.tool_payload?.reasoning);
     const lastAssistant = detail.messages.findLast((m) => m.role === "assistant");
+    reasoning.value = normalizeReasoning(lastAssistant?.tool_payload?.reasoning);
     citations.value = Array.isArray(lastAssistant?.tool_payload?.citations)
       ? [...lastAssistant.tool_payload.citations]
       : [];
@@ -775,6 +793,15 @@ export const useChatStore = defineStore("chat", () => {
         syncTurnToMessage();
         break;
       }
+      case "message.reset": {
+        const a = assistant();
+        if (a) a.content = "";
+        break;
+      }
+      case "context_state.updated": {
+        contextStateVersion.value += 1;
+        break;
+      }
       case "message.interim":
         break;
       case "graph.node":
@@ -804,13 +831,31 @@ export const useChatStore = defineStore("chat", () => {
             created_at: new Date().toISOString(),
           });
         }
-        const blk = reasoningBlock(null, "");
-        const toolsList = (blk.tools ??= []);
-        const alreadyInTools = d.call_id && toolsList.some((t) => t.call_id === d.call_id);
-        if (!alreadyInTools) {
+        const activeStep = currentStep.value;
+        const resolvedStep =
+          typeof d.step === "number"
+            ? d.step
+            : activeStep
+              ? activeStep.index
+              : null;
+        const resolvedTitle =
+          typeof d.title === "string" && d.title
+            ? d.title
+            : activeStep?.title ?? "";
+        const alreadyInAnyBlock =
+          Boolean(d.call_id) &&
+          reasoning.value.some((b) => (b.tools ?? []).some((t) => t.call_id === d.call_id));
+        if (!alreadyInAnyBlock) {
+          const blk = reasoningBlock(resolvedStep, resolvedTitle);
+          const toolsList = (blk.tools ??= []);
           toolsList.push({
             name: d.tool ?? "tool",
+            label: typeof d.label === "string" ? d.label : null,
+            ui_kind: typeof d.ui_kind === "string" ? d.ui_kind : null,
+            summary: typeof d.summary === "string" ? d.summary : null,
             call_id: d.call_id ?? null,
+            parent_call_id: d.parent_call_id ?? null,
+            subagent_role: typeof d.subagent_role === "string" ? d.subagent_role : null,
             args: rawArgs,
             status: "running",
           });
@@ -822,12 +867,15 @@ export const useChatStore = defineStore("chat", () => {
         const rawResult = stringifyToolVal(d.result ?? d.preview);
         const row =
           findMessage(d.message_id) ??
+          (d.call_id
+            ? messages.value.findLast((m) => m.role === "tool" && m.tool_payload?.call_id === d.call_id)
+            : undefined) ??
           messages.value.findLast((m) => m.role === "tool" && m.tool_name === d.tool && m.status === "running");
         if (row) {
           row.tool_payload = {
             ...(row.tool_payload ?? {}),
             result: rawResult || d.preview,
-            duration: d.duration,
+            duration: d.duration ?? d.duration_ms,
             error: d.error,
             status: d.error ? "failed" : "completed",
           };
@@ -844,8 +892,11 @@ export const useChatStore = defineStore("chat", () => {
           if (match) {
             match.status = d.error ? "failed" : "completed";
             match.result = rawResult;
+            if (typeof d.label === "string" && d.label) match.label = d.label;
+            if (typeof d.summary === "string" && d.summary) match.summary = d.summary;
             if (d.error) match.error = d.error;
             if (typeof d.duration_ms === "number") match.duration_ms = d.duration_ms;
+            else if (typeof d.duration === "number") match.duration_ms = d.duration;
             break;
           }
         }
@@ -1482,7 +1533,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   return {
-    convId, messages, stableKeys, stableKeyOf, latestTurnTriggerSeq,
+    convId, messages, stableKeys, stableKeyOf, latestTurnTriggerSeq, contextStateVersion,
     streaming, waitingFirstByte, ragPrefetching, stopping, reconnecting, approvingChoice, submittingClarify,
     activeAssistantId, activeRunId, plan, reasoning, citations, ragScope, currentStep, runningTool,
     selectedTurnId, selectedTurn, assistantTurns, viewPlan, viewReasoning, viewStreaming, viewCurrentStep,

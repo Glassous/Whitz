@@ -15,6 +15,7 @@ import com.glassous.whitz.core.model.EmailCodeResponse
 import com.glassous.whitz.core.model.GithubSkillPreviewResponse
 import com.glassous.whitz.core.model.LibraryContentSearchResponse
 import com.glassous.whitz.core.model.MemoryOverview
+import com.glassous.whitz.core.model.MemoryPendingItem
 import com.glassous.whitz.core.model.MemorySearchResponse
 import com.glassous.whitz.core.model.MessageReaction
 import com.glassous.whitz.core.model.PostCommentCreateResponse
@@ -426,6 +427,11 @@ interface WhitzApi {
     @GET("users/me/memory")
     suspend fun getMemory(): MemoryOverview
 
+    @GET("users/me/memory/pending")
+    suspend fun getPendingMemory(
+        @Query("conversation_id") conversationId: String? = null,
+    ): List<MemoryPendingItem>
+
     @PUT("users/me/memory/settings")
     suspend fun updateMemorySettings(@Body body: MemorySettingsRequest): MemoryOverview
 
@@ -667,6 +673,12 @@ interface WhitzApi {
     suspend fun getLibraryPreviewContent(
         @Path("fileId") fileId: String,
     ): ResponseBody
+
+    @PUT("library/files/{fileId}/content")
+    suspend fun updateLibraryFileContent(
+        @Path("fileId") fileId: String,
+        @Body body: UpdateFileContentRequest,
+    ): ConversationFile
 
     @PATCH("library/files/{id}")
     suspend fun patchLibraryFile(@Path("id") id: String, @Body body: LibraryFilePatchRequest): ConversationFile

@@ -215,3 +215,26 @@ async def run_schedule_now(
         metadata={"run_record_id": str(run_out["id"])},
     )
     return ScheduledTaskRunOut(**run_out)
+
+
+@router.post("/{task_id}/runs/{run_id}/cancel", response_model=ScheduledTaskRunOut)
+async def cancel_schedule_run(
+    task_id: uuid.UUID,
+    run_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ScheduledTaskRunOut:
+    try:
+        run_out = await scheduler_service.cancel_task_run(db, user, task_id, run_id)
+    except scheduler_service.ScheduleServiceError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    await audit.record(
+        "schedule.run_cancel",
+        actor=user,
+        target_type="scheduled_task_run",
+        target_id=str(run_id),
+        request=request,
+        metadata={"task_id": str(task_id), "status": run_out["status"]},
+    )
+    return ScheduledTaskRunOut(**run_out)

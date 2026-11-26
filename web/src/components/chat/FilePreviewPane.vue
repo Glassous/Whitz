@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import hljs from "highlight.js/lib/common";
 import { categoryLabel, formatFileSize, getFileExt } from "../../lib/fileTypes";
 import { isWritableTextExt } from "../../lib/fileTokens";
+import { injectHtmlTheme } from "../../lib/htmlTheme";
 import { useFilesStore } from "../../stores/files";
 import type { ConversationFile, DeliverableTarget, PreviewTarget } from "../../types";
 import Spinner from "../ui/Spinner.vue";
@@ -67,6 +68,28 @@ const freshUrl = ref<string | null>(null);
 const viewMode = ref<"preview" | "source">("preview");
 const imageActualSize = ref(false);
 const copied = ref(false);
+const isDarkTheme = ref(
+  typeof document !== "undefined" ? document.documentElement.classList.contains("dark") : false,
+);
+let themeObserver: MutationObserver | null = null;
+
+onMounted(() => {
+  if (typeof document !== "undefined") {
+    isDarkTheme.value = document.documentElement.classList.contains("dark");
+    themeObserver = new MutationObserver(() => {
+      isDarkTheme.value = document.documentElement.classList.contains("dark");
+    });
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+  }
+});
+
+onBeforeUnmount(() => {
+  themeObserver?.disconnect();
+  themeObserver = null;
+});
 
 let loadSeq = 0;
 
@@ -85,6 +108,11 @@ const previewKind = computed<"html" | "markdown" | "image" | "pdf" | "table" | "
   if (ext === ".pdf") return "pdf";
   if (ext === ".csv" || ext === ".tsv") return "table";
   return "code";
+});
+
+const themedHtml = computed(() => {
+  if (previewKind.value !== "html" || !textContent.value) return "";
+  return injectHtmlTheme(textContent.value, isDarkTheme.value);
 });
 
 const titleText = computed(() =>
@@ -471,10 +499,11 @@ watch(() => props.target, () => {
       <template v-else-if="previewKind === 'html'">
         <iframe
           v-if="viewMode === 'preview'"
+          :key="`pane-html-${isDarkTheme ? 'dark' : 'light'}`"
           sandbox="allow-scripts"
           referrerpolicy="no-referrer"
-          :srcdoc="textContent"
-          class="h-full w-full flex-1 border-0 bg-white"
+          :srcdoc="themedHtml"
+          class="h-full w-full flex-1 border-0 bg-white dark:bg-[#111]"
           :class="resizing ? 'pointer-events-none' : ''"
           title="HTML 预览"
         />

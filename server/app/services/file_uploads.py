@@ -10,10 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.db.models import Conversation, ConversationFile, ConversationFileLink, User
-from app.services import cos, file_cache, file_chunks, file_parser, realtime_bus
+from app.services import cos, embeddings, file_cache, file_chunks, file_parser, realtime_bus
 from app.services.file_types import FileValidationError, validate_upload_request
 
-SYNC_INDEX_MAX_BYTES = 128 * 1024
+SYNC_INDEX_MAX_BYTES = 16 * 1024
 
 
 async def cleanup_expired_pending_files(
@@ -176,7 +176,27 @@ async def presign_file_upload(
         background_tasks=background_tasks,
     )
 
+    quota_mb = int(getattr(s, "user_storage_quota_mb", 500) or 0)
+    if quota_mb > 0:
+        used_bytes = await db.scalar(
+            select(func.coalesce(func.sum(ConversationFile.size_bytes), 0)).where(
+                ConversationFile.user_id == user.id,
+                ConversationFile.status.in_(("ready", "pending")),
+            )
+        )
+        quota_bytes = quota_mb * 1024 * 1024
+        if int(used_bytes or 0) + info.size_bytes > quota_bytes:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"个人文件总存储配额已满（上限 {quota_mb} MB），请先清理部分资料库文件",
+            )
+
     if conversation is not None:
+        max_conv_files = (
+            s.max_files_per_conversation * 5
+            if getattr(conversation, "kind", "side") == "main"
+            else s.max_files_per_conversation
+        )
         existing_count = await db.scalar(
             select(func.count())
             .select_from(ConversationFile)
@@ -185,10 +205,10 @@ async def presign_file_upload(
                 ConversationFile.status.in_(("ready", "pending")),
             )
         )
-        if int(existing_count or 0) >= s.max_files_per_conversation:
+        if int(existing_count or 0) >= max_conv_files:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                f"单个对话最多上传 {s.max_files_per_conversation} 个文件，请先清理部分文件",
+                f"单个对话最多上传 {max_conv_files} 个文件，请先清理部分文件",
             )
 
     file_id = uuid.uuid4()
@@ -267,9 +287,14 @@ async def complete_file_upload(
         record.status = "failed"
         record.error_message = f"文件大小校验不匹配: 预期 {record.size_bytes}, 实际 {actual_size}"
         await db.commit()
+        if record.storage_key and s.cos_configured:
+            try:
+                await cos.delete_objects([record.storage_key], settings=s)
+            except Exception:
+                pass
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "上传文件大小与签名不一致")
 
-    # Zero-overhead 32-byte magic header check for images, PDFs, DOCX, XLSX
+    # Zero-overhead 32-byte magic header check for images, PDFs, DOCX, XLSX (fail-closed)
     if record.category == "image" or (record.ext or "").lower() in (".pdf", ".docx", ".xlsx"):
         head_bytes = await cos.get_object_head_bytes(record.storage_key, num_bytes=32, settings=s)
         magic_err = file_parser.sniff_file_header(head_bytes, ext=record.ext, category=record.category)
@@ -277,6 +302,11 @@ async def complete_file_upload(
             record.status = "failed"
             record.error_message = magic_err
             await db.commit()
+            if record.storage_key and s.cos_configured:
+                try:
+                    await cos.delete_objects([record.storage_key], settings=s)
+                except Exception:
+                    pass
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, magic_err)
 
     record.status = "ready"
@@ -285,11 +315,18 @@ async def complete_file_upload(
     record.expires_cleanup_at = None
     record.etag = (etag or None) or meta.get("etag")
 
-    # Images NEVER block /complete for Vision Captioning (current turn sends original image natively!).
-    # Small text/code/docs (<= 128KB) index quickly inline; larger docs index asynchronously.
+    # Images NEVER block /complete (current turn sends original image URL natively!).
+    # Non-images also offload to async queue whenever remote embeddings are configured or size > 16KB
+    # so /complete never stalls on external embedding API round-trips.
     is_async_index = (
         (record.category == "image" and bool(s.rag_image_indexing_enabled))
-        or (record.category != "image" and int(record.size_bytes or 0) > SYNC_INDEX_MAX_BYTES)
+        or (
+            record.category != "image"
+            and (
+                int(record.size_bytes or 0) > SYNC_INDEX_MAX_BYTES
+                or embeddings.is_embedding_configured()
+            )
+        )
     )
     record.index_status = "indexing" if is_async_index else "ready"
     await db.commit()

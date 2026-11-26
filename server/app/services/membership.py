@@ -129,13 +129,31 @@ def window_bounds(anchor: datetime, period: timedelta, now: datetime) -> tuple[d
 
 
 async def _net_tokens(
-    db: AsyncSession, user_id: uuid.UUID, start: datetime, end: datetime | None = None
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    start: datetime,
+    end: datetime | None = None,
+    *,
+    bucket: str = "plan",
 ) -> int:
     stmt = select(func.coalesce(func.sum(CreditLedger.tokens), 0)).where(
-        CreditLedger.user_id == user_id, CreditLedger.created_at >= start
+        CreditLedger.user_id == user_id,
+        CreditLedger.created_at >= start,
     )
+    if bucket == "plan":
+        stmt = stmt.where((CreditLedger.bucket == "plan") | (CreditLedger.bucket.is_(None)))
+    elif bucket == "bonus":
+        stmt = stmt.where(CreditLedger.bucket == "bonus")
     if end is not None:
         stmt = stmt.where(CreditLedger.created_at < end)
+    return int(await db.scalar(stmt) or 0)
+
+
+async def _bonus_tokens(db: AsyncSession, user_id: uuid.UUID) -> int:
+    stmt = select(func.coalesce(func.sum(CreditLedger.tokens), 0)).where(
+        CreditLedger.user_id == user_id,
+        CreditLedger.bucket == "bonus",
+    )
     return int(await db.scalar(stmt) or 0)
 
 
@@ -156,19 +174,23 @@ def _window_status(plan_limit: int | None, used_credits: float, reset_at: dateti
 
 
 async def status(db: AsyncSession, user: User, now: datetime | None = None) -> dict:
-    """Full credit status for a user (tier, windows, remaining credits)."""
+    """Full credit status for a user (tier, rolling plan windows, non-expiring bonus credits)."""
     now = now or utcnow()
     tier = effective_tier(user, now)
     plan = plan_for(tier)
     anchor = user.credit_anchor_at or user.created_at or now
     week_start, week_reset = window_bounds(anchor, WEEK_PERIOD, now)
     five_start, five_reset = window_bounds(anchor, FIVE_HOUR_PERIOD, now)
-    week_tokens = await _net_tokens(db, user.id, week_start)
-    five_tokens = await _net_tokens(db, user.id, five_start)
+    week_tokens = await _net_tokens(db, user.id, week_start, bucket="plan")
+    five_tokens = await _net_tokens(db, user.id, five_start, bucket="plan")
+    bonus_tok = await _bonus_tokens(db, user.id)
+    bonus_credits = round(max(0.0, _credits(bonus_tok)), 1)
+
     weekly = _window_status(plan.weekly_credits, _credits(-week_tokens), week_reset)
     five_hour = _window_status(plan.five_hour_credits, _credits(-five_tokens), five_reset)
     candidates = [c for c in (weekly["remaining"], five_hour["remaining"]) if c is not None]
-    remaining = round(min(candidates), 1) if candidates else 0.0
+    plan_remaining = round(min(candidates), 1) if candidates else 0.0
+    remaining = round(plan_remaining + bonus_credits, 1)
     return {
         "tier": tier,
         "tier_label": plan.label,
@@ -177,6 +199,7 @@ async def status(db: AsyncSession, user: User, now: datetime | None = None) -> d
         "tokens_per_credit": get_settings().tokens_per_credit,
         "weekly": weekly,
         "five_hour": five_hour,
+        "bonus_credits": bonus_credits,
         "remaining": remaining,
         "overdrawn": remaining < 0,
         "plan": plan_payload(plan),
@@ -214,25 +237,52 @@ async def settle(
     *,
     message_id: uuid.UUID | None = None,
     conversation_id: uuid.UUID | None = None,
+    source_ref: str | None = None,
 ) -> bool:
-    """Record consumption for a finished run. Idempotent per assistant message."""
+    """Record consumption for a finished run. Idempotent per assistant message or source_ref.
+
+    Consumes from the rolling `plan` bucket first; if plan rolling window is exhausted and the user
+    holds non-expiring `bonus` credits, deducts from `bonus` instead.
+    """
     if tokens <= 0:
         logger.warning("run finished without token usage user=%s message=%s", user_id, message_id)
         return False
     user = await db.get(User, user_id)
     tier = effective_tier(user) if user is not None else FREE
-    stmt = (
-        insert(CreditLedger)
-        .values(
-            user_id=user_id,
-            tokens=-abs(int(tokens)),
-            kind="consume",
-            tier=tier,
-            conversation_id=conversation_id,
-            message_id=message_id,
+    bucket = "plan"
+    if user is not None:
+        now = utcnow()
+        plan = plan_for(tier)
+        anchor = user.credit_anchor_at or user.created_at or now
+        week_start, _ = window_bounds(anchor, WEEK_PERIOD, now)
+        five_start, _ = window_bounds(anchor, FIVE_HOUR_PERIOD, now)
+        tpc = max(1, get_settings().tokens_per_credit)
+        week_used = -await _net_tokens(db, user.id, week_start, bucket="plan")
+        five_used = -await _net_tokens(db, user.id, five_start, bucket="plan")
+        plan_exhausted = week_used >= plan.weekly_credits * tpc or (
+            plan.five_hour_credits is not None and five_used >= plan.five_hour_credits * tpc
         )
-        .on_conflict_do_nothing(index_elements=[CreditLedger.message_id])
-    )
+        if plan_exhausted and await _bonus_tokens(db, user.id) > 0:
+            bucket = "bonus"
+
+    values = {
+        "user_id": user_id,
+        "tokens": -abs(int(tokens)),
+        "kind": "consume",
+        "bucket": bucket,
+        "tier": tier,
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "source_ref": source_ref,
+    }
+    stmt = insert(CreditLedger).values(**values)
+    if message_id is not None:
+        stmt = stmt.on_conflict_do_nothing(index_elements=[CreditLedger.message_id])
+    elif source_ref is not None:
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=[CreditLedger.source_ref],
+            index_where=CreditLedger.source_ref.is_not(None),
+        )
     result = await db.execute(stmt)
     await db.commit()
     return bool(result.rowcount)
@@ -245,20 +295,62 @@ async def adjust(
     *,
     actor_id: uuid.UUID | None = None,
     note: str | None = None,
+    bucket: str | None = None,
+    source_ref: str | None = None,
 ) -> None:
-    """Grant (positive) or revoke (negative) credits within the current windows."""
+    """Grant (positive -> non-expiring `bonus` bucket) or revoke (negative) credits."""
     tokens = int(credits * get_settings().tokens_per_credit)
+    resolved_bucket = bucket or ("bonus" if credits > 0 else "plan")
+    if resolved_bucket not in ("plan", "bonus"):
+        resolved_bucket = "bonus" if credits > 0 else "plan"
+    if credits < 0 and bucket is None and await _bonus_tokens(db, user.id) > 0:
+        resolved_bucket = "bonus"
     db.add(
         CreditLedger(
             user_id=user.id,
             tokens=tokens,
             kind="adjust",
+            bucket=resolved_bucket,
             tier=effective_tier(user),
             actor_user_id=actor_id,
             note=(note or "")[:255] or None,
+            source_ref=source_ref,
         )
     )
     await db.commit()
+
+
+async def list_user_ledger(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    tpc = max(1, int(get_settings().tokens_per_credit))
+    rows = (
+        await db.execute(
+            select(CreditLedger)
+            .where(CreditLedger.user_id == user_id)
+            .order_by(CreditLedger.created_at.desc(), CreditLedger.id.desc())
+            .offset(max(0, int(offset)))
+            .limit(max(1, min(int(limit), 200)))
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "created_at": r.created_at,
+            "tokens": int(r.tokens or 0),
+            "credits": round(int(r.tokens or 0) / tpc, 2),
+            "kind": r.kind,
+            "bucket": getattr(r, "bucket", None) or "plan",
+            "tier": r.tier,
+            "conversation_id": r.conversation_id,
+            "note": r.note,
+        }
+        for r in rows
+    ]
 
 
 def generate_code() -> str:
@@ -351,13 +443,23 @@ async def batch_status(db: AsyncSession, users: list[User], now: datetime | None
             earliest = start if earliest is None else min(earliest, start)
 
     rows = await db.execute(
-        select(CreditLedger.user_id, CreditLedger.created_at, CreditLedger.tokens).where(
-            CreditLedger.user_id.in_(ids), CreditLedger.created_at >= earliest
+        select(
+            CreditLedger.user_id,
+            CreditLedger.created_at,
+            CreditLedger.tokens,
+            CreditLedger.bucket,
+        ).where(
+            CreditLedger.user_id.in_(ids),
+            (CreditLedger.created_at >= earliest) | (CreditLedger.bucket == "bonus"),
         )
     )
-    by_user: dict[uuid.UUID, list[tuple[datetime, int]]] = {uid: [] for uid in ids}
-    for user_id, created_at, tokens in rows:
-        by_user.setdefault(user_id, []).append((created_at, int(tokens)))
+    by_user_plan: dict[uuid.UUID, list[tuple[datetime, int]]] = {uid: [] for uid in ids}
+    bonus_by_user: dict[uuid.UUID, int] = {uid: 0 for uid in ids}
+    for user_id, created_at, tokens, bucket in rows:
+        if bucket == "bonus":
+            bonus_by_user[user_id] = bonus_by_user.get(user_id, 0) + int(tokens)
+        else:
+            by_user_plan.setdefault(user_id, []).append((created_at, int(tokens)))
 
     tpc = get_settings().tokens_per_credit
     output: dict[uuid.UUID, dict] = {}
@@ -365,17 +467,20 @@ async def batch_status(db: AsyncSession, users: list[User], now: datetime | None
         tier = effective_tier(user, now)
         plan = plan_for(tier)
         week_start, week_reset, five_start, five_reset = windows[user.id]
-        entries = by_user.get(user.id, [])
+        entries = by_user_plan.get(user.id, [])
         week_tokens = sum(t for ts, t in entries if ts >= week_start)
         five_tokens = sum(t for ts, t in entries if ts >= five_start)
+        bonus_credits = round(max(0.0, bonus_by_user.get(user.id, 0) / tpc), 1)
         weekly = _window_status(plan.weekly_credits, round(-week_tokens / tpc, 1), week_reset)
         five_hour = _window_status(plan.five_hour_credits, round(-five_tokens / tpc, 1), five_reset)
         candidates = [c for c in (weekly["remaining"], five_hour["remaining"]) if c is not None]
-        remaining = round(min(candidates), 1) if candidates else 0.0
+        plan_remaining = round(min(candidates), 1) if candidates else 0.0
+        remaining = round(plan_remaining + bonus_credits, 1)
         output[user.id] = {
             "tier": tier,
             "tier_label": plan.label,
             "expires_at": user.membership_expires_at.isoformat() if user.membership_expires_at else None,
+            "bonus_credits": bonus_credits,
             "remaining": remaining,
             "weekly_used": weekly["used"],
             "weekly_limit": weekly["limit"],

@@ -18,9 +18,15 @@ from app.core.models import EmbeddingClient, ModelRouter, RerankClient
 from app.core.multimodal import (
     HydratedTurnMedia,
     build_multimodal_user_message,
+    extract_inline_file_ids,
     hydrate_turn_attachments,
 )
-from app.graph.builder import DEFAULT_MAX_TOOL_ITERATIONS, _extract_text, build_agent_graph
+from app.graph.builder import (
+    DEFAULT_MAX_TOOL_ITERATIONS,
+    _extract_text,
+    build_agent_graph,
+    extract_turn_memory_standalone,
+)
 from app.graph.topology import GRAPH_NODES
 from app.memory.store import MemoryManager
 from app.rag.citations import CitationRegistry
@@ -272,28 +278,41 @@ async def _build_runtime_config(
     pool: Any,
     store: Any,
     settings: AgentSettings,
+    initial_citations: list[dict[str, Any]] | None = None,
+    preloaded_mcp_tools: list[Any] | None = None,
 ) -> dict[str, Any]:
     agent_namespace = str(payload.get("agent_namespace") or "")
     agent_api_key = str(payload.get("agent_api_key") or "") or await load_run_secret(redis, run_id)
-    mcp_tools = []
-    if agent_namespace and agent_api_key and settings.internal_mcp_base_url.strip():
-        mcp_tools = await load_whitz_mcp_tools(
-            internal_mcp_base_url=settings.internal_mcp_base_url,
-            agent_namespace=agent_namespace,
-            agent_api_key=agent_api_key,
-        )
+    if preloaded_mcp_tools is not None:
+        mcp_tools = list(preloaded_mcp_tools)
+    else:
+        mcp_tools = []
+        if agent_namespace and agent_api_key and settings.internal_mcp_base_url.strip():
+            mcp_tools = await load_whitz_mcp_tools(
+                internal_mcp_base_url=settings.internal_mcp_base_url,
+                agent_namespace=agent_namespace,
+                agent_api_key=agent_api_key,
+            )
 
     emb_client = EmbeddingClient(settings=settings, redis_client=redis)
     rerank_client = RerankClient(settings=settings, redis_client=redis)
     model_router = ModelRouter(settings=settings, redis_client=redis)
     hybrid_retriever = HybridRetriever(pool=pool, embedding_client=emb_client, rerank_client=rerank_client)
-    citation_registry = CitationRegistry()
+    citation_registry = CitationRegistry.from_serialized(initial_citations)
     raw_attachments = list(payload.get("attachments") or [])
-    attached_file_ids = [
-        str(a.get("file_id") or a.get("id"))
-        for a in raw_attachments
-        if isinstance(a, dict) and a.get("attached") and (a.get("file_id") or a.get("id"))
-    ]
+    input_text = str(payload.get("input") or payload.get("input_text") or "")
+    seen_fids: set[str] = set()
+    attached_file_ids: list[str] = []
+    for a in raw_attachments:
+        if isinstance(a, dict) and a.get("attached") and (a.get("file_id") or a.get("id")):
+            fid = str(a.get("file_id") or a.get("id"))
+            if fid not in seen_fids:
+                seen_fids.add(fid)
+                attached_file_ids.append(fid)
+    for fid in extract_inline_file_ids(input_text):
+        if fid not in seen_fids:
+            seen_fids.add(fid)
+            attached_file_ids.append(fid)
     rag_scope = payload.get("rag_scope") if isinstance(payload.get("rag_scope"), dict) else {}
     memory_manager = MemoryManager(
         store=store,
@@ -352,29 +371,63 @@ async def _build_runtime_config(
     }
 
 
-class _CoalescedEmitter:
-    """Coalesces high-frequency delta events and tracks live snapshot state with low Redis overhead."""
+def _active_plan_step(plan: dict[str, Any] | None) -> tuple[int | None, str]:
+    """Return 1-based step index and title of the active in_progress plan item, if any."""
+    if not isinstance(plan, dict):
+        return None, ""
+    items = plan.get("items")
+    if not isinstance(items, list):
+        return None, ""
+    for idx, it in enumerate(items, start=1):
+        if isinstance(it, dict) and str(it.get("status") or "").lower() == "in_progress":
+            return idx, str(it.get("content") or "")[:80]
+    return None, ""
 
-    def __init__(self, redis: Any, run_id: str, meta: dict[str, Any], settings: AgentSettings) -> None:
+
+class _CoalescedEmitter:
+    """Coalesces high-frequency delta events and tracks live snapshot state with serialized meta saves."""
+
+    def __init__(
+        self,
+        redis: Any,
+        run_id: str,
+        meta: dict[str, Any],
+        settings: AgentSettings,
+        meta_lock: asyncio.Lock | None = None,
+    ) -> None:
         self.redis = redis
         self.run_id = run_id
         self.meta = meta
+        self.meta_lock = meta_lock or asyncio.Lock()
         self.event_ttl = settings.event_stream_ttl_seconds
         self.meta_ttl = settings.run_state_ttl_seconds
         self.max_len = settings.stream_max_len
 
         self._msg_pending: list[str] = []
         self._reason_pending: list[str] = []
+        self._reason_step: int | None = None
+        self._reason_title: str = ""
         self._last_flush_ts = time.monotonic()
         self._last_meta_save_ts = time.monotonic()
         self._ttl_counter = 0
 
-    async def emit_delta(self, kind: str, text: str) -> None:
+    async def emit_delta(
+        self,
+        kind: str,
+        text: str,
+        *,
+        step: int | None = None,
+        title: str = "",
+    ) -> None:
         if not text:
             return
         if kind == "message":
             self._msg_pending.append(text)
         else:
+            if self._reason_pending and (step != self._reason_step or title != self._reason_title):
+                await self.flush_deltas()
+            self._reason_step = step
+            self._reason_title = title
             self._reason_pending.append(text)
 
         now = time.monotonic()
@@ -386,8 +439,10 @@ class _CoalescedEmitter:
         self._last_flush_ts = time.monotonic()
         if self._reason_pending:
             chunk = "".join(self._reason_pending)
+            step = self._reason_step
+            title = self._reason_title
             self._reason_pending.clear()
-            await self.emit("reasoning.delta", {"text": chunk, "delta": chunk, "step": None, "title": ""})
+            await self.emit("reasoning.delta", {"text": chunk, "delta": chunk, "step": step, "title": title})
         if self._msg_pending:
             chunk = "".join(self._msg_pending)
             self._msg_pending.clear()
@@ -408,14 +463,15 @@ class _CoalescedEmitter:
             refresh_ttl=refresh_ttl,
         )
         if entry_id:
-            self.meta["last_event_id"] = entry_id
+            async with self.meta_lock:
+                self.meta["last_event_id"] = entry_id
         return entry_id
 
     async def maybe_checkpoint_meta(
         self,
         *,
         output: str,
-        reasoning_text: str,
+        reasoning_blocks: list[dict[str, Any]] | None,
         plan: dict[str, Any] | None,
         tool_events: list[dict[str, Any]],
         usage: dict[str, int],
@@ -427,16 +483,17 @@ class _CoalescedEmitter:
         if not force and (now - self._last_meta_save_ts) < 1.0:
             return
         self._last_meta_save_ts = now
-        self.meta["output"] = output
-        self.meta["reasoning"] = [{"step": None, "title": "", "text": reasoning_text}] if reasoning_text else []
-        self.meta["plan"] = plan
-        self.meta["tool_events"] = tool_events[-40:]
-        self.meta["usage"] = usage
-        self.meta["route"] = route
-        self.meta["model"] = model
-        self.meta["heartbeat_at"] = time.time()
-        self.meta["worker_id"] = WORKER_ID
-        await save_run_meta(self.redis, self.run_id, self.meta, ttl_seconds=self.meta_ttl)
+        async with self.meta_lock:
+            self.meta["output"] = output
+            self.meta["reasoning"] = list(reasoning_blocks) if reasoning_blocks else []
+            self.meta["plan"] = plan
+            self.meta["tool_events"] = tool_events[-40:]
+            self.meta["usage"] = usage
+            self.meta["route"] = route
+            self.meta["model"] = model
+            self.meta["heartbeat_at"] = time.time()
+            self.meta["worker_id"] = WORKER_ID
+            await save_run_meta(self.redis, self.run_id, self.meta, ttl_seconds=self.meta_ttl)
 
 
 async def _watch_cancel_and_heartbeat(
@@ -446,8 +503,10 @@ async def _watch_cancel_and_heartbeat(
     settings: AgentSettings,
     target_task: asyncio.Task[Any],
     cancel_flag: dict[str, bool],
+    meta_lock: asyncio.Lock | None = None,
 ) -> None:
     """Concurrently monitors cancel_key / PubSub cancel channel and refreshes run heartbeat."""
+    lock = meta_lock or asyncio.Lock()
     pubsub = None
     if redis is not None and hasattr(redis, "pubsub"):
         try:
@@ -478,14 +537,15 @@ async def _watch_cancel_and_heartbeat(
                 target_task.cancel()
                 return
 
-            # 3. Refresh heartbeat every 10s so orphan reaper knows worker is alive
+            # 3. Refresh heartbeat every 10s under meta_lock so snapshot consistency is preserved
             now = time.monotonic()
             if (now - last_hb) >= 10.0:
                 last_hb = now
-                meta["heartbeat_at"] = time.time()
-                meta["worker_id"] = WORKER_ID
                 try:
-                    await save_run_meta(redis, run_id, meta, ttl_seconds=settings.run_state_ttl_seconds)
+                    async with lock:
+                        meta["heartbeat_at"] = time.time()
+                        meta["worker_id"] = WORKER_ID
+                        await save_run_meta(redis, run_id, meta, ttl_seconds=settings.run_state_ttl_seconds)
                 except Exception:
                     pass
     finally:
@@ -508,17 +568,44 @@ async def _stream_graph(
     settings: AgentSettings,
 ) -> None:
     meta_ttl = settings.run_state_ttl_seconds
-    emitter = _CoalescedEmitter(redis, run_id, meta, settings)
+    meta_lock = asyncio.Lock()
+    emitter = _CoalescedEmitter(redis, run_id, meta, settings, meta_lock=meta_lock)
 
     node_started_at: dict[str, float] = {}
+    # Restore pending started_tools across HITL resume so args & wall-clock duration are never lost
     started_tools: dict[str, tuple[str, Any, float]] = {}
+    raw_saved_started = meta.get("started_tools")
+    if isinstance(raw_saved_started, dict):
+        for cid, entry in raw_saved_started.items():
+            if isinstance(entry, dict):
+                started_tools[str(cid)] = (
+                    str(entry.get("tool") or "tool"),
+                    entry.get("args"),
+                    float(entry.get("started_ts") or time.time()),
+                )
 
-    # Preserve prior partial output / reasoning / tool_events across HITL resume
-    prior_reasoning = ""
-    if isinstance(meta.get("reasoning"), list) and meta["reasoning"]:
-        prior_reasoning = "".join(str(b.get("text") or "") for b in meta["reasoning"] if isinstance(b, dict))
+    # Preserve prior partial output / structured reasoning blocks / tool_events across HITL resume
+    reasoning_blocks_state: list[dict[str, Any]] = []
+    if isinstance(meta.get("reasoning"), list):
+        for b in meta["reasoning"]:
+            if isinstance(b, dict):
+                reasoning_blocks_state.append(
+                    {
+                        "step": b.get("step"),
+                        "title": str(b.get("title") or ""),
+                        "text": str(b.get("text") or ""),
+                    }
+                )
+
+    def _append_reasoning_text(delta_txt: str, step: int | None, title: str) -> None:
+        if not delta_txt:
+            return
+        if reasoning_blocks_state and reasoning_blocks_state[-1].get("step") == step and reasoning_blocks_state[-1].get("title") == title:
+            reasoning_blocks_state[-1]["text"] += delta_txt
+        else:
+            reasoning_blocks_state.append({"step": step, "title": title, "text": delta_txt})
+
     buffered_text: list[str] = [str(meta.get("output") or "")] if meta.get("output") else []
-    reasoning_buf: list[str] = [prior_reasoning] if prior_reasoning else []
     tool_events: list[dict[str, Any]] = list(meta.get("tool_events") or [])
     latest_citations: list[dict[str, Any]] = list(meta.get("citations") or [])
     latest_rag_metrics: dict[str, Any] = dict(meta.get("rag_metrics") or {})
@@ -527,9 +614,10 @@ async def _stream_graph(
     latest_usage: dict[str, int] = dict(meta.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
     selected_route = str(meta.get("route") or payload_route(meta))
     selected_model = str(meta.get("model") or "")
+    called_memory_propose = bool(meta.get("called_memory_propose", False))
 
     async def _run_loop() -> str:
-        nonlocal last_ai_text, latest_plan, latest_usage, selected_route, selected_model
+        nonlocal last_ai_text, latest_plan, latest_usage, selected_route, selected_model, called_memory_propose, latest_citations
         async for raw_item in graph.astream(
             graph_input,
             config=config,
@@ -568,7 +656,7 @@ async def _stream_graph(
                     await emitter.emit("plan.updated", latest_plan)
                     await emitter.maybe_checkpoint_meta(
                         output=last_ai_text or "".join(buffered_text),
-                        reasoning_text="".join(reasoning_buf),
+                        reasoning_blocks=reasoning_blocks_state,
                         plan=latest_plan,
                         tool_events=tool_events,
                         usage=latest_usage,
@@ -577,11 +665,15 @@ async def _stream_graph(
                         force=True,
                     )
                 elif ev_type == "tool.started":
+                    cur_step, _ = _active_plan_step(latest_plan)
                     payload = {k: v for k, v in chunk.items() if k != "type"}
+                    payload.setdefault("step", cur_step)
                     tool_events.append(payload)
                     await emitter.emit("tool.started", payload)
                 elif ev_type == "tool.completed":
+                    cur_step, _ = _active_plan_step(latest_plan)
                     payload = {k: v for k, v in chunk.items() if k != "type"}
+                    payload.setdefault("step", cur_step)
                     cid = payload.get("call_id")
                     updated = False
                     for idx, te in enumerate(tool_events):
@@ -596,7 +688,8 @@ async def _stream_graph(
                     cites = list(chunk.get("citations") or [])
                     if cites:
                         latest_citations = cites
-                        meta["citations"] = latest_citations
+                        async with meta_lock:
+                            meta["citations"] = latest_citations
                     diag = chunk.get("diagnostics")
                     if isinstance(diag, dict) and diag:
                         stage_key = str(chunk.get("stage") or diag.get("stage") or "prefetch")
@@ -612,7 +705,8 @@ async def _stream_graph(
                             diag.get("corrective_retries") or 0
                         )
                         latest_rag_metrics["citations_count"] = len(latest_citations)
-                        meta["rag_metrics"] = latest_rag_metrics
+                        async with meta_lock:
+                            meta["rag_metrics"] = latest_rag_metrics
                     await emitter.emit(
                         "rag.context",
                         {
@@ -637,15 +731,16 @@ async def _stream_graph(
                     continue
                 txt, r_txt = _extract_chunk_text_and_reasoning(msg_chunk)
                 if r_txt:
-                    reasoning_buf.append(r_txt)
-                    await emitter.emit_delta("reasoning", r_txt)
+                    cur_step, cur_title = _active_plan_step(latest_plan)
+                    _append_reasoning_text(r_txt, cur_step, cur_title)
+                    await emitter.emit_delta("reasoning", r_txt, step=cur_step, title=cur_title)
                 if txt:
                     buffered_text.append(txt)
                     await emitter.emit_delta("message", txt)
                 if txt or r_txt:
                     await emitter.maybe_checkpoint_meta(
                         output=last_ai_text or "".join(buffered_text),
-                        reasoning_text="".join(reasoning_buf),
+                        reasoning_blocks=reasoning_blocks_state,
                         plan=latest_plan,
                         tool_events=tool_events,
                         usage=latest_usage,
@@ -668,8 +763,6 @@ async def _stream_graph(
                     tool_name = str(val.get("tool") or ("execute_code" if kind == "approval" else "clarify"))
                     req_id = str(val.get("call_id") or val.get("request_id") or uuid.uuid4().hex)
                     gen = int(meta.get("execution_generation") or 0) + 1
-                    meta["execution_generation"] = gen
-                    meta["status"] = "waiting_for_approval" if kind == "approval" else "waiting_for_clarify"
                     control = {
                         "request_id": req_id,
                         "prompt_id": req_id,
@@ -679,7 +772,16 @@ async def _stream_graph(
                         "preview": val.get("preview"),
                         "detail": val,
                     }
-                    meta["pending_controls"] = [control]
+                    async with meta_lock:
+                        meta["execution_generation"] = gen
+                        meta["status"] = "waiting_for_approval" if kind == "approval" else "waiting_for_clarify"
+                        meta["pending_controls"] = [control]
+                        meta["citations"] = latest_citations
+                        meta["called_memory_propose"] = called_memory_propose
+                        meta["started_tools"] = {
+                            cid: {"tool": tn, "args": ta, "started_ts": ts}
+                            for cid, (tn, ta, ts) in started_tools.items()
+                        }
                     await emitter.emit(
                         "graph.node",
                         {
@@ -695,7 +797,7 @@ async def _stream_graph(
                     await emitter.emit(ev_name, control, force_ttl=True)
                     await emitter.maybe_checkpoint_meta(
                         output=last_ai_text or "".join(buffered_text),
-                        reasoning_text="".join(reasoning_buf),
+                        reasoning_blocks=reasoning_blocks_state,
                         plan=latest_plan,
                         tool_events=tool_events,
                         usage=latest_usage,
@@ -718,6 +820,8 @@ async def _stream_graph(
                         latest_plan = update["plan"]
                     if isinstance(update.get("usage"), dict):
                         latest_usage = dict(update["usage"])
+                    if isinstance(update.get("citations"), list) and update["citations"]:
+                        latest_citations = list(update["citations"])
 
                     await emitter.emit(
                         "graph.node",
@@ -731,6 +835,7 @@ async def _stream_graph(
                         },
                     )
 
+                    cur_step, cur_title = _active_plan_step(latest_plan)
                     for msg in update.get("messages") or []:
                         if isinstance(msg, AIMessage):
                             if getattr(msg, "tool_calls", None):
@@ -740,19 +845,22 @@ async def _stream_graph(
                                     buffered_text.clear()
                                     await emitter.emit(
                                         "commentary",
-                                        {"text": interim, "step": None, "title": "", "already_streamed": True},
+                                        {"text": interim, "step": cur_step, "title": cur_title, "already_streamed": True},
                                     )
                                 for tc in msg.tool_calls:
                                     cid = str(tc.get("id") or uuid.uuid4().hex)
                                     tname = str(tc.get("name") or "tool")
+                                    if tname == "memory_propose":
+                                        called_memory_propose = True
                                     targs = tc.get("args")
                                     if cid not in started_tools:
-                                        started_tools[cid] = (tname, targs, time.monotonic())
+                                        started_tools[cid] = (tname, targs, time.time())
                                         ev_obj = {
                                             "tool": tname,
                                             "preview": targs,
                                             "args": targs,
                                             "call_id": cid,
+                                            "step": cur_step,
                                             "status": "running",
                                         }
                                         tool_events.append(ev_obj)
@@ -770,9 +878,17 @@ async def _stream_graph(
                             orig_name = ""
                             if cid in started_tools:
                                 orig_name, targs, t0 = started_tools.pop(cid)
-                                dur_tool_ms = round((time.monotonic() - t0) * 1000.0, 1)
+                                dur_tool_ms = round(max(0.0, (time.time() - t0) * 1000.0), 1)
                             tname = raw_name or orig_name or "tool"
+                            if tname == "memory_propose":
+                                called_memory_propose = True
                             err = _parse_tool_error(msg.content, getattr(msg, "status", None))
+                            # Preserve original args from prior tool_events if started_tools didn't have it
+                            if targs is None and cid:
+                                for te in tool_events:
+                                    if te.get("call_id") == cid and te.get("args") is not None:
+                                        targs = te.get("args")
+                                        break
                             done_obj = {
                                 "tool": tname,
                                 "preview": _clip_str(msg.content, 8000),
@@ -782,12 +898,13 @@ async def _stream_graph(
                                 "duration": dur_tool_ms,
                                 "duration_ms": dur_tool_ms,
                                 "call_id": cid or None,
+                                "step": cur_step,
                                 "status": "failed" if err else "completed",
                             }
-                            # Update matching tool_event in snapshot
                             updated = False
                             for idx, te in enumerate(tool_events):
                                 if cid and te.get("call_id") == cid:
+                                    done_obj["step"] = te.get("step") if te.get("step") is not None else cur_step
                                     tool_events[idx] = done_obj
                                     updated = True
                                     break
@@ -797,7 +914,7 @@ async def _stream_graph(
 
                     await emitter.maybe_checkpoint_meta(
                         output=last_ai_text or "".join(buffered_text),
-                        reasoning_text="".join(reasoning_buf),
+                        reasoning_blocks=reasoning_blocks_state,
                         plan=latest_plan,
                         tool_events=tool_events,
                         usage=latest_usage,
@@ -809,7 +926,7 @@ async def _stream_graph(
     cancel_flag = {"cancelled": False}
     loop_task = asyncio.create_task(_run_loop())
     watcher_task = asyncio.create_task(
-        _watch_cancel_and_heartbeat(redis, run_id, meta, settings, loop_task, cancel_flag)
+        _watch_cancel_and_heartbeat(redis, run_id, meta, settings, loop_task, cancel_flag, meta_lock=meta_lock)
     )
     timed_out = False
     outcome = "completed"
@@ -820,7 +937,6 @@ async def _stream_graph(
         if cancel_flag["cancelled"] or await is_cancelled(redis, run_id):
             outcome = "cancelled"
         else:
-            # Worker shutdown cancellation
             outcome = "cancelled"
             raise
     except TimeoutError:
@@ -839,34 +955,43 @@ async def _stream_graph(
 
     await emitter.flush_deltas()
     partial = last_ai_text or "".join(buffered_text)
-    reasoning_blocks = [{"step": None, "title": "", "text": "".join(reasoning_buf)}] if reasoning_buf else None
+    reasoning_blocks = list(reasoning_blocks_state) if reasoning_blocks_state else None
 
     if timed_out:
-        meta["status"] = "failed"
-        meta["error"] = "运行超时"
-        meta["output"] = partial
-        meta["plan"] = latest_plan
-        meta["usage"] = latest_usage
-        meta["reasoning"] = reasoning_blocks
-        meta["pending_controls"] = []
+        async with meta_lock:
+            meta["status"] = "failed"
+            meta["error"] = "运行超时"
+            meta["output"] = partial
+            meta["plan"] = latest_plan
+            meta["usage"] = latest_usage
+            meta["reasoning"] = reasoning_blocks
+            meta["citations"] = latest_citations
+            meta["rag_metrics"] = latest_rag_metrics or None
+            meta["pending_controls"] = []
+            meta.pop("started_tools", None)
         await emitter.emit(
             "run.failed",
             {"error": "运行超过时长上限，已终止", "output": partial, "usage": latest_usage, "plan": latest_plan},
             force_ttl=True,
         )
-        await save_run_meta(redis, run_id, meta, ttl_seconds=meta_ttl)
+        async with meta_lock:
+            await save_run_meta(redis, run_id, meta, ttl_seconds=meta_ttl)
         return
 
     if outcome == "interrupted":
         return
 
     if outcome == "cancelled":
-        meta["status"] = "cancelled"
-        meta["output"] = partial
-        meta["plan"] = latest_plan
-        meta["usage"] = latest_usage
-        meta["reasoning"] = reasoning_blocks
-        meta["pending_controls"] = []
+        async with meta_lock:
+            meta["status"] = "cancelled"
+            meta["output"] = partial
+            meta["plan"] = latest_plan
+            meta["usage"] = latest_usage
+            meta["reasoning"] = reasoning_blocks
+            meta["citations"] = latest_citations
+            meta["rag_metrics"] = latest_rag_metrics or None
+            meta["pending_controls"] = []
+            meta.pop("started_tools", None)
         await emitter.emit(
             "run.cancelled",
             {
@@ -878,20 +1003,24 @@ async def _stream_graph(
             },
             force_ttl=True,
         )
-        await save_run_meta(redis, run_id, meta, ttl_seconds=meta_ttl)
+        async with meta_lock:
+            await save_run_meta(redis, run_id, meta, ttl_seconds=meta_ttl)
         return
 
-    meta["status"] = "completed"
-    meta["output"] = partial
-    meta["usage"] = latest_usage
-    meta["plan"] = latest_plan
-    meta["reasoning"] = reasoning_blocks
-    meta["tool_events"] = tool_events[-40:]
-    meta["citations"] = latest_citations
-    meta["rag_metrics"] = latest_rag_metrics or None
-    meta["pending_controls"] = []
-    meta["route"] = selected_route
-    meta["model"] = selected_model
+    async with meta_lock:
+        meta["status"] = "completed"
+        meta["output"] = partial
+        meta["usage"] = latest_usage
+        meta["plan"] = latest_plan
+        meta["reasoning"] = reasoning_blocks
+        meta["tool_events"] = tool_events[-40:]
+        meta["citations"] = latest_citations
+        meta["rag_metrics"] = latest_rag_metrics or None
+        meta["pending_controls"] = []
+        meta["route"] = selected_route
+        meta["model"] = selected_model
+        meta["called_memory_propose"] = called_memory_propose
+        meta.pop("started_tools", None)
     await emitter.emit(
         "run.completed",
         {
@@ -904,7 +1033,8 @@ async def _stream_graph(
         },
         force_ttl=True,
     )
-    await save_run_meta(redis, run_id, meta, ttl_seconds=meta_ttl)
+    async with meta_lock:
+        await save_run_meta(redis, run_id, meta, ttl_seconds=meta_ttl)
 
 
 def payload_route(meta: dict[str, Any]) -> str:
@@ -919,6 +1049,40 @@ def _sanitized_meta_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+async def _maybe_dispatch_async_memory_extract(
+    *,
+    meta: dict[str, Any],
+    payload: dict[str, Any],
+    arq_pool: Any,
+) -> None:
+    if meta.get("status") != "completed":
+        return
+    if not bool(payload.get("memory_enabled", True)) or bool(meta.get("called_memory_propose")):
+        return
+    user_text = str(payload.get("input") or payload.get("input_text") or "").strip()
+    assistant_text = str(meta.get("output") or "").strip()
+    if len(user_text) < 12 or not assistant_text:
+        return
+    job_payload = {
+        "user_id": str(meta.get("user_id") or payload.get("user_id") or ""),
+        "agent_namespace": str(payload.get("agent_namespace") or ""),
+        "conversation_id": str(meta.get("conversation_id") or payload.get("conversation_id") or ""),
+        "user_text": user_text[:1500],
+        "assistant_text": assistant_text[:1500],
+        "memory_index": str(payload.get("memory_index") or "")[:1000],
+        "memory_require_confirm": bool(payload.get("memory_require_confirm", False)),
+    }
+    if arq_pool is not None and hasattr(arq_pool, "enqueue_job"):
+        try:
+            await arq_pool.enqueue_job(
+                "extract_turn_memory_job",
+                job_payload,
+                _job_id=f"memext:{meta.get('run_id') or uuid.uuid4().hex}",
+            )
+        except Exception as exc:
+            logger.debug("Failed to enqueue extract_turn_memory_job: %s", exc)
+
+
 async def execute_run(
     run_id: str,
     payload: dict[str, Any],
@@ -928,6 +1092,9 @@ async def execute_run(
     checkpointer: Any = None,
     store: Any = None,
     settings: AgentSettings | None = None,
+    compiled_graph: Any = None,
+    arq_pool: Any = None,
+    async_memory_extract: bool = False,
 ) -> dict[str, Any]:
     s = settings or get_settings()
     s.configure_langsmith()
@@ -984,35 +1151,52 @@ async def execute_run(
     await save_run_meta(redis, run_id, meta, ttl_seconds=s.run_state_ttl_seconds)
 
     try:
-        config = await _build_runtime_config(
-            payload,
-            run_id=run_id,
-            redis=redis,
-            pool=pool,
-            store=store,
-            settings=s,
-        )
-        cfg_inner = config.get("configurable") or {}
-        model_router: ModelRouter = cfg_inner.get("model_router") or ModelRouter(settings=s, redis_client=redis)
-        attached_fids: list[str] = list(cfg_inner.get("attached_file_ids") or [])
-        hydrated_media: HydratedTurnMedia | None = None
-        if attached_fids:
-            # Respect cached per-endpoint multimodal capabilities to avoid wasted retries on turn 2+
-            target_ep = model_router.endpoint_for("vision" if model_router.endpoint_for("vision").model else "default")
-            primary_ep = model_router.endpoint_for("default")
+        agent_namespace = str(payload.get("agent_namespace") or "")
+        agent_api_key = raw_api_key or await load_run_secret(redis, run_id)
+        raw_attachments = list(payload.get("attachments") or [])
+        input_text = str(payload.get("input") or payload.get("input_text") or "")
+        seen_fids: set[str] = set()
+        attached_fids: list[str] = []
+        for a in raw_attachments:
+            if isinstance(a, dict) and a.get("attached") and (a.get("file_id") or a.get("id")):
+                fid = str(a.get("file_id") or a.get("id"))
+                if fid not in seen_fids:
+                    seen_fids.add(fid)
+                    attached_fids.append(fid)
+        for fid in extract_inline_file_ids(input_text):
+            if fid not in seen_fids:
+                seen_fids.add(fid)
+                attached_fids.append(fid)
+
+        # Parallelize Turn-0 MCP tool discovery & multimodal attachment hydration to slash TTFT!
+        async def _load_mcp() -> list[Any]:
+            if agent_namespace and agent_api_key and s.internal_mcp_base_url.strip():
+                return await load_whitz_mcp_tools(
+                    internal_mcp_base_url=s.internal_mcp_base_url,
+                    agent_namespace=agent_namespace,
+                    agent_api_key=agent_api_key,
+                )
+            return []
+
+        async def _hydrate_media() -> HydratedTurnMedia | None:
+            if not attached_fids:
+                return None
+            probe_router = ModelRouter(settings=s, redis_client=redis)
+            target_ep = probe_router.endpoint_for("vision" if probe_router.endpoint_for("vision").model else "default")
+            primary_ep = probe_router.endpoint_for("default")
             prefer_img_mode = (
                 "base64"
-                if (s.llm_image_delivery_mode == "base64" or model_router.is_image_url_unsupported(target_ep))
+                if (s.llm_image_delivery_mode == "base64" or await probe_router.is_capability_unsupported("image_url", target_ep))
                 else s.llm_image_delivery_mode
             )
             allow_pdf = (
                 s.llm_native_pdf_mode != "disabled"
-                and not model_router.is_native_pdf_unsupported(primary_ep)
+                and not await probe_router.is_capability_unsupported("native_pdf", primary_ep)
             )
-            hydrated_media = await hydrate_turn_attachments(
-                internal_mcp_base_url=str(cfg_inner.get("internal_mcp_base_url") or s.internal_mcp_base_url),
-                agent_namespace=str(cfg_inner.get("agent_namespace") or ""),
-                agent_api_key=str(cfg_inner.get("agent_api_key") or ""),
+            return await hydrate_turn_attachments(
+                internal_mcp_base_url=s.internal_mcp_base_url,
+                agent_namespace=agent_namespace,
+                agent_api_key=agent_api_key,
                 conversation_id=meta["conversation_id"],
                 attached_file_ids=attached_fids,
                 prefer_image_mode=prefer_img_mode,
@@ -1020,7 +1204,18 @@ async def execute_run(
                 settings=s,
             )
 
-        graph = build_agent_graph(checkpointer=checkpointer, store=store)
+        preloaded_mcp, hydrated_media = await asyncio.gather(_load_mcp(), _hydrate_media())
+
+        config = await _build_runtime_config(
+            payload,
+            run_id=run_id,
+            redis=redis,
+            pool=pool,
+            store=store,
+            settings=s,
+            preloaded_mcp_tools=preloaded_mcp,
+        )
+        graph = compiled_graph if compiled_graph is not None else build_agent_graph(checkpointer=checkpointer, store=store)
         graph_input = {
             "messages": _build_initial_messages(payload, hydrated_media=hydrated_media),
             "run_id": run_id,
@@ -1033,7 +1228,7 @@ async def execute_run(
             "memory_index": str(payload.get("memory_index") or ""),
             "pinned_memories": str(payload.get("pinned_memories") or ""),
             "user_id": meta["user_id"],
-            "agent_namespace": str(payload.get("agent_namespace") or ""),
+            "agent_namespace": agent_namespace,
             "persona": str(payload.get("persona") or ""),
             "profile_context": str(payload.get("profile_context") or ""),
             "timezone": str(payload.get("timezone") or "Asia/Shanghai"),
@@ -1050,6 +1245,7 @@ async def execute_run(
             "max_tool_iterations": max(1, int(payload.get("max_tool_iterations") or DEFAULT_MAX_TOOL_ITERATIONS)),
             "requested_route": str(payload.get("model_route") or "auto"),
             "rag_scope": dict(payload.get("rag_scope") or {}) if isinstance(payload.get("rag_scope"), dict) else {},
+            "async_memory_extract": bool(async_memory_extract),
         }
         await _stream_graph(
             graph=graph,
@@ -1060,6 +1256,8 @@ async def execute_run(
             redis=redis,
             settings=s,
         )
+        if async_memory_extract:
+            await _maybe_dispatch_async_memory_extract(meta=meta, payload=payload, arq_pool=arq_pool)
     except asyncio.CancelledError:
         meta["status"] = "cancelled"
         meta["error"] = "工作进程重启或任务已取消"
@@ -1107,6 +1305,9 @@ async def resume_run(
     checkpointer: Any = None,
     store: Any = None,
     settings: AgentSettings | None = None,
+    compiled_graph: Any = None,
+    arq_pool: Any = None,
+    async_memory_extract: bool = False,
 ) -> dict[str, Any]:
     s = settings or get_settings()
     s.configure_langsmith()
@@ -1158,8 +1359,9 @@ async def resume_run(
             pool=pool,
             store=store,
             settings=s,
+            initial_citations=list(meta.get("citations") or []),
         )
-        graph = build_agent_graph(checkpointer=checkpointer, store=store)
+        graph = compiled_graph if compiled_graph is not None else build_agent_graph(checkpointer=checkpointer, store=store)
         await _stream_graph(
             graph=graph,
             graph_input=Command(resume=resume_payload),
@@ -1169,6 +1371,8 @@ async def resume_run(
             redis=redis,
             settings=s,
         )
+        if async_memory_extract:
+            await _maybe_dispatch_async_memory_extract(meta=meta, payload=payload, arq_pool=arq_pool)
     except asyncio.CancelledError:
         meta["status"] = "cancelled"
         meta["error"] = "工作进程重启或任务已取消"

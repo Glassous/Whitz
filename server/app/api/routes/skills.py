@@ -199,6 +199,29 @@ async def install_github_skill(
     return SkillOut(**installed)
 
 
+@router.post("/{name}/sync-github", response_model=SkillOut)
+async def sync_github_skill(
+    name: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SkillOut:
+    """Re-sync an installed GitHub skill from its upstream repository."""
+    try:
+        synced = await skills_service.sync_github_skill(db, user, name)
+    except skills_service.SkillServiceError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    await audit.record(
+        "skill.sync_github",
+        actor=user,
+        target_type="skill",
+        target_id=synced["name"],
+        request=request,
+        metadata={"repo_url": synced.get("repo_url")},
+    )
+    return SkillOut(**synced)
+
+
 @router.post("/pending/{pending_id}")
 async def resolve_pending_skill(
     pending_id: str,

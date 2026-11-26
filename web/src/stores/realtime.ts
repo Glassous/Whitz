@@ -18,7 +18,15 @@ export const useRealtimeStore = defineStore("realtime", () => {
   let controller: AbortController | null = null;
   let running = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let runFinishedSyncTimer: ReturnType<typeof setTimeout> | null = null;
   let backoffMs = 1000;
+
+  function clearRunFinishedSyncTimer() {
+    if (runFinishedSyncTimer) {
+      clearTimeout(runFinishedSyncTimer);
+      runFinishedSyncTimer = null;
+    }
+  }
 
   function scheduleReconnect() {
     if (!running) return;
@@ -65,6 +73,7 @@ export const useRealtimeStore = defineStore("realtime", () => {
       // If this device is currently viewing this conversation:
       if (chat.convId === cid) {
         if (runId && runId !== "pending" && !chat.streaming) {
+          clearRunFinishedSyncTimer();
           // Another device started a run on the conversation we're viewing -> refresh messages & attach live!
           void convs.open(cid).then((detail) => {
             if (chat.convId === cid && !chat.streaming) {
@@ -72,12 +81,18 @@ export const useRealtimeStore = defineStore("realtime", () => {
             }
           });
         } else if (!runId && chat.streaming && chat.activeRunId) {
-          // Run finished on server while our stream lagged; refresh snapshot if not already terminal
-          void convs.open(cid).then((detail) => {
-            if (chat.convId === cid && !detail.active_run_id) {
-              chat.loadFromConversation(detail);
-            }
-          });
+          // Debounce 600ms so local SSE `run.completed` wins cleanly without racing into a full reload
+          clearRunFinishedSyncTimer();
+          const expectedRunId = chat.activeRunId;
+          runFinishedSyncTimer = setTimeout(() => {
+            runFinishedSyncTimer = null;
+            if (chat.convId !== cid || !chat.streaming || chat.activeRunId !== expectedRunId) return;
+            void convs.open(cid).then((detail) => {
+              if (chat.convId === cid && chat.streaming && !detail.active_run_id) {
+                chat.loadFromConversation(detail);
+              }
+            });
+          }, 600);
         }
       }
       return;
@@ -131,14 +146,33 @@ export const useRealtimeStore = defineStore("realtime", () => {
       libraryVersion.value += 1;
       const fileId = typeof d.file_id === "string" ? d.file_id : null;
       const action = typeof d.action === "string" ? d.action : "";
+      const targetConvId = typeof d.conversation_id === "string" ? d.conversation_id : null;
       if (action === "deleted" && fileId) {
         filesStore.removeLocalFile(fileId);
+      } else if (action === "detached" && fileId) {
+        if (filesStore.listScope === "conversation" && (!targetConvId || targetConvId === filesStore.convId)) {
+          filesStore.removeLocalFile(fileId);
+        }
       } else if (action === "indexed" && fileId) {
         filesStore.patchLocalIndexStatus(
           fileId,
           typeof d.index_status === "string" ? d.index_status : "ready",
           typeof d.indexed_chunks === "number" ? d.indexed_chunks : undefined,
         );
+      } else if (
+        (action === "added" || action === "updated" || action === "renamed") &&
+        filesStore.convId &&
+        (filesStore.listScope === "all" || !targetConvId || targetConvId === filesStore.convId)
+      ) {
+        void filesStore.load(filesStore.convId, filesStore.listScope);
+      }
+      return;
+    }
+
+    if (event === "context_state.updated") {
+      const cid = typeof d.conversation_id === "string" ? d.conversation_id : null;
+      if (!cid || cid === chat.convId) {
+        chat.contextStateVersion += 1;
       }
       return;
     }
@@ -244,6 +278,7 @@ export const useRealtimeStore = defineStore("realtime", () => {
   function stop() {
     running = false;
     connected.value = false;
+    clearRunFinishedSyncTimer();
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;

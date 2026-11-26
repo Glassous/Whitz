@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -397,14 +398,17 @@ async def call_tool(
         # Images: return lightweight visual observation metadata + COS original URL (NO multi-MB base64 JSON!)
         if file_row.category == "image":
             image_url: str | None = None
+            url_ttl = max(1800, int(getattr(settings, "run_max_seconds", 1200) or 1200) + 600)
+            expires_at: float | None = None
             if settings.cos_configured and file_row.storage_key:
                 try:
                     image_url = cos.presign_ai_media_url(
                         key=file_row.storage_key,
                         size_bytes=int(file_row.size_bytes or 0),
-                        expires_seconds=900,
+                        expires_seconds=url_ttl,
                         settings=settings,
                     )
+                    expires_at = time.time() + url_ttl
                 except cos.CosError:
                     image_url = None
             return _text_result(
@@ -415,6 +419,7 @@ async def call_tool(
                     "mime_type": file_row.mime_type,
                     "size_bytes": int(file_row.size_bytes or 0),
                     "image_url": image_url,
+                    "expires_at": expires_at,
                     "whitz_visual_attachment": True,
                     "note": "图片已通过原生多模态通道加载，请直接查看紧随其后的图片画面作答。",
                 }
@@ -479,7 +484,7 @@ async def call_tool(
                     "scope": (
                         "conversation"
                         if (frow.conversation_id == conv.id or frow.id in linked_id_set)
-                        else "global"
+                        else "library"
                     ),
                     "hits": [],
                 },
@@ -540,7 +545,7 @@ async def call_tool(
                     "scope": (
                         "conversation"
                         if (row.conversation_id == conv.id or row.id in linked_id_set)
-                        else "global"
+                        else "library"
                     ),
                     "hits": hits,
                 }
@@ -606,15 +611,16 @@ async def call_tool(
             existing.category = category
             existing.size_bytes = len(raw_bytes)
             existing.etag = etag
-            existing.source = "assistant"
+            # Preserve user provenance (source & message_id) if overwriting a user-uploaded file;
+            # mark last_edited_by="assistant" so deliverables still pick up the assistant's update.
+            existing.last_edited_by = "assistant"
             existing.is_global = True
-            existing.message_id = None
+            existing.index_status = "indexing"
             existing.updated_at = datetime.now(timezone.utc)
             await db.commit()
             await db.refresh(existing)
             file_cache.invalidate_file_cache(existing.id)
-            await file_chunks.index_file_chunks_safe(db, existing, raw=raw_bytes)
-            await db.refresh(existing)
+            file_chunks.schedule_file_indexing(existing.id, user.id)
             from app.services import realtime_bus
 
             await realtime_bus.publish_user_event(
@@ -633,9 +639,15 @@ async def call_tool(
                     "mime_type": existing.mime_type,
                     "size_bytes": existing.size_bytes,
                     "source": existing.source,
+                    "last_edited_by": existing.last_edited_by,
                 }
             )
 
+        max_conv_files = (
+            max(settings.max_files_per_conversation, 20) * 5
+            if getattr(conv, "kind", "side") == "main"
+            else max(settings.max_files_per_conversation, 20)
+        )
         existing_count = await db.scalar(
             select(func.count())
             .select_from(ConversationFile)
@@ -644,9 +656,9 @@ async def call_tool(
                 ConversationFile.status.in_(("ready", "pending")),
             )
         )
-        if int(existing_count or 0) >= max(settings.max_files_per_conversation, 20):
+        if int(existing_count or 0) >= max_conv_files:
             return _text_result(
-                f"错误：当前对话文件数量已达上限（{settings.max_files_per_conversation} 个），请先清理部分文件。",
+                f"错误：当前对话文件数量已达上限（{max_conv_files} 个），请先清理部分文件。",
                 is_error=True,
             )
 
@@ -670,14 +682,15 @@ async def call_tool(
             etag=etag,
             status="ready",
             source="assistant",
+            last_edited_by="assistant",
             is_global=True,
+            index_status="indexing",
         )
         db.add(row)
         await db.commit()
         await db.refresh(row)
         file_cache.invalidate_file_cache(row.id)
-        await file_chunks.index_file_chunks_safe(db, row, raw=raw_bytes)
-        await db.refresh(row)
+        file_chunks.schedule_file_indexing(row.id, user.id)
         from app.services import realtime_bus
 
         await realtime_bus.publish_user_event(
@@ -794,15 +807,13 @@ async def call_tool(
 
         file_row.size_bytes = len(raw_bytes)
         file_row.etag = etag
+        file_row.last_edited_by = "assistant"
+        file_row.index_status = "indexing"
         file_row.updated_at = datetime.now(timezone.utc)
-        if file_row.conversation_id == conv.id:
-            file_row.source = "assistant"
-            file_row.message_id = None
         await db.commit()
         await db.refresh(file_row)
         file_cache.invalidate_file_cache(file_row.id)
-        await file_chunks.index_file_chunks_safe(db, file_row, raw=raw_bytes)
-        await db.refresh(file_row)
+        file_chunks.schedule_file_indexing(file_row.id, user.id)
 
         from app.services import realtime_bus
 

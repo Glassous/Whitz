@@ -193,7 +193,7 @@ async def update_membership(
     await db.commit()
     await db.refresh(user)
     await audit.record(
-        "membership.admin_update",
+        "admin.membership_update",
         actor=admin,
         target_type="user",
         target_id=user.id,
@@ -224,7 +224,7 @@ async def adjust_credits(
         note=(body.note or "").strip() or None,
     )
     await audit.record(
-        "credits.admin_adjust",
+        "admin.credit_adjust",
         actor=admin,
         target_type="user",
         target_id=user.id,

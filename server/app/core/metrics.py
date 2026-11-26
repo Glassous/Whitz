@@ -21,6 +21,15 @@ ACTIVE_SSE_STREAMS = Gauge(
     "whitz_server_active_sse_streams",
     "Current number of active SSE chat streams",
 )
+REALTIME_SUBSCRIBERS_ACTIVE = Gauge(
+    "whitz_server_realtime_subscribers_active",
+    "Current number of active user realtime sync SSE subscribers",
+)
+AUDIT_WRITE_FAILURES_TOTAL = Counter(
+    "whitz_server_audit_write_failures_total",
+    "Total audit log write failures",
+    ["action"],
+)
 AGENT_RUNS_TOTAL = Counter(
     "whitz_agent_runs_total",
     "Total completed/failed/interrupted agent runs",

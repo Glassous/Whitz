@@ -23,11 +23,13 @@ from app.api.schemas import (
     FilePresignRequest,
     LibraryFileOut,
     LibraryFileUpdateRequest,
+    UpdateTextFileContentRequest,
 )
 from app.core.config import get_settings
 from app.db.models import Conversation, ConversationFile, User
 from app.db.session import get_db
 from app.services import audit, cos, file_cache, file_chunks, file_types, file_uploads
+from app.services.mcp_files import MAX_WRITE_FILE_BYTES, WRITABLE_TEXT_EXTENSIONS
 
 router = APIRouter(tags=["library"])
 
@@ -303,7 +305,19 @@ async def update_library_file(
     await db.commit()
     await db.refresh(row)
     if "filename" in changes:
+        file_cache.invalidate_file_cache(row.id)
         await file_chunks.sync_filename_change(db, row)
+        from app.services import realtime_bus
+
+        await realtime_bus.publish_user_event(
+            user.id,
+            "library.updated",
+            {
+                "action": "renamed",
+                "file_id": str(row.id),
+                "conversation_id": str(row.conversation_id) if row.conversation_id else None,
+            },
+        )
 
     conv_title = None
     if row.conversation_id is not None:
@@ -387,6 +401,71 @@ async def get_library_preview_content(
 ) -> dict:
     row = await _get_owned_library_file(file_id, user, db)
     return await read_preview_content_payload(row, sheet_name=sheet_name)
+
+
+@router.put("/api/library/files/{file_id}/content", response_model=LibraryFileOut)
+async def update_library_file_content(
+    file_id: uuid.UUID,
+    body: UpdateTextFileContentRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> LibraryFileOut:
+    """Edit any owned text/code library file directly without needing a conversation_id."""
+    settings = get_settings()
+    if not settings.cos_configured:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "文件存储服务尚未配置")
+
+    row = await _get_owned_library_file(file_id, user, db)
+    if row.status != "ready":
+        raise HTTPException(status.HTTP_409_CONFLICT, "文件尚未就绪")
+
+    ext = (row.ext or os.path.splitext(row.filename)[1]).lower()
+    if ext not in WRITABLE_TEXT_EXTENSIONS:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "该文件类型不支持在线文本编辑")
+
+    raw_bytes = (body.content or "").encode("utf-8")
+    if len(raw_bytes) > MAX_WRITE_FILE_BYTES:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "文件内容超过 2 MB 上限")
+
+    try:
+        etag = await cos.put_object_bytes(row.storage_key, raw_bytes, row.mime_type, settings=settings)
+    except cos.CosError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+    row.size_bytes = len(raw_bytes)
+    row.etag = etag
+    row.last_edited_by = "user"
+    row.index_status = "indexing"
+    row.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(row)
+    file_cache.invalidate_file_cache(row.id)
+    file_chunks.schedule_file_indexing(row.id, user.id)
+
+    from app.services import realtime_bus
+
+    await realtime_bus.publish_user_event(
+        user.id,
+        "library.updated",
+        {
+            "action": "updated",
+            "file_id": str(row.id),
+            "conversation_id": str(row.conversation_id) if row.conversation_id else None,
+        },
+    )
+    await audit.record(
+        "library.file_update_content",
+        actor=user,
+        target_type="conversation_file",
+        target_id=row.id,
+        request=request,
+        metadata={"filename": row.filename, "size_bytes": row.size_bytes},
+    )
+    conv_title = None
+    if row.conversation_id is not None:
+        conv_title = await db.scalar(select(Conversation.title).where(Conversation.id == row.conversation_id))
+    return serialize_file_out(row, settings=settings, conversation_title=conv_title, as_library=True)
 
 
 @router.post("/api/conversations/{conversation_id}/files/attach", response_model=list[ConversationFileOut])

@@ -269,6 +269,21 @@ export interface OpsRagTableStat {
   stale_model: number;
 }
 
+export interface OpsRagDlqItem {
+  id?: string;
+  job_type?: string;
+  payload?: Record<string, unknown>;
+  attempts?: number;
+  error?: string;
+  failed_at?: string;
+  [key: string]: unknown;
+}
+
+export interface OpsRagDlqResponse {
+  items: OpsRagDlqItem[];
+  total: number;
+}
+
 export interface OpsRagHealth {
   embedding_enabled: boolean;
   rerank_enabled: boolean;

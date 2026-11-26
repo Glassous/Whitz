@@ -13,7 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.schemas import ConversationFileOut
 from app.core.config import get_settings
 from app.core.redis import get_redis
-from app.db.models import Conversation, ConversationEpisode, ConversationFile, Message, MessageChunk, User
+from app.db.models import (
+    Conversation,
+    ConversationEpisode,
+    ConversationFile,
+    Message,
+    MessageChunk,
+    ToolInvocation,
+    User,
+)
 from app.db.session import SessionLocal
 from app.services import (
     cos,
@@ -21,17 +29,23 @@ from app.services import (
     file_provenance,
     file_uploads,
     limits,
-    membership,
     memory_service,
     profile_context,
     run_supervisor,
     scheduler_service,
     skills_service,
-    telemetry,
     titles,
     usage,
 )
 from app.services.agent_client import AgentClient, AgentError
+from app.services.chat import (
+    finalize_plan_status,
+    get_tool_meta,
+    merge_citations,
+    normalize_control_payload,
+    normalize_passthrough_event,
+    summarize_tool_call,
+)
 
 logger = logging.getLogger("whitz.chat")
 
@@ -221,11 +235,12 @@ class ChatPipeline:
                 fid_str = str(fid)
                 art.setdefault("id", fid_str)
                 art.setdefault("file_id", fid_str)
-        self.seen_artifact_ids: set[str] = {
-            str(a.get("id") or a.get("file_id"))
+        self.seen_artifact_versions: dict[str, tuple[int, str]] = {
+            str(a.get("id") or a.get("file_id")): (int(a.get("size_bytes") or 0), str(a.get("updated_at") or ""))
             for a in self.artifacts
             if a.get("id") or a.get("file_id")
         }
+        self.seen_artifact_ids: set[str] = set(self.seen_artifact_versions.keys())
         stored_citations = (assistant.tool_payload or {}).get("citations")
         self.citations: list[dict] = (
             [dict(c) for c in stored_citations if isinstance(c, dict)]
@@ -292,7 +307,11 @@ class ChatPipeline:
     async def _collect_new_artifacts(self, target_file_id: uuid.UUID | None = None) -> list[dict]:
         conditions = [
             and_(
-                ConversationFile.message_id.is_(None),
+                ConversationFile.conversation_id == self.conv.id,
+                or_(
+                    ConversationFile.source == "assistant",
+                    ConversationFile.last_edited_by == "assistant",
+                ),
                 or_(
                     ConversationFile.created_at >= self.run_started_dt,
                     ConversationFile.updated_at >= self.run_started_dt,
@@ -306,9 +325,7 @@ class ChatPipeline:
             await self.db.execute(
                 select(ConversationFile)
                 .where(
-                    ConversationFile.conversation_id == self.conv.id,
                     ConversationFile.user_id == self.conv.user_id,
-                    ConversationFile.source == "assistant",
                     ConversationFile.status == "ready",
                     or_(*conditions),
                 )
@@ -321,11 +338,16 @@ class ChatPipeline:
         changed = False
         for row in rows:
             fid_str = str(row.id)
-            if row.message_id is None:
+            if row.source == "assistant" and row.message_id is None and row.conversation_id == self.conv.id:
                 row.message_id = self.assistant.id
                 changed = True
-            if fid_str in self.seen_artifact_ids:
+            version_key = (
+                int(row.size_bytes or 0),
+                row.etag or (row.updated_at.isoformat() if row.updated_at else ""),
+            )
+            if self.seen_artifact_versions.get(fid_str) == version_key:
                 continue
+            self.seen_artifact_versions[fid_str] = version_key
             self.seen_artifact_ids.add(fid_str)
             meta = {
                 "id": fid_str,
@@ -337,10 +359,17 @@ class ChatPipeline:
                 "mime_type": row.mime_type,
                 "size_bytes": row.size_bytes,
                 "source": row.source,
+                "last_edited_by": getattr(row, "last_edited_by", None),
                 "is_global": bool(row.is_global),
                 "message_id": str(row.message_id) if row.message_id else str(self.assistant.id),
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
             }
-            self.artifacts.append(meta)
+            # Upsert existing artifact metadata if modified again in the same run
+            existing_idx = next((i for i, a in enumerate(self.artifacts) if str(a.get("file_id") or a.get("id")) == fid_str), None)
+            if existing_idx is not None:
+                self.artifacts[existing_idx] = meta
+            else:
+                self.artifacts.append(meta)
             changed = True
 
             event_payload = dict(meta)
@@ -452,10 +481,12 @@ class ChatPipeline:
         await self.db.commit()
 
     async def _clear_active(self) -> None:
-        self.conv.active_run_id = None
-        self.conv.active_run_status = None
-        self.conv.pending_control = None
-        self.conv.last_message_at = datetime.now(timezone.utc)
+        # Guard against a dying stopped supervisor clobbering a newer active run!
+        if self.conv.active_run_id == self.run_id:
+            self.conv.active_run_id = None
+            self.conv.active_run_status = None
+            self.conv.pending_control = None
+            self.conv.last_message_at = datetime.now(timezone.utc)
 
     async def _control_ids(self, payload: dict) -> tuple[str | None, int | None]:
         request_id = payload.get("request_id") or payload.get("prompt_id")
@@ -564,6 +595,10 @@ class ChatPipeline:
             args = payload.get("args") if "args" in payload else payload.get("preview")
             preview = payload.get("preview") if "preview" in payload else args
             call_id = payload.get("call_id")
+            parent_call_id = payload.get("parent_call_id")
+            subagent_role = payload.get("subagent_role")
+            label, ui_kind = get_tool_meta(str(tool))
+            summary = summarize_tool_call(str(tool), args)
             key = self._tool_key(tool, args)
 
             row = None
@@ -580,6 +615,11 @@ class ChatPipeline:
                     **(row.tool_payload or {}),
                     "args": args,
                     "call_id": call_id,
+                    "parent_call_id": parent_call_id,
+                    "subagent_role": subagent_role,
+                    "label": label,
+                    "ui_kind": ui_kind,
+                    "summary": summary,
                     "status": "running",
                 }
             else:
@@ -587,7 +627,16 @@ class ChatPipeline:
                     conversation_id=self.conv.id,
                     role="tool",
                     tool_name=tool,
-                    tool_payload={"args": args, "call_id": call_id, "status": "running"},
+                    tool_payload={
+                        "args": args,
+                        "call_id": call_id,
+                        "parent_call_id": parent_call_id,
+                        "subagent_role": subagent_role,
+                        "label": label,
+                        "ui_kind": ui_kind,
+                        "summary": summary,
+                        "status": "running",
+                    },
                     status="running",
                     run_id=self.run_id,
                 )
@@ -598,12 +647,19 @@ class ChatPipeline:
             self.pending_tools.setdefault(tool, []).append(row)
 
             block = self._reasoning_block()
+            step_num = payload.get("step") if payload.get("step") is not None else block.get("step")
             tools_list = block.setdefault("tools", [])
             if not (call_id and any(t.get("call_id") == call_id for t in tools_list)):
                 tools_list.append(
                     {
                         "name": tool,
+                        "label": label,
+                        "ui_kind": ui_kind,
+                        "summary": summary,
                         "call_id": call_id,
+                        "parent_call_id": parent_call_id,
+                        "subagent_role": subagent_role,
+                        "step": step_num,
                         "args": self._clip(args),
                         "status": "running",
                     }
@@ -611,12 +667,20 @@ class ChatPipeline:
 
             out_ev: dict[str, Any] = {
                 "tool": tool,
+                "label": label,
+                "ui_kind": ui_kind,
+                "summary": summary,
                 "preview": preview,
                 "args": args,
+                "step": step_num,
                 "message_id": str(row.id),
             }
             if call_id is not None:
                 out_ev["call_id"] = call_id
+            if parent_call_id:
+                out_ev["parent_call_id"] = parent_call_id
+            if subagent_role:
+                out_ev["subagent_role"] = subagent_role
             yield sse("tool.started", out_ev)
 
             if tool == "todo_list":
@@ -635,6 +699,9 @@ class ChatPipeline:
             duration = payload.get("duration")
             duration_ms = payload.get("duration_ms") if payload.get("duration_ms") is not None else duration
             call_id = payload.get("call_id")
+            parent_call_id = payload.get("parent_call_id")
+            subagent_role = payload.get("subagent_role")
+            label, ui_kind = get_tool_meta(str(tool))
 
             row = None
             if isinstance(call_id, str) and call_id and call_id in self.pending_tools_by_call:
@@ -647,9 +714,11 @@ class ChatPipeline:
                 row = rows.pop(0) if rows else None
 
             args_val = payload.get("args")
+            if row is not None and args_val is None:
+                args_val = (row.tool_payload or {}).get("args")
+            summary = summarize_tool_call(str(tool), args_val, result_val, error)
+
             if row is not None:
-                if args_val is None:
-                    args_val = (row.tool_payload or {}).get("args")
                 row.tool_payload = {
                     "args": args_val,
                     "result": result_val,
@@ -657,12 +726,41 @@ class ChatPipeline:
                     "duration_ms": duration_ms,
                     "error": error,
                     "call_id": call_id or (row.tool_payload or {}).get("call_id"),
+                    "parent_call_id": parent_call_id or (row.tool_payload or {}).get("parent_call_id"),
+                    "subagent_role": subagent_role or (row.tool_payload or {}).get("subagent_role"),
+                    "label": label,
+                    "ui_kind": ui_kind,
+                    "summary": summary,
                     "status": "failed" if error else "completed",
                 }
                 row.status = "failed" if error else "completed"
+                # Persist lightweight indexed ToolInvocation telemetry row (best-effort)
+                try:
+                    res_obj = json.loads(result_val) if isinstance(result_val, str) and result_val.lstrip().startswith("{") else (result_val if isinstance(result_val, dict) else {})
+                    inv_ok = not bool(error)
+                    if isinstance(res_obj, dict) and "ok" in res_obj:
+                        inv_ok = inv_ok and bool(res_obj.get("ok"))
+                    sc = res_obj.get("status_code") if isinstance(res_obj, dict) else None
+                    prov = res_obj.get("provider") if isinstance(res_obj, dict) else None
+                    self.db.add(
+                        ToolInvocation(
+                            user_id=self.conv.user_id,
+                            conversation_id=self.conv.id,
+                            run_id=self.run_id,
+                            tool_name=str(tool)[:80],
+                            ok=inv_ok,
+                            status_code=int(sc) if isinstance(sc, int) else None,
+                            provider=str(prov)[:40] if prov else None,
+                            duration_ms=int(duration_ms) if isinstance(duration_ms, (int, float)) else None,
+                            error_code=str(error)[:120] if error else None,
+                        )
+                    )
+                except Exception:
+                    pass
                 await self.db.commit()
 
             # Update reasoning block tool record
+            matched_step = payload.get("step")
             for blk in reversed(self.reasoning):
                 matched_tool = None
                 for t_rec in reversed(blk.get("tools") or []):
@@ -674,26 +772,39 @@ class ChatPipeline:
                         break
                 if matched_tool is not None:
                     matched_tool["status"] = "failed" if error else "completed"
+                    matched_tool["label"] = label
+                    matched_tool["ui_kind"] = ui_kind
+                    matched_tool["summary"] = summary
                     matched_tool["result"] = self._clip(result_val, 1200)
                     if duration_ms is not None:
                         matched_tool["duration_ms"] = duration_ms
                     if error:
                         matched_tool["error"] = error
+                    if matched_step is None:
+                        matched_step = matched_tool.get("step") if matched_tool.get("step") is not None else blk.get("step")
                     await self._persist_reasoning()
                     break
 
             out_ev: dict[str, Any] = {
                 "tool": tool,
+                "label": label,
+                "ui_kind": ui_kind,
+                "summary": summary,
                 "preview": preview,
                 "result": result_val,
                 "args": args_val,
                 "error": error,
                 "duration": duration,
                 "duration_ms": duration_ms,
+                "step": matched_step,
                 "message_id": str(row.id) if row else None,
             }
             if call_id is not None:
                 out_ev["call_id"] = call_id
+            if parent_call_id:
+                out_ev["parent_call_id"] = parent_call_id
+            if subagent_role:
+                out_ev["subagent_role"] = subagent_role
             yield sse("tool.completed", out_ev)
 
             if tool == "todo_list":
@@ -710,23 +821,10 @@ class ChatPipeline:
 
         elif name in ("approval.request", "clarify.request"):
             request_id, generation = await self._control_ids(payload)
-            detail = payload.get("detail") if isinstance(payload.get("detail"), dict) else payload
-            out_payload: dict[str, Any] = {
-                "kind": "approval" if name == "approval.request" else "clarify",
-                "request_id": request_id,
-                "execution_generation": generation,
-                "tool": payload.get("tool"),
-                "preview": payload.get("preview"),
-                "detail": detail,
-            }
-            if isinstance(detail, dict):
-                if detail.get("code") is not None:
-                    out_payload["code"] = detail.get("code")
-                if detail.get("language") is not None:
-                    out_payload["language"] = detail.get("language")
-                desc = detail.get("reason") or detail.get("description")
-                if desc is not None:
-                    out_payload["description"] = desc
+            out_payload = normalize_control_payload(
+                name,
+                {**payload, "request_id": request_id, "execution_generation": generation},
+            )
             self.assistant.status = "waiting"
             self.conv.active_run_status = (
                 "waiting_for_approval" if name == "approval.request" else "waiting_for_clarify"
@@ -747,7 +845,7 @@ class ChatPipeline:
         elif name == "rag.context":
             cites = payload.get("citations")
             if isinstance(cites, list):
-                self.citations = [dict(c) for c in cites if isinstance(c, dict)]
+                self.citations = merge_citations(self.citations, cites)
             diag = payload.get("diagnostics")
             if isinstance(diag, dict) and diag:
                 cur = dict(self.rag_metrics or {})
@@ -784,6 +882,9 @@ class ChatPipeline:
             self.assistant.status = "completed"
             if isinstance(payload.get("plan"), dict):
                 self.plan = payload["plan"]
+            self.plan = finalize_plan_status(self.plan, "completed")
+            if not self.reasoning and isinstance(payload.get("reasoning"), list) and payload["reasoning"]:
+                self.reasoning = [dict(b) for b in payload["reasoning"] if isinstance(b, dict)]
             extra = dict(self.assistant.tool_payload or {})
             runtime = dict(extra.get("runtime") or {})
             if isinstance(payload.get("runtime"), dict):
@@ -803,7 +904,7 @@ class ChatPipeline:
             if self.plan:
                 extra["plan"] = self.plan
             if isinstance(payload.get("citations"), list) and payload["citations"]:
-                self.citations = [dict(c) for c in payload["citations"] if isinstance(c, dict)]
+                self.citations = merge_citations(self.citations, payload["citations"])
             if isinstance(payload.get("rag_metrics"), dict) and payload["rag_metrics"]:
                 self.rag_metrics = dict(payload["rag_metrics"])
             if self.artifacts:
@@ -830,14 +931,20 @@ class ChatPipeline:
 
         elif name in ("run.failed", "run.cancelled", "run.interrupted"):
             self.terminal = True
+            for art in await self._collect_new_artifacts():
+                yield sse("workspace.file_created", art)
             error = payload.get("error")
             if isinstance(error, dict):
                 error = error.get("message") or json.dumps(error, ensure_ascii=False)
             self.assistant.content = payload.get("output") or "".join(self.buffer)
-            self.assistant.status = "failed" if name == "run.failed" else "cancelled"
+            term_status = "failed" if name == "run.failed" else "cancelled"
+            self.assistant.status = term_status
             if isinstance(payload.get("plan"), dict):
                 self.plan = payload["plan"]
+            self.plan = finalize_plan_status(self.plan, term_status)
             extra = dict(self.assistant.tool_payload or {})
+            if error:
+                extra["error"] = str(error)[:1000]
             for key in ("usage", "runtime"):
                 if payload.get(key) is not None:
                     extra[key] = payload.get(key)
@@ -852,7 +959,12 @@ class ChatPipeline:
                 extra["plan"] = self.plan
             if self.artifacts:
                 extra["artifacts"] = self.artifacts
+            if self.citations:
+                extra["citations"] = self.citations
+            if self.rag_metrics:
+                extra["rag_metrics"] = self.rag_metrics
             self.assistant.tool_payload = extra
+            self.conv.plan = self.plan
             await self._clear_active()
             await self.db.commit()
             yield sse(
@@ -862,6 +974,7 @@ class ChatPipeline:
                     "output": self.assistant.content,
                     "plan": self.plan,
                     "reasoning": self.reasoning or None,
+                    "citations": self.citations or None,
                 },
             )
 
@@ -1691,7 +1804,6 @@ async def stream_regenerate(
 
             target_msg = ordered[target_idx]
             user_msg = ordered[preceding_idx]
-            history = _history_from_messages(ordered[:preceding_idx])
 
             delete_ids = {m.id for m in ordered[target_idx:]}
             if target_msg.run_id:
@@ -1699,6 +1811,11 @@ async def stream_regenerate(
                     if m.role == "tool" and m.run_id == target_msg.run_id:
                         delete_ids.add(m.id)
             if delete_ids:
+                await db.execute(
+                    update(ConversationFile)
+                    .where(ConversationFile.message_id.in_(delete_ids))
+                    .values(message_id=None)
+                )
                 await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
                 await db.execute(
                     delete(MessageChunk).where(
@@ -1724,6 +1841,9 @@ async def stream_regenerate(
                 if conv.working_state_cursor_msg_id and conv.working_state_cursor_msg_id in delete_ids:
                     conv.working_state = None
                     conv.working_state_cursor_msg_id = None
+            await db.flush()
+            # Use bounded cursor-aligned history (never unbounded full-chat dump)
+            history = await cross_chat_memory.load_cursor_aligned_history(db, conv, exclude_msg_id=user_msg.id)
 
             prompt_payload = user_msg.tool_payload or {}
             file_ids: list[uuid.UUID] = []
@@ -1883,9 +2003,26 @@ async def stream_edit(
                 yield sse("error", {"code": "invalid_target", "detail": "未找到可编辑的用户消息"})
                 return
 
-            history = _history_from_messages(ordered[:target_idx])
+            orig_user_payload = ordered[target_idx].tool_payload or {}
+            eff_file_ids = file_ids
+            if not eff_file_ids and orig_user_payload.get("attachments"):
+                preserved: list[uuid.UUID] = []
+                for att in orig_user_payload.get("attachments") or []:
+                    if isinstance(att, dict) and att.get("id"):
+                        try:
+                            preserved.append(uuid.UUID(str(att["id"])))
+                        except ValueError:
+                            pass
+                if preserved:
+                    eff_file_ids = preserved
+
             delete_ids = {m.id for m in ordered[target_idx:]}
             if delete_ids:
+                await db.execute(
+                    update(ConversationFile)
+                    .where(ConversationFile.message_id.in_(delete_ids))
+                    .values(message_id=None)
+                )
                 await db.execute(delete(Message).where(Message.id.in_(delete_ids)))
                 await db.execute(
                     delete(MessageChunk).where(
@@ -1911,8 +2048,10 @@ async def stream_edit(
                 if conv.working_state_cursor_msg_id and conv.working_state_cursor_msg_id in delete_ids:
                     conv.working_state = None
                     conv.working_state_cursor_msg_id = None
+            await db.flush()
+            history = await cross_chat_memory.load_cursor_aligned_history(db, conv)
 
-            turn_ctx = await _prepare_turn_context(db, user, conv, file_ids, skill_names, query_text=content)
+            turn_ctx = await _prepare_turn_context(db, user, conv, eff_file_ids, skill_names, query_text=content)
 
             old_thread_id = conv.thread_id
             conv.thread_id = str(uuid.uuid4())
@@ -2079,6 +2218,13 @@ async def stream_reconnect(
     # Fast path B: run already finished in DB -> emit snapshot + terminal event immediately
     if assistant_status in ("completed", "failed", "cancelled"):
         term_ev = TERMINAL_STATUSES.get(assistant_status, "run.completed")
+        stored_reasoning = assistant_payload.get("reasoning") or []
+        db_tool_events: list[dict[str, Any]] = []
+        for blk in stored_reasoning:
+            if isinstance(blk, dict):
+                for t_rec in blk.get("tools") or []:
+                    if isinstance(t_rec, dict):
+                        db_tool_events.append({**t_rec, "tool": t_rec.get("tool") or t_rec.get("name") or "tool"})
         yield sse(
             "run.snapshot",
             {
@@ -2088,10 +2234,11 @@ async def stream_reconnect(
                 "created_at": assistant_created_at,
                 "status": assistant_status,
                 "output": assistant_content,
-                "reasoning": assistant_payload.get("reasoning") or [],
+                "reasoning": stored_reasoning,
                 "plan": conv_plan or assistant_payload.get("plan"),
                 "artifacts": assistant_payload.get("artifacts") or [],
                 "citations": assistant_payload.get("citations") or [],
+                "tool_events": db_tool_events,
                 "pending_control": None,
                 "last_event_id": "0-0",
             },
@@ -2100,9 +2247,10 @@ async def stream_reconnect(
             term_ev,
             {
                 "output": assistant_content,
+                "error": assistant_payload.get("error"),
                 "usage": assistant_payload.get("usage"),
                 "plan": conv_plan or assistant_payload.get("plan"),
-                "reasoning": assistant_payload.get("reasoning"),
+                "reasoning": stored_reasoning or None,
                 "artifacts": assistant_payload.get("artifacts"),
                 "citations": assistant_payload.get("citations"),
             },
@@ -2110,7 +2258,7 @@ async def stream_reconnect(
         return
 
     # Path C: Run is alive on agent-worker (e.g., handled by another server worker) ->
-    # read-only passthrough with snapshot from agent-api (no DB writes!)
+    # read-only passthrough normalized to match Path A/B canonical schemas!
     client = AgentClient(namespace, api_key)
     try:
         include_snap = not bool(last_event_id)
@@ -2119,15 +2267,14 @@ async def stream_reconnect(
             last_event_id=last_event_id,
             include_snapshot=include_snap,
         ):
-            if ev_name == "run.snapshot":
-                payload = dict(payload)
-                payload.setdefault("assistant_message_id", assistant_id_str)
-                if assistant_created_at:
-                    payload.setdefault("created_at", assistant_created_at)
-                if not payload.get("pending_control") and isinstance(payload.get("pending_controls"), list):
-                    ctls = payload["pending_controls"]
-                    payload["pending_control"] = ctls[0] if ctls else conv_pending_control
-            yield sse(ev_name, payload, event_id=ev_id)
+            norm_name, norm_payload = normalize_passthrough_event(
+                ev_name,
+                payload,
+                assistant_id_str=assistant_id_str,
+                assistant_created_at=assistant_created_at,
+                conv_pending_control=conv_pending_control,
+            )
+            yield sse(norm_name, norm_payload, event_id=ev_id)
             if ev_name in TERMINAL_EVENTS:
                 return
     except AgentError as exc:

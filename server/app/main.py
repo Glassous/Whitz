@@ -34,7 +34,17 @@ from app.core.config import get_settings
 from app.core.metrics import metrics_middleware, render_prometheus_metrics
 from app.core.redis import close_redis, get_redis
 from app.db.session import SessionLocal, detect_pgvector, engine
-from app.services import bootstrap, embeddings, posts_service, rag_jobs, run_supervisor, scheduler_service
+from app.services import (
+    bootstrap,
+    embeddings,
+    llm_gateway,
+    ops_service,
+    posts_service,
+    rag_jobs,
+    realtime_bus,
+    run_supervisor,
+    scheduler_service,
+)
 from app.services.agent_client import aclose_shared_agent_clients
 
 logging.basicConfig(level=logging.INFO)
@@ -43,6 +53,10 @@ logger = logging.getLogger("whitz")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
+    if settings.app_env == "production":
+        if settings.jwt_secret == "dev-secret-change-me" or settings.agent_internal_token == "dev-agent-token":
+            logger.error("生产环境检测到默认安全密钥 (JWT_SECRET / AGENT_INTERNAL_TOKEN)，请立即更换！")
     try:
         await get_redis().ping()
     except Exception as exc:
@@ -57,11 +71,19 @@ async def lifespan(app: FastAPI):
     scheduler_service.start_scheduler()
     posts_service.start_post_scheduler()
     rag_jobs.start_rag_job_worker()
+    ops_service.start_alert_evaluator()
     yield
+    await ops_service.stop_alert_evaluator()
     await rag_jobs.stop_rag_job_worker()
     await posts_service.stop_post_scheduler()
     await scheduler_service.stop_scheduler()
     await run_supervisor.stop_reconciler_and_supervisors()
+    await realtime_bus.aclose_realtime_bus()
+    await llm_gateway.aclose_shared_client()
+    await posts_service.aclose_shared_client()
+    from app.services import cross_chat_memory
+
+    await cross_chat_memory.aclose_fast_llm_client()
     await aclose_shared_agent_clients()
     await embeddings.aclose_embedding_client()
     await close_redis()

@@ -98,6 +98,15 @@ def _slice_lines(
     }
 
 
+def count_pdf_pages_fast(raw: bytes) -> int:
+    """Count PDF pages without running expensive text extraction."""
+    try:
+        reader = PdfReader(io.BytesIO(raw))
+        return len(reader.pages)
+    except Exception as exc:
+        raise FileParseError(f"无法解析 PDF 文件: {exc}") from exc
+
+
 def _extract_pdf_pages(raw: bytes) -> tuple[list[str], bool]:
     try:
         reader = PdfReader(io.BytesIO(raw))
@@ -280,10 +289,13 @@ def _sniff_image_mime(raw: bytes) -> str | None:
 
 
 def sniff_file_header(head_bytes: bytes | None, *, ext: str, category: str) -> str | None:
-    """Validate file magic header bytes; return error message if invalid, or None if OK."""
-    if not head_bytes:
-        return None
+    """Validate file magic header bytes (fail-closed for binary checked types); return error message or None."""
     norm_ext = (ext or "").lower()
+    requires_magic = category == "image" or norm_ext in IMAGE_EXTENSIONS or norm_ext in (".pdf", ".docx", ".xlsx")
+    if not head_bytes:
+        if requires_magic:
+            return "无法读取文件头进行格式校验，请重试上传"
+        return None
     if category == "image" or norm_ext in IMAGE_EXTENSIONS:
         if not _sniff_image_mime(head_bytes):
             return "图片文件头无效或已损坏，请检查真实文件格式后重新上传"

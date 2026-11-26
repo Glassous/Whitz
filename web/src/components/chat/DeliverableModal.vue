@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import hljs from "highlight.js/lib/common";
 import { getFileExt } from "../../lib/fileTypes";
 import { isWritableTextExt } from "../../lib/fileTokens";
+import { injectHtmlTheme } from "../../lib/htmlTheme";
 import { useFilesStore } from "../../stores/files";
 import type { DeliverableTarget } from "../../types";
 import BaseModal from "../ui/BaseModal.vue";
@@ -93,22 +94,6 @@ const badgeLabel = computed(() => {
   if (kind.value === "table") return ext.value === ".tsv" ? "TSV" : "CSV";
   return ext.value.replace(".", "").toUpperCase() || "TEXT";
 });
-
-function injectHtmlTheme(rawHtml: string, dark: boolean): string {
-  const theme = dark ? "dark" : "light";
-  const themeTag =
-    `<meta name="color-scheme" content="${theme}">` +
-    `<style data-whitz-theme>:root{color-scheme:${theme};--whitz-theme:${theme};}</style>` +
-    `<script>(function(){try{document.documentElement.setAttribute("data-theme","${theme}");document.documentElement.classList.toggle("dark",${dark});}catch(e){}})();<\/script>`;
-
-  if (/<head[\s>]/i.test(rawHtml)) {
-    return rawHtml.replace(/<head([^>]*)>/i, `<head$1>${themeTag}`);
-  }
-  if (/<html[\s>]/i.test(rawHtml)) {
-    return rawHtml.replace(/<html([^>]*)>/i, `<html$1><head>${themeTag}</head>`);
-  }
-  return `<!doctype html><html data-theme="${theme}" class="${dark ? "dark" : ""}"><head><meta charset="utf-8">${themeTag}</head><body>${rawHtml}</body></html>`;
-}
 
 const themedHtml = computed(() => {
   if (kind.value !== "html" || !content.value) return "";
@@ -229,8 +214,21 @@ function openHtmlInNewTab() {
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-function downloadFile() {
+async function downloadFile() {
   if (!props.target) return;
+  try {
+    const signedUrl = await filesStore.getDownloadUrl(
+      props.target.fileId,
+      false,
+      props.target.conversationId ?? undefined,
+    );
+    if (signedUrl) {
+      window.open(signedUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+  } catch {
+    /* fallback to local blob when signed URL cannot be generated */
+  }
   const mime =
     kind.value === "html"
       ? "text/html;charset=utf-8"

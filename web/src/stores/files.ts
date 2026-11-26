@@ -91,6 +91,7 @@ export const useFilesStore = defineStore("files", () => {
   const error = ref<string | null>(null);
   const abortMap = new Map<string, () => void>();
   let listRefreshPromise: { cid: string; promise: Promise<ConversationFile[]> } | null = null;
+  let loadSeq = 0;
 
   const activeUploads = computed(() =>
     uploads.value.filter((u) => u.status === "signing" || u.status === "uploading" || u.status === "completing"),
@@ -135,6 +136,7 @@ export const useFilesStore = defineStore("files", () => {
   }
 
   async function load(conversationId: string, scope: "conversation" | "all" = "conversation") {
+    const seq = ++loadSeq;
     if (convId.value !== conversationId) {
       for (const abort of abortMap.values()) abort();
       abortMap.clear();
@@ -149,12 +151,17 @@ export const useFilesStore = defineStore("files", () => {
     loading.value = true;
     try {
       const qs = scope === "all" ? "?scope=all" : "";
-      files.value = await api.get<ConversationFile[]>(`/conversations/${conversationId}/files${qs}`);
+      const list = await api.get<ConversationFile[]>(`/conversations/${conversationId}/files${qs}`);
+      if (seq !== loadSeq) return;
+      files.value = list;
     } catch (e: any) {
+      if (seq !== loadSeq) return;
       error.value = errorText(e, "加载对话文件失败");
       files.value = [];
     } finally {
-      loading.value = false;
+      if (seq === loadSeq) {
+        loading.value = false;
+      }
     }
   }
 
@@ -414,12 +421,11 @@ export const useFilesStore = defineStore("files", () => {
     content: string,
     targetConvId?: string | null,
   ): Promise<ConversationFile> {
-    const cid = targetConvId || convId.value;
-    if (!cid) throw new Error("未选择对话");
-    const updated = await api.put<ConversationFile>(
-      `/conversations/${cid}/files/${fileId}/content`,
-      { content },
-    );
+    const target = files.value.find((f) => f.id === fileId);
+    const cid = targetConvId ?? target?.conversation_id ?? (listScope.value === "conversation" ? convId.value : null);
+    const updated = cid
+      ? await api.put<ConversationFile>(`/conversations/${cid}/files/${fileId}/content`, { content })
+      : await api.put<ConversationFile>(`/library/files/${fileId}/content`, { content });
     upsertFile(updated);
     return updated;
   }
@@ -429,19 +435,24 @@ export const useFilesStore = defineStore("files", () => {
     filename: string,
     targetConvId?: string | null,
   ): Promise<ConversationFile> {
-    const cid = targetConvId || convId.value;
-    if (!cid) throw new Error("未选择对话");
-    const updated = await api.patch<ConversationFile>(
-      `/conversations/${cid}/files/${fileId}`,
-      { filename },
-    );
+    const target = files.value.find((f) => f.id === fileId);
+    const cid = targetConvId ?? target?.conversation_id ?? (listScope.value === "conversation" ? convId.value : null);
+    const updated = cid
+      ? await api.patch<ConversationFile>(`/conversations/${cid}/files/${fileId}`, { filename })
+      : await api.patch<ConversationFile>(`/library/files/${fileId}`, { filename });
     upsertFile(updated);
     return updated;
   }
 
   async function removeFile(fileId: string) {
-    if (!convId.value) return;
-    await api.delete(`/conversations/${convId.value}/files/${fileId}`);
+    const target = files.value.find((f) => f.id === fileId);
+    if (listScope.value === "conversation" && convId.value) {
+      await api.delete(`/conversations/${convId.value}/files/${fileId}`);
+    } else if (target?.conversation_id) {
+      await api.delete(`/conversations/${target.conversation_id}/files/${fileId}`);
+    } else {
+      await api.delete(`/library/files/${fileId}`);
+    }
     removeLocalFile(fileId);
   }
 
@@ -463,11 +474,13 @@ export const useFilesStore = defineStore("files", () => {
   }
 
   async function getDownloadUrl(fileId: string, inline = false, targetConvId?: string): Promise<string | null> {
-    const cid = targetConvId ?? convId.value;
-    if (!cid) return null;
-    const res = await api.get<{ url: string; expires_in: number }>(
-      `/conversations/${cid}/files/${fileId}/download-url?inline=${inline ? "true" : "false"}`,
-    );
+    const target = files.value.find((f) => f.id === fileId);
+    const cid = targetConvId ?? target?.conversation_id ?? convId.value;
+    const qs = `inline=${inline ? "true" : "false"}`;
+    const urlPath = cid
+      ? `/conversations/${cid}/files/${fileId}/download-url?${qs}`
+      : `/library/files/${fileId}/download-url?${qs}`;
+    const res = await api.get<{ url: string; expires_in: number }>(urlPath);
     return res.url;
   }
 
@@ -558,9 +571,12 @@ export const useFilesStore = defineStore("files", () => {
   }
 
   async function fetchPreviewContent(fileId: string, targetConvId?: string): Promise<PreviewContentResult> {
-    const cid = targetConvId ?? convId.value;
-    if (!cid) throw new Error("未关联对话");
-    const res = await api.get<unknown>(`/conversations/${cid}/files/${fileId}/preview-content`);
+    const target = files.value.find((f) => f.id === fileId);
+    const cid = targetConvId ?? target?.conversation_id ?? convId.value;
+    const path = cid
+      ? `/conversations/${cid}/files/${fileId}/preview-content`
+      : `/library/files/${fileId}/preview-content`;
+    const res = await api.get<unknown>(path);
     if (typeof res === "string") {
       return { content: res };
     }

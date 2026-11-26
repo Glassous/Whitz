@@ -7,7 +7,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -26,7 +26,7 @@ from app.db.models import (
 from app.db.session import SessionLocal
 from app.services import limits, membership, realtime_bus, schedule_calc, usage
 from app.services.agent_client import AgentClient, AgentError
-from app.services.cross_chat_memory import ensure_main_conversation
+from app.services.cross_chat_memory import ensure_main_conversation, load_cursor_aligned_history
 
 logger = logging.getLogger("whitz.scheduler")
 
@@ -586,6 +586,7 @@ async def resolve_proposal(
             conversation_id=conv_uuid,
             model_route=str(p.get("model_route") or "auto"),
             skill_names=p.get("skill_names") if isinstance(p.get("skill_names"), list) else None,
+            max_runs=p.get("max_runs") if isinstance(p.get("max_runs"), int) else None,
             enabled=True,
             source="agent",
         )
@@ -597,6 +598,12 @@ async def resolve_proposal(
             enabled_override = False
         elif row.action == "resume":
             enabled_override = True
+        conv_uuid_upd: uuid.UUID | None = None
+        if p.get("conversation_id"):
+            try:
+                conv_uuid_upd = uuid.UUID(str(p["conversation_id"]))
+            except ValueError:
+                conv_uuid_upd = None
         task_out = await update_task(
             db,
             user,
@@ -607,7 +614,10 @@ async def resolve_proposal(
             schedule_config=p.get("schedule_config") if isinstance(p.get("schedule_config"), dict) else None,
             timezone_name=p.get("timezone") if "timezone" in p else None,
             target_mode=p.get("target_mode") if "target_mode" in p else None,
+            conversation_id=conv_uuid_upd,
             model_route=p.get("model_route") if "model_route" in p else None,
+            skill_names=p.get("skill_names") if isinstance(p.get("skill_names"), list) else None,
+            max_runs=p.get("max_runs") if isinstance(p.get("max_runs"), int) else None,
             enabled=enabled_override if enabled_override is not None else None,
         )
     elif row.action == "delete":
@@ -644,6 +654,7 @@ async def _resolve_or_create_target_conversation(
         user_id=user.id,
         kind="side",
         title=f"[定时] {task.name}"[:200],
+        is_scheduled=True,
         thread_id=str(uuid.uuid4()),
     )
     db.add(conv)
@@ -740,7 +751,12 @@ async def _execute_claimed_task_run(
             )
             await db.commit()
             if not claimed.rowcount:
-                await _mark_run_skipped(db, task, task_run, "目标会话正在执行其他任务，本次跳过")
+                # Target conversation is busy: retry in 60s for scheduled runs instead of losing the execution
+                if task_run.trigger_type == "scheduled" and task.enabled and task.status == "active":
+                    retry_at = now + timedelta(seconds=60)
+                    if task.next_run_at is None or task.next_run_at > retry_at:
+                        task.next_run_at = retry_at
+                await _mark_run_skipped(db, task, task_run, "目标会话正在执行其他任务，将于 60 秒后重试")
                 return
 
             conv_claimed = True
@@ -751,26 +767,8 @@ async def _execute_claimed_task_run(
                 await db.commit()
 
             client = AgentClient(user.agent_namespace, user.agent_api_key)
-            if not await client.health():
-                await client.aclose()
-                await db.execute(
-                    update(Conversation)
-                    .where(Conversation.id == conv.id, Conversation.active_run_id == "pending")
-                    .values(active_run_id=None, active_run_status=None, pending_control=None)
-                )
-                conv_claimed = False
-                await finalize_scheduled_run(
-                    db,
-                    scheduled_run_id=task_run.id,
-                    status="failed",
-                    output="",
-                    error="Agent 服务暂不可用",
-                    tokens_used=0,
-                )
-                return
-
             prompt_display = f"[定时任务 · {task.name}]\n{task.prompt}"
-            history = await chat_stream._recent_conversation_history(db, conv.id, limit=24)
+            history = await load_cursor_aligned_history(db, conv)
             turn_ctx = await chat_stream._prepare_turn_context(
                 db,
                 user,
@@ -811,6 +809,9 @@ async def _execute_claimed_task_run(
             task_run.conversation_id = conv.id
             task_run.assistant_message_id = assistant.id
             task_run.status = "running"
+            task.run_count = int(task.run_count or 0) + 1
+            task.last_run_at = now
+            task.last_run_status = "running"
             await db.commit()
 
             try:
@@ -918,6 +919,11 @@ async def finalize_scheduled_run(
         if norm_status == "completed":
             task.consecutive_failures = 0
             task.last_error = None
+            reached_cap = task.max_runs is not None and int(task.run_count or 0) >= int(task.max_runs)
+            if task.schedule_type == "once" or reached_cap:
+                task.enabled = False
+                task.status = "completed"
+                task.next_run_at = None
         elif norm_status == "failed":
             task.consecutive_failures = int(task.consecutive_failures or 0) + 1
             task.last_error = task_run.error or "执行失败"
@@ -972,7 +978,6 @@ async def trigger_task_now(
         started_at=now,
     )
     db.add(task_run)
-    task.run_count = int(task.run_count or 0) + 1
     task.last_run_at = now
     task.last_run_status = "running"
     await db.commit()
@@ -1021,14 +1026,11 @@ async def dispatch_due_tasks(
         due_tasks = list((await db.execute(stmt)).scalars().all())
         for task in due_tasks:
             scheduled_for = task.next_run_at or current
-            task.run_count = int(task.run_count or 0) + 1
             task.last_run_at = current
             task.last_run_status = "running"
 
-            reached_cap = task.max_runs is not None and task.run_count >= int(task.max_runs)
-            if task.schedule_type == "once" or reached_cap:
-                task.enabled = False
-                task.status = "completed"
+            if task.schedule_type == "once":
+                # Keep enabled=True until execution completes, but clear next_run_at so it isn't double-claimed
                 task.next_run_at = None
             else:
                 try:
@@ -1075,8 +1077,86 @@ async def dispatch_due_tasks(
     return len(claimed_run_ids)
 
 
+async def cancel_task_run(
+    db: AsyncSession,
+    user: User,
+    task_id: uuid.UUID,
+    task_run_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Cancel a queued or running scheduled task execution."""
+    task = await db.get(ScheduledTask, task_id)
+    if task is None or task.user_id != user.id:
+        raise ScheduleServiceError(404, "定时任务不存在")
+    task_run = await db.get(ScheduledTaskRun, task_run_id)
+    if task_run is None or task_run.task_id != task.id or task_run.user_id != user.id:
+        raise ScheduleServiceError(404, "执行记录不存在")
+    if task_run.status in ("completed", "failed", "cancelled", "skipped"):
+        return serialize_task_run(task_run)
+
+    if task_run.run_id:
+        from app.services import run_supervisor
+
+        await run_supervisor.cancel_local_supervisor(task_run.run_id)
+        client = AgentClient(user.agent_namespace, user.agent_api_key)
+        try:
+            await client.cancel_run(task_run.run_id)
+        except Exception:
+            pass
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+    await finalize_scheduled_run(
+        db,
+        scheduled_run_id=task_run.id,
+        status="cancelled",
+        error="用户手动取消执行",
+    )
+    await db.refresh(task_run)
+    return serialize_task_run(task_run)
+
+
+async def recover_stale_scheduled_runs(
+    *,
+    session_factory: Callable[[], Any] | None = None,
+) -> int:
+    """Recover queued/running ScheduledTaskRun rows orphaned by a server crash."""
+    factory = session_factory or SessionLocal
+    stale_seconds = max(600, int(get_settings().run_max_seconds or 1200) + 300)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_seconds)
+    recovered = 0
+    try:
+        async with factory() as db:
+            rows = list(
+                (
+                    await db.execute(
+                        select(ScheduledTaskRun).where(
+                            ScheduledTaskRun.status.in_(("queued", "running")),
+                            ScheduledTaskRun.started_at < cutoff,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for run in rows:
+                await finalize_scheduled_run(
+                    db,
+                    scheduled_run_id=run.id,
+                    status="failed",
+                    error="执行超时或服务重启导致中断，已自动恢复",
+                )
+                recovered += 1
+    except Exception as exc:
+        logger.debug("Stale scheduled run recovery skipped: %s", exc)
+    return recovered
+
+
 async def _scheduler_loop() -> None:
     await asyncio.sleep(4.0)
+    await recover_stale_scheduled_runs()
     while True:
         settings = get_settings()
         if settings.scheduler_enabled:

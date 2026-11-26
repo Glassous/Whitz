@@ -143,65 +143,13 @@ async def _get_user_active_sessions(
     user_id: uuid.UUID,
     current_session_id: uuid.UUID | None = None,
 ) -> list[UserSessionOut]:
-    now = datetime.now(timezone.utc)
-    result = await db.execute(
-        select(RefreshToken)
-        .where(
-            RefreshToken.user_id == user_id,
-            RefreshToken.revoked_at.is_(None),
-            RefreshToken.expires_at > now,
-        )
-        .order_by(RefreshToken.created_at.asc())
-    )
-    grouped: dict[uuid.UUID, dict] = {}
-    for row in result.scalars().all():
-        sid = row.session_id or row.id
-        entry = grouped.get(sid)
-        last_used = row.last_used_at or row.created_at
-        if entry is None:
-            grouped[sid] = {
-                "session_id": sid,
-                "user_agent": row.user_agent,
-                "client_ip": row.client_ip,
-                "last_used_at": row.last_used_at,
-                "created_at": row.created_at,
-                "expires_at": row.expires_at,
-                "_sort_last_used": last_used,
-            }
-            continue
-        if row.created_at < entry["created_at"]:
-            entry["created_at"] = row.created_at
-        if row.expires_at > entry["expires_at"]:
-            entry["expires_at"] = row.expires_at
-        if last_used >= entry["_sort_last_used"]:
-            entry["_sort_last_used"] = last_used
-            entry["last_used_at"] = row.last_used_at or entry["last_used_at"]
-            entry["user_agent"] = row.user_agent or entry["user_agent"]
-            entry["client_ip"] = row.client_ip or entry["client_ip"]
+    from app.services import sessions_service
 
-    sessions: list[UserSessionOut] = []
-    for sid, entry in sorted(
-        grouped.items(),
-        key=lambda pair: (pair[1]["_sort_last_used"], pair[1]["created_at"]),
-        reverse=True,
-    ):
-        try:
-            if await is_session_revoked(sid):
-                continue
-        except Exception:
-            pass
-        sessions.append(
-            UserSessionOut(
-                session_id=entry["session_id"],
-                user_agent=entry["user_agent"],
-                client_ip=entry["client_ip"],
-                last_used_at=entry["last_used_at"],
-                created_at=entry["created_at"],
-                expires_at=entry["expires_at"],
-                is_current=(current_session_id == sid),
-            )
-        )
-    return sessions
+    return await sessions_service.list_user_active_sessions(
+        db,
+        user_id,
+        current_session_id=current_session_id,
+    )
 
 
 @router.get("/overview")

@@ -38,6 +38,8 @@ def _to_psycopg_positional(sql: str, params: dict[str, Any]) -> tuple[str, tuple
 class DbAdapter:
     """Dual-driver async SQL adapter supporting both psycopg3 AsyncConnectionPool (Agent) and SQLAlchemy AsyncSession (Server)."""
 
+    _iterative_scan_supported: bool | None = None
+
     def __init__(self, *, pool: Any = None, session: Any = None) -> None:
         self.pool = pool
         self.session = session
@@ -51,36 +53,67 @@ class DbAdapter:
         # psycopg3 pools allow concurrent queries across connections; single SQLAlchemy AsyncSession must serialize.
         return self.pool is not None
 
+    @staticmethod
+    def _trgm_threshold_sql(threshold: float) -> str:
+        val = max(0.05, min(0.95, float(threshold)))
+        return f"SET LOCAL pg_trgm.word_similarity_threshold = {val:.2f}"
+
     async def fetch_all(
         self,
         sql: str,
         params: dict[str, Any],
         *,
         set_iterative_scan: bool = False,
+        trgm_threshold: float | None = None,
     ) -> list[tuple[Any, ...]]:
         if self.pool is not None:
             pg_sql, pg_params = _to_psycopg_positional(sql, params)
+            need_tx = bool(trgm_threshold is not None or (set_iterative_scan and DbAdapter._iterative_scan_supported is not False))
             async with self.pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    if set_iterative_scan:
-                        try:
-                            await cur.execute("SET hnsw.iterative_scan = relaxed_order")
-                        except Exception:
-                            pass
-                    await cur.execute(pg_sql, pg_params)
-                    rows = await cur.fetchall()
+                if need_tx and hasattr(conn, "transaction"):
+                    async with conn.transaction():
+                        async with conn.cursor() as cur:
+                            if set_iterative_scan and DbAdapter._iterative_scan_supported is not False:
+                                try:
+                                    await cur.execute("SAVEPOINT whitz_iter_scan")
+                                    await cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+                                    await cur.execute("RELEASE SAVEPOINT whitz_iter_scan")
+                                    DbAdapter._iterative_scan_supported = True
+                                except Exception:
+                                    DbAdapter._iterative_scan_supported = False
+                                    try:
+                                        await cur.execute("ROLLBACK TO SAVEPOINT whitz_iter_scan")
+                                        await cur.execute("RELEASE SAVEPOINT whitz_iter_scan")
+                                    except Exception:
+                                        pass
+                            if trgm_threshold is not None:
+                                await cur.execute(self._trgm_threshold_sql(trgm_threshold))
+                            await cur.execute(pg_sql, pg_params)
+                            rows = await cur.fetchall()
+                else:
+                    async with conn.cursor() as cur:
+                        if trgm_threshold is not None:
+                            try:
+                                await cur.execute(self._trgm_threshold_sql(trgm_threshold))
+                            except Exception:
+                                pass
+                        await cur.execute(pg_sql, pg_params)
+                        rows = await cur.fetchall()
             return [tuple(r) for r in rows]
 
         if self.session is not None:
             from sqlalchemy import text
 
-            if set_iterative_scan:
-                try:
-                    async with self.session.begin_nested():
-                        await self.session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
-                except Exception:
-                    pass
             async with self.session.begin_nested():
+                if set_iterative_scan and DbAdapter._iterative_scan_supported is not False:
+                    try:
+                        async with self.session.begin_nested():
+                            await self.session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+                            DbAdapter._iterative_scan_supported = True
+                    except Exception:
+                        DbAdapter._iterative_scan_supported = False
+                if trgm_threshold is not None:
+                    await self.session.execute(text(self._trgm_threshold_sql(trgm_threshold)))
                 res = await self.session.execute(text(sql), params)
                 rows = res.fetchall()
             return [tuple(r) for r in rows]
@@ -316,6 +349,27 @@ class UnifiedKnowledgeRetriever:
         except Exception:
             return []
 
+    async def _list_linked_file_ids(
+        self,
+        *,
+        user_uuid: uuid.UUID,
+        conv_uuid: uuid.UUID | None,
+    ) -> set[str]:
+        if conv_uuid is None or not self.db.is_available:
+            return set()
+        try:
+            rows = await self.db.fetch_all(
+                """
+                SELECT file_id
+                FROM conversation_file_links
+                WHERE conversation_id = :cid AND user_id = :uid
+                """,
+                {"cid": conv_uuid, "uid": user_uuid},
+            )
+            return {str(r[0]) for r in rows if r and r[0] is not None}
+        except Exception:
+            return set()
+
     # ------------------------------------------------------------------
     # Source 1: Files (`file_chunks` + Parent/Sibling Window Expansion)
     # ------------------------------------------------------------------
@@ -332,6 +386,7 @@ class UnifiedKnowledgeRetriever:
         rrf_k: int = 60,
         expand_neighbors: bool = True,
         apply_rerank: bool = True,
+        apply_mmr: bool = True,
         q_vec_lit: str | None = None,
     ) -> list[EvidenceItem]:
         cleaned = (query or "").strip()
@@ -358,7 +413,7 @@ class UnifiedKnowledgeRetriever:
         candidate_k = max(top_k * 3, 24)
         model_tag = self.embedding_client.model_tag
 
-        vec_rows, fts_rows, trgm_rows = await self.db.run_legs(
+        vec_rows, fts_rows, trgm_rows, linked_set = await self.db.run_legs(
             [
                 self._file_vector_leg(
                     user_uuid=user_uuid,
@@ -379,6 +434,7 @@ class UnifiedKnowledgeRetriever:
                     query=cleaned,
                     limit=candidate_k,
                 ),
+                self._list_linked_file_ids(user_uuid=user_uuid, conv_uuid=conv_uuid),
             ]
         )
 
@@ -390,14 +446,14 @@ class UnifiedKnowledgeRetriever:
                 limit=candidate_k,
             )
 
-        # Apply scope boost: explicitly attached files (1.45x) > current conversation files (1.2x) > library (1.0x)
+        # Apply scope boost: explicitly attached files (1.45x) > current conversation/linked files (1.2x) > library (1.0x)
         def _apply_scope_boost(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for r in rows:
                 fid = str(r.get("file_id") or "")
                 cid = str(r.get("conversation_id") or "")
                 if fid in attached_set:
                     r["_boost"] = 1.45
-                elif conv_uuid is not None and cid == str(conv_uuid):
+                elif (conv_uuid is not None and cid == str(conv_uuid)) or (fid in linked_set):
                     r["_boost"] = 1.20
                 else:
                     r["_boost"] = 1.0
@@ -417,12 +473,15 @@ class UnifiedKnowledgeRetriever:
         if apply_rerank and self.rerank_client.is_configured and len(items) > 1:
             items = await self._rerank_evidence(cleaned, items, top_n=min(len(items), max(top_k * 2, 12)))
 
-        diverse = mmr_select_evidence(items, top_k=top_k, lambda_mult=0.75, max_per_source=max(3, top_k // 2 + 1))
+        if apply_mmr:
+            selected = mmr_select_evidence(items, top_k=top_k, lambda_mult=0.75, max_per_source=max(3, top_k // 2 + 1))
+        else:
+            selected = items[:top_k]
 
-        if expand_neighbors and diverse:
-            await self._expand_file_neighbors(user_uuid=user_uuid, items=diverse)
+        if expand_neighbors and selected:
+            await self._expand_file_neighbors(user_uuid=user_uuid, items=selected)
 
-        return diverse
+        return selected
 
     async def _file_vector_leg(
         self,
@@ -583,7 +642,7 @@ class UnifiedKnowledgeRetriever:
                 FROM file_chunks fc
                 INNER JOIN conversation_files cf ON cf.id = fc.file_id AND cf.status = 'ready'
                 WHERE fc.user_id = :uid
-                  AND word_similarity(:q, fc.content) >= 0.16
+                  AND :q <% fc.content
             """
             params: dict[str, Any] = {"uid": user_uuid, "q": query, "lim": limit}
             if file_uuids:
@@ -594,7 +653,7 @@ class UnifiedKnowledgeRetriever:
                     sql += " AND fc.file_id = ANY(:fids)"
                     params["fids"] = file_uuids
             sql += " ORDER BY word_similarity(:q, fc.content) DESC LIMIT :lim"
-            rows = await self.db.fetch_all(sql, params)
+            rows = await self.db.fetch_all(sql, params, trgm_threshold=0.16)
             return [self._parse_file_row(r) for r in rows]
         except Exception as exc:
             if "section_path" in str(exc) or "chunk_meta" in str(exc):
@@ -607,14 +666,14 @@ class UnifiedKnowledgeRetriever:
                         FROM file_chunks fc
                         INNER JOIN conversation_files cf ON cf.id = fc.file_id AND cf.status = 'ready'
                         WHERE fc.user_id = :uid
-                          AND word_similarity(:q, fc.content) >= 0.16
+                          AND :q <% fc.content
                     """
                     params = {"uid": user_uuid, "q": query, "lim": limit}
                     if file_uuids:
                         sql += " AND fc.file_id = ANY(:fids)"
                         params["fids"] = file_uuids
                     sql += " ORDER BY word_similarity(:q, fc.content) DESC LIMIT :lim"
-                    return [self._parse_file_row(r) for r in await self.db.fetch_all(sql, params)]
+                    return [self._parse_file_row(r) for r in await self.db.fetch_all(sql, params, trgm_threshold=0.16)]
                 except Exception:
                     return []
             logger.debug("File pg_trgm leg skipped: %s", exc)
@@ -681,42 +740,51 @@ class UnifiedKnowledgeRetriever:
         if not targets:
             return
 
-        # Fetch neighbors per unique file_id in minimal queries
-        by_file: dict[uuid.UUID, set[int]] = {}
+        # Fetch all neighbor chunks across files in a single batched query (eliminates N+1)
+        all_fids: list[uuid.UUID] = []
+        seen_fids: set[uuid.UUID] = set()
+        all_idxs: set[int] = set()
+        wanted_pairs: set[tuple[str, int]] = set()
         for _, fid, cidx in targets:
-            idx_set = by_file.setdefault(fid, set())
+            if fid not in seen_fids:
+                seen_fids.add(fid)
+                all_fids.append(fid)
             if cidx > 0:
-                idx_set.add(cidx - 1)
-            idx_set.add(cidx + 1)
+                all_idxs.add(cidx - 1)
+                wanted_pairs.add((str(fid), cidx - 1))
+            all_idxs.add(cidx + 1)
+            wanted_pairs.add((str(fid), cidx + 1))
 
         neighbor_map: dict[tuple[str, int], tuple[str, str]] = {}
-        for fid, idx_set in by_file.items():
+        try:
+            rows = await self.db.fetch_all(
+                """
+                SELECT file_id, chunk_index, content, COALESCE(section_path, '')
+                FROM file_chunks
+                WHERE user_id = :uid AND file_id = ANY(:fids) AND chunk_index = ANY(:idxs)
+                """,
+                {"uid": user_uuid, "fids": all_fids, "idxs": sorted(all_idxs)},
+            )
+            for r in rows:
+                pair = (str(r[0]), int(r[1]))
+                if pair in wanted_pairs:
+                    neighbor_map[pair] = (str(r[2] or ""), str(r[3] or ""))
+        except Exception:
             try:
                 rows = await self.db.fetch_all(
                     """
-                    SELECT chunk_index, content, COALESCE(section_path, '')
+                    SELECT file_id, chunk_index, content
                     FROM file_chunks
-                    WHERE user_id = :uid AND file_id = :fid AND chunk_index = ANY(:idxs)
+                    WHERE user_id = :uid AND file_id = ANY(:fids) AND chunk_index = ANY(:idxs)
                     """,
-                    {"uid": user_uuid, "fid": fid, "idxs": sorted(idx_set)},
+                    {"uid": user_uuid, "fids": all_fids, "idxs": sorted(all_idxs)},
                 )
                 for r in rows:
-                    neighbor_map[(str(fid), int(r[0]))] = (str(r[1] or ""), str(r[2] or ""))
+                    pair = (str(r[0]), int(r[1]))
+                    if pair in wanted_pairs:
+                        neighbor_map[pair] = (str(r[2] or ""), "")
             except Exception:
-                # Legacy schema fallback without section_path
-                try:
-                    rows = await self.db.fetch_all(
-                        """
-                        SELECT chunk_index, content
-                        FROM file_chunks
-                        WHERE user_id = :uid AND file_id = :fid AND chunk_index = ANY(:idxs)
-                        """,
-                        {"uid": user_uuid, "fid": fid, "idxs": sorted(idx_set)},
-                    )
-                    for r in rows:
-                        neighbor_map[(str(fid), int(r[0]))] = (str(r[1] or ""), "")
-                except Exception:
-                    continue
+                return
 
         for item, fid, cidx in targets:
             cur_section = str(item.metadata.get("section_path") or "")
@@ -815,6 +883,7 @@ class UnifiedKnowledgeRetriever:
         top_k: int = 8,
         rrf_k: int = 60,
         apply_rerank: bool = True,
+        apply_mmr: bool = True,
         q_vec_lit: str | None = None,
     ) -> list[EvidenceItem]:
         cleaned = (query or "").strip()
@@ -899,7 +968,9 @@ class UnifiedKnowledgeRetriever:
         if apply_rerank and self.rerank_client.is_configured and len(items) > 1:
             items = await self._rerank_evidence(cleaned, items, top_n=min(len(items), max(top_k * 2, 12)))
 
-        return mmr_select_evidence(items, top_k=top_k, lambda_mult=0.75, max_per_source=top_k)
+        if apply_mmr:
+            return mmr_select_evidence(items, top_k=top_k, lambda_mult=0.75, max_per_source=top_k)
+        return items[:top_k]
 
     async def _memory_vector_leg(
         self,
@@ -1002,7 +1073,8 @@ class UnifiedKnowledgeRetriever:
                   AND (
                       me.content ILIKE :pat ESCAPE '\\'
                       OR me.title ILIKE :pat ESCAPE '\\'
-                      OR word_similarity(:q, COALESCE(me.title, '') || ' ' || me.content) >= 0.14
+                      OR :q <% me.content
+                      OR :q <% COALESCE(me.title, '')
                   )
                 ORDER BY
                     CASE WHEN me.title ILIKE :pat ESCAPE '\\' OR me.content ILIKE :pat ESCAPE '\\' THEN 0 ELSE 1 END,
@@ -1010,7 +1082,11 @@ class UnifiedKnowledgeRetriever:
                     me.updated_at DESC
                 LIMIT :lim
             """
-            rows = await self.db.fetch_all(sql, {**base_params, "q": query, "pat": like_pat, "lim": limit})
+            rows = await self.db.fetch_all(
+                sql,
+                {**base_params, "q": query, "pat": like_pat, "lim": limit},
+                trgm_threshold=0.14,
+            )
             return [self._parse_memory_row(r) for r in rows]
         except Exception:
             try:
@@ -1102,6 +1178,7 @@ class UnifiedKnowledgeRetriever:
         top_k: int = 6,
         rrf_k: int = 60,
         apply_rerank: bool = True,
+        apply_mmr: bool = True,
         q_vec_lit: str | None = None,
     ) -> list[EvidenceItem]:
         cleaned = (query or "").strip()
@@ -1194,7 +1271,9 @@ class UnifiedKnowledgeRetriever:
         if apply_rerank and self.rerank_client.is_configured and len(items) > 1:
             items = await self._rerank_evidence(cleaned, items, top_n=min(len(items), max(top_k * 2, 10)))
 
-        return mmr_select_evidence(items, top_k=top_k, lambda_mult=0.75, max_per_source=2)
+        if apply_mmr:
+            return mmr_select_evidence(items, top_k=top_k, lambda_mult=0.75, max_per_source=2)
+        return items[:top_k]
 
     async def _episode_vector_leg(
         self,
@@ -1271,14 +1350,14 @@ class UnifiedKnowledgeRetriever:
                        e.topic, e.summary, e.key_facts, e.entities, e.start_msg_id, e.ended_at
                 FROM conversation_episodes e
                 WHERE e.user_id = :uid
-                  AND word_similarity(:q, COALESCE(e.topic, '') || ' ' || COALESCE(e.summary, '')) >= 0.16
+                  AND (:q <% COALESCE(e.summary, '') OR :q <% COALESCE(e.topic, ''))
             """
             params: dict[str, Any] = {"uid": user_uuid, "q": query, "lim": limit}
             if scope in ("side", "main"):
                 sql += " AND e.conversation_kind = :kind"
                 params["kind"] = scope
             sql += " ORDER BY word_similarity(:q, COALESCE(e.topic, '') || ' ' || COALESCE(e.summary, '')) DESC, e.ended_at DESC NULLS LAST LIMIT :lim"
-            return [self._parse_episode_row(r) for r in await self.db.fetch_all(sql, params)]
+            return [self._parse_episode_row(r) for r in await self.db.fetch_all(sql, params, trgm_threshold=0.16)]
         except Exception as exc:
             logger.debug("Episode trgm leg skipped: %s", exc)
             return []
@@ -1450,7 +1529,7 @@ class UnifiedKnowledgeRetriever:
                 FROM message_chunks mc
                 INNER JOIN conversations c ON c.id = mc.conversation_id
                 WHERE mc.user_id = :uid
-                  AND word_similarity(:q, mc.content) >= 0.16
+                  AND :q <% mc.content
             """
             params: dict[str, Any] = {"uid": user_uuid, "q": query, "lim": limit}
             if scope in ("side", "main"):
@@ -1460,7 +1539,7 @@ class UnifiedKnowledgeRetriever:
                 sql += " AND mc.conversation_id <> :excl"
                 params["excl"] = excl_uuid
             sql += " ORDER BY word_similarity(:q, mc.content) DESC, mc.created_at DESC LIMIT :lim"
-            return [self._parse_turn_row(r) for r in await self.db.fetch_all(sql, params)]
+            return [self._parse_turn_row(r) for r in await self.db.fetch_all(sql, params, trgm_threshold=0.16)]
         except Exception as exc:
             logger.debug("Turn trgm leg skipped: %s", exc)
             return []
@@ -1545,7 +1624,7 @@ class UnifiedKnowledgeRetriever:
                   AND (
                       d.title ILIKE :pat ESCAPE '\\'
                       OR d.summary ILIKE :pat ESCAPE '\\'
-                      OR word_similarity(:q, d.summary) >= 0.16
+                      OR :q <% d.summary
                   )
             """
             params: dict[str, Any] = {"uid": user_uuid, "q": query, "pat": like_pat, "lim": limit}
@@ -1553,7 +1632,7 @@ class UnifiedKnowledgeRetriever:
                 sql += " AND d.conversation_id <> :excl"
                 params["excl"] = excl_uuid
             sql += " ORDER BY word_similarity(:q, d.summary) DESC, d.last_message_at DESC NULLS LAST LIMIT :lim"
-            return [self._parse_digest_row(r) for r in await self.db.fetch_all(sql, params)]
+            return [self._parse_digest_row(r) for r in await self.db.fetch_all(sql, params, trgm_threshold=0.16)]
         except Exception:
             try:
                 sql = """
@@ -1817,6 +1896,7 @@ class UnifiedKnowledgeRetriever:
                             top_k=per_source_k,
                             expand_neighbors=False,
                             apply_rerank=False,
+                            apply_mmr=False,
                             q_vec_lit=q_vec_lit,
                         )
                     )
@@ -1828,6 +1908,7 @@ class UnifiedKnowledgeRetriever:
                             collection=collection,
                             top_k=per_source_k,
                             apply_rerank=False,
+                            apply_mmr=False,
                             q_vec_lit=q_vec_lit,
                         )
                     )
@@ -1840,6 +1921,7 @@ class UnifiedKnowledgeRetriever:
                             exclude_conversation_id=conversation_id if exclude_current_chat else None,
                             top_k=per_source_k,
                             apply_rerank=False,
+                            apply_mmr=False,
                             q_vec_lit=q_vec_lit,
                         )
                     )

@@ -45,6 +45,9 @@ class AgentState(TypedDict, total=False):
     rag_scope: dict[str, Any]
     rag_evidence: list[dict[str, Any]]
     rag_diagnostics: dict[str, Any]
+    citations: list[dict[str, Any]]
+    current_time_str: str
+    async_memory_extract: bool
     memory_extracted: bool
     final_output: str
 
@@ -52,6 +55,7 @@ class AgentState(TypedDict, total=False):
 class SubagentState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     role: str
+    parent_call_id: str
     task: str
     context: str
     result: str

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import secrets
 import uuid
@@ -7,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
+from fastapi import Request
 
 from app.core.config import get_settings
 from app.core.redis import get_redis
@@ -30,6 +32,37 @@ def verify_password(password: str, password_hash: str) -> bool:
         return _hasher.verify(password_hash, password)
     except VerifyMismatchError:
         return False
+
+
+async def hash_password_async(password: str) -> str:
+    """Run CPU-heavy Argon2id hashing off the asyncio event loop."""
+    return await asyncio.to_thread(hash_password, password)
+
+
+async def verify_password_async(password: str, password_hash: str) -> bool:
+    """Run CPU-heavy Argon2id verification off the asyncio event loop."""
+    return await asyncio.to_thread(verify_password, password, password_hash)
+
+
+def get_client_ip(request: Request | None) -> str | None:
+    """Resolve client IP respecting ``FORWARDED_ALLOW_IPS`` reverse-proxy trust list."""
+    if request is None:
+        return None
+    direct_host = request.client.host if request.client else None
+    settings = get_settings()
+    raw_trusted = (settings.forwarded_allow_ips or "").strip()
+    trusted = {h.strip() for h in raw_trusted.split(",") if h.strip()}
+    trust_forwarded = "*" in trusted or (direct_host is not None and direct_host in trusted)
+    if trust_forwarded:
+        xff = (request.headers.get("x-forwarded-for") or "").strip()
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first:
+                return first[:64]
+        xri = (request.headers.get("x-real-ip") or "").strip()
+        if xri:
+            return xri[:64]
+    return direct_host
 
 
 def create_access_token(
@@ -104,3 +137,23 @@ async def revoke_session(session_id: uuid.UUID | str) -> None:
 
 async def is_session_revoked(session_id: uuid.UUID | str) -> bool:
     return bool(await get_redis().exists(session_revoked_key(session_id)))
+
+
+async def are_sessions_revoked(session_ids: list[uuid.UUID | str]) -> set[str]:
+    """Batch check revoked session IDs using Redis MGET (falls back cleanly on MemoryRedis)."""
+    if not session_ids:
+        return set()
+    str_ids = [str(sid) for sid in session_ids]
+    keys = [session_revoked_key(sid) for sid in str_ids]
+    try:
+        r = get_redis()
+        if hasattr(r, "mget"):
+            vals = await r.mget(keys)
+            return {sid for sid, val in zip(str_ids, vals) if val is not None}
+        revoked: set[str] = set()
+        for sid in str_ids:
+            if await is_session_revoked(sid):
+                revoked.add(sid)
+        return revoked
+    except Exception:
+        return set()

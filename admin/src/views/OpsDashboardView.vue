@@ -8,6 +8,8 @@ import type {
   OpsAlertRule,
   OpsAlertsResponse,
   OpsInspection,
+  OpsRagDlqItem,
+  OpsRagDlqResponse,
   OpsRagHealth,
 } from "../types";
 import BaseBadge from "../components/ui/BaseBadge.vue";
@@ -24,6 +26,10 @@ const ragHealth = ref<OpsRagHealth | null>(null);
 const loading = ref(false);
 const evaluating = ref(false);
 const backfilling = ref(false);
+const dlqModalOpen = ref(false);
+const dlqLoading = ref(false);
+const dlqBusy = ref(false);
+const dlqItems = ref<OpsRagDlqItem[]>([]);
 const autoRefresh = ref(false);
 const error = ref<string | null>(null);
 const toast = ref<string | null>(null);
@@ -101,6 +107,46 @@ async function triggerRagBackfill() {
     error.value = readableError(err);
   } finally {
     backfilling.value = false;
+  }
+}
+
+async function openRagDlq() {
+  dlqModalOpen.value = true;
+  dlqLoading.value = true;
+  try {
+    const res = await api.get<OpsRagDlqResponse>("/admin/ops/rag/dlq?limit=50");
+    dlqItems.value = res.items ?? [];
+  } catch (err) {
+    error.value = readableError(err);
+  } finally {
+    dlqLoading.value = false;
+  }
+}
+
+async function replayRagDlq() {
+  dlqBusy.value = true;
+  try {
+    const res = await api.post<{ replayed: number }>("/admin/ops/rag/dlq/replay?limit=50", {});
+    showToast(`已重放 ${res.replayed} 条死信任务到 RAG 队列`);
+    await Promise.all([loadAll(), openRagDlq()]);
+  } catch (err) {
+    error.value = readableError(err);
+  } finally {
+    dlqBusy.value = false;
+  }
+}
+
+async function purgeRagDlq() {
+  dlqBusy.value = true;
+  try {
+    const res = await api.delete<{ purged: number }>("/admin/ops/rag/dlq");
+    showToast(`已清空 ${res.purged} 条死信任务`);
+    dlqItems.value = [];
+    await loadAll();
+  } catch (err) {
+    error.value = readableError(err);
+  } finally {
+    dlqBusy.value = false;
   }
 }
 
@@ -379,18 +425,28 @@ onBeforeUnmount(() => {
             </span>
           </p>
         </div>
-        <BaseButton
-          variant="secondary"
-          size="sm"
-          :loading="backfilling"
-          :disabled="!ragHealth.embedding_enabled"
-          @click="triggerRagBackfill"
-        >
-          触发存量回填
-        </BaseButton>
+        <div class="flex flex-wrap items-center gap-2">
+          <BaseButton
+            v-if="ragHealth.queue.dlq > 0"
+            variant="secondary"
+            size="sm"
+            @click="openRagDlq"
+          >
+            查看 DLQ ({{ ragHealth.queue.dlq }})
+          </BaseButton>
+          <BaseButton
+            variant="secondary"
+            size="sm"
+            :loading="backfilling"
+            :disabled="!ragHealth.embedding_enabled"
+            @click="triggerRagBackfill"
+          >
+            触发存量回填
+          </BaseButton>
+        </div>
       </div>
 
-      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <div
           v-for="tbl in ragHealth.tables"
           :key="tbl.key"
@@ -789,6 +845,42 @@ onBeforeUnmount(() => {
       <template #footer>
         <BaseButton variant="secondary" @click="stopTarget = null">取消</BaseButton>
         <BaseButton variant="danger" :loading="stopLoading" @click="confirmStopRun">确认终止</BaseButton>
+      </template>
+    </BaseModal>
+
+    <!-- RAG 死信队列 (DLQ) 管理弹窗 -->
+    <BaseModal :open="dlqModalOpen" title="RAG 死信队列 (DLQ)" @close="dlqModalOpen = false">
+      <div class="space-y-3">
+        <div v-if="dlqLoading" class="py-6 text-center text-[13px] text-fg-faint">正在加载死信任务…</div>
+        <div v-else-if="!dlqItems.length" class="py-6 text-center text-[13px] text-fg-faint">
+          死信队列为空
+        </div>
+        <div v-else class="max-h-80 space-y-2 overflow-y-auto pr-1">
+          <div
+            v-for="(item, idx) in dlqItems"
+            :key="item.id || idx"
+            class="rounded-xl border border-line bg-canvas p-3 text-[12px]"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-medium text-fg">{{ item.job_type || "unknown_job" }}</span>
+              <span class="text-[11px] text-fg-faint">重试 {{ item.attempts ?? 0 }} 次</span>
+            </div>
+            <p v-if="item.error" class="mt-1 break-words text-danger">{{ item.error }}</p>
+            <pre
+              v-if="item.payload"
+              class="mt-1.5 max-h-24 overflow-auto rounded bg-surface p-1.5 font-mono text-[11px] text-fg-muted"
+            >{{ JSON.stringify(item.payload) }}</pre>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <BaseButton variant="secondary" @click="dlqModalOpen = false">关闭</BaseButton>
+        <BaseButton variant="danger" :loading="dlqBusy" :disabled="!dlqItems.length" @click="purgeRagDlq">
+          清空死信
+        </BaseButton>
+        <BaseButton :loading="dlqBusy" :disabled="!dlqItems.length" @click="replayRagDlq">
+          全部重放
+        </BaseButton>
       </template>
     </BaseModal>
   </div>

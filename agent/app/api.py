@@ -256,14 +256,19 @@ def create_app(
         run_id = body.run_id or uuid.uuid4().hex
         eff_idemp = (idempotency_key or body.idempotency_key or "").strip()
 
-        # Atomic idempotency claim via SET NX
+        # Atomic idempotency claim via SET NX (with brief wait for in-flight request 1 to persist meta)
         if eff_idemp:
             idemp_key = f"agent:idemp:{eff_idemp}"
             claimed = await redis.set(idemp_key, run_id, ex=3600, nx=True)
             if not claimed:
                 existing_id = await redis.get(idemp_key)
                 if existing_id:
-                    existing_meta = await load_run_meta(redis, existing_id)
+                    existing_meta = None
+                    for _ in range(4):
+                        existing_meta = await load_run_meta(redis, existing_id)
+                        if existing_meta is not None:
+                            break
+                        await asyncio.sleep(0.05)
                     if existing_meta is not None:
                         return {
                             "id": existing_id,
@@ -381,9 +386,27 @@ def create_app(
         else:
             resume_payload = {"choice": body.choice, "approved": body.approved}
 
+        prev_status = meta.get("status")
+        prev_controls = list(meta.get("pending_controls") or [])
         meta["status"] = "running"
         meta["pending_controls"] = []
         meta["heartbeat_at"] = time.time()
+        try:
+            await app.state.arq.enqueue_job(
+                "resume_run_job",
+                run_id,
+                resume_payload,
+                _job_id=f"resume:{run_id}:g{current_gen}",
+            )
+        except Exception:
+            meta["status"] = prev_status
+            meta["pending_controls"] = prev_controls
+            try:
+                await redis.delete(resume_lock_key)
+            except Exception:
+                pass
+            raise
+
         entry_id = await publish_event(
             redis,
             run_id,
@@ -399,13 +422,6 @@ def create_app(
         if entry_id:
             meta["last_event_id"] = entry_id
         await save_run_meta(redis, run_id, meta, ttl_seconds=s.run_state_ttl_seconds)
-
-        await app.state.arq.enqueue_job(
-            "resume_run_job",
-            run_id,
-            resume_payload,
-            _job_id=f"resume:{run_id}:g{current_gen}",
-        )
         return {"id": run_id, "run_id": run_id, "status": "running"}
 
     @app.post("/v1/runs/{run_id}/cancel", dependencies=[Depends(verify_agent_token)])
@@ -577,13 +593,14 @@ def create_app(
         try:
             checkpointer = AsyncPostgresSaver(pool)
             await checkpointer.adelete_thread(thread_id)
-            # Also clean up per-run scoped checkpoints ("{thread_id}:{run_id}")
-            prefix = f"{thread_id}:%"
+            # Also clean up per-run scoped checkpoints ("{thread_id}:{run_id}") with escaped LIKE wildcards
+            escaped_tid = thread_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            prefix = f"{escaped_tid}:%"
             async with pool.connection() as conn:
                 async with conn.cursor() as cur:
                     for tbl in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
                         try:
-                            await cur.execute(f"DELETE FROM {tbl} WHERE thread_id LIKE %s", (prefix,))
+                            await cur.execute(f"DELETE FROM {tbl} WHERE thread_id LIKE %s ESCAPE '\\\\'", (prefix,))
                         except Exception:
                             pass
         except Exception as exc:

@@ -34,7 +34,7 @@ async def list_my_posts(
     bookmarked_only: bool = Query(default=False),
     collection_id: uuid.UUID | None = Query(default=None),
     post_kind: str | None = Query(default=None),
-    cursor: datetime | None = Query(default=None),
+    cursor: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=50),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

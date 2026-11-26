@@ -70,6 +70,7 @@ data class CreditStatus(
     @SerialName("tokens_per_credit") val tokensPerCredit: Long = 5000,
     val weekly: CreditWindow = CreditWindow(),
     @SerialName("five_hour") val fiveHour: CreditWindow = CreditWindow(),
+    @SerialName("bonus_credits") val bonusCredits: Double = 0.0,
     val remaining: Double = 0.0,
     val overdrawn: Boolean = false,
     val plan: MembershipPlan = MembershipPlan(tier = "free", label = "Free"),
@@ -157,7 +158,12 @@ data class ConversationSearchHit(
 @Serializable
 data class ReasoningTool(
     val name: String,
+    val label: String? = null,
+    @SerialName("ui_kind") val uiKind: String? = null,
+    val summary: String? = null,
     @SerialName("call_id") val callId: String? = null,
+    @SerialName("parent_call_id") val parentCallId: String? = null,
+    @SerialName("subagent_role") val subagentRole: String? = null,
     val args: String? = null,
     val result: String? = null,
     val status: String? = null,

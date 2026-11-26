@@ -5,13 +5,16 @@ import logging
 import time
 from typing import Any
 
+from arq import create_pool
 from arq.connections import RedisSettings
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import Redis
 
 from app.core.config import get_settings
-from app.core.models import aclose_shared_http_clients
+from app.core.models import EmbeddingClient, ModelRouter, RerankClient, aclose_shared_http_clients
+from app.graph.builder import build_agent_graph, extract_turn_memory_standalone
+from app.memory.store import MemoryManager
 from app.runner import (
     ACTIVE_RUNS_SET,
     TERMINAL_RUN_STATUSES,
@@ -85,6 +88,7 @@ async def startup(ctx: dict[str, Any]) -> None:
         max_connections=settings.redis_max_connections,
         socket_timeout=settings.redis_socket_timeout,
     )
+    arq_pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
     pool = AsyncConnectionPool(
         conninfo=settings.psycopg_database_url,
         min_size=1,
@@ -97,16 +101,20 @@ async def startup(ctx: dict[str, Any]) -> None:
     checkpointer = AsyncPostgresSaver(pool)
     await checkpointer.setup()
 
-    # MemoryManager now uses PostgreSQL `memory_entries` as single source of truth (store=None).
+    # Precompile LangGraph ONCE per worker instead of rebuilding 3 StateGraphs on every turn!
+    compiled_graph = build_agent_graph(checkpointer=checkpointer, store=None)
+
     ctx["settings"] = settings
     ctx["redis"] = redis
+    ctx["arq"] = arq_pool
     ctx["pool"] = pool
     ctx["checkpointer"] = checkpointer
+    ctx["graph"] = compiled_graph
     ctx["store"] = None
     ctx["active_tasks"] = set()
     ctx["reaper_task"] = asyncio.create_task(_heartbeat_and_reaper_loop(ctx))
     await redis.set(WORKER_HEARTBEAT_KEY, str(time.time()), ex=60)
-    logger.info("Whitz agent arq worker initialized (single-source PG memory + orphan reaper enabled)")
+    logger.info("Whitz agent arq worker initialized (precompiled graph + async memory extractor + orphan reaper)")
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
@@ -126,6 +134,9 @@ async def shutdown(ctx: dict[str, Any]) -> None:
         await asyncio.gather(*list(active_tasks), return_exceptions=True)
 
     await aclose_shared_http_clients()
+    arq_pool = ctx.get("arq")
+    if arq_pool is not None:
+        await arq_pool.aclose()
     redis = ctx.get("redis")
     if redis is not None:
         await redis.aclose()
@@ -149,6 +160,9 @@ async def execute_run_job(ctx: dict[str, Any], run_id: str, payload: dict[str, A
             checkpointer=ctx.get("checkpointer"),
             store=ctx.get("store"),
             settings=ctx.get("settings"),
+            compiled_graph=ctx.get("graph"),
+            arq_pool=ctx.get("arq"),
+            async_memory_extract=True,
         )
     finally:
         if task is not None:
@@ -169,14 +183,44 @@ async def resume_run_job(ctx: dict[str, Any], run_id: str, resume_payload: Any) 
             checkpointer=ctx.get("checkpointer"),
             store=ctx.get("store"),
             settings=ctx.get("settings"),
+            compiled_graph=ctx.get("graph"),
+            arq_pool=ctx.get("arq"),
+            async_memory_extract=True,
         )
     finally:
         if task is not None:
             active_tasks.discard(task)
 
 
+async def extract_turn_memory_job(ctx: dict[str, Any], job_payload: dict[str, Any]) -> bool:
+    """Off-critical-path post-turn memory extraction & consolidation job (eliminates 2-10s tail lag)."""
+    settings = ctx.get("settings") or get_settings()
+    redis = ctx.get("redis")
+    pool = ctx.get("pool")
+    emb_client = EmbeddingClient(settings=settings, redis_client=redis)
+    rerank_client = RerankClient(settings=settings, redis_client=redis)
+    router = ModelRouter(settings=settings, redis_client=redis)
+    manager = MemoryManager(
+        store=ctx.get("store"),
+        pool=pool,
+        embedding_client=emb_client,
+        rerank_client=rerank_client,
+    )
+    return await extract_turn_memory_standalone(
+        user_id=str(job_payload.get("user_id") or ""),
+        agent_namespace=str(job_payload.get("agent_namespace") or ""),
+        conversation_id=str(job_payload.get("conversation_id") or "") or None,
+        user_text=str(job_payload.get("user_text") or ""),
+        assistant_text=str(job_payload.get("assistant_text") or ""),
+        memory_index=str(job_payload.get("memory_index") or ""),
+        memory_require_confirm=bool(job_payload.get("memory_require_confirm", False)),
+        manager=manager,
+        router=router,
+    )
+
+
 class WorkerSettings:
-    functions = [execute_run_job, resume_run_job]
+    functions = [execute_run_job, resume_run_job, extract_turn_memory_job]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

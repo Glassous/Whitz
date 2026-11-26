@@ -17,9 +17,10 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
-from sqlalchemy import desc, func, select
+from sqlalchemy import and_, desc, exists, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.core.config import get_settings
 from app.db.models import (
@@ -49,6 +50,50 @@ AI_POST_KINDS = ("opinion", "digest", "insight", "inspiration")
 _DAILY_SCHEDULER_TASK: asyncio.Task[Any] | None = None
 _INTERACTION_SCHEDULER_TASK: asyncio.Task[Any] | None = None
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+_SHARED_HTTP_CLIENT: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _SHARED_HTTP_CLIENT
+    if _SHARED_HTTP_CLIENT is None or _SHARED_HTTP_CLIENT.is_closed:
+        _SHARED_HTTP_CLIENT = httpx.AsyncClient(
+            timeout=httpx.Timeout(45.0, connect=8.0),
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=8),
+            trust_env=False,
+        )
+    return _SHARED_HTTP_CLIENT
+
+
+async def aclose_shared_client() -> None:
+    global _SHARED_HTTP_CLIENT
+    if _SHARED_HTTP_CLIENT is not None and not _SHARED_HTTP_CLIENT.is_closed:
+        await _SHARED_HTTP_CLIENT.aclose()
+    _SHARED_HTTP_CLIENT = None
+
+
+def encode_post_cursor(created_at: datetime, post_id: uuid.UUID) -> str:
+    ts = created_at.astimezone(timezone.utc) if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+    return f"{ts.isoformat()}|{post_id}"
+
+
+def decode_post_cursor(raw: str | datetime | None) -> tuple[datetime | None, uuid.UUID | None]:
+    if raw is None:
+        return None, None
+    if isinstance(raw, datetime):
+        return raw, None
+    text_val = str(raw).strip()
+    if not text_val:
+        return None, None
+    if "|" in text_val:
+        ts_part, id_part = text_val.split("|", 1)
+        try:
+            return datetime.fromisoformat(ts_part), uuid.UUID(id_part)
+        except ValueError:
+            pass
+    try:
+        return datetime.fromisoformat(text_val), None
+    except ValueError:
+        return None, None
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 
@@ -202,11 +247,11 @@ async def _call_llm_json(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=8.0), trust_env=False) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code >= 400:
-            raise PostServiceError(502, f"模型调用失败 ({resp.status_code})")
-        data = resp.json()
+    client = _get_http_client()
+    resp = await client.post(url, headers=headers, json=payload)
+    if resp.status_code >= 400:
+        raise PostServiceError(502, f"模型调用失败 ({resp.status_code})")
+    data = resp.json()
     choices = data.get("choices") if isinstance(data, dict) else None
     msg = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
     raw_content = _content_value((msg or {}).get("content"))
@@ -247,6 +292,7 @@ async def _gather_memory_snapshot(
         (
             await db.execute(
                 select(MemoryEntry)
+                .options(defer(MemoryEntry.embedding))
                 .where(MemoryEntry.user_id == user_id)
                 .order_by(
                     MemoryEntry.is_pinned.desc(),
@@ -275,11 +321,48 @@ async def _gather_memory_snapshot(
     return total, len(active_pairs), active_pairs
 
 
+async def _count_active_memory_stats(db: AsyncSession, user_id: uuid.UUID) -> tuple[int, int]:
+    """Fast SQL count of non-empty memories and active collections without loading embeddings."""
+    cols = list(
+        (
+            await db.execute(
+                select(MemoryCollection.id, MemoryCollection.slug).where(
+                    MemoryCollection.user_id == user_id,
+                    MemoryCollection.enabled.is_(True),
+                )
+            )
+        ).all()
+    )
+    if not cols:
+        return 0, 0
+    enabled_ids = [cid for cid, _ in cols]
+    slug_to_id = {slug: cid for cid, slug in cols}
+    rows = (
+        await db.execute(
+            select(MemoryEntry.collection_id, MemoryEntry.target, func.count(MemoryEntry.id))
+            .where(
+                MemoryEntry.user_id == user_id,
+                func.length(func.btrim(MemoryEntry.content)) > 0,
+            )
+            .group_by(MemoryEntry.collection_id, MemoryEntry.target)
+        )
+    ).all()
+    total = 0
+    active_col_ids: set[uuid.UUID] = set()
+    enabled_set = set(enabled_ids)
+    for col_id, target, cnt in rows:
+        resolved_id = col_id if col_id in enabled_set else slug_to_id.get(memory_service.normalize_slug(target or ""))
+        if resolved_id is not None:
+            total += int(cnt or 0)
+            active_col_ids.add(resolved_id)
+    return total, len(active_col_ids)
+
+
 async def get_user_post_quota_summary(db: AsyncSession, user: User, *, now: datetime | None = None) -> dict[str, Any]:
     tier = membership.effective_tier(user, now)
     plan = membership.plan_for(tier)
     cfg = TIER_POST_QUOTAS.get(tier, TIER_POST_QUOTAS[membership.FREE])
-    total_entries, active_collections, _ = await _gather_memory_snapshot(db, user.id)
+    total_entries, active_collections = await _count_active_memory_stats(db, user.id)
     estimated = (
         compute_daily_post_count(tier, total_entries, active_collections)
         if bool(user.memory_enabled)
@@ -388,7 +471,7 @@ async def list_posts(
     bookmarked_only: bool = False,
     collection_id: uuid.UUID | None = None,
     post_kind: str | None = None,
-    cursor: datetime | None = None,
+    cursor: str | datetime | None = None,
     limit: int = 20,
 ) -> dict[str, Any]:
     page_size = max(1, min(int(limit or 20), 50))
@@ -401,14 +484,17 @@ async def list_posts(
         stmt = stmt.where(Post.source_collection_id == collection_id)
     if post_kind in VALID_POST_KINDS:
         stmt = stmt.where(Post.post_kind == post_kind)
-    if cursor is not None:
-        stmt = stmt.where(Post.created_at < cursor)
+    cursor_ts, cursor_id = decode_post_cursor(cursor)
+    if cursor_ts is not None and cursor_id is not None:
+        stmt = stmt.where(tuple_(Post.created_at, Post.id) < (cursor_ts, cursor_id))
+    elif cursor_ts is not None:
+        stmt = stmt.where(Post.created_at < cursor_ts)
 
     stmt = stmt.order_by(desc(Post.created_at), desc(Post.id)).limit(page_size + 1)
     rows = list((await db.execute(stmt)).scalars().all())
     has_more = len(rows) > page_size
     page_rows = rows[:page_size]
-    next_cursor = page_rows[-1].created_at if has_more and page_rows else None
+    next_cursor = encode_post_cursor(page_rows[-1].created_at, page_rows[-1].id) if has_more and page_rows else None
 
     comments_map = await _load_comments_map(db, [p.id for p in page_rows])
     quota = await get_user_post_quota_summary(db, user)
@@ -1048,13 +1134,46 @@ async def dispatch_daily_ai_posts(
     trigger_hour = int(settings.post_scheduler_trigger_hour)
 
     claimed: list[tuple[uuid.UUID, date]] = []
+    stale_cutoff = current - timedelta(minutes=20)
+    utc_today = current.date()
+    min_local_date = utc_today - timedelta(days=1)
     async with factory() as db:
+        # Recover daily runs stuck in 'running' after a crash so users aren't blocked all day.
+        await db.execute(
+            update(AiPostDailyRun)
+            .where(AiPostDailyRun.status == "running", AiPostDailyRun.created_at < stale_cutoff)
+            .values(status="failed", error="worker_restarted", finished_at=current)
+        )
+        # Allow users previously skipped for empty memory to re-try if they have added memories.
+        has_memory_subq = exists(select(1).where(MemoryEntry.user_id == AiPostDailyRun.user_id))
+        await db.execute(
+            AiPostDailyRun.__table__.delete().where(
+                AiPostDailyRun.status == "skipped_empty_memory",
+                AiPostDailyRun.local_date >= min_local_date,
+                has_memory_subq,
+            )
+        )
+        # Anti-join: skip users who already have a finalized/active run for UTC today or tomorrow.
+        already_ran_subq = exists(
+            select(1).where(
+                and_(
+                    AiPostDailyRun.user_id == User.id,
+                    AiPostDailyRun.local_date >= utc_today,
+                    AiPostDailyRun.status.in_(("completed", "running", "skipped_empty_memory", "skipped_credits")),
+                )
+            )
+        )
         users = list(
             (
                 await db.execute(
                     select(User)
-                    .where(User.is_active.is_(True), User.ai_posts_enabled.is_(True))
+                    .where(
+                        User.is_active.is_(True),
+                        User.ai_posts_enabled.is_(True),
+                        ~already_ran_subq,
+                    )
                     .order_by(User.created_at.asc())
+                    .limit(limit_n * 4)
                 )
             )
             .scalars()
@@ -1081,8 +1200,7 @@ async def dispatch_daily_ai_posts(
             res = await db.execute(stmt)
             if res.rowcount:
                 claimed.append((user.id, local_today))
-        if claimed:
-            await db.commit()
+        await db.commit()
 
     if execute_inline:
         for uid, ldate in claimed:

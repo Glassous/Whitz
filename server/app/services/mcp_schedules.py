@@ -72,6 +72,15 @@ MCP_TOOLS: list[dict[str, Any]] = [
                     "enum": ["auto", "default", "fast", "reasoning"],
                     "default": "auto",
                 },
+                "skill_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "可选：定时任务执行时自动挂载的技能名称列表",
+                },
+                "max_runs": {
+                    "type": "integer",
+                    "description": "可选：最大执行次数上限（达到后自动停止）",
+                },
                 "timezone": {"type": "string", "description": "可选 IANA 时区，默认使用用户当前时区"},
                 "reason": {"type": "string", "description": "向用户解释为何建议创建该定时任务"},
             },
@@ -101,6 +110,8 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "schedule_config": {"type": "object"},
                 "target_mode": {"type": "string", "enum": ["dedicated", "main", "conversation"]},
                 "model_route": {"type": "string", "enum": ["auto", "default", "fast", "reasoning"]},
+                "skill_names": {"type": "array", "items": {"type": "string"}},
+                "max_runs": {"type": "integer"},
                 "timezone": {"type": "string"},
                 "conversation_id": {"type": "string", "description": "当前所在对话 UUID（可选）"},
                 "reason": {"type": "string", "description": "变更说明"},
@@ -205,6 +216,10 @@ async def call_tool(
             "model_route": str(args.get("model_route") or "auto").strip().lower(),
             "timezone": str(args.get("timezone") or user.timezone or "Asia/Shanghai").strip(),
         }
+        if isinstance(args.get("skill_names"), list):
+            payload["skill_names"] = [str(s).strip() for s in args["skill_names"] if str(s).strip()][:10]
+        if isinstance(args.get("max_runs"), int) and args["max_runs"] >= 1:
+            payload["max_runs"] = args["max_runs"]
         if conv_uuid and payload["target_mode"] == "conversation":
             payload["conversation_id"] = str(conv_uuid)
         try:
@@ -237,7 +252,17 @@ async def call_tool(
             return _text_result("错误：action 仅支持 update | pause | resume", is_error=True)
 
         payload: dict[str, Any] = {}
-        for key in ("name", "prompt", "schedule_type", "schedule_config", "target_mode", "model_route", "timezone"):
+        for key in (
+            "name",
+            "prompt",
+            "schedule_type",
+            "schedule_config",
+            "target_mode",
+            "model_route",
+            "skill_names",
+            "max_runs",
+            "timezone",
+        ):
             if args.get(key) is not None:
                 payload[key] = args.get(key)
         try:

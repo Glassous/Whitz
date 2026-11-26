@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -47,9 +48,26 @@ class WhitzChatOpenAI(ChatOpenAI):
 
 VALID_ROUTES = ("auto", "default", "fast", "reasoning", "vision")
 _TRIVIAL_GREETINGS = frozenset({"hi", "hello", "hey", "你好", "您好", "在吗", "谢谢", "感谢", "ok", "好的", "嗯"})
-_UNSUPPORTED_THINKING_MODELS: set[tuple[str, str]] = set()
-_URL_UNSUPPORTED_VISION_MODELS: set[tuple[str, str]] = set()
-_UNSUPPORTED_NATIVE_PDF_MODELS: set[tuple[str, str]] = set()
+_CAPABILITY_CACHE_TTL_SECONDS = 1200.0
+# Process-local TTL caches: (base_url, model) -> expires_monotonic
+_UNSUPPORTED_THINKING_MODELS: dict[tuple[str, str], float] = {}
+_URL_UNSUPPORTED_VISION_MODELS: dict[tuple[str, str], float] = {}
+_UNSUPPORTED_NATIVE_PDF_MODELS: dict[tuple[str, str], float] = {}
+
+
+def _cap_cache_has(cache: dict[tuple[str, str], float], key: tuple[str, str]) -> bool:
+    exp = cache.get(key)
+    if exp is None:
+        return False
+    if time.monotonic() >= exp:
+        cache.pop(key, None)
+        return False
+    return True
+
+
+def _cap_cache_mark(cache: dict[tuple[str, str], float], key: tuple[str, str], ttl: float = _CAPABILITY_CACHE_TTL_SECONDS) -> None:
+    if key[0] or key[1]:
+        cache[key] = time.monotonic() + max(30.0, ttl)
 _COMPLEX_REASONING_RE = re.compile(
     r"(架构|设计方案|深入分析|对比分析|源码|排障|调试|为什么.*失败|推导|证明|算法|复杂度|"
     r"重构|性能优化|数据库设计|sql|系统设计|权衡|trade[- ]?off|benchmark|debug|refactor|"
@@ -245,6 +263,7 @@ class ModelRouter:
         req = (requested_route or "auto").strip().lower()
         msgs = messages or []
         needs_vision = bool(has_images or self._has_image_content(msgs))
+        has_native_files = self._has_native_file_content(msgs)
 
         if req in ("default", "fast", "reasoning", "vision"):
             if needs_vision:
@@ -261,6 +280,9 @@ class ModelRouter:
             ep = self.endpoint_for("vision")
             if ep.model and ep.supports_vision:
                 return "vision"
+            return "default"
+
+        if has_native_files:
             return "default"
 
         hint = (task_hint or "").strip().lower()
@@ -302,12 +324,11 @@ class ModelRouter:
 
     @staticmethod
     def is_thinking_param_unsupported(ep: ModelEndpoint) -> bool:
-        return (ep.base_url, ep.model) in _UNSUPPORTED_THINKING_MODELS
+        return _cap_cache_has(_UNSUPPORTED_THINKING_MODELS, (ep.base_url, ep.model))
 
     @staticmethod
-    def mark_thinking_param_unsupported(ep: ModelEndpoint) -> None:
-        if ep.base_url or ep.model:
-            _UNSUPPORTED_THINKING_MODELS.add((ep.base_url, ep.model))
+    def mark_thinking_param_unsupported(ep: ModelEndpoint, *, ttl: float = _CAPABILITY_CACHE_TTL_SECONDS) -> None:
+        _cap_cache_mark(_UNSUPPORTED_THINKING_MODELS, (ep.base_url, ep.model), ttl=ttl)
 
     @staticmethod
     def is_unsupported_thinking_param_error(exc: Exception) -> bool:
@@ -318,12 +339,17 @@ class ModelRouter:
 
     @staticmethod
     def is_image_url_unsupported(ep: ModelEndpoint) -> bool:
-        return (ep.base_url, ep.model) in _URL_UNSUPPORTED_VISION_MODELS
+        return _cap_cache_has(_URL_UNSUPPORTED_VISION_MODELS, (ep.base_url, ep.model))
 
     @staticmethod
-    def mark_image_url_unsupported(ep: ModelEndpoint) -> None:
-        if ep.base_url or ep.model:
-            _URL_UNSUPPORTED_VISION_MODELS.add((ep.base_url, ep.model))
+    def mark_image_url_unsupported(ep: ModelEndpoint, *, ttl: float = _CAPABILITY_CACHE_TTL_SECONDS) -> None:
+        _cap_cache_mark(_URL_UNSUPPORTED_VISION_MODELS, (ep.base_url, ep.model), ttl=ttl)
+
+    @staticmethod
+    def is_transient_url_expiry_error(exc: Exception) -> bool:
+        """Detect signed-URL 403/404/expired errors that should trigger URL refresh, NOT endpoint blacklisting."""
+        msg = str(exc).lower()
+        return any(k in msg for k in ("403", "forbidden", "expired", "signature", "accessdenied", "access denied"))
 
     @staticmethod
     def is_image_url_fetch_error(exc: Exception) -> bool:
@@ -342,17 +368,68 @@ class ModelRouter:
                 "error while downloading",
             )
         )
-        status_hit = any(k in msg for k in ("400", "422", "timeout", "download", "fetch", "invalid", "failed"))
+        status_hit = any(k in msg for k in ("400", "403", "422", "timeout", "download", "fetch", "invalid", "failed"))
         return url_hit and status_hit
 
     @staticmethod
     def is_native_pdf_unsupported(ep: ModelEndpoint) -> bool:
-        return (ep.base_url, ep.model) in _UNSUPPORTED_NATIVE_PDF_MODELS
+        return _cap_cache_has(_UNSUPPORTED_NATIVE_PDF_MODELS, (ep.base_url, ep.model))
 
     @staticmethod
-    def mark_native_pdf_unsupported(ep: ModelEndpoint) -> None:
-        if ep.base_url or ep.model:
-            _UNSUPPORTED_NATIVE_PDF_MODELS.add((ep.base_url, ep.model))
+    def mark_native_pdf_unsupported(ep: ModelEndpoint, *, ttl: float = _CAPABILITY_CACHE_TTL_SECONDS) -> None:
+        _cap_cache_mark(_UNSUPPORTED_NATIVE_PDF_MODELS, (ep.base_url, ep.model), ttl=ttl)
+
+    @staticmethod
+    def _cap_redis_key(kind: str, ep: ModelEndpoint) -> str:
+        digest = hashlib.sha256(f"{ep.base_url}|{ep.model}".encode("utf-8")).hexdigest()[:24]
+        return f"agent:cap:{kind}:{digest}"
+
+    async def is_capability_unsupported(self, kind: str, ep: ModelEndpoint) -> bool:
+        cache_map = {
+            "thinking": _UNSUPPORTED_THINKING_MODELS,
+            "image_url": _URL_UNSUPPORTED_VISION_MODELS,
+            "native_pdf": _UNSUPPORTED_NATIVE_PDF_MODELS,
+        }
+        cache = cache_map.get(kind)
+        if cache is not None and _cap_cache_has(cache, (ep.base_url, ep.model)):
+            return True
+        if self.redis is not None and (ep.base_url or ep.model):
+            try:
+                if await self.redis.exists(self._cap_redis_key(kind, ep)):
+                    if cache is not None:
+                        _cap_cache_mark(cache, (ep.base_url, ep.model), ttl=300.0)
+                    return True
+            except Exception:
+                pass
+        return False
+
+    async def mark_capability_unsupported(
+        self, kind: str, ep: ModelEndpoint, *, ttl: float = _CAPABILITY_CACHE_TTL_SECONDS
+    ) -> None:
+        cache_map = {
+            "thinking": _UNSUPPORTED_THINKING_MODELS,
+            "image_url": _URL_UNSUPPORTED_VISION_MODELS,
+            "native_pdf": _UNSUPPORTED_NATIVE_PDF_MODELS,
+        }
+        cache = cache_map.get(kind)
+        if cache is not None:
+            _cap_cache_mark(cache, (ep.base_url, ep.model), ttl=ttl)
+        if self.redis is not None and (ep.base_url or ep.model):
+            try:
+                await self.redis.set(self._cap_redis_key(kind, ep), "1", ex=max(60, int(ttl)))
+            except Exception:
+                pass
+
+    @staticmethod
+    def is_transient_provider_error(exc: Exception) -> bool:
+        """Only 5xx / timeout / connection / rate-limit errors should trip the global circuit breaker."""
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code >= 500 or status_code == 429
+        msg = str(exc).lower()
+        if any(code in msg for code in ("error code: 400", "status 400", "400 bad request", "422 ", "invalid_request_error", "context_length_exceeded")):
+            return False
+        return True
 
     @staticmethod
     def is_unsupported_native_pdf_error(exc: Exception) -> bool:
@@ -423,6 +500,8 @@ class ModelRouter:
         if has_images or self._has_image_content(msgs):
             ep = self.endpoint_for("vision")
             return False, ("vision" if (ep.model and ep.supports_vision) else "default"), "multimodal_image"
+        if self._has_native_file_content(msgs):
+            return False, "default", "multimodal_native_file"
 
         user_text = self._last_user_text(msgs)
         if not user_text:
@@ -488,8 +567,10 @@ class ModelRouter:
         except Exception:
             pass
 
-    async def record_failure(self, ep: ModelEndpoint) -> None:
+    async def record_failure(self, ep: ModelEndpoint, exc: Exception | None = None) -> None:
         if self.redis is None:
+            return
+        if exc is not None and not self.is_transient_provider_error(exc):
             return
         threshold = max(1, int(self.settings.model_cb_failure_threshold))
         cooldown = max(5, int(self.settings.model_cb_cooldown_seconds))

@@ -121,8 +121,18 @@ fun derivePlanFromReasoning(blocks: List<ReasoningBlock>): Plan? {
     return if (items.isNotEmpty()) Plan(items = items.values.toList()) else null
 }
 
-fun computeRunningTool(messages: List<Message>): String? =
-    messages.lastOrNull { it.role == "tool" && it.status == "running" }?.toolName
+fun computeRunningTool(
+    messages: List<Message>,
+    reasoning: List<ReasoningBlock> = emptyList(),
+): String? {
+    for (i in reasoning.indices.reversed()) {
+        val active = reasoning[i].tools.lastOrNull { it.status == "running" }
+        if (active != null) {
+            return active.label?.takeIf { it.isNotBlank() } ?: active.name
+        }
+    }
+    return messages.lastOrNull { it.role == "tool" && it.status == "running" }?.toolName
+}
 
 fun computeCurrentStep(plan: Plan?): CurrentStepInfo? {
     val items = plan?.items.orEmpty()
@@ -170,7 +180,7 @@ fun resolveTurnDetails(
     }
 
     val isLive = streaming && isActive
-    val runningTool = if (isLive) computeRunningTool(messages) else null
+    val runningTool = if (isLive) computeRunningTool(messages, reasoning) else null
     return ResolvedTurnDetails(
         turnId = selectedMsg.id,
         plan = plan,
@@ -286,14 +296,14 @@ private val SEARCH_PROVIDER_LABELS = mapOf(
 )
 
 fun toolDisplayName(tool: ReasoningTool): String {
-    val base = toolDisplayName(tool.name)
+    val base = tool.label?.takeIf { it.isNotBlank() } ?: toolDisplayName(tool.name)
     if (tool.name != "web_search") return base
     val resultObj = parsePayloadJson(tool.result) as? JsonObject
     val resProvider = (resultObj?.get("provider") as? JsonPrimitive)?.contentOrNull?.lowercase().orEmpty()
     val argObj = parseArgsJson(tool.args) as? JsonObject
     val argProvider = (argObj?.get("provider") as? JsonPrimitive)?.contentOrNull?.lowercase().orEmpty()
     val providerLabel = SEARCH_PROVIDER_LABELS[resProvider] ?: SEARCH_PROVIDER_LABELS[argProvider]
-    return if (providerLabel != null) "$base · $providerLabel" else base
+    return if (providerLabel != null && !base.contains(providerLabel)) "$base · $providerLabel" else base
 }
 
 private fun JsonElement?.asIdString(): String? =
@@ -447,6 +457,7 @@ fun parseTodoChanges(tool: ReasoningTool): List<String> {
 }
 
 fun formatToolSummary(tool: ReasoningTool): String {
+    tool.summary?.takeIf { it.isNotBlank() }?.let { return it.trim() }
     return when (tool.name) {
         "web_search" -> parseWebSearchQuery(tool)
         "web_extract" -> parseWebSearchItems(tool).firstOrNull()?.title.orEmpty()

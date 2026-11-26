@@ -21,16 +21,20 @@ from app.core.config import get_settings
 from app.core.ratelimit import (
     email_code_addr_limiter,
     email_code_ip_limiter,
+    login_account_limiter,
     login_code_limiter,
+    login_ip_limiter,
+    register_ip_limiter,
     reset_password_limiter,
 )
 from app.core.security import (
     create_access_token,
     generate_agent_key,
     generate_refresh_token,
-    hash_password,
+    get_client_ip,
+    hash_password_async,
     hash_refresh_token,
-    verify_password,
+    verify_password_async,
 )
 from app.db.models import RefreshToken, User
 from app.db.session import get_db
@@ -77,7 +81,7 @@ async def issue_tokens(
 
 
 def _client_ip(request: Request) -> str | None:
-    return request.client.host if request.client else None
+    return get_client_ip(request)
 
 
 def _user_agent(request: Request) -> str | None:
@@ -189,6 +193,9 @@ async def register(
 ) -> TokenResponse:
     email = body.email.strip().lower()
     display_name = body.display_name.strip()
+    client_ip = _client_ip(request) or "unknown"
+    if not await register_ip_limiter.allow(client_ip):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "注册请求过于频繁，请稍后再试")
     existing = await db.execute(select(User).where(User.email == email))
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已注册")
@@ -215,7 +222,7 @@ async def register(
     now = datetime.now(timezone.utc)
     user = User(
         email=email,
-        password_hash=hash_password(body.password),
+        password_hash=await hash_password_async(body.password),
         display_name=display_name,
         agent_namespace=namespace,
         agent_api_key=api_key,
@@ -245,12 +252,15 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
     ident = body.login_id.lower()
+    client_ip = _client_ip(request) or "unknown"
+    if not await login_ip_limiter.allow(client_ip) or not await login_account_limiter.allow(f"{client_ip}:{ident}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "登录尝试过于频繁，请稍后再试")
     if "@" in ident:
         result = await db.execute(select(User).where(User.email == ident))
     else:
         result = await db.execute(select(User).where(func.lower(User.display_name) == ident))
     user = result.scalar_one_or_none()
-    if user is None or not verify_password(body.password, user.password_hash):
+    if user is None or not await verify_password_async(body.password, user.password_hash):
         await audit.record(
             "auth.login_failed",
             actor=user.id if user else None,
@@ -454,7 +464,7 @@ async def reset_password(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
     now = datetime.now(timezone.utc)
-    user.password_hash = hash_password(body.new_password)
+    user.password_hash = await hash_password_async(body.new_password)
     user.token_version = (user.token_version or 0) + 1
     if user.email_verified_at is None:
         user.email_verified_at = now

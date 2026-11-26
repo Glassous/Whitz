@@ -11,6 +11,7 @@ from whitz_rag.embeddings import (
     vector_literal,
 )
 from whitz_rag.retriever import DbAdapter, UnifiedKnowledgeRetriever, mmr_select_evidence, rrf_fuse_rows
+from whitz_rag.tokenizer import estimate_tokens, expand_cjk_bigrams
 from whitz_rag.types import EvidenceItem, RagDiagnostics, RagScope
 
 __all__ = [
@@ -24,6 +25,8 @@ __all__ = [
     "aclose_shared_rag_clients",
     "char_trigrams",
     "escape_like",
+    "estimate_tokens",
+    "expand_cjk_bigrams",
     "fit_embedding",
     "jaccard_sim",
     "mmr_select_evidence",

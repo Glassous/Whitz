@@ -13,6 +13,8 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.metrics import AUDIT_WRITE_FAILURES_TOTAL
+from app.core.security import get_client_ip
 from app.db.models import AuditLog, User
 from app.db.session import SessionLocal
 
@@ -113,7 +115,8 @@ def compute_record_hash(
             _canonical_json(diff),
         ]
     )
-    secret = (get_settings().jwt_secret or "").encode("utf-8")
+    settings = get_settings()
+    secret = (settings.audit_hmac_secret or settings.jwt_secret or "").encode("utf-8")
     if secret:
         return hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -176,7 +179,7 @@ async def record(
     user_agent = None
     request_id = None
     if request is not None:
-        ip = request.client.host if request.client else None
+        ip = get_client_ip(request)
         user_agent = (request.headers.get("user-agent") or "")[:256] or None
         request_id = getattr(request.state, "request_id", None)
 
@@ -238,6 +241,7 @@ async def record(
             db.add(row)
             await db.commit()
     except Exception:
+        AUDIT_WRITE_FAILURES_TOTAL.labels(action=action or "unknown").inc()
         logger.warning("audit write failed action=%s", action, exc_info=True)
 
 

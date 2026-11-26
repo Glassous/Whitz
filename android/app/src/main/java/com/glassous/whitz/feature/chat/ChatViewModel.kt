@@ -220,8 +220,14 @@ class ChatViewModel(
     private var streamJob: Job? = null
     private var pendingPollJob: Job? = null
     private var realtimeJob: Job? = null
+    private var runFinishedSyncJob: Job? = null
     private var unifiedSearchJob: Job? = null
     private val uploadJobs = mutableMapOf<String, Job>()
+
+    private fun cancelActiveUploads() {
+        uploadJobs.values.forEach { it.cancel() }
+        uploadJobs.clear()
+    }
     private var pendingUserTargetId: String? = null
     private var lastEventId: String? = null
     private var openSeq = 0
@@ -314,9 +320,6 @@ class ChatViewModel(
         val main = cached.mainConversation
         if (sortedConvs.isEmpty() && main == null) return
 
-        val lastReasoned = main?.messages?.lastOrNull {
-            it.role == "assistant" && !it.toolPayload?.reasoning.isNullOrEmpty()
-        }
         val lastAssistant = main?.messages?.lastOrNull { it.role == "assistant" }
         _ui.update {
             it.copy(
@@ -328,7 +331,7 @@ class ChatViewModel(
                 currentConvTitle = main?.title ?: it.currentConvTitle,
                 messages = main?.messages ?: it.messages,
                 plan = main?.plan ?: it.plan,
-                reasoning = lastReasoned?.toolPayload?.reasoning ?: it.reasoning,
+                reasoning = lastAssistant?.toolPayload?.reasoning ?: emptyList(),
                 selectedTurnId = lastAssistant?.id ?: it.selectedTurnId,
                 activeAssistantId = lastAssistant?.id ?: it.activeAssistantId,
             )
@@ -468,8 +471,11 @@ class ChatViewModel(
     fun createSideConversation() {
         pendingPollJob?.cancel()
         pendingPollJob = null
+        runFinishedSyncJob?.cancel()
+        runFinishedSyncJob = null
         streamJob?.cancel()
         streamJob = null
+        cancelActiveUploads()
         deltaCoalescer.clear()
         pendingUserTargetId = null
         lastEventId = null
@@ -524,14 +530,18 @@ class ChatViewModel(
         val mySeq = ++openSeq
         pendingPollJob?.cancel()
         pendingPollJob = null
+        runFinishedSyncJob?.cancel()
+        runFinishedSyncJob = null
         streamJob?.cancel()
         streamJob = null
+        cancelActiveUploads()
         deltaCoalescer.clear()
         _ui.update {
             it.copy(
                 isNewSideDraft = false,
                 switchingConversation = true,
                 previewTarget = null,
+                uploads = emptyList(),
                 selectedSkillNames = emptyList(),
             )
         }
@@ -565,14 +575,18 @@ class ChatViewModel(
         val mySeq = ++openSeq
         pendingPollJob?.cancel()
         pendingPollJob = null
+        runFinishedSyncJob?.cancel()
+        runFinishedSyncJob = null
         streamJob?.cancel()
         streamJob = null
+        cancelActiveUploads()
         deltaCoalescer.clear()
         _ui.update {
             it.copy(
                 isNewSideDraft = false,
                 switchingConversation = true,
                 previewTarget = null,
+                uploads = emptyList(),
             )
         }
         viewModelScope.launch {
@@ -600,13 +614,16 @@ class ChatViewModel(
     private fun loadFromConversation(detail: ConversationDetail) {
         pendingPollJob?.cancel()
         pendingPollJob = null
+        runFinishedSyncJob?.cancel()
+        runFinishedSyncJob = null
         streamJob?.cancel()
         streamJob = null
+        val isSwitchingConv = _ui.value.currentConvId != null && _ui.value.currentConvId != detail.id
+        if (isSwitchingConv) {
+            cancelActiveUploads()
+        }
         deltaCoalescer.clear()
         lastEventId = null
-        val lastReasoned = detail.messages.lastOrNull {
-            it.role == "assistant" && !it.toolPayload?.reasoning.isNullOrEmpty()
-        }
         val lastAssistant = detail.messages.lastOrNull { it.role == "assistant" }
         pendingUserTargetId = null
         val hydratedControl = hydratePendingControl(detail.pendingControl)
@@ -621,7 +638,7 @@ class ChatViewModel(
                 messages = detail.messages,
                 stableKeys = emptyMap(),
                 plan = detail.plan,
-                reasoning = lastReasoned?.toolPayload?.reasoning ?: emptyList(),
+                reasoning = lastAssistant?.toolPayload?.reasoning ?: emptyList(),
                 selectedTurnId = lastAssistant?.id,
                 activeRunId = detail.activeRunId,
                 pendingControl = hydratedControl,
@@ -637,6 +654,7 @@ class ChatViewModel(
                 approvingChoice = null,
                 submittingClarify = false,
                 activeAssistantId = lastAssistant?.id,
+                uploads = if (isSwitchingConv) emptyList() else it.uploads,
                 attachedIds = emptyList(),
                 ragPrefetching = false,
                 citations = lastAssistant?.toolPayload?.citations.orEmpty(),
@@ -682,9 +700,9 @@ class ChatViewModel(
     private fun loadConversationPending(targetConvId: String) {
         viewModelScope.launch {
             try {
-                val mem = container.network.api.getMemory()
+                val memPending = container.network.api.getPendingMemory(conversationId = targetConvId)
                 if (_ui.value.currentConvId == targetConvId) {
-                    val filtered = mem.pending.filter {
+                    val filtered = memPending.filter {
                         (it.conversationId == null || it.conversationId == targetConvId) &&
                             (it.status ?: "pending") == "pending"
                     }
@@ -1800,11 +1818,30 @@ class ChatViewModel(
                     }
                 }
             }
+            "message.reset" -> {
+                _ui.update { state ->
+                    val asstId = state.activeAssistantId
+                    if (asstId == null) state
+                    else state.copy(messages = state.messages.map { m -> if (m.id == asstId) m.copy(content = "") else m })
+                }
+            }
+            "context_state.updated" -> {
+                if (_ui.value.contextState != null) {
+                    loadContextState()
+                }
+            }
             "tool.started" -> {
                 val toolName = d.str("tool") ?: "tool"
+                val toolLabel = d.str("label")
+                val toolUiKind = d.str("ui_kind")
+                val toolSummary = d.str("summary")
                 val rawArgs = d["args"]?.let { jsonToPlainString(it) } ?: d.str("preview") ?: ""
                 val explicitMsgId = d.str("message_id")
                 val callId = d.str("call_id")
+                val parentCallId = d.str("parent_call_id")
+                val subagentRole = d.str("subagent_role")
+                val eventStep = d.int("step")
+                val eventTitle = d.str("title") ?: ""
                 _ui.update { state ->
                     val existingMsg = when {
                         explicitMsgId != null -> state.messages.any { it.id == explicitMsgId }
@@ -1829,15 +1866,28 @@ class ChatViewModel(
                         )
                         state.messages + toolMsg
                     }
+                    val activeStep = computeCurrentStep(state.plan)
+                    val resolvedStep = eventStep ?: activeStep?.index
+                    val resolvedTitle = eventTitle.ifBlank { activeStep?.title ?: "" }
                     val blocks = state.reasoning.toMutableList()
-                    val last = blocks.lastOrNull()
-                    val alreadyInTools = callId != null && (last?.tools?.any { it.callId == callId } == true)
-                    if (!alreadyInTools) {
-                        val newTool = ReasoningTool(name = toolName, callId = callId, args = rawArgs, status = "running")
-                        if (last != null && last.step == null) {
+                    val alreadyInAnyBlock = callId != null && blocks.any { b -> b.tools.any { it.callId == callId } }
+                    if (!alreadyInAnyBlock) {
+                        val newTool = ReasoningTool(
+                            name = toolName,
+                            label = toolLabel,
+                            uiKind = toolUiKind,
+                            summary = toolSummary,
+                            callId = callId,
+                            parentCallId = parentCallId,
+                            subagentRole = subagentRole,
+                            args = rawArgs,
+                            status = "running",
+                        )
+                        val last = blocks.lastOrNull()
+                        if (last != null && last.step == resolvedStep) {
                             blocks[blocks.lastIndex] = last.copy(tools = last.tools + newTool)
                         } else {
-                            blocks.add(ReasoningBlock(step = null, tools = listOf(newTool)))
+                            blocks.add(ReasoningBlock(step = resolvedStep, title = resolvedTitle, tools = listOf(newTool)))
                         }
                     }
                     syncReasoningToState(state.copy(messages = nextMessages), blocks)
@@ -1845,11 +1895,13 @@ class ChatViewModel(
             }
             "tool.completed" -> {
                 val toolName = d.str("tool") ?: "tool"
+                val toolLabel = d.str("label")
+                val toolSummary = d.str("summary")
                 val msgId = d.str("message_id")
                 val callId = d.str("call_id")
                 val err = d.str("error")
                 val duration = d.double("duration")
-                val durationMs = d.double("duration_ms")
+                val durationMs = d.double("duration_ms") ?: duration
                 val rawResult = d["result"]?.let { jsonToPlainString(it) } ?: d.str("preview") ?: ""
                 val nextStatus = if (!err.isNullOrBlank()) "failed" else "completed"
 
@@ -1858,7 +1910,8 @@ class ChatViewModel(
                     val nextMsgs = state.messages.map { m ->
                         val isMatch = !matchedMsg && (
                             (msgId != null && m.id == msgId) ||
-                                (msgId == null && m.role == "tool" && m.toolName == toolName && m.status == "running")
+                                (callId != null && m.role == "tool" && m.toolPayload?.callId == callId) ||
+                                (msgId == null && callId == null && m.role == "tool" && m.toolName == toolName && m.status == "running")
                             )
                         if (isMatch) {
                             matchedMsg = true
@@ -1867,7 +1920,7 @@ class ChatViewModel(
                                 status = nextStatus,
                                 toolPayload = prevPayload.copy(
                                     result = d["result"] ?: d["preview"],
-                                    duration = duration,
+                                    duration = durationMs,
                                     error = err,
                                     status = nextStatus,
                                 ),
@@ -1887,6 +1940,8 @@ class ChatViewModel(
                                 updatedTools[j] = t.copy(
                                     status = nextStatus,
                                     result = rawResult,
+                                    label = toolLabel?.takeIf { it.isNotBlank() } ?: t.label,
+                                    summary = toolSummary?.takeIf { it.isNotBlank() } ?: t.summary,
                                     error = err,
                                     durationMs = durationMs ?: t.durationMs,
                                 )
@@ -2443,17 +2498,24 @@ class ChatViewModel(
     }
 
     fun deleteFile(fileId: String) {
-        val convId = _ui.value.currentConvId ?: return
-        if (_ui.value.deletingFileId == fileId) return
+        val state = _ui.value
+        val convId = state.currentConvId
+        if (state.deletingFileId == fileId) return
+        val target = state.files.firstOrNull { it.id == fileId }
+        val inAllScope = state.isMainChat && state.mainFileScope == "all"
         _ui.update { it.copy(deletingFileId = fileId) }
         viewModelScope.launch {
             try {
-                container.network.api.deleteConversationFile(convId, fileId)
-                _ui.update { state ->
-                    state.copy(
+                when {
+                    !inAllScope && convId != null -> container.network.api.deleteConversationFile(convId, fileId)
+                    target?.conversationId != null -> container.network.api.deleteConversationFile(target.conversationId, fileId)
+                    else -> container.network.api.deleteLibraryFile(fileId)
+                }
+                _ui.update { cur ->
+                    cur.copy(
                         deletingFileId = null,
-                        files = state.files.filterNot { it.id == fileId },
-                        attachedIds = state.attachedIds.filterNot { it == fileId },
+                        files = cur.files.filterNot { it.id == fileId },
+                        attachedIds = cur.attachedIds.filterNot { it == fileId },
                     )
                 }
             } catch (t: Throwable) {
@@ -2624,13 +2686,17 @@ class ChatViewModel(
         val mySeq = ++openSeq
         pendingPollJob?.cancel()
         pendingPollJob = null
+        runFinishedSyncJob?.cancel()
+        runFinishedSyncJob = null
         streamJob?.cancel()
         streamJob = null
+        cancelActiveUploads()
         _ui.update {
             it.copy(
                 isNewSideDraft = false,
                 switchingConversation = true,
                 previewTarget = null,
+                uploads = emptyList(),
                 pendingFocusMessageId = messageId,
             )
         }
@@ -2837,19 +2903,26 @@ class ChatViewModel(
     fun saveDeliverableContent(newContent: String, onSaved: (() -> Unit)? = null) {
         val current = _ui.value.deliverablePreview ?: return
         val fileId = current.resolvedFile?.id ?: current.target.fileId
-        val convId = current.resolvedFile?.conversationId ?: current.target.conversationId ?: _ui.value.currentConvId
-        if (fileId.isEmpty() || convId == null || current.saving) return
+        val convId = current.resolvedFile?.conversationId ?: current.target.conversationId
+        if (fileId.isEmpty() || current.saving) return
 
         _ui.update { cur ->
             cur.copy(deliverablePreview = cur.deliverablePreview?.copy(saving = true, saveMessage = null, error = null))
         }
         viewModelScope.launch {
             try {
-                val updated = container.network.api.updateFileContent(
-                    convId,
-                    fileId,
-                    UpdateFileContentRequest(content = newContent),
-                )
+                val updated = if (convId != null) {
+                    container.network.api.updateFileContent(
+                        convId,
+                        fileId,
+                        UpdateFileContentRequest(content = newContent),
+                    )
+                } else {
+                    container.network.api.updateLibraryFileContent(
+                        fileId,
+                        UpdateFileContentRequest(content = newContent),
+                    )
+                }
                 upsertFile(updated)
                 _ui.update { cur ->
                     cur.copy(
@@ -3099,6 +3172,8 @@ class ChatViewModel(
                 val cur = _ui.value
                 if (cur.currentConvId == cid) {
                     if (!runId.isNullOrBlank() && runId != "pending" && !cur.streaming) {
+                        runFinishedSyncJob?.cancel()
+                        runFinishedSyncJob = null
                         viewModelScope.launch {
                             try {
                                 val detail = container.network.api.getConversation(cid)
@@ -3110,10 +3185,19 @@ class ChatViewModel(
                             }
                         }
                     } else if (runId.isNullOrBlank() && cur.streaming && !cur.activeRunId.isNullOrBlank()) {
-                        viewModelScope.launch {
+                        // Debounce 600ms so local SSE `run.completed` wins cleanly without racing into a full reload
+                        val expectedRunId = cur.activeRunId
+                        runFinishedSyncJob?.cancel()
+                        runFinishedSyncJob = viewModelScope.launch {
+                            delay(600L)
+                            val latest = _ui.value
+                            if (latest.currentConvId != cid || !latest.streaming || latest.activeRunId != expectedRunId) {
+                                return@launch
+                            }
                             try {
                                 val detail = container.network.api.getConversation(cid)
-                                if (_ui.value.currentConvId == cid && detail.activeRunId.isNullOrBlank()) {
+                                val after = _ui.value
+                                if (after.currentConvId == cid && after.streaming && detail.activeRunId.isNullOrBlank()) {
                                     loadFromConversation(detail)
                                 }
                             } catch (_: Throwable) {
@@ -3179,6 +3263,18 @@ class ChatViewModel(
                             files = state.files.filterNot { it.id == fileId },
                             attachedIds = state.attachedIds.filterNot { it == fileId },
                         )
+                    }
+                } else if (action == "detached" && fileId != null) {
+                    val targetConv = d.str("conversation_id")
+                    val st = _ui.value
+                    val inAllScope = st.isMainChat && st.mainFileScope == "all"
+                    if (!inAllScope && (targetConv == null || targetConv == st.currentConvId)) {
+                        _ui.update { state ->
+                            state.copy(
+                                files = state.files.filterNot { it.id == fileId },
+                                attachedIds = state.attachedIds.filterNot { it == fileId },
+                            )
+                        }
                     }
                 } else if (action == "indexed" && fileId != null) {
                     _ui.update { state ->

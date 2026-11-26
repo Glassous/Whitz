@@ -8,6 +8,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import func, or_, select, update
@@ -26,6 +27,7 @@ from app.api.schemas import (
     UpdateAssistantRequest,
     UpdatePersonaRequest,
     UpdateProfileRequest,
+    UserCreditLedgerItemOut,
     UserFeedbackCreateRequest,
     UserFeedbackOut,
     UserOut,
@@ -34,14 +36,12 @@ from app.api.schemas import (
 from app.core.config import get_settings
 from app.core.ratelimit import redeem_limiter
 from app.core.security import (
-    hash_password,
-    is_session_revoked,
-    revoke_session,
-    verify_password,
+    hash_password_async,
+    verify_password_async,
 )
 from app.db.models import RefreshToken, User, UserFeedback
 from app.db.session import get_db
-from app.services import audit, membership
+from app.services import audit, membership, sessions_service
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -188,6 +188,16 @@ async def get_my_credits(
     return await membership.status(db, user)
 
 
+@router.get("/me/credits/ledger", response_model=list[UserCreditLedgerItemOut])
+async def get_my_credit_ledger(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    return await membership.list_user_ledger(db, user.id, limit=limit, offset=offset)
+
+
 @router.post("/me/redeem", response_model=CreditStatusOut)
 async def redeem_invite_code(
     body: RedeemRequest,
@@ -252,7 +262,12 @@ async def update_me(
     if "preferred_language" in body.model_fields_set and body.preferred_language:
         user.preferred_language = body.preferred_language
     if "timezone" in body.model_fields_set and body.timezone:
-        user.timezone = body.timezone
+        tz_clean = body.timezone.strip()
+        try:
+            ZoneInfo(tz_clean)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"无效的时区标识: {tz_clean}") from exc
+        user.timezone = tz_clean
     try:
         await db.commit()
     except IntegrityError as exc:
@@ -296,7 +311,7 @@ async def change_password(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    if not verify_password(body.old_password, user.password_hash):
+    if not await verify_password_async(body.old_password, user.password_hash):
         await audit.record(
             "user.password_change_failed",
             actor=user,
@@ -305,14 +320,20 @@ async def change_password(
             request=request,
         )
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "原密码不正确")
-    user.password_hash = hash_password(body.new_password)
-    user.token_version = (user.token_version or 0) + 1
-    await db.execute(
-        update(RefreshToken)
-        .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
-        .values(revoked_at=datetime.now(timezone.utc))
-    )
-    await db.commit()
+    user.password_hash = await hash_password_async(body.new_password)
+    current_sid = getattr(request.state, "session_id", None)
+    if current_sid is not None:
+        # Preserve the current authenticated device while immediately revoking all other devices.
+        await db.commit()
+        await sessions_service.revoke_user_sessions(db, user.id, exclude_session_id=current_sid)
+    else:
+        user.token_version = (user.token_version or 0) + 1
+        await db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
     await audit.record("user.password_change", actor=user, request=request)
 
 
@@ -429,62 +450,8 @@ async def list_my_sessions(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[UserSessionOut]:
-    now = datetime.now(timezone.utc)
-    rows = (
-        await db.execute(
-            select(RefreshToken)
-            .where(
-                RefreshToken.user_id == user.id,
-                RefreshToken.revoked_at.is_(None),
-                RefreshToken.expires_at > now,
-            )
-            .order_by(RefreshToken.created_at.asc())
-        )
-    ).scalars().all()
-
     current_sid = getattr(request.state, "session_id", None)
-    grouped: dict[uuid.UUID, dict] = {}
-    for row in rows:
-        sid = row.session_id or row.family_id or row.id
-        last_used = row.last_used_at or row.created_at
-        existing = grouped.get(sid)
-        if existing is None:
-            grouped[sid] = {
-                "session_id": sid,
-                "user_agent": row.user_agent,
-                "client_ip": row.client_ip,
-                "last_used_at": last_used,
-                "created_at": row.created_at,
-                "expires_at": row.expires_at,
-                "is_current": current_sid is not None and sid == current_sid,
-            }
-        else:
-            if row.created_at < existing["created_at"]:
-                existing["created_at"] = row.created_at
-            if row.expires_at > existing["expires_at"]:
-                existing["expires_at"] = row.expires_at
-            if last_used >= (existing["last_used_at"] or existing["created_at"]):
-                existing["last_used_at"] = last_used
-                if row.user_agent:
-                    existing["user_agent"] = row.user_agent
-                if row.client_ip:
-                    existing["client_ip"] = row.client_ip
-
-    sessions: list[UserSessionOut] = []
-    for sid, item in grouped.items():
-        if await is_session_revoked(sid):
-            continue
-        sessions.append(UserSessionOut(**item))
-
-    sessions.sort(
-        key=lambda s: (
-            1 if s.is_current else 0,
-            s.last_used_at or s.created_at,
-            s.created_at,
-        ),
-        reverse=True,
-    )
-    return sessions
+    return await sessions_service.list_user_active_sessions(db, user.id, current_session_id=current_sid)
 
 
 @router.delete("/me/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -494,38 +461,9 @@ async def revoke_my_session(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    rows = list(
-        (
-            await db.execute(
-                select(RefreshToken).where(
-                    RefreshToken.user_id == user.id,
-                    or_(
-                        RefreshToken.session_id == session_id,
-                        RefreshToken.family_id == session_id,
-                        RefreshToken.id == session_id,
-                    ),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    if not rows:
+    found = await sessions_service.revoke_single_user_session(db, user.id, session_id)
+    if not found:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "登录会话不存在")
-
-    now = datetime.now(timezone.utc)
-    revoke_ids: set[uuid.UUID] = {session_id}
-    for row in rows:
-        if row.revoked_at is None:
-            row.revoked_at = now
-        if row.session_id is not None:
-            revoke_ids.add(row.session_id)
-        if row.family_id is not None:
-            revoke_ids.add(row.family_id)
-    await db.commit()
-
-    for sid in revoke_ids:
-        await revoke_session(sid)
 
     await audit.record(
         "user.session_revoke",
@@ -543,41 +481,12 @@ async def revoke_all_my_sessions(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    now = datetime.now(timezone.utc)
     current_sid = getattr(request.state, "session_id", None)
-    rows = list(
-        (
-            await db.execute(
-                select(RefreshToken).where(
-                    RefreshToken.user_id == user.id,
-                    RefreshToken.revoked_at.is_(None),
-                    RefreshToken.expires_at > now,
-                )
-            )
-        )
-        .scalars()
-        .all()
+    revoked_count = await sessions_service.revoke_user_sessions(
+        db,
+        user.id,
+        exclude_session_id=current_sid if exclude_current else None,
     )
-
-    revoke_ids: set[uuid.UUID] = set()
-    revoked_rows = 0
-    for row in rows:
-        sid = row.session_id or row.family_id or row.id
-        if exclude_current and current_sid is not None and sid == current_sid:
-            continue
-        row.revoked_at = now
-        revoked_rows += 1
-        revoke_ids.add(sid)
-        if row.session_id is not None:
-            revoke_ids.add(row.session_id)
-        if row.family_id is not None:
-            revoke_ids.add(row.family_id)
-
-    if revoked_rows:
-        await db.commit()
-
-    for sid in revoke_ids:
-        await revoke_session(sid)
 
     await audit.record(
         "user.sessions_revoke_all",
@@ -585,7 +494,7 @@ async def revoke_all_my_sessions(
         target_type="user",
         target_id=user.id,
         request=request,
-        metadata={"exclude_current": exclude_current, "revoked_sessions": len(revoke_ids)},
+        metadata={"exclude_current": exclude_current, "revoked_sessions": revoked_count},
     )
 
 

@@ -92,13 +92,14 @@ async def test_search_files_scope_boost_and_neighbor_window_expansion() -> None:
                 ("c-global", f_global, conv_other, True, "global.md", 2, "第 1 页", "预算策略说明全局版", "global.md", "总览", "text", {}),
                 ("c-attached", f_att, conv_cur, False, "attached.md", 1, "第 3 页", "预算策略核心指标 1200 万", "attached.md", "核心指标", "text", {}),
             ]
-        # Neighbor expansion query: SELECT chunk_index, content, COALESCE(section_path, '')
+        # Batched neighbor expansion query: SELECT file_id, chunk_index, content, COALESCE(section_path, '')
         if "chunk_index = ANY" in sql:
-            fid_str = str(params[1])
-            if fid_str == f_att:
+            fids_arg = params[1]
+            fid_strs = [str(x) for x in fids_arg] if isinstance(fids_arg, (list, tuple)) else [str(fids_arg)]
+            if f_att in fid_strs:
                 return [
-                    (0, "上文：2026 Q3 部门预算背景。", "核心指标"),
-                    (2, "下文：其中研发占比 60%。", "核心指标"),
+                    (f_att, 0, "上文：2026 Q3 部门预算背景。", "核心指标"),
+                    (f_att, 2, "下文：其中研发占比 60%。", "核心指标"),
                 ]
             return []
         return []

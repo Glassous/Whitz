@@ -671,11 +671,29 @@ function focus() {
   editorRef.value?.focus();
 }
 
+function setText(text: string) {
+  const el = editorRef.value;
+  if (!el) return;
+  el.textContent = text;
+  refreshEditorContentState();
+  el.focus();
+  const sel = window.getSelection();
+  if (sel) {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    savedRange = range.cloneRange();
+  }
+}
+
 defineExpose({
   insertFile,
   insertUploadingChip,
   resolveInlineUpload,
   failInlineUpload,
+  setText,
   focus,
 });
 

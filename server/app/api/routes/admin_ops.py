@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_admin
 from app.db.models import (
     ConversationDigest,
+    ConversationEpisode,
     ConversationFile,
     FileChunk,
     MemoryEntry,
@@ -272,7 +273,17 @@ async def evaluate_alerts(
 
 
 class RagBackfillRequest(BaseModel):
-    scope: Literal["all", "file_chunks", "memory_entries", "conversation_digests", "message_chunks"] = "all"
+    scope: Literal[
+        "all",
+        "file_chunks",
+        "files",
+        "memory_entries",
+        "memories",
+        "conversation_digests",
+        "conversation_episodes",
+        "message_chunks",
+        "chats",
+    ] = "all"
     batch_size: int = Field(default=40, ge=5, le=200)
     inline: bool = False
 
@@ -329,10 +340,12 @@ async def get_rag_health(
             key="memory_entries",
             label="长期记忆",
             current_tag=current_tag,
-            extra_filter=MemoryEntry.status == "active",
         ),
         await _table_vector_stats(
             db, ConversationDigest, key="conversation_digests", label="对话摘要", current_tag=current_tag
+        ),
+        await _table_vector_stats(
+            db, ConversationEpisode, key="conversation_episodes", label="情景归档", current_tag=current_tag
         ),
         await _table_vector_stats(
             db, MessageChunk, key="message_chunks", label="对话回合分块", current_tag=current_tag
@@ -435,3 +448,50 @@ async def trigger_rag_backfill(
         metadata={"scope": body.scope, "batch_size": body.batch_size, "inline": body.inline},
     )
     return result
+
+
+@router.get("/rag/dlq")
+async def get_rag_dlq(
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Inspect failed RAG jobs stored in the dead-letter queue."""
+    items = await rag_jobs.list_dlq(limit=limit)
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/rag/dlq/replay")
+async def replay_rag_dlq(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    admin: User = Depends(require_admin),
+) -> dict[str, Any]:
+    """Re-enqueue failed jobs from the RAG dead-letter queue."""
+    replayed = await rag_jobs.replay_dlq(limit=limit)
+    await audit.record(
+        "ops.rag.dlq_replay",
+        actor=admin,
+        target_type="rag_dlq",
+        target_id="dlq",
+        request=request,
+        metadata={"replayed": replayed, "limit": limit},
+    )
+    return {"replayed": replayed}
+
+
+@router.delete("/rag/dlq")
+async def purge_rag_dlq(
+    request: Request,
+    admin: User = Depends(require_admin),
+) -> dict[str, Any]:
+    """Clear all entries from the RAG dead-letter queue."""
+    purged = await rag_jobs.purge_dlq()
+    await audit.record(
+        "ops.rag.dlq_purge",
+        actor=admin,
+        target_type="rag_dlq",
+        target_id="dlq",
+        severity="warning",
+        request=request,
+        metadata={"purged": purged},
+    )
+    return {"purged": purged}

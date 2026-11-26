@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import logging
 import math
+import socket
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.redis import get_redis
+from app.core.redis import MemoryRedis, get_redis
 from app.db.models import Conversation, Message, OpsAlertEvent, OpsAlertRule, RunTelemetry, ScheduledTask, ScheduledTaskRun, User
-from app.db.session import detect_pgvector
+from app.db.session import SessionLocal, detect_pgvector
 from app.services.agent_client import AgentClient
 from app.services.dashboard_telemetry import (
     _parse_json_obj,
@@ -604,10 +608,46 @@ async def compute_metric_value(
     return 0.0
 
 
+def _is_safe_webhook_url(url: str) -> bool:
+    """Validate webhook URL against SSRF (allow only public http/https targets)."""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    if not host or host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or host.endswith(".local") or host.endswith(".internal"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_global
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    for _, _, _, _, sockaddr in infos:
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if not ip.is_global:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
 async def dispatch_webhook(webhook_url: str, payload: dict[str, Any]) -> str:
     url = (webhook_url or "").strip()
     if not url:
         return "skipped"
+    safe = await asyncio.to_thread(_is_safe_webhook_url, url)
+    if not safe:
+        logger.warning("Blocked unsafe webhook URL: %s", url)
+        return "blocked_ssrf"
     text_msg = payload.get("message") or f"[{payload.get('severity', 'info').upper()}] {payload.get('rule_name')}"
     body = {
         **payload,
@@ -616,7 +656,7 @@ async def dispatch_webhook(webhook_url: str, payload: dict[str, Any]) -> str:
         "content": {"text": text_msg},
     }
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False, trust_env=False) as client:
             resp = await client.post(url, json=body)
             return f"http_{resp.status_code}"
     except Exception as exc:
@@ -631,12 +671,25 @@ async def evaluate_alert_rules(db: AsyncSession, admin: User | None) -> dict[str
 
     evaluated = 0
     triggered = 0
+    resolved = 0
     events_out: list[dict[str, Any]] = []
 
     for rule in rules:
         evaluated += 1
         current = await compute_metric_value(db, rule.metric_key, rule.window_minutes, inspection=inspection)
         if not _compare(rule.operator, current, rule.threshold):
+            # Auto-resolve any currently firing alerts for this rule once metric recovers.
+            firing_rows = (
+                await db.execute(
+                    select(OpsAlertEvent).where(
+                        OpsAlertEvent.rule_id == rule.id,
+                        OpsAlertEvent.status == "firing",
+                    )
+                )
+            ).scalars().all()
+            for ev in firing_rows:
+                ev.status = "resolved"
+                resolved += 1
             continue
 
         if rule.last_triggered_at is not None:
@@ -689,12 +742,60 @@ async def evaluate_alert_rules(db: AsyncSession, admin: User | None) -> dict[str
             }
         )
 
-    if triggered > 0:
+    if triggered > 0 or resolved > 0:
         await db.commit()
 
     return {
         "evaluated": evaluated,
         "triggered": triggered,
+        "resolved": resolved,
         "events": events_out,
         "evaluated_at": now.isoformat(),
     }
+
+
+_ALERT_TASK: asyncio.Task[Any] | None = None
+_ALERT_LEADER_KEY = "whitz:ops:alert_eval_lock"
+
+
+async def _alert_evaluator_loop() -> None:
+    while True:
+        settings = get_settings()
+        interval = max(15.0, float(settings.alert_evaluator_interval_seconds or 60.0))
+        try:
+            await asyncio.sleep(interval)
+            if not settings.alert_evaluator_enabled:
+                continue
+            r = get_redis()
+            if not isinstance(r, MemoryRedis):
+                acquired = await r.set(_ALERT_LEADER_KEY, "1", ex=max(10, int(interval) - 5), nx=True)
+                if not acquired:
+                    continue
+            async with SessionLocal() as db:
+                admin_user = (
+                    await db.execute(select(User).where(User.role == "admin", User.is_active.is_(True)).limit(1))
+                ).scalar_one_or_none()
+                await evaluate_alert_rules(db, admin_user)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.debug("alert evaluator loop error: %s", exc)
+
+
+def start_alert_evaluator() -> None:
+    global _ALERT_TASK
+    if not get_settings().alert_evaluator_enabled:
+        return
+    if _ALERT_TASK is None or _ALERT_TASK.done():
+        _ALERT_TASK = asyncio.create_task(_alert_evaluator_loop(), name="ops-alert-evaluator")
+
+
+async def stop_alert_evaluator() -> None:
+    global _ALERT_TASK
+    if _ALERT_TASK is not None:
+        _ALERT_TASK.cancel()
+        try:
+            await _ALERT_TASK
+        except (asyncio.CancelledError, Exception):
+            pass
+        _ALERT_TASK = None

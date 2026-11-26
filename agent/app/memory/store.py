@@ -769,15 +769,14 @@ class MemoryManager:
                 fts_rows: list[dict[str, Any]] = []
                 trgm_rows: list[dict[str, Any]] = []
 
-                # Leg 1: pgvector HNSW
+                # Leg 1: pgvector HNSW (filtered by current embedding_model tag to prevent cross-model score corruption)
                 q_vec = await self.embedding_client.embed_query(query) if self.embedding_client.is_configured else None
                 if q_vec:
                     vec_lit = _vector_literal(q_vec)
+                    m_tag = getattr(self.embedding_client, "model_tag", "") or ""
+                    model_filter_sql = "AND (me.embedding_model IS NULL OR me.embedding_model = %s)" if m_tag else ""
+                    model_params = (m_tag,) if m_tag else ()
                     try:
-                        try:
-                            await cur.execute("SET hnsw.iterative_scan = relaxed_order")
-                        except Exception:
-                            pass
                         await cur.execute(
                             f"""
                             SELECT me.id, me.target, COALESCE(mc.name, me.target), COALESCE(me.title, ''),
@@ -788,11 +787,12 @@ class MemoryManager:
                             WHERE me.user_id = %s
                               {col_sql}
                               AND me.embedding IS NOT NULL
+                              {model_filter_sql}
                               AND (me.embedding <=> %s::vector) < 0.72
                             ORDER BY me.embedding <=> %s::vector ASC, me.updated_at DESC
                             LIMIT %s
                             """,
-                            (vec_lit, user_uuid, *col_params, vec_lit, vec_lit, pool_limit),
+                            (vec_lit, user_uuid, *col_params, *model_params, vec_lit, vec_lit, pool_limit),
                         )
                         vec_rows = [_row_to_dict(r) for r in await cur.fetchall()]
                     except Exception as exc:
@@ -1104,7 +1104,7 @@ class MemoryManager:
 
             async with self.pool.connection() as conn:
                 async def _apply(cur: Any) -> str:
-                    col_id, norm_slug, col_name, _char_limit, _max_entries = await self._resolve_or_create_collection_pg(
+                    col_id, norm_slug, col_name, char_limit, max_entries = await self._resolve_or_create_collection_pg(
                         cur,
                         user_uuid,
                         target,
@@ -1119,26 +1119,63 @@ class MemoryManager:
                             (user_uuid, norm_slug, target_text),
                         )
                         return col_name
-                    supersedes_uuid: uuid.UUID | None = None
                     effective_pinned = bool(is_pinned)
                     effective_priority = max(1, min(3, int(priority or 2)))
                     if action == "replace" and old_content:
-                        try:
-                            await cur.execute(
-                                "SELECT id, COALESCE(is_pinned, false) FROM memory_entries WHERE user_id = %s AND target = %s AND content = %s LIMIT 1",
-                                (user_uuid, norm_slug, old_content),
-                            )
-                            old_row = await cur.fetchone()
-                            if old_row:
-                                supersedes_uuid = old_row[0]
-                                if old_row[1]:
-                                    effective_pinned = True
-                        except Exception:
-                            pass
+                        # Update matched entry in-place (preserving row ID and avoiding dangling supersedes_id)
                         await cur.execute(
-                            "DELETE FROM memory_entries WHERE user_id = %s AND target = %s AND content = %s",
+                            "SELECT id, COALESCE(is_pinned, false) FROM memory_entries WHERE user_id = %s AND target = %s AND content = %s LIMIT 1",
                             (user_uuid, norm_slug, old_content),
                         )
+                        old_row = await cur.fetchone()
+                        if old_row:
+                            old_id = old_row[0]
+                            effective_pinned = effective_pinned or bool(old_row[1])
+                            m_tag = getattr(self.embedding_client, "model_tag", "") or None
+                            if vec:
+                                await cur.execute(
+                                    """
+                                    UPDATE memory_entries
+                                    SET title = %s, content = %s, tags = %s::jsonb,
+                                        search_tsv = to_tsvector('simple', %s),
+                                        embedding = %s::vector, embedding_model = %s,
+                                        is_pinned = %s, priority = %s, updated_at = %s
+                                    WHERE id = %s
+                                    """,
+                                    (title, content, tags_json, tsv_text, _vector_literal(vec), m_tag, effective_pinned, effective_priority, now, old_id),
+                                )
+                            else:
+                                await cur.execute(
+                                    """
+                                    UPDATE memory_entries
+                                    SET title = %s, content = %s, tags = %s::jsonb,
+                                        search_tsv = to_tsvector('simple', %s),
+                                        is_pinned = %s, priority = %s, updated_at = %s
+                                    WHERE id = %s
+                                    """,
+                                    (title, content, tags_json, tsv_text, effective_pinned, effective_priority, now, old_id),
+                                )
+                            return col_name
+                    # Enforce collection & global quota parity with server memory_service
+                    await cur.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(char_length(content)), 0) FROM memory_entries WHERE user_id = %s AND collection_id = %s",
+                        (user_uuid, col_id),
+                    )
+                    col_stat = await cur.fetchone()
+                    if col_stat:
+                        cur_cnt, cur_chars = int(col_stat[0] or 0), int(col_stat[1] or 0)
+                        if max_entries and cur_cnt >= int(max_entries):
+                            return col_name
+                        if char_limit and (cur_chars + len(content)) > int(char_limit):
+                            return col_name
+                    await cur.execute(
+                        "SELECT COALESCE(SUM(char_length(content)), 0) FROM memory_entries WHERE user_id = %s",
+                        (user_uuid,),
+                    )
+                    total_stat = await cur.fetchone()
+                    if total_stat and (int(total_stat[0] or 0) + len(content)) > 200_000:
+                        return col_name
+                    supersedes_uuid: uuid.UUID | None = None
                     # Deduplicate identical content before inserting
                     await cur.execute(
                         "SELECT id FROM memory_entries WHERE user_id = %s AND target = %s AND content = %s LIMIT 1",

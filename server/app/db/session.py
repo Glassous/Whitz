@@ -6,7 +6,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.config import get_settings
 from app.db.models import pgvector_detected, set_pgvector_enabled
 
-engine = create_async_engine(get_settings().database_url, pool_pre_ping=True)
+_settings = get_settings()
+engine = create_async_engine(
+    _settings.database_url,
+    pool_pre_ping=True,
+    pool_size=max(5, int(_settings.db_pool_size)),
+    max_overflow=max(5, int(_settings.db_max_overflow)),
+    pool_timeout=max(5, int(_settings.db_pool_timeout)),
+)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

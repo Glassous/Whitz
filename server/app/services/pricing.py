@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -8,6 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ModelPricing, RunTelemetry
+
+_RATES_CACHE_TTL_SECONDS = 60.0
+_RATES_CACHE: tuple[float, list[dict[str, Any]]] | None = None
+
+
+def invalidate_custom_rates_cache() -> None:
+    global _RATES_CACHE
+    _RATES_CACHE = None
 
 # Fallback USD rates per 1M tokens when no custom DB override exists.
 DEFAULT_MODEL_RATES: list[dict[str, Any]] = [
@@ -94,9 +103,13 @@ def calculate_reasoning_baseline_cost_usd(
     return round(cost, 6)
 
 
-async def list_custom_rates(db: AsyncSession) -> list[dict[str, Any]]:
+async def list_custom_rates(db: AsyncSession, *, use_cache: bool = True) -> list[dict[str, Any]]:
+    global _RATES_CACHE
+    now = time.monotonic()
+    if use_cache and _RATES_CACHE is not None and (now - _RATES_CACHE[0]) < _RATES_CACHE_TTL_SECONDS:
+        return [dict(item) for item in _RATES_CACHE[1]]
     rows = (await db.execute(select(ModelPricing).order_by(ModelPricing.model_pattern.asc()))).scalars().all()
-    return [
+    rates = [
         {
             "id": str(r.id),
             "model_pattern": r.model_pattern,
@@ -108,6 +121,8 @@ async def list_custom_rates(db: AsyncSession) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+    _RATES_CACHE = (now, rates)
+    return [dict(item) for item in rates]
 
 
 async def resolve_and_calculate_cost(
@@ -174,6 +189,7 @@ async def upsert_model_pricing(
         existing.updated_by = actor_id
     await db.commit()
     await db.refresh(existing)
+    invalidate_custom_rates_cache()
     after = {
         "id": str(existing.id),
         "model_pattern": existing.model_pattern,
@@ -186,24 +202,40 @@ async def upsert_model_pricing(
     return after, {"before": before, "after": after}
 
 
-async def recalculate_telemetry_costs(db: AsyncSession, *, days: int = 30) -> int:
+async def recalculate_telemetry_costs(db: AsyncSession, *, days: int = 30, batch_size: int = 1000) -> int:
     since = datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days), 365)))
-    rates = await list_custom_rates(db)
-    rows = (
-        await db.execute(select(RunTelemetry).where(RunTelemetry.created_at >= since))
-    ).scalars().all()
+    rates = await list_custom_rates(db, use_cache=False)
     updated = 0
-    for row in rows:
-        new_cost = calculate_cost_usd(
-            model_name=row.model_name,
-            model_route=row.model_route,
-            prompt_tokens=row.prompt_tokens,
-            completion_tokens=row.completion_tokens,
-            custom_rates=rates,
+    last_id: uuid.UUID | None = None
+    chunk_limit = max(100, min(int(batch_size or 1000), 5000))
+    while True:
+        stmt = (
+            select(RunTelemetry)
+            .where(RunTelemetry.created_at >= since)
+            .order_by(RunTelemetry.id.asc())
+            .limit(chunk_limit)
         )
-        if abs(float(row.estimated_cost_usd or 0.0) - new_cost) > 1e-7:
-            row.estimated_cost_usd = new_cost
-            updated += 1
-    if updated > 0:
-        await db.commit()
+        if last_id is not None:
+            stmt = stmt.where(RunTelemetry.id > last_id)
+        rows = list((await db.execute(stmt)).scalars().all())
+        if not rows:
+            break
+        batch_updated = 0
+        for row in rows:
+            last_id = row.id
+            new_cost = calculate_cost_usd(
+                model_name=row.model_name,
+                model_route=row.model_route,
+                prompt_tokens=row.prompt_tokens,
+                completion_tokens=row.completion_tokens,
+                custom_rates=rates,
+            )
+            if abs(float(row.estimated_cost_usd or 0.0) - new_cost) > 1e-7:
+                row.estimated_cost_usd = new_cost
+                batch_updated += 1
+        if batch_updated > 0:
+            await db.commit()
+            updated += batch_updated
+        if len(rows) < chunk_limit:
+            break
     return updated

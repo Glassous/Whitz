@@ -26,6 +26,13 @@ class EmailCodeRequest(BaseModel):
     email: EmailStr
     purpose: EmailCodePurpose
 
+    @field_validator("purpose", mode="before")
+    @classmethod
+    def normalize_purpose(cls, v: Any) -> Any:
+        if isinstance(v, str) and v.strip().lower() == "reset":
+            return "reset_password"
+        return v
+
 
 class EmailCodeResponse(BaseModel):
     message: str
@@ -282,6 +289,7 @@ class ConversationOut(BaseModel):
     is_pinned: bool = False
     pinned_at: datetime | None = None
     is_scheduled: bool = False
+    memory_excluded: bool = False
     plan: dict | None
     active_run_id: str | None
     active_run_status: str | None
@@ -293,6 +301,8 @@ class ConversationOut(BaseModel):
 
 class ConversationDetail(ConversationOut):
     messages: list[MessageOut]
+    has_more_messages: bool = False
+    next_before_id: str | None = None
 
 
 class ConversationSearchHit(BaseModel):
@@ -515,10 +525,23 @@ class CreditStatusOut(BaseModel):
     tokens_per_credit: int
     weekly: CreditWindowOut
     five_hour: CreditWindowOut
+    bonus_credits: float = 0.0
     remaining: float
     overdrawn: bool
     plan: MembershipPlanOut
     plans: list[MembershipPlanOut]
+
+
+class UserCreditLedgerItemOut(BaseModel):
+    id: int
+    created_at: datetime
+    tokens: int
+    credits: float
+    kind: str
+    bucket: str = "plan"
+    tier: str | None = None
+    conversation_id: uuid.UUID | None = None
+    note: str | None = None
 
 
 class RedeemRequest(BaseModel):
@@ -817,6 +840,7 @@ class SkillOut(BaseModel):
     source: str = "custom"
     repo_url: str | None = None
     content: str | None = None
+    files: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     updated_at: datetime | None = None
 
@@ -869,6 +893,7 @@ class SkillPendingOut(BaseModel):
     name: str
     description: str = ""
     content: str
+    files: list[str] = Field(default_factory=list)
     action: str = "create"
     source: str = "agent"
     conversation_id: uuid.UUID | None = None
@@ -1181,7 +1206,7 @@ class PostQuotaSummaryOut(BaseModel):
 
 class PostListOut(BaseModel):
     items: list[PostOut] = Field(default_factory=list)
-    next_cursor: datetime | None = None
+    next_cursor: str | None = None
     quota: PostQuotaSummaryOut
 
 

@@ -121,27 +121,21 @@ async def read_preview_content_payload(
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "该文件类型请使用临时预览链接查看")
 
     settings = get_settings()
-    max_download = max(settings.max_file_size_bytes, 10 * 1024 * 1024)
     try:
-        raw = await cos.get_object_bytes(
-            row.storage_key,
-            max_bytes=max_download,
-            settings=settings,
-        )
+        parsed_data = await file_cache.get_or_parse_file(row, settings=settings)
     except cos.CosError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
+    except file_parser.FileParseError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
     if ext == ".xlsx":
-        try:
-            parsed = file_parser._read_xlsx(
-                raw,
-                sheet_name=sheet_name,
-                start_line=1,
-                max_lines=500,
-                max_chars=MAX_PREVIEW_CHARS,
-            )
-        except file_parser.FileParseError as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        sliced = file_parser.read_from_parsed(
+            parsed_data,
+            sheet_name=sheet_name,
+            start_line=1,
+            max_lines=500,
+            max_chars=MAX_PREVIEW_CHARS,
+        )
         return {
             "file_id": str(row.id),
             "filename": row.filename,
@@ -149,24 +143,20 @@ async def read_preview_content_payload(
             "category": row.category,
             "mime_type": row.mime_type,
             "format": "xlsx",
-            "content": parsed.get("content") or "",
-            "sheets": parsed.get("sheets") or [],
-            "sheet": parsed.get("sheet"),
-            "truncated": bool(parsed.get("truncated") or parsed.get("has_more")),
+            "content": sliced.get("content") or "",
+            "sheets": sliced.get("sheets") or [],
+            "sheet": sliced.get("sheet"),
+            "truncated": bool(sliced.get("truncated") or sliced.get("has_more")),
             "size_bytes": row.size_bytes,
         }
 
     if ext == ".docx":
-        try:
-            parsed = file_parser.read_file_content(
-                raw,
-                ext=".docx",
-                mime_type=row.mime_type,
-                start_line=1,
-                max_lines=500,
-            )
-        except file_parser.FileParseError as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        sliced = file_parser.read_from_parsed(
+            parsed_data,
+            start_line=1,
+            max_lines=500,
+            max_chars=MAX_PREVIEW_CHARS,
+        )
         return {
             "file_id": str(row.id),
             "filename": row.filename,
@@ -174,12 +164,12 @@ async def read_preview_content_payload(
             "category": row.category,
             "mime_type": row.mime_type,
             "format": "docx",
-            "content": parsed.get("content") or "",
-            "truncated": bool(parsed.get("truncated") or parsed.get("has_more")),
+            "content": sliced.get("content") or "",
+            "truncated": bool(sliced.get("truncated") or sliced.get("has_more")),
             "size_bytes": row.size_bytes,
         }
 
-    text = file_parser.decode_text(raw)
+    text = "\n".join(parsed_data.lines)
     truncated = len(text) > MAX_PREVIEW_CHARS
     if truncated:
         text = text[:MAX_PREVIEW_CHARS]
@@ -395,13 +385,20 @@ async def create_text_file(
         existing.category = category
         existing.size_bytes = len(raw_bytes)
         existing.etag = etag
+        existing.last_edited_by = "user"
+        existing.index_status = "indexing"
         existing.updated_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(existing)
-        await file_chunks.index_file_chunks_safe(db, existing, raw=raw_bytes)
-        await db.refresh(existing)
+        file_cache.invalidate_file_cache(existing.id)
+        file_chunks.schedule_file_indexing(existing.id, user.id)
         row = existing
     else:
+        max_conv_files = (
+            settings.max_files_per_conversation * 5
+            if getattr(conv, "kind", "side") == "main"
+            else settings.max_files_per_conversation
+        )
         existing_count = await db.scalar(
             select(func.count())
             .select_from(ConversationFile)
@@ -410,10 +407,10 @@ async def create_text_file(
                 ConversationFile.status.in_(("ready", "pending")),
             )
         )
-        if int(existing_count or 0) >= settings.max_files_per_conversation:
+        if int(existing_count or 0) >= max_conv_files:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                f"单个对话最多保留 {settings.max_files_per_conversation} 个文件，请先清理部分文件",
+                f"单个对话最多保留 {max_conv_files} 个文件，请先清理部分文件",
             )
         file_id = uuid.uuid4()
         storage_key = cos.build_storage_key(user.id, conv.id, file_id, filename, settings=settings)
@@ -434,13 +431,14 @@ async def create_text_file(
             etag=etag,
             status="ready",
             source="user",
+            last_edited_by="user",
             is_global=True,
+            index_status="indexing",
         )
         db.add(row)
         await db.commit()
         await db.refresh(row)
-        await file_chunks.index_file_chunks_safe(db, row, raw=raw_bytes)
-        await db.refresh(row)
+        file_chunks.schedule_file_indexing(row.id, user.id)
 
     from app.services import realtime_bus
 
@@ -493,12 +491,13 @@ async def update_file_content(
 
     record.size_bytes = len(raw_bytes)
     record.etag = etag
+    record.last_edited_by = "user"
+    record.index_status = "indexing"
     record.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(record)
     file_cache.invalidate_file_cache(record.id)
-    await file_chunks.index_file_chunks_safe(db, record, raw=raw_bytes)
-    await db.refresh(record)
+    file_chunks.schedule_file_indexing(record.id, user.id)
 
     from app.services import realtime_bus
 
@@ -538,19 +537,16 @@ async def rename_file(
     if not new_ext:
         # Preserve original extension if user omitted it during inline rename
         cleaned = f"{cleaned}{record.ext}"
-        new_ext = record.ext.lower()
-    if new_ext not in file_types.ALLOWED_FILE_TYPES:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"不支持的文件扩展名：{new_ext}")
+        new_ext = (record.ext or "").lower()
+    if new_ext != (record.ext or "").lower():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "重命名文件时不能更改文件扩展名")
 
     old_filename = record.filename
-    new_category, new_mime = file_types.ALLOWED_FILE_TYPES[new_ext]
     record.filename = cleaned
-    record.ext = new_ext
-    record.category = new_category
-    record.mime_type = new_mime
     record.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(record)
+    file_cache.invalidate_file_cache(record.id)
     if cleaned != old_filename:
         await file_chunks.sync_filename_change(db, record)
 
@@ -601,6 +597,13 @@ async def delete_file(
             .values(conversation_id=None, is_global=True)
         )
     await db.commit()
+    from app.services import realtime_bus
+
+    await realtime_bus.publish_user_event(
+        user.id,
+        "library.updated",
+        {"action": "detached", "file_id": str(file_id), "conversation_id": str(conv.id)},
+    )
     await audit.record(
         "file.detach_workspace",
         actor=user,

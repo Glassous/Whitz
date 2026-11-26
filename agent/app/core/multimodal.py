@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -17,12 +19,31 @@ DIRECT_DELIVERY_MODES = frozenset(
     {"native_image_url", "native_image_base64", "native_pdf_file", "inline_full"}
 )
 
+_INLINE_FILE_TOKEN_RE = re.compile(
+    r"\[\[file:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\|([^\]]+)\]\]"
+)
+
+
+def extract_inline_file_ids(text: str) -> list[str]:
+    """Extract ordered, deduplicated file UUIDs from inline ``[[file:uuid|name]]`` tokens."""
+    if not text or "[[file:" not in text:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in _INLINE_FILE_TOKEN_RE.finditer(text):
+        fid = match.group(1)
+        if fid not in seen:
+            seen.add(fid)
+            out.append(fid)
+    return out
+
 
 @dataclass
 class HydratedTurnMedia:
     """Result of hydrating current-turn attached files for native multimodal / full-context delivery."""
 
     content_blocks: list[dict[str, Any]] = field(default_factory=list)
+    block_refs: list[dict[str, Any]] = field(default_factory=list)
     directly_delivered_ids: list[str] = field(default_factory=list)
     delivery_map: dict[str, str] = field(default_factory=dict)
     has_images: bool = False
@@ -53,14 +74,14 @@ def _format_inline_document_block(item: dict[str, Any]) -> str:
             extra_note = "\n[注意：该 PDF 可提取文本极少，疑似扫描件/纯图 PDF，请勿凭空补全缺失文字。]"
         return (
             f'<attached_file file_id="{fid}" filename="{fname}" mode="full"'
-            + (f' {stat_str}' if stat_str else "")
+            + (f" {stat_str}" if stat_str else "")
             + f">{extra_note}\n{body}\n</attached_file>"
         )
     outline = str(item.get("outline") or "").strip()
     return (
         f'<attached_file file_id="{fid}" filename="{fname}" mode="outline"'
-        + (f' {stat_str}' if stat_str else "")
-        + f">\n{outline}\n[该文件篇幅较大，已附结构大纲；如需精确章节或指定行/页，请调用 read_workspace_file 或 rag_search_workspace]\n</attached_file>"
+        + (f" {stat_str}" if stat_str else "")
+        + f">\n{outline}\n[该文件篇幅较大，已附结构大纲；如需精确章节或指定行/页，请调用 read_workspace_file 或 knowledge_search]\n</attached_file>"
     )
 
 
@@ -119,17 +140,35 @@ async def hydrate_turn_attachments(
         fid = str(item.get("file_id") or "").strip()
         fname = str(item.get("filename") or "file").strip()
         delivery = str(item.get("delivery") or "").strip()
-        if not fid or not delivery or delivery == "error":
+        if not fid or not delivery:
             continue
 
-        out.delivery_map[fid] = delivery
-        out.file_meta_by_id[fid] = {
+        if delivery == "error":
+            err_msg = str(item.get("error") or "无法预处理该附件")
+            out.delivery_map[fid] = "error"
+            out.content_blocks.append(
+                {
+                    "type": "text",
+                    "text": f"[附件 {fname} (file_id={fid}) 预处理失败：{err_msg}；可尝试调用 read_workspace_file 读取]",
+                }
+            )
+            out.block_refs.append({"file_id": fid, "filename": fname, "category": item.get("category"), "delivery": "error"})
+            continue
+
+        expires_at = item.get("expires_at")
+        if expires_at is None and delivery == "native_image_url":
+            expires_at = time.time() + 1800.0
+
+        meta_entry = {
             "file_id": fid,
             "filename": fname,
             "category": item.get("category"),
             "mime_type": item.get("mime_type"),
             "delivery": delivery,
+            "expires_at": expires_at,
         }
+        out.delivery_map[fid] = delivery
+        out.file_meta_by_id[fid] = meta_entry
 
         if delivery in ("native_image_url", "native_image_base64"):
             img_url = str(item.get("image_url") or "").strip()
@@ -140,6 +179,7 @@ async def hydrate_turn_attachments(
                         "image_url": {"url": img_url, "detail": "auto"},
                     }
                 )
+                out.block_refs.append(dict(meta_entry))
                 out.has_images = True
                 out.directly_delivered_ids.append(fid)
 
@@ -152,15 +192,18 @@ async def hydrate_turn_attachments(
                         "file": {"filename": fname, "file_data": file_data},
                     }
                 )
+                out.block_refs.append(dict(meta_entry))
                 out.has_native_files = True
                 out.directly_delivered_ids.append(fid)
 
         elif delivery == "inline_full":
             out.content_blocks.append({"type": "text", "text": _format_inline_document_block(item)})
+            out.block_refs.append(dict(meta_entry))
             out.directly_delivered_ids.append(fid)
 
         elif delivery == "outline_rag":
             out.content_blocks.append({"type": "text", "text": _format_inline_document_block(item)})
+            out.block_refs.append(dict(meta_entry))
 
     return out
 
@@ -174,7 +217,7 @@ async def fetch_media_fallback(
     mode: str = "base64",
     max_tokens: int = 8000,
 ) -> dict[str, Any] | None:
-    """Fetch a single file's fallback payload (base64 image or parsed text/outline for PDF)."""
+    """Fetch a single file's media/fallback payload (``url`` / ``base64`` / ``text_fallback``)."""
     base = (internal_mcp_base_url or "").strip().rstrip("/")
     if not base or not agent_namespace or not agent_api_key or not file_id:
         return None
@@ -213,10 +256,15 @@ def build_multimodal_user_message(
             cleaned = "请查看并分析我附带的文件。"
 
     blocks: list[dict[str, Any]] = [{"type": "text", "text": cleaned}, *hydrated.content_blocks]
+    # Explicit block_index -> ref mapping (offset +1 because block 0 is user prompt text)
+    block_refs: dict[str, dict[str, Any]] = {}
+    for idx, ref in enumerate(hydrated.block_refs):
+        block_refs[str(idx + 1)] = dict(ref)
     return HumanMessage(
         content=blocks,
         additional_kwargs={
             "whitz_media_meta": hydrated.file_meta_by_id,
+            "whitz_block_refs": block_refs,
             "whitz_direct_file_ids": list(hydrated.directly_delivered_ids),
         },
     )
@@ -228,8 +276,19 @@ def build_ephemeral_image_observation(
     filename: str,
     image_url: str,
     mime_type: str = "image/png",
+    expires_at: float | None = None,
 ) -> HumanMessage:
     """Create a synthetic visual observation HumanMessage paired right after a read_workspace_file ToolMessage."""
+    is_http = image_url.startswith(("http://", "https://"))
+    eff_exp = expires_at if expires_at is not None else (time.time() + 1800.0 if is_http else None)
+    meta_entry = {
+        "file_id": file_id,
+        "filename": filename,
+        "category": "image",
+        "mime_type": mime_type,
+        "delivery": "native_image_url" if is_http else "native_image_base64",
+        "expires_at": eff_exp,
+    }
     return HumanMessage(
         content=[
             {
@@ -243,15 +302,8 @@ def build_ephemeral_image_observation(
         ],
         additional_kwargs={
             "whitz_ephemeral_media": True,
-            "whitz_media_meta": {
-                file_id: {
-                    "file_id": file_id,
-                    "filename": filename,
-                    "category": "image",
-                    "mime_type": mime_type,
-                    "delivery": "native_image_url" if image_url.startswith("http") else "native_image_base64",
-                }
-            },
+            "whitz_media_meta": {file_id: meta_entry},
+            "whitz_block_refs": {"1": dict(meta_entry)},
         },
     )
 
@@ -262,7 +314,6 @@ def try_extract_visual_tool_payload(raw_result: Any) -> dict[str, Any] | None:
     if isinstance(raw_result, str):
         text = raw_result
     elif isinstance(raw_result, list):
-        # langchain_mcp_adapters returns a list of content blocks: [{"type": "text", "text": "..."}]
         for blk in raw_result:
             if isinstance(blk, dict) and blk.get("type") == "text" and isinstance(blk.get("text"), str):
                 text = blk["text"]
@@ -303,6 +354,92 @@ def unwrap_mcp_text_result(raw_result: Any) -> str:
     return json.dumps(raw_result, ensure_ascii=False, default=str)
 
 
+def _resolve_block_ref(
+    msg: HumanMessage,
+    block_idx: int,
+    fallback_list: list[dict[str, Any]],
+    fallback_cursor: int,
+) -> dict[str, Any]:
+    """Resolve exact metadata for ``msg.content[block_idx]`` via ``whitz_block_refs`` with safe legacy fallback."""
+    block_refs = (msg.additional_kwargs or {}).get("whitz_block_refs")
+    if isinstance(block_refs, dict):
+        ref = block_refs.get(str(block_idx))
+        if isinstance(ref, dict) and ref.get("file_id"):
+            return ref
+    if fallback_cursor < len(fallback_list):
+        return fallback_list[fallback_cursor]
+    return {}
+
+
+async def refresh_expiring_image_urls(
+    messages: Sequence[BaseMessage],
+    *,
+    internal_mcp_base_url: str,
+    agent_namespace: str,
+    agent_api_key: str,
+    leeway_seconds: float = 180.0,
+    force: bool = False,
+) -> tuple[list[BaseMessage], bool]:
+    """Proactively re-sign remote COS ``image_url`` blocks before expiry (critical after HITL pauses)."""
+    now = time.time()
+    changed = False
+    out: list[BaseMessage] = []
+    for msg in messages:
+        if not isinstance(msg, HumanMessage) or not isinstance(msg.content, list):
+            out.append(msg)
+            continue
+        kwargs = dict(msg.additional_kwargs or {})
+        meta_map = kwargs.get("whitz_media_meta") or {}
+        block_refs = dict(kwargs.get("whitz_block_refs") or {}) if isinstance(kwargs.get("whitz_block_refs"), dict) else {}
+        image_metas = [
+            {"file_id": fid, **info}
+            for fid, info in meta_map.items()
+            if isinstance(info, dict) and info.get("category") == "image"
+        ]
+        img_cursor = 0
+        new_blocks: list[Any] = []
+        msg_changed = False
+
+        for idx, blk in enumerate(msg.content):
+            if isinstance(blk, dict) and blk.get("type") == "image_url" and isinstance(blk.get("image_url"), dict):
+                url = str(blk["image_url"].get("url") or "")
+                ref = _resolve_block_ref(msg, idx, image_metas, img_cursor)
+                img_cursor += 1
+                if url.startswith(("http://", "https://")):
+                    exp = ref.get("expires_at")
+                    fid = str(ref.get("file_id") or "")
+                    needs_refresh = force or (isinstance(exp, (int, float)) and (float(exp) - now) < leeway_seconds)
+                    if fid and needs_refresh:
+                        refreshed = await fetch_media_fallback(
+                            internal_mcp_base_url=internal_mcp_base_url,
+                            agent_namespace=agent_namespace,
+                            agent_api_key=agent_api_key,
+                            file_id=fid,
+                            mode="url",
+                        )
+                        fresh_url = str((refreshed or {}).get("image_url") or "")
+                        if fresh_url.startswith(("http://", "https://")):
+                            new_blocks.append({"type": "image_url", "image_url": {"url": fresh_url, "detail": "auto"}})
+                            new_exp = refreshed.get("expires_at") or (now + 1800.0)
+                            updated_ref = {**ref, "expires_at": new_exp}
+                            block_refs[str(idx)] = updated_ref
+                            if fid in meta_map and isinstance(meta_map[fid], dict):
+                                meta_map = dict(meta_map)
+                                meta_map[fid] = {**meta_map[fid], "expires_at": new_exp}
+                            msg_changed = True
+                            changed = True
+                            continue
+            new_blocks.append(blk)
+
+        if msg_changed:
+            kwargs["whitz_media_meta"] = meta_map
+            kwargs["whitz_block_refs"] = block_refs
+            out.append(HumanMessage(content=new_blocks, additional_kwargs=kwargs, id=msg.id))
+        else:
+            out.append(msg)
+    return out, changed
+
+
 async def upgrade_messages_images_to_base64(
     messages: Sequence[BaseMessage],
     *,
@@ -318,37 +455,36 @@ async def upgrade_messages_images_to_base64(
             out.append(msg)
             continue
         meta_map = (msg.additional_kwargs or {}).get("whitz_media_meta") or {}
-        image_fids = [
-            fid
+        image_metas = [
+            {"file_id": fid, **info}
             for fid, info in meta_map.items()
             if isinstance(info, dict) and info.get("category") == "image"
         ]
-        fid_cursor = 0
+        # Advance img_cursor across ALL image_url blocks (not just http) so legacy fallback stays aligned too.
+        img_cursor = 0
         new_blocks: list[Any] = []
         msg_changed = False
-        for blk in msg.content:
-            if (
-                isinstance(blk, dict)
-                and blk.get("type") == "image_url"
-                and isinstance(blk.get("image_url"), dict)
-                and str(blk["image_url"].get("url") or "").startswith(("http://", "https://"))
-            ):
-                fid = image_fids[fid_cursor] if fid_cursor < len(image_fids) else ""
-                fid_cursor += 1
-                if fid:
-                    fb = await fetch_media_fallback(
-                        internal_mcp_base_url=internal_mcp_base_url,
-                        agent_namespace=agent_namespace,
-                        agent_api_key=agent_api_key,
-                        file_id=fid,
-                        mode="base64",
-                    )
-                    b64_url = str((fb or {}).get("image_url") or "")
-                    if b64_url.startswith("data:image/"):
-                        new_blocks.append({"type": "image_url", "image_url": {"url": b64_url, "detail": "auto"}})
-                        msg_changed = True
-                        changed = True
-                        continue
+        for idx, blk in enumerate(msg.content):
+            if isinstance(blk, dict) and blk.get("type") == "image_url" and isinstance(blk.get("image_url"), dict):
+                ref = _resolve_block_ref(msg, idx, image_metas, img_cursor)
+                img_cursor += 1
+                url = str(blk["image_url"].get("url") or "")
+                if url.startswith(("http://", "https://")):
+                    fid = str(ref.get("file_id") or "")
+                    if fid:
+                        fb = await fetch_media_fallback(
+                            internal_mcp_base_url=internal_mcp_base_url,
+                            agent_namespace=agent_namespace,
+                            agent_api_key=agent_api_key,
+                            file_id=fid,
+                            mode="base64",
+                        )
+                        b64_url = str((fb or {}).get("image_url") or "")
+                        if b64_url.startswith("data:image/"):
+                            new_blocks.append({"type": "image_url", "image_url": {"url": b64_url, "detail": "auto"}})
+                            msg_changed = True
+                            changed = True
+                            continue
             new_blocks.append(blk)
         if msg_changed:
             out.append(HumanMessage(content=new_blocks, additional_kwargs=dict(msg.additional_kwargs or {}), id=msg.id))
@@ -373,18 +509,19 @@ async def downgrade_messages_native_pdf_to_text(
             out.append(msg)
             continue
         meta_map = (msg.additional_kwargs or {}).get("whitz_media_meta") or {}
-        pdf_fids = [
-            fid
+        pdf_metas = [
+            {"file_id": fid, **info}
             for fid, info in meta_map.items()
             if isinstance(info, dict) and info.get("delivery") == "native_pdf_file"
         ]
-        fid_cursor = 0
+        pdf_cursor = 0
         new_blocks: list[Any] = []
         msg_changed = False
-        for blk in msg.content:
+        for idx, blk in enumerate(msg.content):
             if isinstance(blk, dict) and blk.get("type") == "file":
-                fid = pdf_fids[fid_cursor] if fid_cursor < len(pdf_fids) else ""
-                fid_cursor += 1
+                ref = _resolve_block_ref(msg, idx, pdf_metas, pdf_cursor)
+                pdf_cursor += 1
+                fid = str(ref.get("file_id") or "")
                 if fid:
                     fb = await fetch_media_fallback(
                         internal_mcp_base_url=internal_mcp_base_url,
@@ -399,8 +536,7 @@ async def downgrade_messages_native_pdf_to_text(
                         msg_changed = True
                         changed = True
                         continue
-                # Even if fetch failed, strip unsupported file block so retry can succeed with tool guidance
-                fname = str((blk.get("file") or {}).get("filename") or "document.pdf")
+                fname = str((blk.get("file") or {}).get("filename") or ref.get("filename") or "document.pdf")
                 new_blocks.append(
                     {
                         "type": "text",
@@ -427,10 +563,25 @@ def fold_multimodal_message_for_history(msg: HumanMessage) -> HumanMessage:
     media_stubs: list[str] = []
     img_idx = 0
     file_idx = 0
-    img_metas = [v for v in meta_map.values() if isinstance(v, dict) and v.get("category") == "image"]
-    file_metas = [v for v in meta_map.values() if isinstance(v, dict) and v.get("category") != "image"]
+    img_metas = [
+        {"file_id": fid, **v}
+        for fid, v in meta_map.items()
+        if isinstance(v, dict) and v.get("category") == "image"
+    ]
+    # Only native PDFs map to `type == "file"` blocks (never mix inline text docs into pdf fallback!)
+    pdf_metas = [
+        {"file_id": fid, **v}
+        for fid, v in meta_map.items()
+        if isinstance(v, dict) and v.get("delivery") == "native_pdf_file"
+    ]
+    if not pdf_metas:
+        pdf_metas = [
+            {"file_id": fid, **v}
+            for fid, v in meta_map.items()
+            if isinstance(v, dict) and v.get("category") != "image"
+        ]
 
-    for blk in msg.content:
+    for idx, blk in enumerate(msg.content):
         if isinstance(blk, str):
             text_parts.append(blk)
             continue
@@ -445,14 +596,14 @@ def fold_multimodal_message_for_history(msg: HumanMessage) -> HumanMessage:
             else:
                 text_parts.append(txt)
         elif btype in ("image_url", "image"):
-            m = img_metas[img_idx] if img_idx < len(img_metas) else {}
+            m = _resolve_block_ref(msg, idx, img_metas, img_idx)
             img_idx += 1
             fname = m.get("filename") or f"image_{img_idx}"
             fid = m.get("file_id") or ""
             stub = f"[历史图片: {fname}" + (f" (file_id={fid})" if fid else "") + "，如需重新查看细节请调用 read_workspace_file]"
             media_stubs.append(stub)
         elif btype == "file":
-            m = file_metas[file_idx] if file_idx < len(file_metas) else {}
+            m = _resolve_block_ref(msg, idx, pdf_metas, file_idx)
             file_idx += 1
             fname = (blk.get("file") or {}).get("filename") or m.get("filename") or f"document_{file_idx}.pdf"
             fid = m.get("file_id") or ""

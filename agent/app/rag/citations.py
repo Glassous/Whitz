@@ -12,6 +12,22 @@ class CitationRegistry:
         self._by_key: dict[str, dict[str, Any]] = {}
         self._order: list[str] = []
 
+    @classmethod
+    def from_serialized(cls, citations: Sequence[dict[str, Any]] | None) -> "CitationRegistry":
+        """Rehydrate registry from persisted citation dicts across HITL interrupt/resume."""
+        reg = cls()
+        for idx, raw in enumerate(citations or (), start=1):
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            cid = str(item.get("citation_id") or f"S{idx}")
+            item["citation_id"] = cid
+            key = f"{item.get('source_type') or 'unknown'}:{item.get('source_id') or cid}:{item.get('locator') or idx}"
+            if key not in reg._by_key:
+                reg._by_key[key] = item
+                reg._order.append(key)
+        return reg
+
     def register(self, items: Sequence[EvidenceItem]) -> list[dict[str, Any]]:
         """Register EvidenceItems, mutating their `citation_id` to a stable `S{n}` and returning new/updated dicts."""
         registered: list[dict[str, Any]] = []

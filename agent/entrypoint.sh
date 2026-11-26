@@ -22,5 +22,5 @@ exec uvicorn app.api:app \
   --port "${AGENT_PORT:-8642}" \
   --proxy-headers \
   --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-127.0.0.1}" \
-  --limit-concurrency 64 \
+  --limit-concurrency 512 \
   --timeout-keep-alive 30

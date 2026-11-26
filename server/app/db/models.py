@@ -217,7 +217,7 @@ class UsageDaily(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     day: Mapped[date] = mapped_column(Date, index=True)
     messages: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     runs: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -232,6 +232,12 @@ class CreditLedger(Base):
         Index("ix_credit_ledger_user_created", "user_id", "created_at"),
         Index("ix_credit_ledger_created_at", "created_at"),
         UniqueConstraint("message_id", name="uq_credit_ledger_message"),
+        Index(
+            "uq_credit_ledger_source_ref",
+            "source_ref",
+            unique=True,
+            postgresql_where=text("source_ref IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -241,9 +247,11 @@ class CreditLedger(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     kind: Mapped[str] = mapped_column(String(16), default="consume")
+    bucket: Mapped[str] = mapped_column(String(16), default="plan", server_default="plan")
     tier: Mapped[str | None] = mapped_column(String(16), nullable=True)
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    source_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
@@ -316,12 +324,15 @@ class Conversation(Base):
     __tablename__ = "conversations"
     __table_args__ = (
         Index("uq_conversations_user_main", "user_id", unique=True, postgresql_where=text("kind = 'main'")),
+        Index("ix_conversations_active_run", "active_run_id", postgresql_where=text("active_run_id IS NOT NULL")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     thread_id: Mapped[str] = mapped_column(String(128), default="", server_default="")
     kind: Mapped[str] = mapped_column(String(16), default="side", server_default="side", index=True)
+    is_scheduled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    memory_excluded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     title: Mapped[str] = mapped_column(String(200), default="新旁聊")
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
     pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -443,6 +454,7 @@ class ConversationFile(Base):
     index_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     source: Mapped[str] = mapped_column(String(24), default="user", server_default="user")
+    last_edited_by: Mapped[str | None] = mapped_column(String(24), nullable=True)
     is_global: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
     message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     expires_cleanup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -721,6 +733,31 @@ class RunTelemetry(Base):
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     is_regenerated: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     hitl_denied_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ToolInvocation(Base):
+    """Lightweight indexed tool telemetry table so Ops/Admin dashboards never scan giant JSONB payloads."""
+
+    __tablename__ = "tool_invocations"
+    __table_args__ = (
+        Index("ix_tool_invocations_name_created", "tool_name", "created_at"),
+        Index("ix_tool_invocations_user_created", "user_id", "created_at"),
+        Index("ix_tool_invocations_run", "run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(80))
+    ok: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

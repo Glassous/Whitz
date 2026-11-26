@@ -287,7 +287,7 @@ def compute_next_run_at(
 
     if stype == "interval":
         every_minutes = _parse_int(cfg.get("every_minutes"), field="间隔分钟数", min_val=1, max_val=43200)
-        return (now_utc + timedelta(minutes=every_minutes)).replace(second=0, microsecond=0)
+        return (now_utc + timedelta(minutes=every_minutes)).replace(microsecond=0)
 
     if stype == "daily":
         hour = _parse_int(cfg.get("hour", 9), field="小时", min_val=0, max_val=23)

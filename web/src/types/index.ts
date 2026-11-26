@@ -60,6 +60,7 @@ export interface CreditStatus {
   tokens_per_credit: number;
   weekly: CreditWindow;
   five_hour: CreditWindow;
+  bonus_credits?: number;
   remaining: number;
   overdrawn: boolean;
   plan: MembershipPlan;
@@ -129,7 +130,12 @@ export type MessageStatus = "streaming" | "completed" | "failed" | "cancelled" |
 
 export interface ReasoningTool {
   name: string;
+  label?: string | null;
+  ui_kind?: string | null;
+  summary?: string | null;
   call_id?: string | null;
+  parent_call_id?: string | null;
+  subagent_role?: string | null;
   args?: string;
   result?: string;
   status?: string;

@@ -11,11 +11,15 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 
+from app.core.config import get_settings
 from app.core.models import ModelRouter
 from app.core.multimodal import (
     build_ephemeral_image_observation,
+    fetch_media_fallback,
+    refresh_expiring_image_urls,
     try_extract_visual_tool_payload,
     unwrap_mcp_text_result,
+    upgrade_messages_images_to_base64,
 )
 from app.graph.state import SubagentState
 from app.tools import parse_tool_error
@@ -24,7 +28,6 @@ from app.tools.builtin_tools import (
     knowledge_search,
     memory_list,
     memory_search,
-    rag_search_workspace,
     search_chat_history,
     skill_view,
     web_extract,
@@ -72,7 +75,6 @@ def _select_subagent_tools(role: str, config: RunnableConfig) -> list[BaseTool]:
     allowed_mcp = _CODER_ALLOWED_MCP if role == "coder" else _RESEARCHER_ALLOWED_MCP
     base: list[BaseTool] = [
         knowledge_search,
-        rag_search_workspace,
         web_search,
         web_extract,
         http_request,
@@ -107,6 +109,9 @@ async def _invoke_single_tool(
     tool_map: dict[str, BaseTool],
     conv_id: str,
     config: RunnableConfig,
+    *,
+    subagent_role: str = "",
+    parent_call_id: str = "",
 ) -> tuple[ToolMessage, HumanMessage | None]:
     name = str(tc.get("name") or "")
     call_id = str(tc.get("id") or name)
@@ -140,6 +145,8 @@ async def _invoke_single_tool(
             "preview": args,
             "args": args,
             "call_id": call_id,
+            "parent_call_id": parent_call_id or None,
+            "subagent_role": subagent_role or None,
             "status": "running",
         }
     )
@@ -153,6 +160,32 @@ async def _invoke_single_tool(
             fname = str(visual_payload.get("filename") or "image")
             mime = str(visual_payload.get("mime_type") or "image/png")
             img_url = str(visual_payload.get("image_url") or "").strip()
+            expires_at = visual_payload.get("expires_at")
+            cfg_inner = dict(config.get("configurable") or {})
+            router_inst: ModelRouter | None = cfg_inner.get("model_router")
+            s_inst = get_settings()
+            need_b64 = (
+                not img_url
+                or s_inst.llm_image_delivery_mode == "base64"
+                or (
+                    router_inst is not None
+                    and await router_inst.is_capability_unsupported(
+                        "image_url",
+                        router_inst.endpoint_for("vision" if router_inst.endpoint_for("vision").model else "default"),
+                    )
+                )
+            )
+            if need_b64 and fid:
+                fb = await fetch_media_fallback(
+                    internal_mcp_base_url=str(cfg_inner.get("internal_mcp_base_url") or s_inst.internal_mcp_base_url),
+                    agent_namespace=str(cfg_inner.get("agent_namespace") or ""),
+                    agent_api_key=str(cfg_inner.get("agent_api_key") or ""),
+                    file_id=fid,
+                    mode="base64",
+                )
+                if fb and fb.get("image_url"):
+                    img_url = str(fb["image_url"])
+                    mime = str(fb.get("mime_type") or mime)
             text = json.dumps(
                 {
                     "file_id": fid,
@@ -165,7 +198,11 @@ async def _invoke_single_tool(
             )
             if img_url:
                 visual_obs = build_ephemeral_image_observation(
-                    file_id=fid, filename=fname, image_url=img_url, mime_type=mime
+                    file_id=fid,
+                    filename=fname,
+                    image_url=img_url,
+                    mime_type=mime,
+                    expires_at=expires_at if isinstance(expires_at, (int, float)) else None,
                 )
         else:
             text = unwrap_mcp_text_result(res)
@@ -182,6 +219,8 @@ async def _invoke_single_tool(
                 "duration": dur_ms,
                 "duration_ms": dur_ms,
                 "call_id": call_id,
+                "parent_call_id": parent_call_id or None,
+                "subagent_role": subagent_role or None,
                 "status": "failed" if err else "completed",
             }
         )
@@ -201,6 +240,8 @@ async def _invoke_single_tool(
                 "duration": dur_ms,
                 "duration_ms": dur_ms,
                 "call_id": call_id,
+                "parent_call_id": parent_call_id or None,
+                "subagent_role": subagent_role or None,
                 "status": "failed",
             }
         )
@@ -219,6 +260,9 @@ async def _invoke_tools_for_message(
     last_msg: AIMessage,
     tools: list[BaseTool],
     config: RunnableConfig,
+    *,
+    subagent_role: str = "",
+    parent_call_id: str = "",
 ) -> list[Any]:
     tool_map = {t.name: t for t in tools}
     cfg = dict(config.get("configurable") or {})
@@ -226,13 +270,38 @@ async def _invoke_tools_for_message(
     calls = list(last_msg.tool_calls or [])
     if not calls:
         return []
-    pairs = list(
-        await asyncio.gather(*[_invoke_single_tool(tc, tool_map, conv_id, config) for tc in calls])
+    raw_pairs = await asyncio.gather(
+        *[
+            _invoke_single_tool(
+                tc,
+                tool_map,
+                conv_id,
+                config,
+                subagent_role=subagent_role,
+                parent_call_id=parent_call_id,
+            )
+            for tc in calls
+        ],
+        return_exceptions=True,
     )
-    out: list[Any] = [tm for tm, _ in pairs]
-    for _, obs in pairs:
-        if obs is not None:
-            out.append(obs)
+    out: list[Any] = []
+    obs_list: list[HumanMessage] = []
+    for tc, item in zip(calls, raw_pairs):
+        if isinstance(item, Exception):
+            out.append(
+                ToolMessage(
+                    tool_call_id=str(tc.get("id") or tc.get("name") or "tool"),
+                    name=str(tc.get("name") or "tool"),
+                    content=json.dumps({"error": str(item)}, ensure_ascii=False),
+                    status="error",
+                )
+            )
+        else:
+            tm, obs = item
+            out.append(tm)
+            if obs is not None:
+                obs_list.append(obs)
+    out.extend(obs_list)
     return out
 
 
@@ -251,6 +320,7 @@ def _build_specialist_subgraph(role: str):
     async def worker_node(state: SubagentState, config: RunnableConfig) -> dict[str, Any]:
         cfg = dict(config.get("configurable") or {})
         router: ModelRouter = cfg.get("model_router") or ModelRouter()
+        settings = get_settings()
         max_iters = max(1, int(state.get("max_iterations") or cfg.get("max_subagent_iterations") or MAX_SUBAGENT_ITERATIONS))
         tools = _select_subagent_tools(role, config)
         orig_messages = list(state.get("messages") or [])
@@ -267,6 +337,18 @@ def _build_specialist_subgraph(role: str):
         else:
             messages = orig_messages
 
+        internal_base = str(cfg.get("internal_mcp_base_url") or settings.internal_mcp_base_url or "")
+        agent_ns = str(cfg.get("agent_namespace") or "")
+        agent_key = str(cfg.get("agent_api_key") or "")
+
+        if router._has_image_content(messages):
+            messages, _ = await refresh_expiring_image_urls(
+                messages,
+                internal_mcp_base_url=internal_base,
+                agent_namespace=agent_ns,
+                agent_api_key=agent_key,
+            )
+
         candidates = await router.select_candidates(
             cfg.get("requested_route", "auto"),
             messages,
@@ -276,18 +358,46 @@ def _build_specialist_subgraph(role: str):
         last_exc: Exception | None = None
         for ep in candidates:
             try:
-                llm = router.build_chat_model(ep, streaming=False, thinking_enabled=want_thinking)
-                bound = llm.bind_tools(tools) if tools else llm
-                try:
-                    resp = await bound.ainvoke(messages, config=config)
-                except Exception as inner_exc:
-                    if router.is_unsupported_thinking_param_error(inner_exc):
-                        router.mark_thinking_param_unsupported(ep)
-                        llm = router.build_chat_model(ep, streaming=False, include_thinking_params=False)
-                        bound = llm.bind_tools(tools) if tools else llm
-                        resp = await bound.ainvoke(messages, config=config)
-                    else:
+                cur_messages = list(messages)
+                include_thinking = want_thinking
+                if router._has_image_content(cur_messages) and await router.is_capability_unsupported("image_url", ep):
+                    cur_messages, _ = await upgrade_messages_images_to_base64(
+                        cur_messages,
+                        internal_mcp_base_url=internal_base,
+                        agent_namespace=agent_ns,
+                        agent_api_key=agent_key,
+                    )
+                resp = None
+                for _ in range(3):
+                    llm = router.build_chat_model(
+                        ep,
+                        streaming=False,
+                        thinking_enabled=include_thinking if include_thinking else None,
+                        include_thinking_params=include_thinking,
+                    )
+                    bound = llm.bind_tools(tools) if tools else llm
+                    try:
+                        resp = await bound.ainvoke(cur_messages, config=config)
+                        break
+                    except Exception as inner_exc:
+                        if include_thinking and router.is_unsupported_thinking_param_error(inner_exc):
+                            await router.mark_capability_unsupported("thinking", ep)
+                            include_thinking = False
+                            continue
+                        if router._has_image_content(cur_messages) and router.is_image_url_fetch_error(inner_exc):
+                            if not router.is_transient_url_expiry_error(inner_exc):
+                                await router.mark_capability_unsupported("image_url", ep)
+                            cur_messages, upgraded = await upgrade_messages_images_to_base64(
+                                cur_messages,
+                                internal_mcp_base_url=internal_base,
+                                agent_namespace=agent_ns,
+                                agent_api_key=agent_key,
+                            )
+                            if upgraded:
+                                continue
                         raise
+                if resp is None:
+                    raise RuntimeError("Subagent received empty model response")
                 await router.record_success(ep)
                 return {
                     "messages": [*messages, resp] if seed_added else [resp],
@@ -297,7 +407,7 @@ def _build_specialist_subgraph(role: str):
                 }
             except Exception as exc:
                 last_exc = exc
-                await router.record_failure(ep)
+                await router.record_failure(ep, exc=exc)
         fallback_msg = AIMessage(content=f"子智能体调用模型失败: {last_exc}")
         return {
             "messages": [*messages, fallback_msg] if seed_added else [fallback_msg],
@@ -311,19 +421,69 @@ def _build_specialist_subgraph(role: str):
         if not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
             return {}
         tools = _select_subagent_tools(role, config)
-        tool_msgs = await _invoke_tools_for_message(last_msg, tools, config)
+        tool_msgs = await _invoke_tools_for_message(
+            last_msg,
+            tools,
+            config,
+            subagent_role=role,
+            parent_call_id=str(state.get("parent_call_id") or ""),
+        )
         return {"messages": tool_msgs}
 
-    async def synthesizer_node(state: SubagentState) -> dict[str, Any]:
+    async def synthesizer_node(state: SubagentState, config: RunnableConfig) -> dict[str, Any]:
         messages = list(state.get("messages") or [])
+        last_msg = messages[-1] if messages else None
+        hit_iter_cap = (
+            isinstance(last_msg, AIMessage)
+            and bool(getattr(last_msg, "tool_calls", None))
+        )
         final_text = ""
-        for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content.strip():
-                final_text = msg.content.strip()
-                break
+        if not hit_iter_cap:
+            for msg in reversed(messages):
+                if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content.strip():
+                    final_text = msg.content.strip()
+                    break
+
+        usage = dict(state.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        # If max_iterations was exhausted mid-tool-calling (or worker returned no final text),
+        # perform ONE tool-free LLM synthesis pass so gathered tool results are never discarded!
+        if not final_text and messages:
+            cfg = dict(config.get("configurable") or {})
+            router: ModelRouter | None = cfg.get("model_router")
+            if router is not None:
+                try:
+                    # Strip trailing unanswered tool-call AIMessage before synthesizing
+                    clean_msgs = [
+                        m for m in messages
+                        if not (isinstance(m, AIMessage) and getattr(m, "tool_calls", None) and m is last_msg)
+                    ]
+                    clean_msgs.append(
+                        HumanMessage(
+                            content="你已达到最大检索轮次，请不再调用任何工具，直接基于目前收集到的所有信息给出清晰、结构化的最终结论。"
+                        )
+                    )
+                    llm, ep = await router.get_chat_model(
+                        cfg.get("requested_route", "auto"),
+                        clean_msgs,
+                        task_hint=task_hint,
+                        streaming=False,
+                    )
+                    resp = await llm.ainvoke(clean_msgs, config=config)
+                    usage = _merge_usage(usage, resp)
+                    if isinstance(resp.content, str) and resp.content.strip():
+                        final_text = resp.content.strip()
+                    await router.record_success(ep)
+                except Exception as exc:
+                    logger.debug("Subagent forced synthesis skipped: %s", exc)
+
+        if not final_text:
+            for msg in reversed(messages):
+                if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content.strip():
+                    final_text = msg.content.strip()
+                    break
         if not final_text:
             final_text = "子智能体已完成检索但未生成文本结论。"
-        return {"result": final_text}
+        return {"result": final_text, "usage": usage}
 
     def route_worker(state: SubagentState) -> str:
         messages = list(state.get("messages") or [])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import math
@@ -8,6 +9,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import httpx
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -23,6 +26,7 @@ from app.core.multimodal import (
     downgrade_messages_native_pdf_to_text,
     fetch_media_fallback,
     fold_multimodal_message_for_history,
+    refresh_expiring_image_urls,
     try_extract_visual_tool_payload,
     unwrap_mcp_text_result,
     upgrade_messages_images_to_base64,
@@ -302,12 +306,26 @@ def _prepare_llm_messages(
         else:
             turns[-1].append(m)
 
-    # Fold heavy multimodal / oversized inline document blocks in OLDER turns (keep latest turn 100% intact!)
+    # Fold heavy multimodal / oversized inline document blocks in OLDER turns (keep latest turn intact,
+    # except fold older ephemeral visual observations if > 2 images were loaded within the same turn).
     for turn_idx in range(max(0, len(turns) - 1)):
         turns[turn_idx] = [
             fold_multimodal_message_for_history(m) if isinstance(m, HumanMessage) else m
             for m in turns[turn_idx]
         ]
+    if turns:
+        latest = turns[-1]
+        ephemeral_indices = [
+            i
+            for i, m in enumerate(latest)
+            if isinstance(m, HumanMessage) and bool((getattr(m, "additional_kwargs", None) or {}).get("whitz_ephemeral_media"))
+        ]
+        if len(ephemeral_indices) > 2:
+            to_fold = set(ephemeral_indices[:-2])
+            turns[-1] = [
+                fold_multimodal_message_for_history(m) if (i in to_fold and isinstance(m, HumanMessage)) else m
+                for i, m in enumerate(latest)
+            ]
 
     # Keep turns from newest backwards under max_verbatim_messages and max_prompt_tokens
     sys_tokens = _estimate_message_tokens(sys_msg) if sys_msg is not None else 0
@@ -320,8 +338,28 @@ def _prepare_llm_messages(
 
     for idx in range(len(turns) - 1, -1, -1):
         turn = turns[idx]
-        turn_tokens = sum(_estimate_message_tokens(m) for m in turn)
         is_latest_turn = idx == len(turns) - 1
+        # Guard against multi-step single-turn context overflow by aggressively folding older ToolMessages
+        if is_latest_turn and budget is not None:
+            turn_tokens = sum(_estimate_message_tokens(m) for m in turn)
+            if turn_tokens > budget and len(turn) > 4:
+                compact_turn: list[BaseMessage] = []
+                tail_keep = max(0, len(turn) - 4)
+                for m_i, m in enumerate(turn):
+                    if m_i < tail_keep and isinstance(m, ToolMessage) and isinstance(m.content, str) and len(m.content) > 400:
+                        compact_turn.append(
+                            ToolMessage(
+                                content=m.content[:400] + f"\n... [同轮较早工具结果已压缩，原长 {len(m.content)} 字符]",
+                                tool_call_id=m.tool_call_id,
+                                name=m.name,
+                                status=getattr(m, "status", "success"),
+                                id=m.id,
+                            )
+                        )
+                    else:
+                        compact_turn.append(m)
+                turn = compact_turn
+        turn_tokens = sum(_estimate_message_tokens(m) for m in turn)
         if not is_latest_turn:
             if msg_cap is not None and used_msgs + len(turn) > msg_cap:
                 break
@@ -593,7 +631,11 @@ def _classify_route(state: AgentState) -> str:
         if any(n in HITL_TOOL_NAMES for n in names):
             return "hitl_gate"
 
-    if bool(state.get("memory_enabled", True)) and not bool(state.get("memory_extracted")):
+    if (
+        bool(state.get("memory_enabled", True))
+        and not bool(state.get("memory_extracted"))
+        and not bool(state.get("async_memory_extract"))
+    ):
         return "memory_extractor"
     return END
 
@@ -639,11 +681,13 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         )
         return {
             "messages": [sys_msg],
+            "current_time_str": now_str,
             "tool_call_count": 0,
             "max_tool_iterations": max_tool_iters,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             "rag_evidence": [],
             "rag_diagnostics": {},
+            "citations": list(state.get("citations") or []),
             "memory_extracted": False,
             "thinking_enabled": thinking_enabled,
             "thinking_escalated": False,
@@ -688,7 +732,9 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         if isinstance(config.get("configurable"), dict) and plan.attached_file_ids:
             config["configurable"]["attached_file_ids"] = plan.attached_file_ids
 
-        reg: CitationRegistry = cfg.get("citation_registry") or CitationRegistry()
+        reg: CitationRegistry | None = cfg.get("citation_registry")
+        if reg is None:
+            reg = CitationRegistry.from_serialized(state.get("citations"))
         if isinstance(config.get("configurable"), dict):
             config["configurable"]["citation_registry"] = reg
 
@@ -744,6 +790,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         updates: dict[str, Any] = {
             "rag_evidence": evidence_dicts,
             "rag_diagnostics": diag_dict,
+            "citations": reg.all_citations(),
         }
         if block:
             # Append prefetched evidence to the dynamic suffix of SystemMessage (preserves static KV prefix!)
@@ -815,19 +862,28 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         agent_ns = str(state.get("agent_namespace") or cfg.get("agent_namespace") or "")
         agent_key = str(cfg.get("agent_api_key") or "")
 
+        # Proactively refresh any COS image URLs nearing expiry (critical after long HITL pauses)
+        if router._has_image_content(messages):
+            messages, _ = await refresh_expiring_image_urls(
+                messages,
+                internal_mcp_base_url=internal_base,
+                agent_namespace=agent_ns,
+                agent_api_key=agent_key,
+            )
+
         for ep in candidates:
             try:
                 cur_messages = list(messages)
-                include_thinking = True
+                include_thinking = not await router.is_capability_unsupported("thinking", ep)
                 # Proactively apply known capability fallbacks for this endpoint before calling LLM
-                if router._has_image_content(cur_messages) and router.is_image_url_unsupported(ep):
+                if router._has_image_content(cur_messages) and await router.is_capability_unsupported("image_url", ep):
                     cur_messages, _ = await upgrade_messages_images_to_base64(
                         cur_messages,
                         internal_mcp_base_url=internal_base,
                         agent_namespace=agent_ns,
                         agent_api_key=agent_key,
                     )
-                if router._has_native_file_content(cur_messages) and router.is_native_pdf_unsupported(ep):
+                if router._has_native_file_content(cur_messages) and await router.is_capability_unsupported("native_pdf", ep):
                     cur_messages, _ = await downgrade_messages_native_pdf_to_text(
                         cur_messages,
                         internal_mcp_base_url=internal_base,
@@ -837,6 +893,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                     )
 
                 response = None
+                tried_url_refresh = False
                 for _retry_step in range(3):
                     llm = router.build_chat_model(
                         ep,
@@ -850,11 +907,25 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                         break
                     except Exception as inner_exc:
                         if include_thinking and router.is_unsupported_thinking_param_error(inner_exc):
-                            router.mark_thinking_param_unsupported(ep)
+                            await router.mark_capability_unsupported("thinking", ep)
                             include_thinking = False
                             continue
                         if router._has_image_content(cur_messages) and router.is_image_url_fetch_error(inner_exc):
-                            router.mark_image_url_unsupported(ep)
+                            # If error looks like a signed-URL expiry (403/AccessDenied), refresh URL first WITHOUT blacklisting!
+                            if not tried_url_refresh and router.is_transient_url_expiry_error(inner_exc):
+                                tried_url_refresh = True
+                                cur_messages, refreshed = await refresh_expiring_image_urls(
+                                    cur_messages,
+                                    internal_mcp_base_url=internal_base,
+                                    agent_namespace=agent_ns,
+                                    agent_api_key=agent_key,
+                                    force=True,
+                                )
+                                if refreshed:
+                                    logger.info("Refreshed expired image_url for endpoint %s; retrying native URL delivery", ep.model)
+                                    continue
+                            if not router.is_transient_url_expiry_error(inner_exc):
+                                await router.mark_capability_unsupported("image_url", ep)
                             cur_messages, upgraded = await upgrade_messages_images_to_base64(
                                 cur_messages,
                                 internal_mcp_base_url=internal_base,
@@ -865,7 +936,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                                 logger.info("Endpoint %s rejected remote image_url; retrying with original base64", ep.model)
                                 continue
                         if router._has_native_file_content(cur_messages) and router.is_unsupported_native_pdf_error(inner_exc):
-                            router.mark_native_pdf_unsupported(ep)
+                            await router.mark_capability_unsupported("native_pdf", ep)
                             cur_messages, downgraded = await downgrade_messages_native_pdf_to_text(
                                 cur_messages,
                                 internal_mcp_base_url=internal_base,
@@ -907,7 +978,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             except Exception as exc:
                 last_exc = exc
                 logger.warning("Model %s (%s) invocation failed: %s", ep.model, ep.route, exc)
-                await router.record_failure(ep)
+                await router.record_failure(ep, exc=exc)
 
         raise RuntimeError(f"All model endpoints failed: {last_exc}")
 
@@ -1057,11 +1128,14 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         _emit_node_running("tools")
         cfg = dict(config.get("configurable") or {})
         mcp_tools: list[BaseTool] = list(cfg.get("mcp_tools") or [])
-        is_main = str(state.get("conversation_kind") or cfg.get("conversation_kind") or "side") == "main"
+        allow_hitl = bool(state.get("allow_hitl", cfg.get("allow_hitl", True)))
+        rag_scope = RagScope.from_dict(state.get("rag_scope") or cfg.get("rag_scope"))
+        include_cross_chat = rag_scope.include_chats and rag_scope.mode != "files_only"
         builtin = get_builtin_tools(
             include_delegation=False,
             include_hitl=False,
-            include_cross_chat=True,
+            include_cross_chat=include_cross_chat,
+            include_user_reaction=bool(cfg.get("ai_reactions_enabled", True)) and allow_hitl,
         )
         tool_map = {t.name: t for t in [*builtin, *mcp_tools]}
 
@@ -1195,8 +1269,74 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                     approved = str(resume_val or "").strip().lower() in ("once", "approve", "approved", "true", "yes")
 
                 if approved:
-                    result = await executor.execute(code, language=language, timeout_seconds=timeout_sec)
+                    workspace_files: dict[str, bytes] | None = None
+                    conv_id_val = str(state.get("conversation_id") or cfg.get("conversation_id") or "").strip()
+                    internal_url = str(cfg.get("internal_files_base_url") or "").strip().rstrip("/")
+                    internal_token = str(cfg.get("internal_files_token") or "").strip()
+                    user_ns = str(cfg.get("user_namespace") or "").strip()
+                    bridge_headers: dict[str, str] = {}
+                    if internal_token:
+                        bridge_headers["Authorization"] = f"Bearer {internal_token}"
+                    if user_ns:
+                        bridge_headers["X-Whitz-Namespace"] = user_ns
+
+                    if (
+                        not isinstance(executor, DisabledSandboxExecutor)
+                        and internal_url
+                        and conv_id_val
+                    ):
+                        try:
+                            async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=4.0), trust_env=False) as hc:
+                                resp = await hc.get(
+                                    f"{internal_url}/api/internal/files/sandbox-inputs",
+                                    params={"conversation_id": conv_id_val},
+                                    headers=bridge_headers,
+                                )
+                                if resp.status_code == 200:
+                                    fetched: dict[str, bytes] = {}
+                                    for item in (resp.json().get("files") or []):
+                                        fname = str(item.get("filename") or "").strip()
+                                        b64 = str(item.get("content_base64") or "")
+                                        if fname and b64:
+                                            try:
+                                                fetched[fname] = base64.b64decode(b64)
+                                            except Exception:
+                                                pass
+                                    if fetched:
+                                        workspace_files = fetched
+                        except Exception as exc:
+                            logger.debug("Sandbox input fetch skipped: %s", exc)
+
+                    exec_kwargs: dict[str, Any] = {"language": language, "timeout_seconds": timeout_sec}
+                    if workspace_files:
+                        exec_kwargs["workspace_files"] = workspace_files
+                    result = await executor.execute(code, **exec_kwargs)
                     payload = result.to_dict()
+                    output_files = getattr(result, "output_files", None) or []
+                    if output_files and internal_url and conv_id_val:
+                        saved_files: list[dict[str, Any]] = []
+                        try:
+                            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0), trust_env=False) as hc:
+                                for item in output_files:
+                                    art_name = str(item.get("filename") or "").strip()
+                                    art_b64 = str(item.get("content_b64") or item.get("content_base64") or "")
+                                    if not art_name or not art_b64:
+                                        continue
+                                    up = await hc.post(
+                                        f"{internal_url}/api/internal/files/sandbox-output",
+                                        headers=bridge_headers,
+                                        json={
+                                            "conversation_id": conv_id_val,
+                                            "filename": art_name,
+                                            "content_base64": art_b64,
+                                        },
+                                    )
+                                    if up.status_code < 400:
+                                        saved_files.append(up.json())
+                        except Exception as exc:
+                            logger.debug("Sandbox output persist skipped: %s", exc)
+                        if saved_files:
+                            payload["saved_workspace_files"] = saved_files
                 else:
                     payload = {"status": "denied", "message": "用户拒绝了代码执行审批。"}
 
@@ -1229,7 +1369,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             context = str(args.get("context") or "").strip()
             subgraph = coder_subgraph if role == "coder" else researcher_subgraph
             sub_res = await subgraph.ainvoke(
-                {"role": role, "task": task, "context": context, "messages": []},
+                {"role": role, "parent_call_id": call_id, "task": task, "context": context, "messages": []},
                 config=config,
             )
             result_text = str(sub_res.get("result") or "")
@@ -1241,10 +1381,22 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             )
             return msg, {"role": role, "task": task, "result": result_text}, sub_usage
 
-        results = await asyncio.gather(*[_run_sub(tc) for tc in sub_calls])
+        raw_results = await asyncio.gather(*[_run_sub(tc) for tc in sub_calls], return_exceptions=True)
         out_msgs: list[ToolMessage] = []
         outputs: list[dict[str, Any]] = []
-        for msg, out_obj, sub_usage in results:
+        for tc, item in zip(sub_calls, raw_results):
+            if isinstance(item, Exception):
+                cid = str(tc.get("id") or "delegate_subtask")
+                out_msgs.append(
+                    ToolMessage(
+                        tool_call_id=cid,
+                        name="delegate_subtask",
+                        content=json.dumps({"error": f"子智能体执行异常: {item}"}, ensure_ascii=False),
+                        status="error",
+                    )
+                )
+                continue
+            msg, out_obj, sub_usage = item
             out_msgs.append(msg)
             outputs.append(out_obj)
             for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -1445,3 +1597,121 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
     graph.add_edge("memory_extractor", END)
 
     return graph.compile(checkpointer=checkpointer, store=store)
+
+
+async def extract_turn_memory_standalone(
+    *,
+    user_id: str,
+    agent_namespace: str,
+    conversation_id: str | None,
+    user_text: str,
+    assistant_text: str,
+    memory_index: str = "",
+    memory_require_confirm: bool = False,
+    manager: Any,
+    router: ModelRouter | None = None,
+) -> bool:
+    """Standalone memory extraction + semantic consolidation used by async ARQ post-run job."""
+    if manager is None or len((user_text or "").strip()) < 12 or not (assistant_text or "").strip():
+        return False
+    settings = get_settings()
+    if not settings.llm_model.strip():
+        return False
+    eff_router = router or ModelRouter(settings=settings)
+    try:
+        llm, _ = await eff_router.get_chat_model(
+            "fast",
+            task_hint="memory_extract",
+            temperature=0.0,
+            streaming=False,
+        )
+        index_block = f"\n当前记忆集目录：\n{memory_index.strip()[:800]}\n" if memory_index.strip() else ""
+        prompt = (
+            "判断本轮对话中用户是否明确表达了值得长期记住的个人偏好、身份背景、项目架构或长期要求。"
+            '若无，仅返回 JSON `{"should_save": false}`。'
+            '若有，返回 JSON `{"should_save": true, "target": "memory"|"user"|"projects"|"<主题slug>", '
+            '"collection_name": "可选新集名", "title": "简短标题", "tags": ["标签"], '
+            '"is_core": false, "content": "一句话精炼记忆"}`。'
+            "注意：仅当信息属于每轮对话都必须遵守的核心个人身份、全局语言/编码硬规则或当前唯一主力项目时，才将 `is_core` 设为 true（其余普通事实一律为 false）。"
+            f"{index_block}\n"
+            f"用户：{user_text[:1000]}\n助手：{assistant_text[:1000]}"
+        )
+        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        raw = resp.content if isinstance(resp.content, str) else ""
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end <= start:
+            return False
+        parsed = json.loads(raw[start : end + 1])
+        if not (parsed.get("should_save") and parsed.get("content")):
+            return False
+        cand_content = str(parsed["content"]).strip()
+        cand_target = str(parsed.get("target") or "memory")
+        cand_title = str(parsed.get("title") or "")
+        cand_tags = list(parsed.get("tags") or []) if isinstance(parsed.get("tags"), list) else None
+        cand_col_name = str(parsed.get("collection_name") or "").strip() or None
+        cand_is_core = bool(parsed.get("is_core", False))
+        final_action = "add"
+        old_content_to_replace: str | None = None
+
+        if settings.rag_memory_consolidation_enabled and cand_content:
+            try:
+                similar = await manager.search(
+                    user_id=user_id,
+                    agent_namespace=agent_namespace,
+                    query=cand_content,
+                    memory_enabled=True,
+                    limit=3,
+                )
+                if similar:
+                    sim_lines = "\n".join(
+                        f"- [{idx + 1}] (集:{m.get('collection')}) {m.get('content')}"
+                        for idx, m in enumerate(similar)
+                    )
+                    cons_prompt = (
+                        "你是长期记忆冲突消解器。对比【新候选记忆】与【已有相似记忆】，判断应该如何处理：\n"
+                        "- noop：已有记忆已经完整包含相同事实，无需重复写入；\n"
+                        "- add：属于全新补充信息，与已有记忆不冲突；\n"
+                        "- replace：新事实更新/推翻了某条旧记忆，需给出被替换的旧记忆编号 index（1开始）与合并更新后的 content。\n"
+                        '仅输出单行 JSON：{"decision":"noop"|"add"|"replace","replace_index":1,"content":"更新后的精炼记忆"}\n\n'
+                        f"已有相似记忆：\n{sim_lines}\n\n新候选记忆：{cand_content}"
+                    )
+                    c_resp = await llm.ainvoke([HumanMessage(content=cons_prompt)])
+                    c_raw = c_resp.content if isinstance(c_resp.content, str) else ""
+                    cs, ce = c_raw.find("{"), c_raw.rfind("}")
+                    if cs >= 0 and ce > cs:
+                        c_parsed = json.loads(c_raw[cs : ce + 1])
+                        dec = str(c_parsed.get("decision") or "add").strip().lower()
+                        if dec == "noop":
+                            return False
+                        if dec == "replace":
+                            r_idx = int(c_parsed.get("replace_index") or 1) - 1
+                            if 0 <= r_idx < len(similar):
+                                final_action = "replace"
+                                old_content_to_replace = str(similar[r_idx].get("content") or "")
+                                cand_target = str(similar[r_idx].get("collection") or cand_target)
+                                merged_txt = str(c_parsed.get("content") or "").strip()
+                                if merged_txt:
+                                    cand_content = merged_txt
+            except Exception as cons_exc:
+                logger.debug("Async memory consolidation skipped: %s", cons_exc)
+
+        await manager.propose(
+            user_id=user_id,
+            agent_namespace=agent_namespace,
+            conversation_id=conversation_id or None,
+            target=cand_target,
+            action=final_action,
+            old_content=old_content_to_replace,
+            title=cand_title,
+            tags=cand_tags,
+            collection_name=cand_col_name,
+            content=cand_content,
+            is_pinned=cand_is_core,
+            priority=1 if cand_is_core else 2,
+            memory_enabled=True,
+            memory_require_confirm=memory_require_confirm,
+        )
+        return True
+    except Exception as exc:
+        logger.debug("Async memory extraction skipped: %s", exc)
+        return False

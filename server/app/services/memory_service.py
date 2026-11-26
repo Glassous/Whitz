@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.db.models import MemoryCollection, MemoryEntry, MemoryPendingProposal, User, is_pgvector_enabled
 from app.db.session import detect_pgvector
@@ -322,6 +323,7 @@ async def list_collections(db: AsyncSession, user_id: uuid.UUID) -> list[dict[st
         (
             await db.execute(
                 select(MemoryEntry)
+                .options(defer(MemoryEntry.embedding))
                 .where(MemoryEntry.user_id == user_id)
                 .order_by(MemoryEntry.created_at.asc(), MemoryEntry.id.asc())
             )
@@ -474,6 +476,7 @@ async def _collection_rows(
 ) -> list[MemoryEntry]:
     result = await db.execute(
         select(MemoryEntry)
+        .options(defer(MemoryEntry.embedding))
         .where(
             MemoryEntry.user_id == user_id,
             (MemoryEntry.collection_id == col.id) | ((MemoryEntry.collection_id.is_(None)) & (MemoryEntry.target == col.slug)),
@@ -484,11 +487,12 @@ async def _collection_rows(
 
 
 async def _total_user_chars(db: AsyncSession, user_id: uuid.UUID, exclude_id: uuid.UUID | None = None) -> int:
-    stmt = select(MemoryEntry.content).where(MemoryEntry.user_id == user_id)
+    stmt = select(func.coalesce(func.sum(func.length(MemoryEntry.content)), 0)).where(
+        MemoryEntry.user_id == user_id
+    )
     if exclude_id is not None:
         stmt = stmt.where(MemoryEntry.id != exclude_id)
-    rows = list((await db.execute(stmt)).scalars().all())
-    return sum(len(c or "") for c in rows)
+    return int(await db.scalar(stmt) or 0)
 
 
 def _check_collection_limits(col: MemoryCollection, contents: list[str]) -> int:
@@ -520,6 +524,7 @@ async def list_entries(
 
     result = await db.execute(
         select(MemoryEntry)
+        .options(defer(MemoryEntry.embedding))
         .where(MemoryEntry.user_id == user_id)
         .order_by(MemoryEntry.created_at.asc(), MemoryEntry.id.asc())
     )
@@ -547,12 +552,16 @@ async def _enforce_pinned_budget(
     user_id: uuid.UUID,
     *,
     keep_id: uuid.UUID | None = None,
-) -> None:
-    """Keep L0 always-on pinned core memory strictly bounded (<=10 items & <=1200 chars)."""
+) -> list[str]:
+    """Keep L0 always-on pinned core memory strictly bounded (<=10 items & <=1200 chars).
+
+    Returns list of entry IDs that were automatically unpinned due to budget eviction.
+    """
     rows = list(
         (
             await db.execute(
                 select(MemoryEntry)
+                .options(defer(MemoryEntry.embedding))
                 .where(MemoryEntry.user_id == user_id, MemoryEntry.is_pinned.is_(True))
                 .order_by(
                     MemoryEntry.priority.asc(),
@@ -565,8 +574,9 @@ async def _enforce_pinned_budget(
         .all()
     )
     if not rows:
-        return
+        return []
     kept: list[MemoryEntry] = []
+    unpinned_ids: list[str] = []
     used_chars = 0
     # Ensure keep_id always wins budget first if pinned
     ordered = sorted(rows, key=lambda r: (0 if (keep_id and r.id == keep_id) else 1))
@@ -577,6 +587,8 @@ async def _enforce_pinned_budget(
             used_chars += entry_len
         else:
             r.is_pinned = False
+            unpinned_ids.append(str(r.id))
+    return unpinned_ids
 
 
 async def add_entry(
@@ -640,11 +652,15 @@ async def add_entry(
     )
     db.add(row)
     await db.flush()
+    unpinned_ids: list[str] = []
     if row.is_pinned:
-        await _enforce_pinned_budget(db, user_id, keep_id=row.id)
+        unpinned_ids = await _enforce_pinned_budget(db, user_id, keep_id=row.id)
     await db.commit()
     await db.refresh(row)
-    return _serialize_entry(row, collection_name=col.name)
+    out = _serialize_entry(row, collection_name=col.name)
+    if unpinned_ids:
+        out["auto_unpinned_ids"] = unpinned_ids
+    return out
 
 
 async def update_entry(
@@ -732,11 +748,15 @@ async def update_entry(
         row.priority = max(1, min(3, int(priority)))
 
     await db.flush()
+    unpinned_ids: list[str] = []
     if row.is_pinned:
-        await _enforce_pinned_budget(db, user_id, keep_id=row.id)
+        unpinned_ids = await _enforce_pinned_budget(db, user_id, keep_id=row.id)
     await db.commit()
     await db.refresh(row)
-    return _serialize_entry(row, collection_name=dest_col.name)
+    out = _serialize_entry(row, collection_name=dest_col.name)
+    if unpinned_ids:
+        out["auto_unpinned_ids"] = unpinned_ids
+    return out
 
 
 async def delete_entry(db: AsyncSession, user_id: uuid.UUID, entry_id: str) -> None:
@@ -773,11 +793,24 @@ async def clear_all(db: AsyncSession, user_id: uuid.UUID, *, collection_id: str 
     await db.commit()
 
 
-async def list_pending(db: AsyncSession, user_id: uuid.UUID) -> list[dict[str, Any]]:
+async def list_pending(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    conversation_id: str | None = None,
+) -> list[dict[str, Any]]:
+    stmt = select(MemoryPendingProposal).where(
+        MemoryPendingProposal.user_id == user_id,
+        MemoryPendingProposal.status == "pending",
+    )
+    if conversation_id:
+        try:
+            conv_uuid = uuid.UUID(str(conversation_id))
+            stmt = stmt.where(MemoryPendingProposal.conversation_id == conv_uuid)
+        except ValueError:
+            return []
     result = await db.execute(
-        select(MemoryPendingProposal)
-        .where(MemoryPendingProposal.user_id == user_id, MemoryPendingProposal.status == "pending")
-        .order_by(MemoryPendingProposal.created_at.asc(), MemoryPendingProposal.id.asc())
+        stmt.order_by(MemoryPendingProposal.created_at.asc(), MemoryPendingProposal.id.asc())
     )
     return [_serialize_pending(row) for row in result.scalars().all()]
 
@@ -810,7 +843,7 @@ async def resolve_pending(
         raise MemoryServiceError("待审批记忆不存在", 404)
 
     if action == "reject":
-        await db.delete(proposal)
+        proposal.status = "rejected"
         await db.commit()
         return
     if action != "approve":
@@ -836,11 +869,18 @@ async def resolve_pending(
         if not needle:
             raise MemoryServiceError("待删除内容为空", 400)
         to_delete = [r for r in existing_rows if r.content == needle]
-        if not to_delete:
-            to_delete = [r for r in existing_rows if needle in r.content]
+        if not to_delete and len(needle) >= 6:
+            substring_matches = [r for r in existing_rows if needle in r.content]
+            if len(substring_matches) == 1:
+                to_delete = substring_matches
+            elif len(substring_matches) > 1:
+                raise MemoryServiceError(
+                    f"待删除内容匹配了 {len(substring_matches)} 条记忆，请手动选择精确条目删除",
+                    409,
+                )
         for row in to_delete:
             await db.delete(row)
-        await db.delete(proposal)
+        proposal.status = "approved"
         await db.commit()
         return
 
@@ -851,17 +891,20 @@ async def resolve_pending(
 
     if op == "replace":
         old_text = (proposal.old_content or "").strip()
-        matched_row = None
-        for r in existing_rows:
-            if old_text and (r.content == old_text or old_text in r.content):
-                matched_row = r
-                break
+        matched_row = next((r for r in existing_rows if old_text and r.content == old_text), None)
+        if matched_row is None and old_text and len(old_text) >= 6:
+            sub = [r for r in existing_rows if old_text in r.content]
+            if len(sub) == 1:
+                matched_row = sub[0]
         if matched_row is None:
             if old_text:
                 raise MemoryServiceError("原记忆条目已不存在，无法替换", 409)
             if not any(r.content == resolved_text for r in existing_rows):
                 _check_collection_limits(col, [r.content for r in existing_rows] + [resolved_text])
+                if await _total_user_chars(db, user_id) + len(resolved_text) > TOTAL_CHAR_LIMIT:
+                    raise MemoryServiceError(f"超出全部记忆总字符上限（{TOTAL_CHAR_LIMIT} 字符）", 400)
                 vec = await _optional_embed(_embed_text_for_entry(col.name, resolved_title, resolved_text, resolved_tags))
+                m_tag = embeddings.current_embedding_model_tag() or None if vec is not None else None
                 db.add(
                     MemoryEntry(
                         user_id=user_id,
@@ -873,12 +916,14 @@ async def resolve_pending(
                         source="agent",
                         search_tsv=func.to_tsvector("simple", tsv_text),
                         embedding=vec,
-                        embedding_model=embeddings.current_embedding_model_tag() or None if vec is not None else None,
+                        embedding_model=m_tag,
                     )
                 )
         else:
             next_texts = [resolved_text if r.id == matched_row.id else r.content for r in existing_rows]
             _check_collection_limits(col, next_texts)
+            if await _total_user_chars(db, user_id, exclude_id=matched_row.id) + len(resolved_text) > TOTAL_CHAR_LIMIT:
+                raise MemoryServiceError(f"超出全部记忆总字符上限（{TOTAL_CHAR_LIMIT} 字符）", 400)
             matched_row.collection_id = col.id
             matched_row.target = col.slug
             if resolved_title:
@@ -888,13 +933,18 @@ async def resolve_pending(
             matched_row.content = resolved_text
             matched_row.source = "agent"
             matched_row.search_tsv = func.to_tsvector("simple", tsv_text)
-            matched_row.embedding = await _optional_embed(
+            vec = await _optional_embed(
                 _embed_text_for_entry(col.name, matched_row.title or "", resolved_text, list(matched_row.tags or []))
             )
+            matched_row.embedding = vec
+            matched_row.embedding_model = embeddings.current_embedding_model_tag() or None if vec is not None else None
     else:
         if not any(r.content == resolved_text for r in existing_rows):
             _check_collection_limits(col, [r.content for r in existing_rows] + [resolved_text])
+            if await _total_user_chars(db, user_id) + len(resolved_text) > TOTAL_CHAR_LIMIT:
+                raise MemoryServiceError(f"超出全部记忆总字符上限（{TOTAL_CHAR_LIMIT} 字符）", 400)
             vec = await _optional_embed(_embed_text_for_entry(col.name, resolved_title, resolved_text, resolved_tags))
+            m_tag = embeddings.current_embedding_model_tag() or None if vec is not None else None
             db.add(
                 MemoryEntry(
                     user_id=user_id,
@@ -906,10 +956,11 @@ async def resolve_pending(
                     source="agent",
                     search_tsv=func.to_tsvector("simple", tsv_text),
                     embedding=vec,
+                    embedding_model=m_tag,
                 )
             )
 
-    await db.delete(proposal)
+    proposal.status = "approved"
     await db.commit()
 
 
@@ -931,6 +982,7 @@ async def build_pinned_memory_prompt(
         (
             await db.execute(
                 select(MemoryEntry)
+                .options(defer(MemoryEntry.embedding))
                 .where(MemoryEntry.user_id == user_id, MemoryEntry.is_pinned.is_(True))
                 .order_by(
                     MemoryEntry.priority.asc(),
@@ -984,6 +1036,7 @@ async def build_memory_index_prompt(
         (
             await db.execute(
                 select(MemoryEntry)
+                .options(defer(MemoryEntry.embedding))
                 .where(MemoryEntry.user_id == user_id)
                 .order_by(MemoryEntry.updated_at.desc(), MemoryEntry.created_at.desc())
             )

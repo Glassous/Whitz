@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import type { ReasoningBlock, ReasoningTool } from "../../types";
 import AppIcon from "../ui/AppIcon.vue";
+import Spinner from "../ui/Spinner.vue";
 
 const props = defineProps<{ block: ReasoningBlock }>();
 
@@ -170,15 +171,16 @@ function webSearchProviderLabel(tool: ReasoningTool): string {
 }
 
 function toolLabel(tool: ReasoningTool): string {
-  const base = TOOL_LABELS[tool.name] ?? tool.name;
+  const base = (tool.label && tool.label.trim()) || TOOL_LABELS[tool.name] || tool.name;
   if (tool.name === "web_search") {
     const providerLabel = webSearchProviderLabel(tool);
-    if (providerLabel) return `${base} · ${providerLabel}`;
+    if (providerLabel && !base.includes(providerLabel)) return `${base} · ${providerLabel}`;
   }
   return base;
 }
 
 function toolSummary(tool: ReasoningTool): string {
+  if (tool.summary && tool.summary.trim()) return tool.summary.trim();
   if (tool.name === "web_search") return webQuery(tool);
   if (tool.name === "web_extract") return webItems(tool)[0]?.title ?? "";
   if (tool.name === "todo_list") return todoChanges(tool)[0] ?? "";
@@ -196,6 +198,27 @@ function toolSummary(tool: ReasoningTool): string {
   }
   const args = stripWrapper(tool.args);
   return (args || stripWrapper(tool.result)).split("\n")[0]?.slice(0, 80) ?? "";
+}
+
+function formatDuration(ms?: number | null): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return "";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
+}
+
+function isCodeTool(tool: ReasoningTool): boolean {
+  return tool.ui_kind === "code" || tool.name === "execute_code";
+}
+
+function codePayload(tool: ReasoningTool): { language: string; code: string } | null {
+  const args = parseArgs(tool.args);
+  if (args && typeof args.code === "string" && args.code.trim()) {
+    return {
+      language: typeof args.language === "string" && args.language ? args.language : "python",
+      code: args.code,
+    };
+  }
+  return null;
 }
 
 function collapsedTitles(tool: ReasoningTool): string[] {
@@ -265,17 +288,45 @@ function prettyResult(tool: ReasoningTool): string {
     <div v-if="block.tools?.length" class="space-y-1.5">
       <div
         v-for="(tool, ti) in block.tools"
-        :key="ti"
+        :key="tool.call_id || ti"
         class="overflow-hidden rounded-lg bg-surface/65"
+        :class="tool.parent_call_id ? 'ml-3.5 border-l-2 border-accent/35' : ''"
       >
         <details :open="openTools.has(ti)" class="disclosure-card">
           <summary
             class="focus-ring flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-2 text-left"
             @click.prevent="toggleTool(ti)"
           >
-            <AppIcon name="wrench" class="h-3.5 w-3.5 shrink-0 text-fg-faint" :stroke-width="1.8" />
+            <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+              <Spinner v-if="tool.status === 'running'" :size="12" class="text-accent" />
+              <AppIcon
+                v-else-if="tool.status === 'failed' || tool.error"
+                name="alert-circle"
+                class="h-3.5 w-3.5 text-danger"
+                :stroke-width="2"
+              />
+              <AppIcon
+                v-else-if="tool.status === 'completed'"
+                name="check"
+                class="h-3.5 w-3.5 text-success"
+                :stroke-width="2.4"
+              />
+              <AppIcon v-else name="wrench" class="h-3.5 w-3.5 text-fg-faint" :stroke-width="1.8" />
+            </span>
+            <span
+              v-if="tool.subagent_role"
+              class="shrink-0 rounded bg-accent-weak px-1.5 py-0.5 text-[10px] font-medium text-accent"
+            >
+              {{ tool.subagent_role }}
+            </span>
             <span class="shrink-0 text-[12.5px] font-medium text-fg-muted">{{ toolLabel(tool) }}</span>
             <span class="min-w-0 flex-1 truncate text-[12.5px] text-fg-faint">{{ toolSummary(tool) }}</span>
+            <span
+              v-if="formatDuration(tool.duration_ms)"
+              class="shrink-0 text-[11px] tabular-nums text-fg-faint"
+            >
+              {{ formatDuration(tool.duration_ms) }}
+            </span>
             <AppIcon
               name="chevron-right"
               motion="chevron-r"
@@ -285,6 +336,9 @@ function prettyResult(tool: ReasoningTool): string {
           </summary>
 
           <div class="space-y-1.5 px-2.5 pb-2.5 pt-1">
+          <p v-if="tool.error" class="rounded bg-danger-weak px-2 py-1 text-[12px] text-danger">
+            {{ tool.error }}
+          </p>
           <template v-if="isWeb(tool)">
             <p v-if="webQuery(tool)" class="text-[12.5px] text-fg-faint">搜索：{{ webQuery(tool) }}</p>
             <div v-for="(item, ii) in webItems(tool)" :key="ii" class="space-y-0.5">
@@ -316,6 +370,19 @@ function prettyResult(tool: ReasoningTool): string {
             >
               · {{ change }}
             </p>
+          </template>
+
+          <template v-else-if="isCodeTool(tool) && codePayload(tool)">
+            <div>
+              <p class="mb-0.5 text-[11.5px] font-medium uppercase tracking-wide text-fg-faint">
+                代码（{{ codePayload(tool)!.language }}）
+              </p>
+              <pre class="max-h-44 overflow-auto whitespace-pre-wrap break-words rounded bg-canvas p-2 font-mono text-[11.5px] leading-relaxed text-fg-muted">{{ codePayload(tool)!.code }}</pre>
+            </div>
+            <div v-if="prettyResult(tool)">
+              <p class="mb-0.5 text-[11.5px] font-medium uppercase tracking-wide text-fg-faint">执行输出</p>
+              <pre class="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-surface/60 p-1.5 font-mono text-[11.5px] leading-relaxed text-fg-faint">{{ prettyResult(tool) }}</pre>
+            </div>
           </template>
 
           <template v-else>

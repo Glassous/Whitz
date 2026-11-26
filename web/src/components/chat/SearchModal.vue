@@ -7,14 +7,16 @@ import type {
   Conversation,
   UnifiedChatSearchHit,
   UnifiedFileSearchHit,
+  UnifiedMemorySearchHit,
   UnifiedSearchResponse,
 } from "../../types";
 
-type SourceTab = "all" | "chat" | "file";
+type SourceTab = "all" | "chat" | "file" | "memory";
 
 type OmniboxItem =
   | { kind: "chat"; key: string; hit: UnifiedChatSearchHit }
-  | { kind: "file"; key: string; hit: UnifiedFileSearchHit };
+  | { kind: "file"; key: string; hit: UnifiedFileSearchHit }
+  | { kind: "memory"; key: string; hit: UnifiedMemorySearchHit };
 
 const props = defineProps<{
   open: boolean;
@@ -28,6 +30,7 @@ const emit = defineEmits<{
   close: [];
   select: [conversationId: string, messageId: string | null];
   "select-file": [fileId: string, filename: string, conversationId: string | null];
+  "select-memory": [entryId: string];
 }>();
 
 const query = ref("");
@@ -47,6 +50,7 @@ const SOURCE_TABS: { key: SourceTab; label: string }[] = [
   { key: "all", label: "全部" },
   { key: "chat", label: "对话" },
   { key: "file", label: "资料库正文" },
+  { key: "memory", label: "长期记忆" },
 ];
 
 const recentConversations = computed(() => {
@@ -68,6 +72,11 @@ const flatItems = computed<OmniboxItem[]>(() => {
       items.push({ kind: "file", key: `file:${f.file_id}:${f.locator}`, hit: f });
     }
   }
+  if (activeTab.value === "all" || activeTab.value === "memory") {
+    for (const m of res.memories ?? []) {
+      items.push({ kind: "memory", key: `memory:${m.entry_id}`, hit: m });
+    }
+  }
   if (activeTab.value === "all" || activeTab.value === "chat") {
     for (const c of res.chats ?? []) {
       items.push({ kind: "chat", key: `chat:${c.conversation_id}:${c.message_id ?? c.match_in}`, hit: c });
@@ -79,8 +88,9 @@ const flatItems = computed<OmniboxItem[]>(() => {
 function tabCount(tab: SourceTab): number | null {
   const res = results.value;
   if (!res || !query.value.trim()) return null;
-  if (tab === "all") return (res.files?.length ?? 0) + (res.chats?.length ?? 0);
+  if (tab === "all") return (res.files?.length ?? 0) + (res.memories?.length ?? 0) + (res.chats?.length ?? 0);
   if (tab === "file") return res.files?.length ?? 0;
+  if (tab === "memory") return res.memories?.length ?? 0;
   return res.chats?.length ?? 0;
 }
 
@@ -225,6 +235,8 @@ function chooseAt(index: number) {
       emit("select", item.hit.conversation_id, item.hit.message_id ?? null);
     } else if (item.kind === "file") {
       emit("select-file", item.hit.file_id, item.hit.filename, item.hit.conversation_id ?? null);
+    } else if (item.kind === "memory") {
+      emit("select-memory", item.hit.entry_id);
     }
   } else {
     const conv = recentConversations.value[index];
@@ -444,6 +456,32 @@ onBeforeUnmount(() => {
                   </span>
                   <span class="shrink-0 truncate max-w-[180px] text-[11.5px] text-fg-faint">
                     {{ item.hit.section_path || item.hit.locator }}
+                  </span>
+                </div>
+                <p v-if="item.hit.snippet" class="line-clamp-2 text-[13px] leading-relaxed text-fg-muted">
+                  <template v-for="(part, pi) in splitHighlight(item.hit.snippet, query)" :key="pi">
+                    <mark v-if="part.match" class="rounded bg-fg/15 px-0.5 font-semibold text-fg">{{ part.text }}</mark>
+                    <template v-else>{{ part.text }}</template>
+                  </template>
+                </p>
+              </template>
+
+              <!-- Memory hit -->
+              <template v-else-if="item.kind === 'memory'">
+                <div class="flex items-center justify-between gap-3">
+                  <span class="flex min-w-0 items-center gap-2">
+                    <span class="shrink-0 rounded-full bg-surface px-2 py-0.5 text-[10.5px] font-semibold text-accent">
+                      {{ item.hit.collection_name || "长期记忆" }}
+                    </span>
+                    <span class="truncate text-[14px] font-medium text-fg">
+                      <template v-for="(part, pi) in splitHighlight(item.hit.title || item.hit.snippet, query)" :key="pi">
+                        <mark v-if="part.match" class="rounded bg-fg/15 px-0.5 font-semibold text-fg">{{ part.text }}</mark>
+                        <template v-else>{{ part.text }}</template>
+                      </template>
+                    </span>
+                  </span>
+                  <span v-if="item.hit.timestamp" class="shrink-0 text-[12px] tabular-nums text-fg-faint">
+                    {{ formatTime(item.hit.timestamp) }}
                   </span>
                 </div>
                 <p v-if="item.hit.snippet" class="line-clamp-2 text-[13px] leading-relaxed text-fg-muted">

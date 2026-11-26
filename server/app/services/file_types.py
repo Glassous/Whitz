@@ -29,6 +29,7 @@ ALLOWED_FILE_TYPES: dict[str, tuple[str, str]] = {
     ".jsx": ("code", "text/jsx"),
     ".vue": ("code", "text/plain"),
     ".html": ("code", "text/html"),
+    ".htm": ("code", "text/html"),
     ".css": ("code", "text/css"),
     ".sql": ("code", "application/sql"),
     ".sh": ("code", "text/x-shellscript"),
