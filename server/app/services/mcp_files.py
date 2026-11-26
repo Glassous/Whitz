@@ -10,8 +10,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import Conversation, ConversationFile, User
-from app.services import cos, file_chunks, file_parser, file_provenance, file_types
+from app.db.models import Conversation, ConversationFile, ConversationFileLink, FileChunk, User
+from app.services import cos, file_cache, file_chunks, file_parser, file_provenance, file_types, file_uploads
 
 MAX_WRITE_FILE_BYTES = 2 * 1024 * 1024
 WRITABLE_TEXT_EXTENSIONS = frozenset(
@@ -24,8 +24,8 @@ MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "list_workspace_files",
         "description": (
-            "列出当前对话工作区中已上传并就绪的文件清单（包含 file_id、文件名、分类、MIME 类型、大小与作用域 scope）。"
-            "默认同时包含用户的全局共享文件（scope='global'）。"
+            "列出当前对话工作区中已上传并就绪的文件清单（包含 file_id、文件名、分类、MIME 类型、大小、索引状态与作用域 scope）。"
+            "默认同时包含用户的全局共享资料库文件（scope='library'）。"
             "在用户提及已上传文件、附件、资料或需要确认当前工作区有哪些文件时调用。"
         ),
         "inputSchema": {
@@ -45,17 +45,34 @@ MCP_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "read_workspace_file",
+        "name": "inspect_workspace_file",
         "description": (
-            "按 file_id 读取当前对话工作区或用户全局共享文件的内容。支持文本/代码/CSV/JSON/YAML（按行分页）、"
-            "PDF（按页分页）、Word DOCX（按段/表格行分页）、Excel XLSX（按工作表与行分页），"
-            "以及 PNG/JPG/WebP/GIF 图片。"
+            "快速查看指定工作区或资料库文件的结构大纲与元信息（总行数、PDF 总页数与扫描件检测、Excel 全部工作表及表头、"
+            "Markdown 章节目录、代码顶层符号、摘要与索引状态），适合在精读大文件前先定位章节或工作表。"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "conversation_id": {"type": "string", "description": "当前对话的 UUID"},
-                "file_id": {"type": "string", "description": "目标文件的 UUID"},
+                "file_id": {"type": "string", "description": "目标文件的 UUID（与 filename 二选一，优先传 file_id）"},
+                "filename": {"type": "string", "description": "目标文件名（未提供 file_id 时按当前工作区/资料库最新同名文件匹配）"},
+            },
+            "required": ["conversation_id"],
+        },
+    },
+    {
+        "name": "read_workspace_file",
+        "description": (
+            "按 file_id（或 filename）读取当前对话工作区或用户全局共享文件的内容。支持文本/代码/CSV/JSON/YAML（按行分页）、"
+            "PDF（按页分页）、Word DOCX（按段/表格行分页）、Excel XLSX（按工作表与行分页），"
+            "以及 PNG/JPG/WebP/GIF 图片（通过原生视觉通道查看原图）。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "conversation_id": {"type": "string", "description": "当前对话的 UUID"},
+                "file_id": {"type": "string", "description": "目标文件的 UUID（与 filename 二选一，优先传 file_id）"},
+                "filename": {"type": "string", "description": "目标文件名（当未提供 file_id 时按当前工作区/资料库最新同名文件匹配）"},
                 "start_line": {
                     "type": "integer",
                     "description": "文本/代码/DOCX/XLSX 起始行号（从 1 开始，默认 1）",
@@ -63,8 +80,8 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 },
                 "max_lines": {
                     "type": "integer",
-                    "description": "每次最多读取的行数（1-500，默认 200）",
-                    "default": 200,
+                    "description": "每次最多读取的行数（1-600，默认 250）",
+                    "default": 250,
                 },
                 "page_start": {
                     "type": "integer",
@@ -72,14 +89,14 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 },
                 "page_end": {
                     "type": "integer",
-                    "description": "PDF 结束页码（默认最多一次读 5 页）",
+                    "description": "PDF 结束页码（默认最多一次读 8 页）",
                 },
                 "sheet_name": {
                     "type": "string",
                     "description": "Excel XLSX 指定工作表名称（不填则读取第一个工作表）",
                 },
             },
-            "required": ["conversation_id", "file_id"],
+            "required": ["conversation_id"],
         },
     },
     {
@@ -95,7 +112,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "query": {"type": "string", "description": "要搜索的关键词（不区分大小写）"},
                 "file_id": {
                     "type": "string",
-                    "description": "可选：仅检索指定 file_id 的文件；留空则检索当前工作区全部可解析文件",
+                    "description": "可选：仅检索指定 file_id 的文件；留空则检索当前工作区及资料库全部可解析文件",
                 },
             },
             "required": ["conversation_id", "query"],
@@ -157,6 +174,10 @@ def _text_result(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
+def _escape_like(term: str) -> str:
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 async def _owned_conversation(db: AsyncSession, user: User, raw_conv_id: str) -> Conversation | None:
     try:
         conv_uuid = uuid.UUID(str(raw_conv_id))
@@ -181,6 +202,58 @@ async def _owned_ready_file(
     return row
 
 
+async def _resolve_ready_file(
+    db: AsyncSession,
+    user: User,
+    conv: Conversation,
+    *,
+    raw_file_id: str = "",
+    raw_filename: str = "",
+) -> ConversationFile | None:
+    if raw_file_id.strip():
+        found = await _owned_ready_file(db, user, conv, raw_file_id.strip())
+        if found is not None:
+            return found
+    cleaned_name = file_types.sanitize_filename(raw_filename or "")
+    if not cleaned_name:
+        return None
+    # Prefer files in the current conversation workspace (direct or linked)
+    linked_ids = select(ConversationFileLink.file_id).where(
+        ConversationFileLink.conversation_id == conv.id,
+        ConversationFileLink.user_id == user.id,
+    )
+    in_conv = (
+        await db.execute(
+            select(ConversationFile)
+            .where(
+                ConversationFile.user_id == user.id,
+                ConversationFile.status == "ready",
+                ConversationFile.filename == cleaned_name,
+                or_(
+                    ConversationFile.conversation_id == conv.id,
+                    ConversationFile.id.in_(linked_ids),
+                ),
+            )
+            .order_by(ConversationFile.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if in_conv is not None:
+        return in_conv
+    return (
+        await db.execute(
+            select(ConversationFile)
+            .where(
+                ConversationFile.user_id == user.id,
+                ConversationFile.status == "ready",
+                ConversationFile.filename == cleaned_name,
+            )
+            .order_by(ConversationFile.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+
+
 async def call_tool(
     db: AsyncSession,
     user: User,
@@ -193,19 +266,44 @@ async def call_tool(
     if conv is None:
         return _text_result("错误：对话不存在或无权访问该对话的工作区。", is_error=True)
 
+    linked_id_set = set(
+        (
+            await db.execute(
+                select(ConversationFileLink.file_id).where(
+                    ConversationFileLink.conversation_id == conv.id,
+                    ConversationFileLink.user_id == user.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
     if name == "list_workspace_files":
         include_global = args.get("include_global")
         want_global = True if include_global is None else bool(include_global)
-        stmt = select(ConversationFile).where(
-            ConversationFile.user_id == user.id,
-            ConversationFile.status == "ready",
-        )
-        if not want_global:
-            stmt = stmt.where(ConversationFile.conversation_id == conv.id)
-
-        rows = list(
-            (await db.execute(stmt.order_by(ConversationFile.created_at.desc()))).scalars().all()
-        )
+        if want_global:
+            rows = list(
+                (
+                    await db.execute(
+                        select(ConversationFile)
+                        .where(
+                            ConversationFile.user_id == user.id,
+                            ConversationFile.status == "ready",
+                        )
+                        .order_by(ConversationFile.created_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        else:
+            rows = await file_uploads.list_conversation_workspace_files(
+                db,
+                user_id=user.id,
+                conversation_id=conv.id,
+                order_asc=False,
+            )
         provenance_map = await file_provenance.resolve_files_provenance(db, user, rows)
         return _text_result(
             {
@@ -221,7 +319,13 @@ async def call_tool(
                         "size_bytes": r.size_bytes,
                         "source": r.source,
                         "is_global": True,
-                        "scope": "conversation" if r.conversation_id == conv.id else "library",
+                        "scope": (
+                            "conversation"
+                            if (r.conversation_id == conv.id or r.id in linked_id_set)
+                            else "library"
+                        ),
+                        "index_status": r.index_status or "ready",
+                        "summary": (r.summary or "")[:160] if r.summary else None,
                         "conversation_id": str(r.conversation_id) if r.conversation_id else None,
                         "conversation_title": (provenance_map.get(r.id) or {}).get("conversation_title"),
                         "message_id": str(r.message_id) if r.message_id else None,
@@ -235,24 +339,93 @@ async def call_tool(
         )
 
     settings = get_settings()
-    max_download = max(settings.max_file_size_bytes, 25 * 1024 * 1024)
 
-    if name == "read_workspace_file":
-        file_row = await _owned_ready_file(db, user, conv, str(args.get("file_id") or ""))
+    if name == "inspect_workspace_file":
+        file_row = await _resolve_ready_file(
+            db,
+            user,
+            conv,
+            raw_file_id=str(args.get("file_id") or ""),
+            raw_filename=str(args.get("filename") or ""),
+        )
         if file_row is None:
             return _text_result("错误：指定文件不存在、未就绪或无权在当前对话访问。", is_error=True)
-        try:
-            raw = await cos.get_object_bytes(
-                file_row.storage_key,
-                max_bytes=max_download,
-                settings=settings,
+
+        if file_row.category == "image":
+            return _text_result(
+                {
+                    "file_id": str(file_row.id),
+                    "filename": file_row.filename,
+                    "format": "image",
+                    "category": "image",
+                    "mime_type": file_row.mime_type,
+                    "size_bytes": file_row.size_bytes,
+                    "index_status": file_row.index_status or "ready",
+                    "summary": file_row.summary or None,
+                    "note": "如需查看图片画面细节，请调用 read_workspace_file 加载原生视觉内容。",
+                }
             )
-            parsed = file_parser.read_file_content(
-                raw,
-                ext=file_row.ext,
-                mime_type=file_row.mime_type,
+        try:
+            parsed = await file_cache.get_or_parse_file(file_row, settings=settings)
+        except (cos.CosError, file_parser.FileParseError, ValueError) as exc:
+            return _text_result(f"检查文件结构失败: {exc}", is_error=True)
+        return _text_result(
+            {
+                "file_id": str(file_row.id),
+                "filename": file_row.filename,
+                "category": file_row.category,
+                "mime_type": file_row.mime_type,
+                "size_bytes": file_row.size_bytes,
+                "index_status": file_row.index_status or "ready",
+                "summary": file_row.summary or None,
+                "outline": parsed.outline,
+                "outline_text": file_parser.format_outline_text(parsed, filename=file_row.filename),
+            }
+        )
+
+    if name == "read_workspace_file":
+        file_row = await _resolve_ready_file(
+            db,
+            user,
+            conv,
+            raw_file_id=str(args.get("file_id") or ""),
+            raw_filename=str(args.get("filename") or ""),
+        )
+        if file_row is None:
+            return _text_result("错误：指定文件不存在、未就绪或无权在当前对话访问。", is_error=True)
+
+        # Images: return lightweight visual observation metadata + COS original URL (NO multi-MB base64 JSON!)
+        if file_row.category == "image":
+            image_url: str | None = None
+            if settings.cos_configured and file_row.storage_key:
+                try:
+                    image_url = cos.presign_ai_media_url(
+                        key=file_row.storage_key,
+                        size_bytes=int(file_row.size_bytes or 0),
+                        expires_seconds=900,
+                        settings=settings,
+                    )
+                except cos.CosError:
+                    image_url = None
+            return _text_result(
+                {
+                    "file_id": str(file_row.id),
+                    "filename": file_row.filename,
+                    "format": "image",
+                    "mime_type": file_row.mime_type,
+                    "size_bytes": int(file_row.size_bytes or 0),
+                    "image_url": image_url,
+                    "whitz_visual_attachment": True,
+                    "note": "图片已通过原生多模态通道加载，请直接查看紧随其后的图片画面作答。",
+                }
+            )
+
+        try:
+            parsed = await file_cache.get_or_parse_file(file_row, settings=settings)
+            sliced = file_parser.read_from_parsed(
+                parsed,
                 start_line=int(args.get("start_line") or 1),
-                max_lines=int(args.get("max_lines") or 200),
+                max_lines=int(args.get("max_lines") or file_parser.DEFAULT_MAX_LINES),
                 page_start=int(args["page_start"]) if args.get("page_start") is not None else None,
                 page_end=int(args["page_end"]) if args.get("page_end") is not None else None,
                 sheet_name=str(args["sheet_name"]) if args.get("sheet_name") else None,
@@ -260,37 +433,11 @@ async def call_tool(
         except (cos.CosError, file_parser.FileParseError, ValueError) as exc:
             return _text_result(f"读取文件失败: {exc}", is_error=True)
 
-        if parsed.get("format") == "image":
-            content_blocks: list[dict[str, Any]] = [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "file_id": str(file_row.id),
-                            "filename": file_row.filename,
-                            "mime_type": parsed["mime_type"],
-                            "size_bytes": parsed["size_bytes"],
-                            "note": parsed["content"],
-                        },
-                        ensure_ascii=False,
-                    ),
-                }
-            ]
-            if parsed.get("image_base64"):
-                content_blocks.append(
-                    {
-                        "type": "image",
-                        "data": parsed["image_base64"],
-                        "mimeType": parsed["mime_type"],
-                    }
-                )
-            return {"content": content_blocks, "isError": False}
-
         return _text_result(
             {
                 "file_id": str(file_row.id),
                 "filename": file_row.filename,
-                **parsed,
+                **sliced,
             }
         )
 
@@ -299,55 +446,106 @@ async def call_tool(
         if not query:
             return _text_result("错误：query 不能为空。", is_error=True)
         target_id = args.get("file_id")
+        target_row: ConversationFile | None = None
         if target_id:
-            file_row = await _owned_ready_file(db, user, conv, str(target_id))
-            if file_row is None:
+            target_row = await _owned_ready_file(db, user, conv, str(target_id))
+            if target_row is None:
                 return _text_result("错误：指定文件不存在、未就绪或无权在当前对话访问。", is_error=True)
-            targets = [file_row]
+
+        # Fast path: query indexed file_chunks in Postgres first (0 COS downloads!)
+        pattern = f"%{_escape_like(query)}%"
+        chunk_stmt = (
+            select(FileChunk, ConversationFile)
+            .join(ConversationFile, FileChunk.file_id == ConversationFile.id)
+            .where(
+                FileChunk.user_id == user.id,
+                ConversationFile.status == "ready",
+                FileChunk.content.ilike(pattern, escape="\\"),
+            )
+            .order_by(ConversationFile.created_at.desc(), FileChunk.chunk_index.asc())
+            .limit(40)
+        )
+        if target_row is not None:
+            chunk_stmt = chunk_stmt.where(FileChunk.file_id == target_row.id)
+
+        chunk_rows = (await db.execute(chunk_stmt)).all()
+        matches_by_file: dict[uuid.UUID, dict[str, Any]] = {}
+        for chunk, frow in chunk_rows:
+            entry = matches_by_file.setdefault(
+                frow.id,
+                {
+                    "file_id": str(frow.id),
+                    "filename": frow.filename,
+                    "scope": (
+                        "conversation"
+                        if (frow.conversation_id == conv.id or frow.id in linked_id_set)
+                        else "global"
+                    ),
+                    "hits": [],
+                },
+            )
+            if len(entry["hits"]) >= 8:
+                continue
+            # Extract the exact matching line from the chunk for precise locator feedback
+            snippet = chunk.content.strip()[:300]
+            for ln in chunk.content.splitlines():
+                if query.lower() in ln.lower():
+                    snippet = ln.strip()[:300]
+                    break
+            entry["hits"].append(
+                {
+                    "location": chunk.locator or chunk.section_path or "正文匹配",
+                    "snippet": snippet,
+                }
+            )
+
+        # Fallback scan ONLY for target/unindexed files that have no chunks yet (using bounded file_cache)
+        if target_row is not None:
+            fallback_targets = [target_row] if (target_row.id not in matches_by_file and int(target_row.indexed_chunks or 0) == 0) else []
         else:
-            targets = list(
+            unindexed = list(
                 (
                     await db.execute(
                         select(ConversationFile)
                         .where(
                             ConversationFile.user_id == user.id,
                             ConversationFile.status == "ready",
+                            ConversationFile.category != "image",
+                            or_(
+                                ConversationFile.indexed_chunks == 0,
+                                ConversationFile.index_status != "ready",
+                            ),
                         )
                         .order_by(ConversationFile.created_at.desc())
-                        .limit(15)
+                        .limit(6)
                     )
                 )
                 .scalars()
                 .all()
             )
-        import asyncio
+            fallback_targets = [r for r in unindexed if r.id not in matches_by_file]
 
-        per_file_cap = min(max_download, 4 * 1024 * 1024) if not target_id else max_download
-        matches: list[dict[str, Any]] = []
-        for row in targets:
+        for row in fallback_targets:
             if row.category == "image":
                 continue
             try:
-                raw = await cos.get_object_bytes(
-                    row.storage_key,
-                    max_bytes=per_file_cap,
-                    settings=settings,
-                )
-                hits = await asyncio.to_thread(
-                    file_parser.search_file_content, raw, ext=row.ext, query=query, max_hits=10
-                )
-            except cos.CosError:
+                parsed = await file_cache.get_or_parse_file(row, settings=settings)
+                hits = file_parser.search_parsed_content(parsed, query=query, max_hits=10)
+            except (cos.CosError, file_parser.FileParseError):
                 continue
             if hits:
-                matches.append(
-                    {
-                        "file_id": str(row.id),
-                        "filename": row.filename,
-                        "scope": "conversation" if row.conversation_id == conv.id else "global",
-                        "hits": hits,
-                    }
-                )
-        return _text_result({"query": query, "matched_files": matches})
+                matches_by_file[row.id] = {
+                    "file_id": str(row.id),
+                    "filename": row.filename,
+                    "scope": (
+                        "conversation"
+                        if (row.conversation_id == conv.id or row.id in linked_id_set)
+                        else "global"
+                    ),
+                    "hits": hits,
+                }
+
+        return _text_result({"query": query, "matched_files": list(matches_by_file.values())})
 
     if name == "write_workspace_file":
         if not settings.cos_configured:
@@ -414,6 +612,7 @@ async def call_tool(
             existing.updated_at = datetime.now(timezone.utc)
             await db.commit()
             await db.refresh(existing)
+            file_cache.invalidate_file_cache(existing.id)
             await file_chunks.index_file_chunks_safe(db, existing, raw=raw_bytes)
             await db.refresh(existing)
             from app.services import realtime_bus
@@ -476,6 +675,7 @@ async def call_tool(
         db.add(row)
         await db.commit()
         await db.refresh(row)
+        file_cache.invalidate_file_cache(row.id)
         await file_chunks.index_file_chunks_safe(db, row, raw=raw_bytes)
         await db.refresh(row)
         from app.services import realtime_bus
@@ -503,25 +703,13 @@ async def call_tool(
         if not settings.cos_configured:
             return _text_result("错误：对象存储 COS 尚未配置，无法编辑工作区文件。", is_error=True)
 
-        file_row: ConversationFile | None = None
-        raw_file_id = str(args.get("file_id") or "").strip()
-        raw_filename = file_types.sanitize_filename(str(args.get("filename") or ""))
-        if raw_file_id:
-            file_row = await _owned_ready_file(db, user, conv, raw_file_id)
-        elif raw_filename:
-            file_row = (
-                await db.execute(
-                    select(ConversationFile)
-                    .where(
-                        ConversationFile.conversation_id == conv.id,
-                        ConversationFile.user_id == user.id,
-                        ConversationFile.filename == raw_filename,
-                        ConversationFile.status == "ready",
-                    )
-                    .order_by(ConversationFile.created_at.desc())
-                    .limit(1)
-                )
-            ).scalars().first()
+        file_row = await _resolve_ready_file(
+            db,
+            user,
+            conv,
+            raw_file_id=str(args.get("file_id") or ""),
+            raw_filename=str(args.get("filename") or ""),
+        )
         if file_row is None:
             return _text_result("错误：未找到目标文件（请检查 file_id 或 filename）。", is_error=True)
 
@@ -607,12 +795,12 @@ async def call_tool(
         file_row.size_bytes = len(raw_bytes)
         file_row.etag = etag
         file_row.updated_at = datetime.now(timezone.utc)
-        # Allow current ChatPipeline run to attach this edited file as a refreshed artifact
         if file_row.conversation_id == conv.id:
             file_row.source = "assistant"
             file_row.message_id = None
         await db.commit()
         await db.refresh(file_row)
+        file_cache.invalidate_file_cache(file_row.id)
         await file_chunks.index_file_chunks_safe(db, file_row, raw=raw_bytes)
         await db.refresh(file_row)
 

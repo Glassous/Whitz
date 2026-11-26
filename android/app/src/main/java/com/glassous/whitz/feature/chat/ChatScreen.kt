@@ -490,7 +490,7 @@ fun ChatScreen(
         if (!ui.hasActiveUploads && queuedSend) {
             queuedSend = false
             val trimmed = inputValue.text.trim()
-            if (trimmed.isNotEmpty() && !ui.streaming && !ui.sendingMessage) {
+            if ((trimmed.isNotEmpty() || ui.attachedIds.isNotEmpty()) && !ui.streaming && !ui.sendingMessage) {
                 inputValue = TextFieldValue("")
                 composerExpanded = false
                 dismissPlusMenu()
@@ -1694,7 +1694,7 @@ fun ChatScreen(
 
                                             val canExpandInput = inputValue.text.length > 60 || inputValue.text.contains('\n') || composerExpanded
                                             val hasActiveUploads = ui.hasActiveUploads
-                                            val canSend = inputValue.text.isNotBlank() && !ui.streaming && !ui.sendingMessage && ui.agentStatus?.ready != false
+                                            val canSend = (inputValue.text.isNotBlank() || ui.attachedIds.isNotEmpty() || hasActiveUploads) && !ui.streaming && !ui.sendingMessage && ui.agentStatus?.ready != false
 
                                             if (queuedSend && hasActiveUploads) {
                                                 Row(

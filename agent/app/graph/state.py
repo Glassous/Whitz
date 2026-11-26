@@ -25,6 +25,8 @@ class AgentState(TypedDict, total=False):
     timezone: str
     instructions: str
     attachments: list[dict[str, Any]]
+    directly_delivered_file_ids: list[str]
+    attachment_delivery_map: dict[str, str]
     skills: list[dict[str, Any]]
     requested_skills: list[str]
     memory_enabled: bool

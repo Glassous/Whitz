@@ -133,9 +133,21 @@ class Settings(BaseSettings):
     cos_upload_expires_seconds: int = 600
     cos_download_expires_seconds: int = 300
     cos_image_thumb_query: str = ""
+    cos_ai_image_query: str = ""
     file_max_size_mb: int = 20
     max_files_per_conversation: int = 20
     pending_file_ttl_seconds: int = 1800
+
+    # Multimodal direct delivery & workspace file cache (2C4G-friendly defaults)
+    llm_image_delivery_mode: str = "url_first"
+    llm_image_url_max_mb: int = 16
+    llm_image_compress_threshold_mb: int = 5
+    llm_native_pdf_mode: str = "auto"
+    llm_native_pdf_max_mb: int = 8
+    llm_native_pdf_max_pages: int = 30
+    attachment_inline_max_tokens: int = 14000
+    attachment_single_file_max_tokens: int = 8000
+    file_parse_cache_max_mb: int = 32
 
     internal_mcp_base_url: str = "http://server:8000"
 

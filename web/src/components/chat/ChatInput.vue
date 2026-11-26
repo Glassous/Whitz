@@ -64,9 +64,14 @@ const hasChips = computed(
     (props.attachedFiles?.length ?? 0) > 0 ||
     (props.selectedSkills?.length ?? 0) > 0,
 );
+const hasAttachedOrUploading = computed(
+  () =>
+    (props.attachedFiles?.length ?? 0) > 0 ||
+    (props.uploads?.some((u) => u.status !== "error") ?? false),
+);
 const sendLockedByUpload = computed(() => !!props.uploading && !props.streaming);
 const canSubmit = computed(
-  () => hasEditorContent.value && !props.streaming && !props.sending && !props.disabled,
+  () => (hasEditorContent.value || hasAttachedOrUploading.value) && !props.streaming && !props.sending && !props.disabled,
 );
 
 const mentionCandidates = computed<ConversationFile[]>(() => {
@@ -387,7 +392,8 @@ function clearEditor() {
 function doSend() {
   if (props.streaming || props.sending || props.disabled) return;
   const { content, inlineFileIds } = serializeEditor();
-  if (!content) return;
+  const hasBarAttachments = (props.attachedFiles?.length ?? 0) > 0;
+  if (!content && !inlineFileIds.length && !hasBarAttachments) return;
   const pop = document.getElementById("chat-skill-picker") as (HTMLElement & { hidePopover?: () => void }) | null;
   pop?.hidePopover?.();
   mentionOpen.value = false;
@@ -396,7 +402,7 @@ function doSend() {
 }
 
 function submit() {
-  if (!hasEditorContent.value || props.streaming || props.sending || props.disabled) return;
+  if ((!hasEditorContent.value && !hasAttachedOrUploading.value) || props.streaming || props.sending || props.disabled) return;
   if (props.uploading) {
     queuedSend.value = true;
     return;

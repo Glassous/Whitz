@@ -19,6 +19,7 @@ from app.services import (
     cos,
     cross_chat_memory,
     file_provenance,
+    file_uploads,
     limits,
     membership,
     memory_service,
@@ -60,12 +61,12 @@ def _history_from_messages(messages: list[Message]) -> list[dict[str, str]]:
     for msg in messages:
         if msg.role not in ("user", "assistant"):
             continue
-        text = (msg.content or "").strip()
-        if not text:
-            continue
         if msg.role == "assistant" and msg.status in ("failed", "cancelled", "streaming", "waiting"):
             continue
-        history.append({"role": msg.role, "content": msg.content})
+        rendered = cross_chat_memory.format_history_message_content(msg)
+        if not rendered.strip():
+            continue
+        history.append({"role": msg.role, "content": rendered})
     return history
 
 
@@ -1020,7 +1021,10 @@ async def _auto_title_events(
             .limit(1)
         )
     ).scalars().first()
-    if user_msg is None or not (user_msg.content or "").strip():
+    if user_msg is None:
+        return
+    user_seed = cross_chat_memory.format_history_message_content(user_msg).strip()
+    if not user_seed:
         return
 
     r = get_redis()
@@ -1029,7 +1033,7 @@ async def _auto_title_events(
     if not acquired:
         return
     try:
-        prompt = titles.build_auto_prompt(user_msg.content, content)
+        prompt = titles.build_auto_prompt(user_seed, content)
         title = await asyncio.wait_for(titles.complete_title(prompt), timeout=20)
         await db.refresh(conv)
         if conv.kind == "main" or conv.title not in ("新对话", "新旁聊"):
@@ -1185,20 +1189,11 @@ async def _prepare_turn_context(
     query_text: str = "",
 ) -> dict[str, Any]:
     conv_id = conv.id
-    conv_files = list(
-        (
-            await db.execute(
-                select(ConversationFile)
-                .where(
-                    ConversationFile.conversation_id == conv_id,
-                    ConversationFile.user_id == user.id,
-                    ConversationFile.status == "ready",
-                )
-                .order_by(ConversationFile.created_at.asc())
-            )
-        )
-        .scalars()
-        .all()
+    conv_files = await file_uploads.list_conversation_workspace_files(
+        db,
+        user_id=user.id,
+        conversation_id=conv_id,
+        order_asc=True,
     )
     conv_file_ids = {f.id for f in conv_files}
     inline_ids = file_provenance.extract_inline_file_ids(query_text)
@@ -1222,20 +1217,17 @@ async def _prepare_turn_context(
             .scalars()
             .all()
         )
+        if global_attached:
+            await file_uploads.link_files_to_conversation(
+                db,
+                user_id=user.id,
+                conversation_id=conv_id,
+                files=global_attached,
+            )
 
     # Slim context budget: include ALL current-conversation & attached files, plus at most 6 recent extra library files
     # (the remaining library files stay searchable via UnifiedKnowledgeRetriever without bloating every turn's prompt)
     seen_file_ids = {f.id for f in [*conv_files, *global_attached]}
-    total_library_count = int(
-        (
-            await db.scalar(
-                select(func.count())
-                .select_from(ConversationFile)
-                .where(ConversationFile.user_id == user.id, ConversationFile.status == "ready")
-            )
-        )
-        or 0
-    )
     recent_library_files = list(
         (
             await db.execute(
@@ -1285,6 +1277,7 @@ async def _prepare_turn_context(
                 "filename": f.filename,
                 "ext": f.ext,
                 "category": f.category,
+                "mime_type": f.mime_type,
                 "size_bytes": f.size_bytes,
                 "is_global": True,
             }
@@ -1294,6 +1287,8 @@ async def _prepare_turn_context(
         user_payload["skills"] = cleaned_skills
 
     provenance_map = await file_provenance.resolve_files_provenance(db, user, all_context_files)
+    attached_id_set = {af.id for af in attached_files}
+    workspace_id_set = conv_file_ids | {f.id for f in global_attached}
 
     attachments_meta = [
         {
@@ -1305,8 +1300,10 @@ async def _prepare_turn_context(
             "mime_type": f.mime_type,
             "size_bytes": f.size_bytes,
             "is_global": True,
-            "scope": "conversation" if f.conversation_id == conv_id else "library",
-            "attached": f.id in {af.id for af in attached_files},
+            "scope": "conversation" if f.id in workspace_id_set else "library",
+            "attached": f.id in attached_id_set,
+            "index_status": f.index_status or "ready",
+            "summary": (f.summary or "")[:140] if f.summary else None,
             "conversation_id": str(f.conversation_id) if f.conversation_id else None,
             "conversation_title": (provenance_map.get(f.id) or {}).get("conversation_title"),
             "message_id": str(f.message_id) if f.message_id else None,
@@ -1337,16 +1334,6 @@ async def _prepare_turn_context(
             desc = (info.get("description") or "").strip() if info else ""
             skill_lines.append(f"- {sname}" + (f"：{desc}" if desc else ""))
         instruction_parts.append("\n".join(skill_lines))
-
-    workspace_ctx = _build_workspace_instructions(
-        conv_id,
-        all_context_files,
-        {f.id for f in attached_files},
-        total_library_count=total_library_count,
-        provenance_map=provenance_map,
-    )
-    if workspace_ctx:
-        instruction_parts.append(workspace_ctx)
 
     rolling_summary = ""
     cross_chat_context = ""

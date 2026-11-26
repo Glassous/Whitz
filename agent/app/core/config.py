@@ -46,6 +46,14 @@ class AgentSettings(BaseSettings):
     llm_thinking_param_style: Literal["auto", "deepseek", "qwen", "openai", "none"] = "auto"
     llm_adaptive_probe_enabled: bool = True
 
+    # Native multimodal & direct attachment ingestion
+    llm_image_delivery_mode: Literal["url_first", "base64", "url_only"] = "url_first"
+    llm_native_pdf_mode: Literal["auto", "enabled", "disabled"] = "auto"
+    llm_native_pdf_max_mb: int = 8
+    llm_native_pdf_max_pages: int = 30
+    attachment_inline_max_tokens: int = 14000
+    attachment_single_file_max_tokens: int = 8000
+
     # Optional Embeddings (OpenAI-compatible /v1/embeddings -> 1536 dims)
     embedding_base_url: str = ""
     embedding_api_key: str = ""

@@ -70,6 +70,8 @@ class QueryPlan:
 def _extract_last_user_text(messages: Sequence[BaseMessage]) -> str:
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage):
+            if (getattr(msg, "additional_kwargs", None) or {}).get("whitz_ephemeral_media"):
+                continue
             content = msg.content
             if isinstance(content, str):
                 return content.strip()
@@ -77,9 +79,11 @@ def _extract_last_user_text(messages: Sequence[BaseMessage]) -> str:
                 parts = [
                     str(b.get("text") or "")
                     for b in content
-                    if isinstance(b, dict) and b.get("type") in ("text", None)
+                    if isinstance(b, dict)
+                    and b.get("type") in ("text", None)
+                    and not str(b.get("text") or "").startswith("<attached_file ")
                 ]
-                return " ".join(p for p in parts if p).strip()
+                return " ".join(p.strip() for p in parts if p.strip()).strip()
     return ""
 
 
@@ -99,8 +103,21 @@ def _recent_context_snippet(messages: Sequence[BaseMessage], max_turns: int = 4)
     # Exclude the latest HumanMessage (already passed as current query)
     history = list(messages[:-1]) if messages else []
     for msg in history[-(max_turns * 2) :]:
-        if isinstance(msg, HumanMessage) and isinstance(msg.content, str) and msg.content.strip():
-            lines.append(f"用户：{msg.content.strip()[:220]}")
+        if isinstance(msg, HumanMessage):
+            if (getattr(msg, "additional_kwargs", None) or {}).get("whitz_ephemeral_media"):
+                continue
+            if isinstance(msg.content, str) and msg.content.strip():
+                lines.append(f"用户：{msg.content.strip()[:220]}")
+            elif isinstance(msg.content, list):
+                txt = " ".join(
+                    str(b.get("text") or "").strip()
+                    for b in msg.content
+                    if isinstance(b, dict)
+                    and b.get("type") in ("text", None)
+                    and not str(b.get("text") or "").startswith("<attached_file ")
+                ).strip()
+                if txt:
+                    lines.append(f"用户：{txt[:220]}")
         elif isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content.strip():
             lines.append(f"助手：{msg.content.strip()[:220]}")
     return "\n".join(lines[-6:])
@@ -111,6 +128,7 @@ async def build_query_plan(
     messages: Sequence[BaseMessage],
     rag_scope: RagScope,
     attachments: Sequence[dict[str, Any]],
+    directly_delivered_file_ids: Sequence[str] = (),
     memory_enabled: bool,
     memory_index: str,
     conversation_kind: str,
@@ -121,6 +139,8 @@ async def build_query_plan(
 
     - L0 (0ms): Skip trivial greetings, empty input, or `rag_scope.mode == 'off'`.
     - L1 (0ms): Deterministic source routing from attachments, inline file refs, memory & chat signals.
+      Files already directly delivered in this turn (native image/PDF or full-text injected) are excluded
+      from redundant prefetch so TTFT drops and models focus on the native input.
     - L2 (~250ms, on-demand): Fast LLM anaphora resolution & multi-query decomposition ONLY when
       multi-turn history + deictic markers / complex comparison exist.
     """
@@ -136,7 +156,8 @@ async def build_query_plan(
     if not low or (low in _TRIVIAL_INPUTS and not inline_fids):
         return QueryPlan(should_prefetch=False, skipped_reason="trivial_greeting")
 
-    attached_fids = list(
+    direct_set = {str(fid).strip() for fid in (directly_delivered_file_ids or ()) if str(fid).strip()}
+    all_attached_fids = list(
         dict.fromkeys(
             [
                 *rag_scope.file_ids,
@@ -145,34 +166,49 @@ async def build_query_plan(
             ]
         )
     )
-    has_any_files = bool(attachments or attached_fids)
+    # Exclude files already presented natively or in full in the current HumanMessage
+    searchable_attached_fids = [fid for fid in all_attached_fids if fid not in direct_set]
+    other_library_files = [
+        a for a in attachments if str(a.get("file_id") or a.get("id") or "") not in direct_set
+    ]
+    has_searchable_files = bool(searchable_attached_fids or other_library_files)
     has_any_memory = bool(memory_enabled and (memory_index or "").strip())
+
+    # If the user sent ONLY directly-delivered media/docs with a short prompt (e.g. image-only or "帮我看下这张图"),
+    # skip proactive RAG prefetch unless they explicitly ask about memory or past chats.
+    is_direct_attachment_only_turn = bool(direct_set) and not searchable_attached_fids
 
     # Determine target sources
     sources: list[str] = []
     if rag_scope.mode == "files_only":
-        if has_any_files:
+        if has_searchable_files:
             sources.append("file")
     else:
-        if has_any_files and (attached_fids or _FILE_INTENT_RE.search(cleaned_query) or len(cleaned_query) >= 12):
-            sources.append("file")
+        if has_searchable_files:
+            if searchable_attached_fids:
+                sources.append("file")
+            elif not is_direct_attachment_only_turn and (_FILE_INTENT_RE.search(cleaned_query) or len(cleaned_query) >= 12):
+                sources.append("file")
         if rag_scope.include_memory and has_any_memory and (
-            _MEMORY_INTENT_RE.search(cleaned_query) or len(cleaned_query) >= 10
+            _MEMORY_INTENT_RE.search(cleaned_query) or (not is_direct_attachment_only_turn and len(cleaned_query) >= 10)
         ):
             sources.append("memory")
         if rag_scope.include_chats and (
-            conversation_kind == "main" or _CHAT_INTENT_RE.search(cleaned_query)
+            _CHAT_INTENT_RE.search(cleaned_query) or (conversation_kind == "main" and not is_direct_attachment_only_turn)
         ):
             sources.append("chat")
 
     if not sources:
-        return QueryPlan(should_prefetch=False, skipped_reason="no_applicable_sources")
+        return QueryPlan(
+            should_prefetch=False,
+            skipped_reason="directly_delivered_native" if is_direct_attachment_only_turn else "no_applicable_sources",
+        )
 
     plan = QueryPlan(
         should_prefetch=True,
         queries=[cleaned_query[:500]],
         sources=sources,
-        attached_file_ids=attached_fids,
+        attached_file_ids=searchable_attached_fids,
     )
 
     # L2: On-demand Fast LLM rewrite ONLY when multi-turn context + anaphora/deictic reference exist
@@ -215,7 +251,7 @@ async def build_query_plan(
                 allowed = set(sources)
                 # Keep original attached files always included
                 refined = [str(s).strip().lower() for s in parsed["sources"] if str(s).strip().lower() in allowed]
-                if attached_fids and "file" not in refined and "file" in allowed:
+                if searchable_attached_fids and "file" not in refined and "file" in allowed:
                     refined.insert(0, "file")
                 if refined:
                     plan.sources = list(dict.fromkeys(refined))

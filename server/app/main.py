@@ -20,6 +20,7 @@ from app.api.routes import (
     conversations,
     desktop,
     files,
+    internal_files,
     library,
     mcp,
     memory,
@@ -123,6 +124,7 @@ def create_app() -> FastAPI:
     app.include_router(schedules.router)
     app.include_router(posts.router)
     app.include_router(mcp.router)
+    app.include_router(internal_files.router)
     app.include_router(chat.router)
     app.include_router(chat.events_router)
     app.include_router(agent.router)

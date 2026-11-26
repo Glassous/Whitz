@@ -455,6 +455,28 @@ class ConversationFile(Base):
     conversation: Mapped[Conversation | None] = relationship(back_populates="files")
 
 
+class ConversationFileLink(Base):
+    """Persistent association linking a global library file into a specific conversation workspace."""
+
+    __tablename__ = "conversation_file_links"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "file_id", name="uq_conv_file_link"),
+        Index("ix_conv_file_links_conv_created", "conversation_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversation_files.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Message(Base):
     __tablename__ = "messages"
     __table_args__ = (

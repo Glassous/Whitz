@@ -27,8 +27,7 @@ from app.api.schemas import (
 from app.core.config import get_settings
 from app.db.models import Conversation, ConversationFile, User
 from app.db.session import get_db
-from app.services import audit, cos, file_chunks, file_types
-from app.services.file_types import FileValidationError, validate_upload_request
+from app.services import audit, cos, file_cache, file_chunks, file_types, file_uploads
 
 router = APIRouter(tags=["library"])
 
@@ -218,73 +217,24 @@ async def presign_library_upload(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    settings = get_settings()
-    if not settings.cos_configured:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "文件存储服务尚未配置")
-
-    try:
-        info = validate_upload_request(
-            body.filename,
-            body.mime_type,
-            body.size_bytes,
-            settings.max_file_size_bytes,
-        )
-    except FileValidationError as exc:
-        raise HTTPException(422, str(exc)) from exc
-
-    await cleanup_expired_pending_files(db, user_id=user.id, background_tasks=background_tasks)
-
-    file_id = uuid.uuid4()
-    storage_key = cos.build_storage_key(user.id, None, file_id, info.filename, settings=settings)
-    try:
-        signed = await cos.presign_put(
-            key=storage_key,
-            content_type=info.mime_type,
-            content_length=info.size_bytes,
-            settings=settings,
-        )
-    except cos.CosError as exc:
-        raise HTTPException(exc.status_code, exc.detail) from exc
-
-    ttl = max(60, int(settings.pending_file_ttl_seconds or 1800))
-    record = ConversationFile(
-        id=file_id,
-        conversation_id=None,
-        user_id=user.id,
-        filename=info.filename,
-        ext=info.ext,
-        mime_type=info.mime_type,
-        category=info.category,
-        size_bytes=info.size_bytes,
-        storage_key=storage_key,
-        status="pending",
-        source="user",
-        is_global=True,
-        expires_cleanup_at=datetime.now(timezone.utc) + timedelta(seconds=ttl),
+    record, payload = await file_uploads.presign_file_upload(
+        db,
+        user=user,
+        conversation=None,
+        filename=body.filename,
+        mime_type=body.mime_type,
+        size_bytes=body.size_bytes,
+        background_tasks=background_tasks,
     )
-    db.add(record)
-    await db.commit()
-
     await audit.record(
         "library.file_presign",
         actor=user,
         target_type="conversation_file",
-        target_id=file_id,
+        target_id=record.id,
         request=request,
-        metadata={"filename": info.filename, "size_bytes": info.size_bytes},
+        metadata={"filename": record.filename, "size_bytes": record.size_bytes},
     )
-    return {
-        "file_id": file_id,
-        "filename": info.filename,
-        "ext": info.ext,
-        "category": info.category,
-        "mime_type": info.mime_type,
-        "size_bytes": info.size_bytes,
-        "upload_url": signed["url"],
-        "method": signed["method"],
-        "headers": signed["headers"],
-        "expires_in": signed["expires_in"],
-    }
+    return payload
 
 
 @router.post("/api/library/files/{file_id}/complete", response_model=LibraryFileOut)
@@ -300,54 +250,13 @@ async def complete_library_upload(
     if record.status == "ready":
         return serialize_file_out(record, settings=settings, conversation_title=None, as_library=True)
 
-    try:
-        meta = await cos.head_object(record.storage_key)
-    except cos.CosError as exc:
-        raise HTTPException(exc.status_code, exc.detail) from exc
-
-    if meta is None:
-        record.status = "failed"
-        record.error_message = "COS 中未找到已上传对象"
-        await db.commit()
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件尚未上传完成，请重试")
-
-    actual_size = meta.get("content_length")
-    if actual_size is not None and actual_size != record.size_bytes:
-        record.status = "failed"
-        record.error_message = f"文件大小校验不匹配: 预期 {record.size_bytes}, 实际 {actual_size}"
-        await db.commit()
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "上传文件大小与签名不一致")
-
-    record.status = "ready"
-    record.is_global = True
-    record.error_message = None
-    record.expires_cleanup_at = None
-    record.etag = (body.etag if body and body.etag else None) or meta.get("etag")
-    is_async_index = (
-        settings.app_env == "production"
-        and (
-            (record.category != "image" and int(record.size_bytes or 0) > 256 * 1024)
-            or (record.category == "image" and settings.rag_image_indexing_enabled)
-        )
+    record = await file_uploads.complete_file_upload(
+        db,
+        record=record,
+        user=user,
+        etag=body.etag if body else None,
+        settings=settings,
     )
-    record.index_status = "indexing" if is_async_index else "ready"
-    await db.commit()
-    await db.refresh(record)
-
-    if is_async_index:
-        file_chunks.schedule_file_indexing(record.id, user.id)
-    else:
-        await file_chunks.index_file_chunks_safe(db, record)
-        await db.refresh(record)
-
-    from app.services import realtime_bus
-
-    await realtime_bus.publish_user_event(
-        user.id,
-        "library.updated",
-        {"action": "added", "file_id": str(record.id), "index_status": record.index_status},
-    )
-
     await audit.record(
         "library.file_complete",
         actor=user,
@@ -426,6 +335,7 @@ async def delete_library_file(
     filename = row.filename
     await db.delete(row)
     await db.commit()
+    file_cache.invalidate_file_cache(file_id)
     if storage_key:
         background_tasks.add_task(cos.delete_object, storage_key)
     from app.services import realtime_bus
@@ -510,6 +420,12 @@ async def attach_library_files(
 
     settings = get_settings()
     attached_rows = [by_id[fid] for fid in unique_ids]
+    linked_count = await file_uploads.link_files_to_conversation(
+        db,
+        user_id=user.id,
+        conversation_id=conv.id,
+        files=attached_rows,
+    )
 
     await audit.record(
         "library.file_attach",
@@ -517,6 +433,6 @@ async def attach_library_files(
         target_type="conversation",
         target_id=conv.id,
         request=request,
-        metadata={"requested": len(unique_ids), "cloned": 0},
+        metadata={"requested": len(unique_ids), "linked": linked_count, "cloned": 0},
     )
     return [serialize_file_out(row, settings=settings) for row in attached_rows]

@@ -192,7 +192,8 @@ function cancelEdit() {
 
 function submitEdit() {
   const trimmed = editText.value.trim();
-  if (!trimmed || chat.streaming || filesStore.hasActiveUploads) return;
+  const hasAttachments = (props.message.tool_payload?.attachments?.length ?? 0) > 0;
+  if ((!trimmed && !hasAttachments) || chat.streaming || filesStore.hasActiveUploads) return;
   editing.value = false;
   emit("edit", props.message.id, trimmed);
 }
@@ -251,6 +252,7 @@ const TOOL_LABELS: Record<string, string> = {
   delegate_subtask: "子智能体协作",
   request_deep_thinking: "开启深度思考",
   list_workspace_files: "查看工作区文件",
+  inspect_workspace_file: "查看文件结构",
   read_workspace_file: "读取工作区文件",
   search_workspace_files: "检索工作区文件",
   write_workspace_file: "写入工作区文件",
@@ -260,6 +262,7 @@ const TOOL_LABELS: Record<string, string> = {
   install_github_skill: "安装 GitHub 技能",
   create_user_skill: "创建自定义技能",
   mcp__whitz_files__list_workspace_files: "查看工作区文件",
+  mcp__whitz_files__inspect_workspace_file: "查看文件结构",
   mcp__whitz_files__read_workspace_file: "读取工作区文件",
   mcp__whitz_files__search_workspace_files: "检索工作区文件",
   mcp__whitz_files__write_workspace_file: "写入工作区文件",
@@ -616,7 +619,7 @@ const resolvedArtifacts = computed(() =>
           <button
             type="button"
             class="focus-ring rounded-full bg-primary px-3.5 py-1.5 text-[12.5px] font-medium text-primary-fg transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="!editText.trim() || chat.streaming || filesStore.hasActiveUploads"
+            :disabled="(!editText.trim() && !(message.tool_payload?.attachments?.length ?? 0)) || chat.streaming || filesStore.hasActiveUploads"
             @click="submitEdit"
           >
             保存并重发
@@ -624,9 +627,9 @@ const resolvedArtifacts = computed(() =>
         </div>
       </div>
 
-      <!-- Normal User Message Bubble (with inline file cards & pure image thumbnails) -->
+      <!-- Normal User Message Bubble (hidden for pure image/file-only turns with empty text) -->
       <div
-        v-else
+        v-else-if="message.content.trim() || !barAttachments.length"
         class="w-fit max-w-full rounded-[22px] bg-surface px-4 py-2.5 text-[15px] leading-relaxed text-fg"
       >
         <div

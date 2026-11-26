@@ -91,6 +91,7 @@ async def test_mcp_files_auth_and_tools(client, register, db, monkeypatch):
     tool_names = [t["name"] for t in tools_resp.json()["result"]["tools"]]
     assert set(tool_names) == {
         "list_workspace_files",
+        "inspect_workspace_file",
         "read_workspace_file",
         "search_workspace_files",
         "write_workspace_file",

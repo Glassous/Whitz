@@ -12,6 +12,11 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 
 from app.core.models import ModelRouter
+from app.core.multimodal import (
+    build_ephemeral_image_observation,
+    try_extract_visual_tool_payload,
+    unwrap_mcp_text_result,
+)
 from app.graph.state import SubagentState
 from app.tools import parse_tool_error
 from app.tools.builtin_tools import (
@@ -31,14 +36,22 @@ logger = logging.getLogger("whitz.agent.subgraphs")
 MAX_SUBAGENT_ITERATIONS = 8
 
 _RESEARCHER_ALLOWED_MCP = frozenset(
-    {"list_workspace_files", "read_workspace_file", "search_workspace_files", "list_user_skills"}
+    {
+        "list_workspace_files",
+        "inspect_workspace_file",
+        "read_workspace_file",
+        "search_workspace_files",
+        "list_user_skills",
+    }
 )
 _CODER_ALLOWED_MCP = frozenset(
     {
         "list_workspace_files",
+        "inspect_workspace_file",
         "read_workspace_file",
         "search_workspace_files",
         "write_workspace_file",
+        "edit_workspace_file",
     }
 )
 
@@ -94,25 +107,30 @@ async def _invoke_single_tool(
     tool_map: dict[str, BaseTool],
     conv_id: str,
     config: RunnableConfig,
-) -> ToolMessage:
+) -> tuple[ToolMessage, HumanMessage | None]:
     name = str(tc.get("name") or "")
     call_id = str(tc.get("id") or name)
     args = dict(tc.get("args") or {})
     if conv_id and name in (
         "list_workspace_files",
+        "inspect_workspace_file",
         "read_workspace_file",
         "search_workspace_files",
         "write_workspace_file",
+        "edit_workspace_file",
     ):
         args.setdefault("conversation_id", conv_id)
     tool_obj = tool_map.get(name)
     if tool_obj is None:
         err_json = json.dumps({"error": f"子智能体无权调用工具: {name}"}, ensure_ascii=False)
-        return ToolMessage(
-            tool_call_id=call_id,
-            name=name,
-            content=err_json,
-            status="error",
+        return (
+            ToolMessage(
+                tool_call_id=call_id,
+                name=name,
+                content=err_json,
+                status="error",
+            ),
+            None,
         )
 
     _emit_subagent_tool_event(
@@ -128,7 +146,29 @@ async def _invoke_single_tool(
     started = time.monotonic()
     try:
         res = await tool_obj.ainvoke(args, config=config)
-        text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+        visual_payload = try_extract_visual_tool_payload(res) if name == "read_workspace_file" else None
+        visual_obs: HumanMessage | None = None
+        if visual_payload is not None:
+            fid = str(visual_payload.get("file_id") or "")
+            fname = str(visual_payload.get("filename") or "image")
+            mime = str(visual_payload.get("mime_type") or "image/png")
+            img_url = str(visual_payload.get("image_url") or "").strip()
+            text = json.dumps(
+                {
+                    "file_id": fid,
+                    "filename": fname,
+                    "format": "image",
+                    "mime_type": mime,
+                    "status": "visual_attached" if img_url else "unavailable",
+                },
+                ensure_ascii=False,
+            )
+            if img_url:
+                visual_obs = build_ephemeral_image_observation(
+                    file_id=fid, filename=fname, image_url=img_url, mime_type=mime
+                )
+        else:
+            text = unwrap_mcp_text_result(res)
         dur_ms = round((time.monotonic() - started) * 1000.0, 1)
         err = parse_tool_error(text, None)
         _emit_subagent_tool_event(
@@ -145,7 +185,7 @@ async def _invoke_single_tool(
                 "status": "failed" if err else "completed",
             }
         )
-        return ToolMessage(tool_call_id=call_id, name=name, content=text)
+        return ToolMessage(tool_call_id=call_id, name=name, content=text), visual_obs
     except Exception as exc:
         dur_ms = round((time.monotonic() - started) * 1000.0, 1)
         err_msg = str(exc)
@@ -164,11 +204,14 @@ async def _invoke_single_tool(
                 "status": "failed",
             }
         )
-        return ToolMessage(
-            tool_call_id=call_id,
-            name=name,
-            content=err_json,
-            status="error",
+        return (
+            ToolMessage(
+                tool_call_id=call_id,
+                name=name,
+                content=err_json,
+                status="error",
+            ),
+            None,
         )
 
 
@@ -176,16 +219,21 @@ async def _invoke_tools_for_message(
     last_msg: AIMessage,
     tools: list[BaseTool],
     config: RunnableConfig,
-) -> list[ToolMessage]:
+) -> list[Any]:
     tool_map = {t.name: t for t in tools}
     cfg = dict(config.get("configurable") or {})
     conv_id = str(cfg.get("conversation_id") or "")
     calls = list(last_msg.tool_calls or [])
     if not calls:
         return []
-    return list(
+    pairs = list(
         await asyncio.gather(*[_invoke_single_tool(tc, tool_map, conv_id, config) for tc in calls])
     )
+    out: list[Any] = [tm for tm, _ in pairs]
+    for _, obs in pairs:
+        if obs is not None:
+            out.append(obs)
+    return out
 
 
 def _build_specialist_subgraph(role: str):

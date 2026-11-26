@@ -22,10 +22,9 @@ from app.api.schemas import (
     UpdateTextFileContentRequest,
 )
 from app.core.config import Settings, get_settings
-from app.db.models import Conversation, ConversationFile, FileChunk, User
+from app.db.models import Conversation, ConversationFile, ConversationFileLink, FileChunk, User
 from app.db.session import get_db
-from app.services import audit, cos, file_chunks, file_parser, file_provenance, file_types
-from app.services.file_types import FileValidationError, validate_upload_request
+from app.services import audit, cos, file_cache, file_chunks, file_parser, file_provenance, file_types, file_uploads
 from app.services.mcp_files import MAX_WRITE_FILE_BYTES, WRITABLE_TEXT_EXTENSIONS
 
 router = APIRouter(prefix="/api/conversations", tags=["files"])
@@ -44,7 +43,15 @@ async def _get_owned_file(
     if row is None or row.user_id != conv.user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
     if require_same_conversation and row.conversation_id != conv.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
+        linked = await db.scalar(
+            select(ConversationFileLink.id).where(
+                ConversationFileLink.conversation_id == conv.id,
+                ConversationFileLink.file_id == row.id,
+                ConversationFileLink.user_id == conv.user_id,
+            )
+        )
+        if linked is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
     return row
 
 
@@ -55,38 +62,12 @@ async def cleanup_expired_pending_files(
     conversation_id: uuid.UUID | None = None,
     background_tasks: BackgroundTasks | None = None,
 ) -> int:
-    settings = get_settings()
-    ttl = max(60, int(settings.pending_file_ttl_seconds or 1800))
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(seconds=ttl)
-
-    stmt = select(ConversationFile).where(
-        ConversationFile.status == "pending",
-        or_(
-            ConversationFile.expires_cleanup_at <= now,
-            ConversationFile.created_at < cutoff,
-        ),
+    return await file_uploads.cleanup_expired_pending_files(
+        db,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        background_tasks=background_tasks,
     )
-    if user_id is not None:
-        stmt = stmt.where(ConversationFile.user_id == user_id)
-    if conversation_id is not None:
-        stmt = stmt.where(ConversationFile.conversation_id == conversation_id)
-
-    expired = list((await db.execute(stmt)).scalars().all())
-    if not expired:
-        return 0
-
-    keys = [row.storage_key for row in expired if row.storage_key]
-    for row in expired:
-        await db.delete(row)
-    await db.commit()
-
-    if keys and settings.cos_configured:
-        if background_tasks is not None:
-            background_tasks.add_task(cos.delete_objects, keys)
-        else:
-            await cos.delete_objects(keys, settings=settings)
-    return len(expired)
 
 
 def serialize_file_out(
@@ -245,14 +226,17 @@ async def list_files(
             .limit(200)
         )
     else:
-        result = await db.execute(
-            select(ConversationFile)
-            .where(
-                ConversationFile.conversation_id == conv.id,
-                ConversationFile.status == "ready",
-            )
-            .order_by(ConversationFile.created_at.desc())
+        rows = await file_uploads.list_conversation_workspace_files(
+            db,
+            user_id=user.id,
+            conversation_id=conv.id,
+            order_asc=False,
         )
+        provenance_map = await file_provenance.resolve_files_provenance(db, user, rows)
+        return [
+            serialize_file_out(row, settings=settings, provenance=provenance_map.get(row.id))
+            for row in rows
+        ]
     rows = list(result.scalars().all())
     provenance_map = await file_provenance.resolve_files_provenance(db, user, rows)
     return [
@@ -270,88 +254,24 @@ async def presign_upload(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    settings = get_settings()
-    if not settings.cos_configured:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "文件存储服务尚未配置")
-
-    try:
-        info = validate_upload_request(
-            body.filename,
-            body.mime_type,
-            body.size_bytes,
-            settings.max_file_size_bytes,
-        )
-    except FileValidationError as exc:
-        raise HTTPException(422, str(exc)) from exc
-
-    await cleanup_expired_pending_files(db, conversation_id=conv.id, background_tasks=background_tasks)
-
-    existing_count = await db.scalar(
-        select(func.count())
-        .select_from(ConversationFile)
-        .where(
-            ConversationFile.conversation_id == conv.id,
-            ConversationFile.status.in_(("ready", "pending")),
-        )
+    record, payload = await file_uploads.presign_file_upload(
+        db,
+        user=user,
+        conversation=conv,
+        filename=body.filename,
+        mime_type=body.mime_type,
+        size_bytes=body.size_bytes,
+        background_tasks=background_tasks,
     )
-    if int(existing_count or 0) >= settings.max_files_per_conversation:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"单个对话最多上传 {settings.max_files_per_conversation} 个文件，请先清理部分文件",
-        )
-
-    file_id = uuid.uuid4()
-    storage_key = cos.build_storage_key(user.id, conv.id, file_id, info.filename, settings=settings)
-
-    try:
-        signed = await cos.presign_put(
-            key=storage_key,
-            content_type=info.mime_type,
-            content_length=info.size_bytes,
-            settings=settings,
-        )
-    except cos.CosError as exc:
-        raise HTTPException(exc.status_code, exc.detail) from exc
-
-    ttl = max(60, int(settings.pending_file_ttl_seconds or 1800))
-    record = ConversationFile(
-        id=file_id,
-        conversation_id=conv.id,
-        user_id=user.id,
-        filename=info.filename,
-        ext=info.ext,
-        mime_type=info.mime_type,
-        category=info.category,
-        size_bytes=info.size_bytes,
-        storage_key=storage_key,
-        status="pending",
-        source="user",
-        is_global=True,
-        expires_cleanup_at=datetime.now(timezone.utc) + timedelta(seconds=ttl),
-    )
-    db.add(record)
-    await db.commit()
-
     await audit.record(
         "file.presign",
         actor=user,
         target_type="conversation_file",
-        target_id=file_id,
+        target_id=record.id,
         request=request,
-        metadata={"conversation_id": str(conv.id), "filename": info.filename, "size_bytes": info.size_bytes},
+        metadata={"conversation_id": str(conv.id), "filename": record.filename, "size_bytes": record.size_bytes},
     )
-    return {
-        "file_id": file_id,
-        "filename": info.filename,
-        "ext": info.ext,
-        "category": info.category,
-        "mime_type": info.mime_type,
-        "size_bytes": info.size_bytes,
-        "upload_url": signed["url"],
-        "method": signed["method"],
-        "headers": signed["headers"],
-        "expires_in": signed["expires_in"],
-    }
+    return payload
 
 
 @router.post("/{conversation_id}/files/{file_id}/complete", response_model=ConversationFileOut)
@@ -368,58 +288,13 @@ async def complete_upload(
     if record.status == "ready":
         return serialize_file_out(record, settings=settings)
 
-    try:
-        meta = await cos.head_object(record.storage_key)
-    except cos.CosError as exc:
-        raise HTTPException(exc.status_code, exc.detail) from exc
-
-    if meta is None:
-        record.status = "failed"
-        record.error_message = "COS 中未找到已上传对象"
-        await db.commit()
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件尚未上传完成，请重试")
-
-    actual_size = meta.get("content_length")
-    if actual_size is not None and actual_size != record.size_bytes:
-        record.status = "failed"
-        record.error_message = f"文件大小校验不匹配: 预期 {record.size_bytes}, 实际 {actual_size}"
-        await db.commit()
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "上传文件大小与签名不一致")
-
-    record.status = "ready"
-    record.error_message = None
-    record.expires_cleanup_at = None
-    record.etag = (body.etag if body and body.etag else None) or meta.get("etag")
-    is_async_index = (
-        settings.app_env == "production"
-        and (
-            (record.category != "image" and int(record.size_bytes or 0) > 256 * 1024)
-            or (record.category == "image" and settings.rag_image_indexing_enabled)
-        )
+    record = await file_uploads.complete_file_upload(
+        db,
+        record=record,
+        user=user,
+        etag=body.etag if body else None,
+        settings=settings,
     )
-    record.index_status = "indexing" if is_async_index else "ready"
-    await db.commit()
-    await db.refresh(record)
-
-    if is_async_index:
-        file_chunks.schedule_file_indexing(record.id, user.id)
-    else:
-        await file_chunks.index_file_chunks_safe(db, record)
-        await db.refresh(record)
-
-    from app.services import realtime_bus
-
-    await realtime_bus.publish_user_event(
-        user.id,
-        "library.updated",
-        {
-            "action": "added",
-            "file_id": str(record.id),
-            "conversation_id": str(conv.id),
-            "index_status": record.index_status,
-        },
-    )
-
     await audit.record(
         "file.complete",
         actor=user,
@@ -621,6 +496,7 @@ async def update_file_content(
     record.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(record)
+    file_cache.invalidate_file_cache(record.id)
     await file_chunks.index_file_chunks_safe(db, record, raw=raw_bytes)
     await db.refresh(record)
 
@@ -710,13 +586,20 @@ async def delete_file(
     """Detach a file from the side chat workspace while keeping it in the global Library."""
     record = await _get_owned_file(file_id, conv, db)
     filename = record.filename
-    record.conversation_id = None
-    record.is_global = True
-    await db.execute(
-        update(FileChunk)
-        .where(FileChunk.file_id == record.id)
-        .values(conversation_id=None, is_global=True)
+    await file_uploads.unlink_file_from_conversation(
+        db,
+        user_id=user.id,
+        conversation_id=conv.id,
+        file_id=record.id,
     )
+    if record.conversation_id == conv.id:
+        record.conversation_id = None
+        record.is_global = True
+        await db.execute(
+            update(FileChunk)
+            .where(FileChunk.file_id == record.id)
+            .values(conversation_id=None, is_global=True)
+        )
     await db.commit()
     await audit.record(
         "file.detach_workspace",

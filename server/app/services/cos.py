@@ -328,6 +328,7 @@ def presign_get(
     key: str,
     filename: str | None = None,
     inline: bool = False,
+    include_disposition: bool = True,
     expires_seconds: int | None = None,
     extra_params: dict[str, str] | None = None,
     settings: Settings | None = None,
@@ -337,7 +338,7 @@ def presign_get(
     creds = _master_credentials(s)
     host = _cos_host(s)
     params: dict[str, str] = {}
-    if filename:
+    if filename and include_disposition:
         disp = "inline" if inline else "attachment"
         encoded = quote(filename, safe="")
         params["response-content-disposition"] = f"{disp}; filename*=UTF-8''{encoded}"
@@ -364,6 +365,31 @@ def presign_get(
             query_parts.append(f"{_rfc3986_quote(k, safe='/-_.~')}={_rfc3986_quote(v)}")
     query_parts.append(auth)
     return f"{_cos_origin(s)}{_encode_uri_path(key)}?{'&'.join(query_parts)}"
+
+
+def presign_ai_media_url(
+    *,
+    key: str,
+    size_bytes: int = 0,
+    expires_seconds: int = 900,
+    settings: Settings | None = None,
+) -> str:
+    """Sign a clean, short-lived COS GET URL for upstream LLM image fetching (zero server download, uncompressed original)."""
+    s = _require_cos(settings)
+    extra_params: dict[str, str] | None = None
+    ai_query = (getattr(s, "cos_ai_image_query", "") or "").strip()
+    max_raw_bytes = max(1, int(getattr(s, "llm_image_url_max_mb", 16) or 16)) * 1024 * 1024
+    if ai_query and size_bytes > max_raw_bytes:
+        extra_params = _parse_query_params(ai_query)
+    return presign_get(
+        key=key,
+        filename=None,
+        inline=True,
+        include_disposition=False,
+        expires_seconds=max(60, int(expires_seconds or 900)),
+        extra_params=extra_params,
+        settings=s,
+    )
 
 
 def presign_preview_urls(
@@ -466,6 +492,39 @@ async def get_object_bytes(
     except httpx.HTTPError as exc:
         raise CosError(f"下载 COS 文件失败: {exc}", status_code=502) from exc
     return bytes(buf)
+
+
+async def get_object_head_bytes(
+    key: str,
+    *,
+    num_bytes: int = 32,
+    settings: Settings | None = None,
+) -> bytes | None:
+    """Read only the first ``num_bytes`` via HTTP Range for zero-cost magic-byte verification."""
+    s = _require_cos(settings)
+    creds = _master_credentials(s)
+    host = _cos_host(s)
+    end_byte = max(0, int(num_bytes) - 1)
+    auth, _ = sign_v5(
+        method="GET",
+        key=key,
+        secret_id=creds.secret_id,
+        secret_key=creds.secret_key,
+        headers={"host": host},
+        expires_seconds=60,
+    )
+    url = f"{_cos_origin(s)}{_encode_uri_path(key)}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), trust_env=False) as client:
+            resp = await client.get(
+                url,
+                headers={"Authorization": auth, "Host": host, "Range": f"bytes=0-{end_byte}"},
+            )
+        if resp.status_code in (200, 206):
+            return resp.content[:num_bytes]
+        return None
+    except httpx.HTTPError:
+        return None
 
 
 async def put_object_bytes(

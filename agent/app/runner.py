@@ -15,6 +15,11 @@ from langgraph.types import Command
 
 from app.core.config import AgentSettings, get_settings
 from app.core.models import EmbeddingClient, ModelRouter, RerankClient
+from app.core.multimodal import (
+    HydratedTurnMedia,
+    build_multimodal_user_message,
+    hydrate_turn_attachments,
+)
 from app.graph.builder import DEFAULT_MAX_TOOL_ITERATIONS, _extract_text, build_agent_graph
 from app.graph.topology import GRAPH_NODES
 from app.memory.store import MemoryManager
@@ -234,7 +239,11 @@ def _parse_tool_error(content: Any, status: str | None) -> str | None:
     return parse_tool_error(content, status)
 
 
-def _build_initial_messages(payload: dict[str, Any]) -> list[Any]:
+def _build_initial_messages(
+    payload: dict[str, Any],
+    *,
+    hydrated_media: HydratedTurnMedia | None = None,
+) -> list[Any]:
     msgs: list[Any] = []
     history = payload.get("conversation_history") or payload.get("history") or []
     if isinstance(history, list):
@@ -250,8 +259,8 @@ def _build_initial_messages(payload: dict[str, Any]) -> list[Any]:
             elif role == "assistant":
                 msgs.append(AIMessage(content=content))
     input_text = str(payload.get("input") or payload.get("input_text") or "").strip()
-    if input_text:
-        msgs.append(HumanMessage(content=input_text))
+    if input_text or (hydrated_media is not None and hydrated_media.content_blocks):
+        msgs.append(build_multimodal_user_message(input_text, hydrated_media))
     return msgs
 
 
@@ -316,6 +325,8 @@ async def _build_runtime_config(
             "conversation_kind": str(payload.get("conversation_kind") or "side"),
             "assistant_name": str(payload.get("assistant_name") or "").strip() or "Whitz",
             "agent_namespace": agent_namespace,
+            "agent_api_key": agent_api_key,
+            "internal_mcp_base_url": settings.internal_mcp_base_url,
             "memory_enabled": bool(payload.get("memory_enabled", True)),
             "memory_require_confirm": bool(payload.get("memory_require_confirm", False)),
             "ai_reactions_enabled": bool(payload.get("ai_reactions_enabled", True)),
@@ -981,9 +992,37 @@ async def execute_run(
             store=store,
             settings=s,
         )
+        cfg_inner = config.get("configurable") or {}
+        model_router: ModelRouter = cfg_inner.get("model_router") or ModelRouter(settings=s, redis_client=redis)
+        attached_fids: list[str] = list(cfg_inner.get("attached_file_ids") or [])
+        hydrated_media: HydratedTurnMedia | None = None
+        if attached_fids:
+            # Respect cached per-endpoint multimodal capabilities to avoid wasted retries on turn 2+
+            target_ep = model_router.endpoint_for("vision" if model_router.endpoint_for("vision").model else "default")
+            primary_ep = model_router.endpoint_for("default")
+            prefer_img_mode = (
+                "base64"
+                if (s.llm_image_delivery_mode == "base64" or model_router.is_image_url_unsupported(target_ep))
+                else s.llm_image_delivery_mode
+            )
+            allow_pdf = (
+                s.llm_native_pdf_mode != "disabled"
+                and not model_router.is_native_pdf_unsupported(primary_ep)
+            )
+            hydrated_media = await hydrate_turn_attachments(
+                internal_mcp_base_url=str(cfg_inner.get("internal_mcp_base_url") or s.internal_mcp_base_url),
+                agent_namespace=str(cfg_inner.get("agent_namespace") or ""),
+                agent_api_key=str(cfg_inner.get("agent_api_key") or ""),
+                conversation_id=meta["conversation_id"],
+                attached_file_ids=attached_fids,
+                prefer_image_mode=prefer_img_mode,
+                allow_native_pdf=allow_pdf,
+                settings=s,
+            )
+
         graph = build_agent_graph(checkpointer=checkpointer, store=store)
         graph_input = {
-            "messages": _build_initial_messages(payload),
+            "messages": _build_initial_messages(payload, hydrated_media=hydrated_media),
             "run_id": run_id,
             "thread_id": meta["thread_id"],
             "conversation_id": meta["conversation_id"],
@@ -1000,6 +1039,8 @@ async def execute_run(
             "timezone": str(payload.get("timezone") or "Asia/Shanghai"),
             "instructions": str(payload.get("instructions") or ""),
             "attachments": list(payload.get("attachments") or []),
+            "directly_delivered_file_ids": list(hydrated_media.directly_delivered_ids) if hydrated_media else [],
+            "attachment_delivery_map": dict(hydrated_media.delivery_map) if hydrated_media else {},
             "skills": list(payload.get("skills") or []),
             "requested_skills": list(payload.get("requested_skills") or payload.get("skill_names") or []),
             "memory_enabled": bool(payload.get("memory_enabled", True)),

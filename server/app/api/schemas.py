@@ -319,19 +319,31 @@ class RagScopeRequest(BaseModel):
 
 
 class SendMessageRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=32000)
+    content: str = Field(default="", max_length=32000)
     file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
     skill_names: list[str] = Field(default_factory=list, max_length=10)
     model_route: ModelRouteType = "auto"
     rag_scope: RagScopeRequest | None = None
+
+    @model_validator(mode="after")
+    def require_content_or_files(self) -> "SendMessageRequest":
+        if not (self.content or "").strip() and not self.file_ids:
+            raise ValueError("消息内容与附件不能同时为空")
+        return self
 
 
 class EditMessageRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=32000)
+    content: str = Field(default="", max_length=32000)
     file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
     skill_names: list[str] = Field(default_factory=list, max_length=10)
     model_route: ModelRouteType = "auto"
     rag_scope: RagScopeRequest | None = None
+
+    @model_validator(mode="after")
+    def require_content_or_files(self) -> "EditMessageRequest":
+        if not (self.content or "").strip() and not self.file_ids:
+            raise ValueError("消息内容与附件不能同时为空")
+        return self
 
 
 class RegenerateMessageRequest(BaseModel):

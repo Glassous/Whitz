@@ -971,7 +971,7 @@ class ChatViewModel(
             fileMap[id] ?: ConversationFile(id = id, filename = id)
         }
         val skillNames = state.selectedSkillNames
-        if (trimmed.isEmpty()) return
+        if (trimmed.isEmpty() && attachedFiles.isEmpty()) return
 
         _ui.update { it.copy(sendingMessage = true, error = null) }
         viewModelScope.launch {

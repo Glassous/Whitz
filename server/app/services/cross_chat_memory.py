@@ -888,6 +888,34 @@ def schedule_episode_archive_check(conv_id: uuid.UUID) -> None:
     task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
+def format_history_message_content(msg: Message) -> str:
+    """Format a persisted message for LLM history, preserving attachment references on prior turns."""
+    text = (msg.content or "").strip()
+    if msg.role != "user":
+        return msg.content or ""
+    payload = msg.tool_payload or {}
+    atts = payload.get("attachments") if isinstance(payload, dict) else None
+    if not isinstance(atts, list) or not atts:
+        return msg.content or ""
+
+    # Avoid duplicating files that are already explicitly referenced via inline [[file:<id>|<name>]] tokens
+    inline_present = set(re.findall(r"\[\[file:([0-9a-fA-F-]{36})\|", text))
+    refs: list[str] = []
+    for att in atts:
+        if not isinstance(att, dict):
+            continue
+        fid = str(att.get("id") or att.get("file_id") or "").strip()
+        fname = str(att.get("filename") or "file").strip()
+        cat = str(att.get("category") or "file").strip()
+        if fid and fid in inline_present:
+            continue
+        refs.append(f"{fname} (file_id={fid}, {cat})" if fid else f"{fname} ({cat})")
+    if not refs:
+        return msg.content or ""
+    tag = "[本轮附带文件: " + "; ".join(refs) + "]"
+    return f"{tag}\n{text}" if text else tag
+
+
 async def load_cursor_aligned_history(
     db: AsyncSession,
     conv: Conversation,
@@ -901,6 +929,7 @@ async def load_cursor_aligned_history(
     - Prefers all completed user/assistant messages strictly after `working_state_cursor_msg_id` (or `summary_cursor_msg_id`).
     - If fewer than `min_messages` exist after the cursor (e.g., right after an archive run), pads backward up to
       `min_messages` so turn continuity stays natural.
+    - Preserves historical attachment references (including image/file-only turns with empty text).
     - Enforces `max_messages` and `max_tokens` from newest backward while preserving turn ordering.
     """
     rows = list(
@@ -919,19 +948,21 @@ async def load_cursor_aligned_history(
         .all()
     )
     rows.reverse()
-    completed = [
-        m
-        for m in rows
-        if (m.content or "").strip()
-        and (m.role == "user" or m.status not in ("failed", "cancelled", "streaming", "waiting"))
-    ]
+    completed: list[tuple[Message, str]] = []
+    for m in rows:
+        if m.role == "assistant" and m.status in ("failed", "cancelled", "streaming", "waiting"):
+            continue
+        rendered = format_history_message_content(m)
+        if not rendered.strip():
+            continue
+        completed.append((m, rendered))
     if not completed:
         return []
 
     cursor_id = conv.working_state_cursor_msg_id or conv.summary_cursor_msg_id
     selected = completed
     if cursor_id is not None:
-        c_idx = next((i for i, m in enumerate(completed) if m.id == cursor_id), None)
+        c_idx = next((i for i, (m, _) in enumerate(completed) if m.id == cursor_id), None)
         if c_idx is not None:
             after_cursor = completed[c_idx + 1 :]
             if len(after_cursor) >= min_messages:
@@ -940,16 +971,16 @@ async def load_cursor_aligned_history(
                 selected = completed[-min_messages:]
 
     # Enforce max_messages & max_tokens from newest backward
-    kept: list[Message] = []
+    kept: list[tuple[Message, str]] = []
     used_tokens = 0
-    for m in reversed(selected):
-        t = estimate_tokens(m.content)
+    for m, rendered in reversed(selected):
+        t = estimate_tokens(rendered)
         if kept and (len(kept) >= max_messages or used_tokens + t > max_tokens):
             break
-        kept.append(m)
+        kept.append((m, rendered))
         used_tokens += t
     kept.reverse()
-    return [{"role": m.role, "content": m.content} for m in kept]
+    return [{"role": m.role, "content": rendered} for m, rendered in kept]
 
 
 def _extractive_rolling_summary(previous: str | None, evicted: list[Message]) -> str:

@@ -48,6 +48,8 @@ class WhitzChatOpenAI(ChatOpenAI):
 VALID_ROUTES = ("auto", "default", "fast", "reasoning", "vision")
 _TRIVIAL_GREETINGS = frozenset({"hi", "hello", "hey", "你好", "您好", "在吗", "谢谢", "感谢", "ok", "好的", "嗯"})
 _UNSUPPORTED_THINKING_MODELS: set[tuple[str, str]] = set()
+_URL_UNSUPPORTED_VISION_MODELS: set[tuple[str, str]] = set()
+_UNSUPPORTED_NATIVE_PDF_MODELS: set[tuple[str, str]] = set()
 _COMPLEX_REASONING_RE = re.compile(
     r"(架构|设计方案|深入分析|对比分析|源码|排障|调试|为什么.*失败|推导|证明|算法|复杂度|"
     r"重构|性能优化|数据库设计|sql|系统设计|权衡|trade[- ]?off|benchmark|debug|refactor|"
@@ -222,6 +224,16 @@ class ModelRouter:
                         return True
         return False
 
+    @staticmethod
+    def _has_native_file_content(messages: Sequence[BaseMessage | dict[str, Any]]) -> bool:
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "file":
+                        return True
+        return False
+
     def infer_route(
         self,
         requested_route: str | None = "auto",
@@ -231,11 +243,21 @@ class ModelRouter:
         task_hint: str | None = None,
     ) -> str:
         req = (requested_route or "auto").strip().lower()
+        msgs = messages or []
+        needs_vision = bool(has_images or self._has_image_content(msgs))
+
         if req in ("default", "fast", "reasoning", "vision"):
+            if needs_vision:
+                ep_req = self.endpoint_for(req)
+                if not ep_req.supports_vision:
+                    ep_vis = self.endpoint_for("vision")
+                    if ep_vis.model and ep_vis.supports_vision:
+                        return "vision"
+                    if self.endpoint_for("default").supports_vision:
+                        return "default"
             return req
 
-        msgs = messages or []
-        if has_images or self._has_image_content(msgs):
+        if needs_vision:
             ep = self.endpoint_for("vision")
             if ep.model and ep.supports_vision:
                 return "vision"
@@ -295,6 +317,63 @@ class ModelRouter:
         return param_hit and reject_hit
 
     @staticmethod
+    def is_image_url_unsupported(ep: ModelEndpoint) -> bool:
+        return (ep.base_url, ep.model) in _URL_UNSUPPORTED_VISION_MODELS
+
+    @staticmethod
+    def mark_image_url_unsupported(ep: ModelEndpoint) -> None:
+        if ep.base_url or ep.model:
+            _URL_UNSUPPORTED_VISION_MODELS.add((ep.base_url, ep.model))
+
+    @staticmethod
+    def is_image_url_fetch_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        url_hit = any(
+            k in msg
+            for k in (
+                "invalid_image_url",
+                "downloading",
+                "failed to download",
+                "could not fetch",
+                "image_url",
+                "fetch image",
+                "unable to access",
+                "timeout while downloading",
+                "error while downloading",
+            )
+        )
+        status_hit = any(k in msg for k in ("400", "422", "timeout", "download", "fetch", "invalid", "failed"))
+        return url_hit and status_hit
+
+    @staticmethod
+    def is_native_pdf_unsupported(ep: ModelEndpoint) -> bool:
+        return (ep.base_url, ep.model) in _UNSUPPORTED_NATIVE_PDF_MODELS
+
+    @staticmethod
+    def mark_native_pdf_unsupported(ep: ModelEndpoint) -> None:
+        if ep.base_url or ep.model:
+            _UNSUPPORTED_NATIVE_PDF_MODELS.add((ep.base_url, ep.model))
+
+    @staticmethod
+    def is_unsupported_native_pdf_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        file_hit = any(
+            k in msg
+            for k in (
+                "file_data",
+                "'file'",
+                '"file"',
+                "type: file",
+                "content type",
+                "unknown variant",
+                "application/pdf",
+                "input_file",
+            )
+        )
+        reject_hit = any(k in msg for k in ("400", "422", "unsupported", "invalid", "unknown", "unrecognized", "not supported"))
+        return file_hit and reject_hit
+
+    @staticmethod
     def _last_user_text(messages: Sequence[BaseMessage | dict[str, Any]] | None) -> str:
         for msg in reversed(messages or ()):
             role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "type", "")
@@ -302,6 +381,15 @@ class ModelRouter:
                 content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
                 if isinstance(content, str):
                     return content.strip()
+                if isinstance(content, list):
+                    parts = [
+                        str(b.get("text") or "")
+                        for b in content
+                        if isinstance(b, dict) and b.get("type") in ("text", None) and not str(b.get("text") or "").startswith("<attached_file ")
+                    ]
+                    joined = " ".join(p.strip() for p in parts if p.strip()).strip()
+                    if joined:
+                        return joined
         return ""
 
     async def resolve_thinking_decision(

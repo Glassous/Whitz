@@ -18,6 +18,15 @@ from langgraph.types import interrupt
 
 from app.core.config import get_settings
 from app.core.models import ModelRouter
+from app.core.multimodal import (
+    build_ephemeral_image_observation,
+    downgrade_messages_native_pdf_to_text,
+    fetch_media_fallback,
+    fold_multimodal_message_for_history,
+    try_extract_visual_tool_payload,
+    unwrap_mcp_text_result,
+    upgrade_messages_images_to_base64,
+)
 from app.graph.state import AgentState
 from app.graph.subgraphs import build_coder_subgraph, build_researcher_subgraph
 from app.graph.topology import GRAPH_NODES
@@ -182,11 +191,21 @@ _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 
 def _estimate_message_tokens(msg: BaseMessage) -> int:
     content = getattr(msg, "content", "")
+    media_tokens = 0
     if isinstance(content, list):
-        text = " ".join(
-            str(b.get("text") or b.get("thinking") or "") if isinstance(b, dict) else str(b)
-            for b in content
-        )
+        text_parts: list[str] = []
+        for b in content:
+            if isinstance(b, dict):
+                btype = str(b.get("type") or "")
+                if btype in ("image_url", "image"):
+                    media_tokens += 1000
+                elif btype == "file":
+                    media_tokens += 2500
+                else:
+                    text_parts.append(str(b.get("text") or b.get("thinking") or ""))
+            else:
+                text_parts.append(str(b))
+        text = " ".join(text_parts)
     else:
         text = str(content or "")
     cjk = len(_CJK_RE.findall(text))
@@ -194,7 +213,7 @@ def _estimate_message_tokens(msg: BaseMessage) -> int:
     tc_overhead = 0
     if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
         tc_overhead = len(json.dumps(msg.tool_calls, ensure_ascii=False, default=str)) // 3
-    return max(4, int(math.ceil(cjk * 0.72 + other * 0.28)) + tc_overhead + 6)
+    return max(4, int(math.ceil(cjk * 0.72 + other * 0.28)) + tc_overhead + media_tokens + 6)
 
 
 def _base_agent_prompt(assistant_name: str = "Whitz", *, is_main_chat: bool = False) -> str:
@@ -211,7 +230,8 @@ def _base_agent_prompt(assistant_name: str = "Whitz", *, is_main_chat: bool = Fa
         "1. 事实与时效性约束：始终以「当前时间」为基准理解“今天/今年/最近/当前”等时间概念；涉及具体日期、外部动态、文件正文、检索结果或代码运行结论时，必须先调用对应工具查证，严禁编造未验证的数据、链接、文件名或行号。\n"
         "2. 工具与 RAG 自主选择：\n"
         "   - 简单问答直接简洁、准确作答，避免过度铺垫；\n"
-        "   - 知识库主动预召回与统一深检：系统已根据当前问题自动预召回高相关证据（见下方「本轮知识库预召回证据」，编号为 `[S1]`、`[S2]`…）。若预召回已充分回答问题，请直接作答避免重复检索；若信息不足或需多跳核实，优先调用 `knowledge_search` 一次性跨源联合检索（文件+记忆+历史对话），或按需调用 `rag_search_workspace` / `memory_search` / `search_chat_history` / `read_workspace_file`；若未命中可主动改用 `list_workspace_files` / `search_workspace_files` 自愈排查；\n"
+        "   - 本轮原生直传附件：若用户本轮上传了图片、原生 PDF 或中小体量文本/代码/表格，系统已将其原生画面或完整内容直接呈现在本轮用户消息中（见下方文件清单标注），请直接基于这些内容精准作答，严禁画蛇添足地再调用工具重复读取；\n"
+        "   - 知识库主动预召回与统一深检：系统已根据当前问题自动预召回高相关证据（见下方「本轮知识库预召回证据」，编号为 `[S1]`、`[S2]`…）。若预召回已充分回答问题，请直接作答避免重复检索；若信息不足或需查阅历史工作区/资料库大文件，可先调用 `inspect_workspace_file` 查看目录/表头大纲，或调用 `knowledge_search` / `rag_search_workspace` / `read_workspace_file` / `search_workspace_files` 按需精读；\n"
         "   - 引用溯源规范：当你在回答中引用了预召回证据或检索工具返回的具体事实、数据、条款或历史结论时，请在对应句子或要点末尾标注内联引用标记 `[[cite:S1]]`（多条引用用 `[[cite:S1,S2]]`），编号必须严格对应真实返回结果中的 `citation_id`，严禁编造编号；\n"
         "   - 用户消息中若出现 `[[file:<file_id>|<filename>]]` 标记，代表用户在该语义位置显式引用了对应工作区文件，可直接用其中的 `<file_id>` 调用 `read_workspace_file` 或 `edit_workspace_file`，并严格结合该文件在句子中的位置理解用户意图；\n"
         "   - 工作区文件创建与修改：创建新文本产物或整体重写时调用 `write_workspace_file`；对工作区已有纯文本/代码/Markdown/HTML/CSV 文件做局部修改时，优先调用 `edit_workspace_file`（支持精准文本替换或行区间修补），避免全量重写导致截断；\n"
@@ -270,13 +290,24 @@ def _prepare_llm_messages(
         else:
             folded_non_sys.append(m)
 
-    # Group into turn-aligned blocks starting at HumanMessage so trimming never splits tool_call/ToolMessage pairs
+    # Group into turn-aligned blocks starting at genuine user HumanMessages (keeping ephemeral visual observations
+    # attached to the same turn so tool_call/ToolMessage/visual-observation sequences never split!)
     turns: list[list[BaseMessage]] = []
     for m in folded_non_sys:
-        if isinstance(m, HumanMessage) or not turns:
+        is_ephemeral = isinstance(m, HumanMessage) and bool(
+            (getattr(m, "additional_kwargs", None) or {}).get("whitz_ephemeral_media")
+        )
+        if (isinstance(m, HumanMessage) and not is_ephemeral) or not turns:
             turns.append([m])
         else:
             turns[-1].append(m)
+
+    # Fold heavy multimodal / oversized inline document blocks in OLDER turns (keep latest turn 100% intact!)
+    for turn_idx in range(max(0, len(turns) - 1)):
+        turns[turn_idx] = [
+            fold_multimodal_message_for_history(m) if isinstance(m, HumanMessage) else m
+            for m in turns[turn_idx]
+        ]
 
     # Keep turns from newest backwards under max_verbatim_messages and max_prompt_tokens
     sys_tokens = _estimate_message_tokens(sys_msg) if sys_msg is not None else 0
@@ -430,19 +461,37 @@ def _build_system_prompt(state: AgentState, cfg: dict[str, Any], current_time_st
         sections.append(f"## 当前工作区\nconversation_id: `{conv_id}` (kind=`{'main' if is_main else 'side'}`)")
 
     attachments = list(state.get("attachments") or [])
+    delivery_map: dict[str, str] = dict(state.get("attachment_delivery_map") or {})
     if attachments:
+        delivery_labels = {
+            "native_image_url": "本轮原图已原生直传，请直接看图作答",
+            "native_image_base64": "本轮原图已原生直传，请直接看图作答",
+            "native_pdf_file": "本轮 PDF 已原生直传，请直接阅读作答",
+            "inline_full": "本轮全文已直接注入消息中，无需重复调工具读取",
+            "outline_rag": "本轮大文件·已提供大纲，请按需调用 read_workspace_file / rag_search_workspace 精读",
+        }
         lines = [
-            "以下为当前工作区及资料库中可用的文件元数据（全资料库共享；未预灌全文，请按需调用 `rag_search_workspace` 或 `read_workspace_file`）："
+            "以下为当前工作区及资料库文件清单（按本轮交付状态分层；历史或未直传文件可调用 `inspect_workspace_file`、`read_workspace_file` 或 `rag_search_workspace` 按需读取）："
         ]
         for att in attachments:
+            fid = str(att.get("file_id") or att.get("id") or "")
             extra_parts: list[str] = []
-            if att.get("conversation_title"):
+            d_mode = delivery_map.get(fid)
+            if d_mode and d_mode in delivery_labels:
+                extra_parts.append(delivery_labels[d_mode])
+            elif att.get("attached"):
+                extra_parts.append("本轮附带")
+            if att.get("index_status") and att.get("index_status") != "ready":
+                extra_parts.append(f"index={att.get('index_status')}")
+            if att.get("conversation_title") and att.get("scope") != "conversation":
                 extra_parts.append(f"from_chat={att.get('conversation_title')}")
-            if att.get("qa_snippet"):
+            if att.get("summary") and not d_mode:
+                extra_parts.append(f"摘要=\"{str(att.get('summary'))[:80]}\"")
+            elif att.get("qa_snippet") and not d_mode:
                 extra_parts.append(f"qa=\"{att.get('qa_snippet')}\"")
             extra_str = (", " + ", ".join(extra_parts)) if extra_parts else ""
             lines.append(
-                f"- `{att.get('filename', 'file')}` (file_id=`{att.get('file_id')}`, "
+                f"- `{att.get('filename', 'file')}` (file_id=`{fid}`, "
                 f"category={att.get('category', 'unknown')}, mime={att.get('mime_type', '')}, "
                 f"size={att.get('size_bytes', 0)}B, scope={att.get('scope', 'library')}{extra_str})"
             )
@@ -626,6 +675,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             messages=messages,
             rag_scope=rag_scope,
             attachments=list(state.get("attachments") or []),
+            directly_delivered_file_ids=list(state.get("directly_delivered_file_ids") or []),
             memory_enabled=bool(state.get("memory_enabled", True)),
             memory_index=str(state.get("memory_index") or ""),
             conversation_kind=str(state.get("conversation_kind") or cfg.get("conversation_kind") or "side"),
@@ -761,20 +811,75 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             ]
 
         last_exc: Exception | None = None
+        internal_base = str(cfg.get("internal_mcp_base_url") or settings.internal_mcp_base_url or "")
+        agent_ns = str(state.get("agent_namespace") or cfg.get("agent_namespace") or "")
+        agent_key = str(cfg.get("agent_api_key") or "")
+
         for ep in candidates:
             try:
-                llm = router.build_chat_model(ep, streaming=True, thinking_enabled=thinking_enabled)
-                bound = llm.bind_tools(all_tools) if (all_tools and not tools_exhausted) else llm
-                try:
-                    response = await bound.ainvoke(messages, config=config)
-                except Exception as inner_exc:
-                    if router.is_unsupported_thinking_param_error(inner_exc):
-                        router.mark_thinking_param_unsupported(ep)
-                        llm = router.build_chat_model(ep, streaming=True, include_thinking_params=False)
-                        bound = llm.bind_tools(all_tools) if (all_tools and not tools_exhausted) else llm
-                        response = await bound.ainvoke(messages, config=config)
-                    else:
+                cur_messages = list(messages)
+                include_thinking = True
+                # Proactively apply known capability fallbacks for this endpoint before calling LLM
+                if router._has_image_content(cur_messages) and router.is_image_url_unsupported(ep):
+                    cur_messages, _ = await upgrade_messages_images_to_base64(
+                        cur_messages,
+                        internal_mcp_base_url=internal_base,
+                        agent_namespace=agent_ns,
+                        agent_api_key=agent_key,
+                    )
+                if router._has_native_file_content(cur_messages) and router.is_native_pdf_unsupported(ep):
+                    cur_messages, _ = await downgrade_messages_native_pdf_to_text(
+                        cur_messages,
+                        internal_mcp_base_url=internal_base,
+                        agent_namespace=agent_ns,
+                        agent_api_key=agent_key,
+                        max_tokens=settings.attachment_single_file_max_tokens,
+                    )
+
+                response = None
+                for _retry_step in range(3):
+                    llm = router.build_chat_model(
+                        ep,
+                        streaming=True,
+                        thinking_enabled=thinking_enabled if include_thinking else None,
+                        include_thinking_params=include_thinking,
+                    )
+                    bound = llm.bind_tools(all_tools) if (all_tools and not tools_exhausted) else llm
+                    try:
+                        response = await bound.ainvoke(cur_messages, config=config)
+                        break
+                    except Exception as inner_exc:
+                        if include_thinking and router.is_unsupported_thinking_param_error(inner_exc):
+                            router.mark_thinking_param_unsupported(ep)
+                            include_thinking = False
+                            continue
+                        if router._has_image_content(cur_messages) and router.is_image_url_fetch_error(inner_exc):
+                            router.mark_image_url_unsupported(ep)
+                            cur_messages, upgraded = await upgrade_messages_images_to_base64(
+                                cur_messages,
+                                internal_mcp_base_url=internal_base,
+                                agent_namespace=agent_ns,
+                                agent_api_key=agent_key,
+                            )
+                            if upgraded:
+                                logger.info("Endpoint %s rejected remote image_url; retrying with original base64", ep.model)
+                                continue
+                        if router._has_native_file_content(cur_messages) and router.is_unsupported_native_pdf_error(inner_exc):
+                            router.mark_native_pdf_unsupported(ep)
+                            cur_messages, downgraded = await downgrade_messages_native_pdf_to_text(
+                                cur_messages,
+                                internal_mcp_base_url=internal_base,
+                                agent_namespace=agent_ns,
+                                agent_api_key=agent_key,
+                                max_tokens=settings.attachment_single_file_max_tokens,
+                            )
+                            if downgraded:
+                                logger.info("Endpoint %s rejected native PDF file block; retrying with parsed text", ep.model)
+                                continue
                         raise
+
+                if response is None:
+                    raise RuntimeError("No response produced by model endpoint")
 
                 total_usage = _merge_usage(state.get("usage"), response)
                 has_tool_calls = bool(getattr(response, "tool_calls", None))
@@ -785,7 +890,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                     synthesis_nudge = HumanMessage(
                         content="请基于以上工具结果或已知信息，为用户整理一份完整、准确的最终回答。"
                     )
-                    response = await llm.ainvoke([*messages, synthesis_nudge], config=config)
+                    response = await llm.ainvoke([*cur_messages, synthesis_nudge], config=config)
                     total_usage = _merge_usage(total_usage, response)
                     final_text = _extract_text(response.content)
 
@@ -811,15 +916,17 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         tool_map: dict[str, BaseTool],
         conv_id: str,
         config: RunnableConfig,
-    ) -> tuple[ToolMessage, dict[str, Any] | None, bool, bool]:
+    ) -> tuple[ToolMessage, dict[str, Any] | None, bool, bool, HumanMessage | None]:
         name = str(tc.get("name") or "")
         call_id = str(tc.get("id") or name)
         args = dict(tc.get("args") or {})
         if conv_id and name in (
             "list_workspace_files",
+            "inspect_workspace_file",
             "read_workspace_file",
             "search_workspace_files",
             "write_workspace_file",
+            "edit_workspace_file",
             "create_scheduled_task",
             "update_scheduled_task",
             "delete_scheduled_task",
@@ -838,10 +945,78 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                 None,
                 False,
                 True,
+                None,
             )
         try:
             res = await tool_obj.ainvoke(args, config=config)
-            content_str = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+
+            # Unwrap structured image observation returned by read_workspace_file so we NEVER dump base64 into ToolMessage!
+            visual_payload = try_extract_visual_tool_payload(res) if name == "read_workspace_file" else None
+            if visual_payload is not None:
+                fid = str(visual_payload.get("file_id") or "")
+                fname = str(visual_payload.get("filename") or "image")
+                mime = str(visual_payload.get("mime_type") or "image/png")
+                img_url = str(visual_payload.get("image_url") or "").strip()
+                cfg_inner = dict(config.get("configurable") or {})
+                router_inst: ModelRouter | None = cfg_inner.get("model_router")
+                s_inst = get_settings()
+                need_b64 = (
+                    not img_url
+                    or s_inst.llm_image_delivery_mode == "base64"
+                    or (
+                        router_inst is not None
+                        and router_inst.is_image_url_unsupported(
+                            router_inst.endpoint_for("vision" if router_inst.endpoint_for("vision").model else "default")
+                        )
+                    )
+                )
+                if need_b64 and fid:
+                    fb = await fetch_media_fallback(
+                        internal_mcp_base_url=str(cfg_inner.get("internal_mcp_base_url") or s_inst.internal_mcp_base_url),
+                        agent_namespace=str(cfg_inner.get("agent_namespace") or ""),
+                        agent_api_key=str(cfg_inner.get("agent_api_key") or ""),
+                        file_id=fid,
+                        mode="base64",
+                    )
+                    if fb and fb.get("image_url"):
+                        img_url = str(fb["image_url"])
+                        mime = str(fb.get("mime_type") or mime)
+
+                compact_tool_json = json.dumps(
+                    {
+                        "file_id": fid,
+                        "filename": fname,
+                        "format": "image",
+                        "mime_type": mime,
+                        "size_bytes": visual_payload.get("size_bytes"),
+                        "status": "visual_attached" if img_url else "unavailable",
+                        "note": (
+                            "图片已通过原生视觉通道加载，请查看紧随其后的图片内容。"
+                            if img_url
+                            else "无法加载图片视觉内容。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+                visual_obs = (
+                    build_ephemeral_image_observation(
+                        file_id=fid,
+                        filename=fname,
+                        image_url=img_url,
+                        mime_type=mime,
+                    )
+                    if img_url
+                    else None
+                )
+                return (
+                    ToolMessage(tool_call_id=call_id, name=name, content=compact_tool_json),
+                    None,
+                    False,
+                    not bool(img_url),
+                    visual_obs,
+                )
+
+            content_str = unwrap_mcp_text_result(res)
             plan_update = None
             if name == "todo_list":
                 try:
@@ -862,6 +1037,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                 plan_update,
                 name == "request_deep_thinking",
                 had_err,
+                None,
             )
         except Exception as exc:
             return (
@@ -874,6 +1050,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                 None,
                 False,
                 True,
+                None,
             )
 
     async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
@@ -898,19 +1075,28 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
             *[_run_single_tool(tc, tool_map, conv_id, config) for tc in standard_calls]
         )
 
-        out_msgs: list[ToolMessage] = []
+        out_msgs: list[BaseMessage] = []
+        visual_observations: list[HumanMessage] = []
         updated_plan = state.get("plan")
         escalate_thinking = False
-        for msg, plan_update, req_thinking, _had_err in results:
+        tool_count_inc = 0
+        for msg, plan_update, req_thinking, _had_err, visual_obs in results:
             out_msgs.append(msg)
+            tool_count_inc += 1
+            if visual_obs is not None:
+                visual_observations.append(visual_obs)
             if plan_update is not None:
                 updated_plan = plan_update
             if req_thinking:
                 escalate_thinking = True
 
+        # Append visual observations strictly AFTER all ToolMessages so OpenAI tool_call/tool pairing stays valid!
+        if visual_observations:
+            out_msgs.extend(visual_observations)
+
         updates: dict[str, Any] = {
             "messages": out_msgs,
-            "tool_call_count": int(state.get("tool_call_count") or 0) + len(out_msgs),
+            "tool_call_count": int(state.get("tool_call_count") or 0) + tool_count_inc,
         }
         if updated_plan is not None:
             updates["plan"] = updated_plan
@@ -1085,7 +1271,7 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         messages = list(state.get("messages") or [])
         last_human_idx = -1
         for i in range(len(messages) - 1, -1, -1):
-            if isinstance(messages[i], HumanMessage):
+            if isinstance(messages[i], HumanMessage) and not (getattr(messages[i], "additional_kwargs", None) or {}).get("whitz_ephemeral_media"):
                 last_human_idx = i
                 break
         turn_msgs = messages[last_human_idx:] if last_human_idx >= 0 else messages[-4:]
@@ -1096,10 +1282,21 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
         user_text = ""
         assistant_text = ""
         for m in turn_msgs:
-            if isinstance(m, HumanMessage) and isinstance(m.content, str):
-                user_text = m.content.strip()
-            elif isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
-                assistant_text = m.content.strip()
+            if isinstance(m, HumanMessage) and not (getattr(m, "additional_kwargs", None) or {}).get("whitz_ephemeral_media"):
+                if isinstance(m.content, str):
+                    user_text = m.content.strip()
+                elif isinstance(m.content, list):
+                    user_text = " ".join(
+                        str(b.get("text") or "").strip()
+                        for b in m.content
+                        if isinstance(b, dict)
+                        and b.get("type") in ("text", None)
+                        and not str(b.get("text") or "").startswith("<attached_file ")
+                    ).strip()
+            elif isinstance(m, AIMessage):
+                txt = _extract_text(m.content).strip()
+                if txt:
+                    assistant_text = txt
 
         if len(user_text) < 12 or not assistant_text:
             return {"memory_extracted": True}
