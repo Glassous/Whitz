@@ -82,7 +82,6 @@ import com.glassous.whitz.ui.theme.FolderOpen
 import com.glassous.whitz.ui.theme.Image
 import com.glassous.whitz.ui.theme.MyLocation
 import com.glassous.whitz.ui.theme.OpenInFull
-import com.glassous.whitz.ui.theme.Psychology
 import com.glassous.whitz.ui.theme.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import com.glassous.whitz.ui.theme.Schedule
@@ -178,7 +177,6 @@ import com.glassous.whitz.core.model.CitationItem
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.Message
-import com.glassous.whitz.core.model.RagMode
 import com.glassous.whitz.core.model.UploadTaskStatus
 import com.glassous.whitz.core.model.User
 import com.glassous.whitz.core.model.displaySideTitle
@@ -346,7 +344,6 @@ private class FileTokenVisualTransformation(
 fun ChatScreen(
     vm: ChatViewModel,
     onOpenSettings: () -> Unit,
-    onOpenMemorySettings: () -> Unit = onOpenSettings,
     onOpenLibrary: () -> Unit,
     onOpenSchedules: () -> Unit,
     onOpenPosts: () -> Unit,
@@ -379,12 +376,10 @@ fun ChatScreen(
     var showSkillPicker by remember { mutableStateOf(false) }
     var showLibraryPicker by remember { mutableStateOf(false) }
     var showCreateFile by remember { mutableStateOf(false) }
-    var showContextState by remember { mutableStateOf(false) }
     var fileRenameTarget by remember { mutableStateOf<ConversationFile?>(null) }
     var desktopSidebarCollapsed by rememberSaveable { mutableStateOf(false) }
     var mainPanelOpen by rememberSaveable { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
-    var showRagModeMenu by remember { mutableStateOf(false) }
     var editingMessage by remember { mutableStateOf<Message?>(null) }
     var savedDraftBeforeEdit by remember { mutableStateOf<String?>(null) }
     var selectingTextMessageId by remember { mutableStateOf<String?>(null) }
@@ -452,7 +447,6 @@ fun ChatScreen(
     }
     val dismissPlusMenu = {
         showAttachMenu = false
-        showRagModeMenu = false
         plusMenuExpanded = false
     }
 
@@ -674,7 +668,6 @@ fun ChatScreen(
     BackHandler(enabled = selectingTextMessageId != null) { selectingTextMessageId = null }
     BackHandler(enabled = editingMessage != null) { cancelEdit() }
     BackHandler(enabled = showSearch) { showSearch = false }
-    BackHandler(enabled = showContextState) { showContextState = false }
     BackHandler(enabled = showSkillPicker) { showSkillPicker = false }
     BackHandler(enabled = showLibraryPicker) { showLibraryPicker = false }
     BackHandler(enabled = plusMenuExpanded) { dismissPlusMenu() }
@@ -935,11 +928,6 @@ fun ChatScreen(
                                                                     vm.openConversationAndFocus(targetConv, metaMsgId)
                                                                 }
                                                             }
-                                                            "memory" -> {
-                                                                scope.launch {
-                                                                    snackbarHostState.showSnackbar("记忆引用：${cite.title.ifBlank { cite.snippet.take(40) }}")
-                                                                }
-                                                            }
                                                             else -> Unit
                                                         }
                                                     },
@@ -1083,49 +1071,12 @@ fun ChatScreen(
                                     }
                                 }
                             }
-                            if (ui.currentConvId != null && !mainPanelOpen) {
-                                WhitzGlassCircleButton(
-                                    hazeState = headerHazeState,
-                                    showBorder = visibleMessages.isNotEmpty(),
-                                    modifier = Modifier.align(Alignment.TopEnd),
-                                    onClick = {
-                                        focusManager.clearFocus()
-                                        vm.loadContextState()
-                                        showContextState = true
-                                    },
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Psychology,
-                                        contentDescription = "记忆状态",
-                                        tint = colors.fgMuted,
-                                        modifier = Modifier.size(21.dp),
-                                    )
-                                }
-                            }
                         } else {
                             Row(
                                 modifier = Modifier.align(Alignment.TopEnd),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                if (ui.currentConvId != null) {
-                                    WhitzGlassCircleButton(
-                                        hazeState = headerHazeState,
-                                        showBorder = visibleMessages.isNotEmpty(),
-                                        onClick = {
-                                            focusManager.clearFocus()
-                                            vm.loadContextState()
-                                            showContextState = true
-                                        },
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Psychology,
-                                            contentDescription = "记忆状态",
-                                            tint = colors.fgMuted,
-                                            modifier = Modifier.size(21.dp),
-                                        )
-                                    }
-                                }
                                 androidx.compose.animation.AnimatedVisibility(
                                     visible = visibleMessages.isNotEmpty(),
                                     enter = fadeIn(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()),
@@ -1307,14 +1258,6 @@ fun ChatScreen(
                                 }
                             }
 
-                            ui.pendingMemory.forEach { mem ->
-                                MemoryPendingCard(
-                                    item = mem,
-                                    busy = mem.id in ui.resolvingMemoryIds,
-                                    onResolve = { id, act, c -> vm.resolvePendingMemory(id, act, c) },
-                                )
-                            }
-
                             ui.pendingSkills.forEach { sk ->
                                 SkillPendingCard(
                                     item = sk,
@@ -1488,7 +1431,7 @@ fun ChatScreen(
                                             )
                                         }
                                     }
-                                    if (ui.selectedSkillNames.isNotEmpty() || ui.ragMode != RagMode.AUTO) {
+                                    if (ui.selectedSkillNames.isNotEmpty()) {
                                         Box(
                                             modifier = Modifier
                                                 .align(Alignment.TopEnd)
@@ -1605,53 +1548,12 @@ fun ChatScreen(
                                                     selection = TextRange(updated.length),
                                                 )
                                             }
-                                            if (ui.uploads.isNotEmpty() || attachedFiles.isNotEmpty() || inlineReferencedFiles.isNotEmpty() || ui.selectedSkillNames.isNotEmpty() || ui.ragMode != RagMode.AUTO) {
+                                            if (ui.uploads.isNotEmpty() || attachedFiles.isNotEmpty() || inlineReferencedFiles.isNotEmpty() || ui.selectedSkillNames.isNotEmpty()) {
                                                 FlowRow(
                                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                                     verticalArrangement = Arrangement.spacedBy(6.dp),
                                                     modifier = Modifier.padding(bottom = 8.dp, start = 4.dp, end = 4.dp),
                                                 ) {
-                                                    if (ui.ragMode != RagMode.AUTO) {
-                                                        Row(
-                                                            modifier = Modifier
-                                                                .clip(RoundedCornerShape(10.dp))
-                                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
-                                                                .border(0.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
-                                                                .clickable {
-                                                                    val next = when (ui.ragMode) {
-                                                                        RagMode.FILES_ONLY -> RagMode.OFF
-                                                                        RagMode.OFF -> RagMode.AUTO
-                                                                        RagMode.AUTO -> RagMode.FILES_ONLY
-                                                                    }
-                                                                    vm.setRagMode(next)
-                                                                }
-                                                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                        ) {
-                                                            Icon(
-                                                                Icons.Default.Search,
-                                                                contentDescription = null,
-                                                                tint = MaterialTheme.colorScheme.primary,
-                                                                modifier = Modifier.size(13.dp),
-                                                            )
-                                                            Spacer(modifier = Modifier.width(4.dp))
-                                                            Text(
-                                                                text = "检索：${ui.ragMode.label}",
-                                                                fontSize = 12.sp,
-                                                                fontWeight = FontWeight.Medium,
-                                                                color = MaterialTheme.colorScheme.primary,
-                                                            )
-                                                            Spacer(modifier = Modifier.width(4.dp))
-                                                            Icon(
-                                                                Icons.Default.Close,
-                                                                contentDescription = "恢复智能融合",
-                                                                tint = colors.fgFaint,
-                                                                modifier = Modifier
-                                                                    .size(14.dp)
-                                                                    .clickable { vm.setRagMode(RagMode.AUTO) },
-                                                            )
-                                                        }
-                                                    }
                                                     ui.uploads.forEach { task ->
                                                         Row(
                                                             modifier = Modifier
@@ -2055,24 +1957,12 @@ fun ChatScreen(
                     visible = plusMenuExpanded,
                     anchorBounds = { plusAnchorBounds },
                     selectedSkillCount = ui.selectedSkillNames.size,
-                    ragMode = ui.ragMode,
                     showAttachMenu = showAttachMenu,
-                    showRagModeMenu = showRagModeMenu,
                     onDismiss = dismissPlusMenu,
                     onOpenAttachMenu = {
-                        showRagModeMenu = false
                         showAttachMenu = true
                     },
                     onDismissAttachMenu = { showAttachMenu = false },
-                    onOpenRagModeMenu = {
-                        showAttachMenu = false
-                        showRagModeMenu = true
-                    },
-                    onDismissRagModeMenu = { showRagModeMenu = false },
-                    onSelectRagMode = { mode ->
-                        vm.setRagMode(mode)
-                        dismissPlusMenu()
-                    },
                     onUploadLocalFile = {
                         dismissPlusMenu()
                         filePickerLauncher.launch(arrayOf("*/*"))
@@ -2225,27 +2115,7 @@ fun ChatScreen(
                 vm.openFileById(hit.fileId, hit.filename, hit.conversationId)
                 scope.launch { drawerState.close() }
             },
-            onSelectMemoryHit = {
-                scope.launch { drawerState.close() }
-                onOpenMemorySettings()
-            },
             onDismiss = { showSearch = false },
-        )
-    }
-
-    if (showContextState) {
-        ContextStateSheet(
-            state = ui.contextState,
-            loading = ui.contextStateLoading,
-            saving = ui.contextStateSaving,
-            archiving = ui.contextStateArchiving,
-            error = ui.contextStateError,
-            onRefresh = { vm.loadContextState() },
-            onUpdateWorkingState = { vm.updateWorkingState(it) },
-            onArchiveNow = { vm.archiveEpisodeNow() },
-            onLocateMessage = { msgId -> vm.focusMessageInCurrentConversation(msgId) },
-            onOpenMemorySettings = onOpenMemorySettings,
-            onDismiss = { showContextState = false },
         )
     }
 
@@ -3366,15 +3236,10 @@ private fun ComposerPlusMenuOverlay(
     visible: Boolean,
     anchorBounds: () -> Rect?,
     selectedSkillCount: Int,
-    ragMode: RagMode,
     showAttachMenu: Boolean,
-    showRagModeMenu: Boolean,
     onDismiss: () -> Unit,
     onOpenAttachMenu: () -> Unit,
     onDismissAttachMenu: () -> Unit,
-    onOpenRagModeMenu: () -> Unit,
-    onDismissRagModeMenu: () -> Unit,
-    onSelectRagMode: (RagMode) -> Unit,
     onUploadLocalFile: () -> Unit,
     onCreateWorkspaceFile: () -> Unit,
     onPickFromLibrary: () -> Unit,
@@ -3457,45 +3322,6 @@ private fun ComposerPlusMenuOverlay(
                             highlighted = selectedSkillCount > 0,
                             onClick = onOpenSkillPicker,
                         )
-
-                        Box {
-                            WhitzFloatingMenuItem(
-                                icon = Icons.Default.Search,
-                                label = "检索：${ragMode.label}",
-                                highlighted = ragMode != RagMode.AUTO,
-                                onClick = onOpenRagModeMenu,
-                            )
-                            DropdownMenu(
-                                expanded = showRagModeMenu,
-                                onDismissRequest = onDismissRagModeMenu,
-                            ) {
-                                RagMode.entries.forEach { mode ->
-                                    DropdownMenuItem(
-                                        text = {
-                                            Column {
-                                                Text(mode.label, fontWeight = FontWeight.Medium)
-                                                Text(
-                                                    mode.description,
-                                                    fontSize = 11.sp,
-                                                    color = LocalWhitzColors.current.fgMuted,
-                                                )
-                                            }
-                                        },
-                                        trailingIcon = {
-                                            if (ragMode == mode) {
-                                                Icon(
-                                                    Icons.Default.Check,
-                                                    contentDescription = null,
-                                                    tint = MaterialTheme.colorScheme.primary,
-                                                    modifier = Modifier.size(16.dp),
-                                                )
-                                            }
-                                        },
-                                        onClick = { onSelectRagMode(mode) },
-                                    )
-                                }
-                            }
-                        }
                     }
                 }
             }

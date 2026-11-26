@@ -6,6 +6,7 @@ import { useChatStore } from "../../stores/chat";
 import { useFilesStore } from "../../stores/files";
 import { categoryLabel, formatFileSize, getFileExt, getFileSpec } from "../../lib/fileTypes";
 import { isWritableTextExt, parseInlineFileSegments } from "../../lib/fileTokens";
+import { isMemoryCitation } from "../../lib/memoryVisibility";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 import Spinner from "../ui/Spinner.vue";
 import AppIcon from "../ui/AppIcon.vue";
@@ -280,7 +281,7 @@ const liveLabel = computed(() => {
     return step.title ? `步骤 ${step.index}/${step.total} · ${step.title}` : `步骤 ${step.index}/${step.total}`;
   }
   if (chat.runningTool) return `正在使用 ${TOOL_LABELS[chat.runningTool] ?? chat.runningTool}`;
-  if (chat.ragPrefetching) return "正在检索知识库与记忆…";
+  if (chat.ragPrefetching) return "正在检索知识库…";
   if (chat.waitingFirstByte) return "正在连接助理…";
   if (props.message.content.trim()) return "正在生成回答…";
   const items = chat.plan?.items ?? [];
@@ -305,36 +306,30 @@ let citeHighlightTimer: number | null = null;
 const messageCitations = computed<CitationItem[]>(() => {
   const live = isLive.value ? chat.citations : [];
   const stored = props.message.tool_payload?.citations ?? [];
-  return live.length ? live : stored;
+  return (live.length ? live : stored).filter((item) => !isMemoryCitation(item));
 });
 
 const citationSummaryText = computed(() => {
   const list = messageCitations.value;
   if (!list.length) return "";
-  let fileCount = 0;
-  let memCount = 0;
   let chatCount = 0;
   const seenFiles = new Set<string>();
   for (const item of list) {
     if (item.source_type === "file") {
       seenFiles.add(item.source_id || item.title);
-    } else if (item.source_type === "memory") {
-      memCount++;
     } else {
       chatCount++;
     }
   }
-  fileCount = seenFiles.size;
+  const fileCount = seenFiles.size;
   const parts: string[] = [];
   if (fileCount) parts.push(`${fileCount} 份文档`);
-  if (memCount) parts.push(`${memCount} 条记忆`);
   if (chatCount) parts.push(`${chatCount} 段历史对话`);
   return parts.length ? `参考了 ${parts.join(" · ")}` : `参考了 ${list.length} 条知识来源`;
 });
 
 function citationTypeLabel(sourceType: string): string {
   if (sourceType === "file") return "文档";
-  if (sourceType === "memory") return "记忆";
   if (sourceType === "chat_digest") return "对话摘要";
   return "历史对话";
 }
@@ -362,16 +357,10 @@ function onOpenCitationById(citationId: string) {
   const item = messageCitations.value.find((c) => c.citation_id.toUpperCase() === upper);
   if (!item) return;
   highlightCitationCard(item.citation_id);
-  if (item.source_type !== "memory") {
-    emit("open-citation", item);
-  }
+  emit("open-citation", item);
 }
 
 function onCitationCardClick(item: CitationItem) {
-  if (item.source_type === "memory") {
-    highlightCitationCard(item.citation_id);
-    return;
-  }
   emit("open-citation", item);
 }
 
@@ -789,7 +778,7 @@ const resolvedArtifacts = computed(() =>
               ? "正在等待你的审批确认…"
               : "正在等待你的澄清回答，提交后将继续执行…"
             : chat.ragPrefetching
-              ? "正在检索知识库与记忆…"
+              ? "正在检索知识库…"
               : chat.waitingFirstByte
                 ? "助理已接收请求，正在准备回复…"
                 : "正在组织回答…"

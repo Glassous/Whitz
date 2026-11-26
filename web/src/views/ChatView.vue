@@ -18,11 +18,9 @@ import ChatInput from "../components/chat/ChatInput.vue";
 import PlanPanel from "../components/chat/PlanPanel.vue";
 import ApprovalCard from "../components/chat/ApprovalCard.vue";
 import ClarifyCard from "../components/chat/ClarifyCard.vue";
-import MemoryPendingCard from "../components/chat/MemoryPendingCard.vue";
 import SkillPendingCard from "../components/chat/SkillPendingCard.vue";
 import SchedulePendingCard from "../components/chat/SchedulePendingCard.vue";
 import SearchModal from "../components/chat/SearchModal.vue";
-import ContextStateModal from "../components/chat/ContextStateModal.vue";
 import DeliverableModal from "../components/chat/DeliverableModal.vue";
 import ImageLightboxModal from "../components/chat/ImageLightboxModal.vue";
 
@@ -139,7 +137,6 @@ function onWindowResize() {
   panelWidth.value = clampPanelWidth(panelWidth.value);
 }
 const searchOpen = ref(false);
-const contextStateOpen = ref(false);
 const focusMessageId = ref<string | null>(null);
 let pollTimer: number | null = null;
 
@@ -398,10 +395,6 @@ function buildSyntheticFile(fileId: string, filename: string, conversationId: st
 function onSelectFileFromSearch(fileId: string, filename: string, conversationId: string | null) {
   activeView.value = "chat";
   onPreviewFile(buildSyntheticFile(fileId, filename, conversationId));
-}
-
-function onSelectMemoryFromSearch() {
-  void router.push({ path: "/settings" });
 }
 
 async function onOpenCitation(citation: CitationItem) {
@@ -700,26 +693,6 @@ async function onEditMessage(userMessageId: string, content: string) {
   }
 }
 
-async function onResolveMemory(id: string, action: "approve" | "reject", content?: string) {
-  const nextBusy = new Set(pendingBusyIds.value);
-  nextBusy.add(id);
-  pendingBusyIds.value = nextBusy;
-  const { [id]: _, ...restErrors } = pendingErrors.value;
-  pendingErrors.value = restErrors;
-  try {
-    await chat.resolvePendingMemory(id, action, content);
-  } catch (e: any) {
-    pendingErrors.value = {
-      ...pendingErrors.value,
-      [id]: e?.detail?.detail ?? e?.message ?? "操作失败，请重试",
-    };
-  } finally {
-    const afterBusy = new Set(pendingBusyIds.value);
-    afterBusy.delete(id);
-    pendingBusyIds.value = afterBusy;
-  }
-}
-
 async function onResolveSkill(id: string, action: "approve" | "reject") {
   const nextBusy = new Set(pendingBusyIds.value);
   nextBusy.add(id);
@@ -991,16 +964,6 @@ onBeforeUnmount(() => {
             <AppIcon name="clock" motion="none" class="h-3 w-3 shrink-0" :stroke-width="2" />
             <span>定时</span>
           </span>
-          <button
-            v-if="activeView === 'chat' && conversations.current?.id"
-            type="button"
-            class="focus-ring pointer-events-auto inline-flex shrink-0 items-center gap-1 rounded-full bg-surface/85 px-2.5 py-1 text-[11.5px] font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
-            title="查看或修正当前对话的 L0/L1/L2 上下文记忆状态与归档时间线"
-            @click="contextStateOpen = true"
-          >
-            <AppIcon name="database" class="h-3.5 w-3.5 shrink-0 text-accent" :stroke-width="1.95" />
-            <span class="hidden sm:inline">记忆状态</span>
-          </button>
         </div>
 
         <div class="relative min-h-0 flex-1">
@@ -1090,15 +1053,6 @@ onBeforeUnmount(() => {
               />
             </Transition>
 
-            <MemoryPendingCard
-              v-for="item in chat.pendingMemory"
-              :key="`mem-${item.id}`"
-              :item="item"
-              :busy="pendingBusyIds.has(item.id)"
-              :error="pendingErrors[item.id] ?? null"
-              @resolve="onResolveMemory"
-            />
-
             <SkillPendingCard
               v-for="item in chat.pendingSkills"
               :key="`skill-${item.id}`"
@@ -1159,7 +1113,6 @@ onBeforeUnmount(() => {
             <ChatInput
               ref="chatInputRef"
               v-model:selected-skills="selectedSkills"
-              :rag-mode="chat.ragScope.mode"
               :streaming="chat.streaming"
               :sending="sendingMessage || chat.waitingFirstByte"
               :stopping="chat.stopping"
@@ -1169,7 +1122,6 @@ onBeforeUnmount(() => {
               :attached-files="filesStore.attachedFiles"
               :workspace-files="filesStore.files"
               :assistant-name="assistantName"
-              @update:rag-mode="chat.setRagMode"
               @send="onSend"
               @stop="chat.stop"
               @upload="(files, dt) => onUploadFiles(files, dt, false)"
@@ -1334,15 +1286,6 @@ onBeforeUnmount(() => {
       @close="searchOpen = false"
       @select="onSelectFromSearch"
       @select-file="onSelectFileFromSearch"
-      @select-memory="onSelectMemoryFromSearch"
-    />
-    <ContextStateModal
-      :open="contextStateOpen"
-      :conversation-id="conversations.current?.id ?? null"
-      :conversation-title="headerTitle"
-      @close="contextStateOpen = false"
-      @jump-message="(msgId) => { contextStateOpen = false; focusMessageId = msgId; }"
-      @open-memory-settings="() => { contextStateOpen = false; router.push({ path: '/settings' }); }"
     />
     <DeliverableModal
       :target="deliverableTarget"

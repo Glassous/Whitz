@@ -32,7 +32,6 @@ import com.glassous.whitz.core.model.MessageReaction
 import com.glassous.whitz.core.model.PendingControl
 import com.glassous.whitz.core.model.Plan
 import com.glassous.whitz.core.model.PlanItem
-import com.glassous.whitz.core.model.RagMode
 import com.glassous.whitz.core.model.ReasoningBlock
 import com.glassous.whitz.core.model.ReasoningTool
 import com.glassous.whitz.core.model.ScheduledTaskPendingItem
@@ -179,7 +178,6 @@ data class ChatUiState(
     val searchSourceTab: String = "all",
     val searching: Boolean = false,
     // RAG & Citations
-    val ragMode: RagMode = RagMode.AUTO,
     val ragPrefetching: Boolean = false,
     val citations: List<CitationItem> = emptyList(),
     // 4-Tier Cognitive Context State (L0/L1/L2)
@@ -208,9 +206,7 @@ data class ChatUiState(
 class ChatViewModel(
     private val container: AppContainer,
 ) : ViewModel() {
-    private val _ui = MutableStateFlow(
-        ChatUiState(ragMode = RagMode.fromWire(container.storage.getRagMode()))
-    )
+    private val _ui = MutableStateFlow(ChatUiState())
     val ui: StateFlow<ChatUiState> = _ui.asStateFlow()
 
     val user = container.authManager.user
@@ -232,16 +228,10 @@ class ChatViewModel(
     private var seq = 0
     private var initialLoaded = false
 
-    fun setRagMode(mode: RagMode) {
-        if (_ui.value.ragMode == mode) return
-        container.storage.setRagMode(mode.wireValue)
-        _ui.update { it.copy(ragMode = mode) }
-    }
-
-    private fun buildRagScopeJson(mode: RagMode): JsonObject = buildJsonObject {
-        put("mode", JsonPrimitive(mode.wireValue))
-        put("include_memory", JsonPrimitive(mode == RagMode.AUTO))
-        put("include_chats", JsonPrimitive(mode == RagMode.AUTO))
+    private fun buildRagScopeJson(): JsonObject = buildJsonObject {
+        put("mode", JsonPrimitive("auto"))
+        put("include_memory", JsonPrimitive(true))
+        put("include_chats", JsonPrimitive(true))
     }
 
     private val deltaCoalescer = StreamDeltaCoalescer(
@@ -1043,7 +1033,6 @@ class ChatViewModel(
             )
         }
 
-        val ragMode = _ui.value.ragMode
         val bodyObj = buildJsonObject {
             put("content", JsonPrimitive(content))
             if (attachedFiles.isNotEmpty()) {
@@ -1052,7 +1041,7 @@ class ChatViewModel(
             if (skillNames.isNotEmpty()) {
                 put("skill_names", buildJsonArray { skillNames.forEach { add(JsonPrimitive(it)) } })
             }
-            put("rag_scope", buildRagScopeJson(ragMode))
+            put("rag_scope", buildRagScopeJson())
         }
         streamTurn(convId, "/conversations/$convId/messages", bodyObj.toString(), "发送失败")
     }
@@ -1119,7 +1108,7 @@ class ChatViewModel(
             )
         }
         val regenBody = buildJsonObject {
-            put("rag_scope", buildRagScopeJson(state.ragMode))
+            put("rag_scope", buildRagScopeJson())
         }
         streamTurn(convId, "/conversations/$convId/messages/$assistantMessageId/regenerate", regenBody.toString(), "重新生成失败")
     }
@@ -1193,7 +1182,7 @@ class ChatViewModel(
             put("content", JsonPrimitive(trimmed))
             put("file_ids", buildJsonArray { attached.forEach { add(JsonPrimitive(it.id)) } })
             put("skill_names", buildJsonArray { skills.forEach { add(JsonPrimitive(it)) } })
-            put("rag_scope", buildRagScopeJson(state.ragMode))
+            put("rag_scope", buildRagScopeJson())
         }
         streamTurn(convId, "/conversations/$convId/messages/$userMessageId/edit", bodyObj.toString(), "保存并重发失败")
     }

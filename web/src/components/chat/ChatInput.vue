@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ACCEPT_ATTR, SUPPORTED_TYPES_SUMMARY, categoryLabel, formatFileSize, validateDragItems } from "../../lib/fileTypes";
 import { isImageExt, serializeFileToken } from "../../lib/fileTokens";
-import type { ConversationFile, RagMode, UploadTask } from "../../types";
+import type { ConversationFile, UploadTask } from "../../types";
 import SkillPickerPopover from "./SkillPickerPopover.vue";
 import AppIcon from "../ui/AppIcon.vue";
 import Spinner from "../ui/Spinner.vue";
@@ -17,7 +17,6 @@ const props = defineProps<{
   attachedFiles?: ConversationFile[];
   workspaceFiles?: ConversationFile[];
   selectedSkills?: string[];
-  ragMode?: RagMode;
   assistantName?: string;
 }>();
 
@@ -31,33 +30,7 @@ const emit = defineEmits<{
   "dismiss-upload": [localId: string];
   "detach-file": [fileId: string];
   "update:selectedSkills": [skills: string[]];
-  "update:ragMode": [mode: RagMode];
 }>();
-
-const RAG_MODE_META: Record<RagMode, { label: string; title: string; next: RagMode }> = {
-  auto: {
-    label: "智能融合",
-    title: "RAG 模式：智能融合（自动检索资料库 + 记忆 + 历史对话）— 点击切换",
-    next: "files_only",
-  },
-  files_only: {
-    label: "严选资料",
-    title: "RAG 模式：严选资料（仅严格基于已上传资料回答，防幻觉）— 点击切换",
-    next: "off",
-  },
-  off: {
-    label: "关闭检索",
-    title: "RAG 模式：关闭自动检索（仅按需手动调用工具）— 点击切换",
-    next: "auto",
-  },
-};
-
-const currentRagMode = computed<RagMode>(() => props.ragMode ?? "auto");
-const currentRagMeta = computed(() => RAG_MODE_META[currentRagMode.value]);
-
-function cycleRagMode() {
-  emit("update:ragMode", currentRagMeta.value.next);
-}
 
 const NORMAL_MAX_HEIGHT = 160;
 
@@ -962,48 +935,6 @@ onBeforeUnmount(() => {
             >
               {{ selectedSkills.length }}
             </span>
-          </button>
-
-          <button
-            type="button"
-            class="focus-ring flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-full px-2.5 text-[12.5px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-            :class="
-              currentRagMode === 'files_only'
-                ? 'bg-accent-weak/90 text-accent'
-                : currentRagMode === 'off'
-                  ? 'bg-canvas/70 text-fg-faint hover:bg-hover hover:text-fg'
-                  : 'text-fg-muted hover:bg-hover hover:text-fg'
-            "
-            :disabled="disabled"
-            :aria-label="currentRagMeta.title"
-            :title="currentRagMeta.title"
-            @click="cycleRagMode"
-          >
-            <Transition name="whitz-icon-swap" mode="out-in">
-              <AppIcon
-                v-if="currentRagMode === 'off'"
-                key="rag-off"
-                name="rag-off"
-                class="h-[16px] w-[16px] shrink-0"
-                :stroke-width="1.85"
-              />
-              <AppIcon
-                v-else-if="currentRagMode === 'files_only'"
-                key="rag-files"
-                name="file-check"
-                active
-                class="h-[16px] w-[16px] shrink-0"
-                :stroke-width="1.85"
-              />
-              <AppIcon
-                v-else
-                key="rag-auto"
-                name="lightbulb"
-                class="h-[16px] w-[16px] shrink-0"
-                :stroke-width="1.85"
-              />
-            </Transition>
-            <span class="hidden sm:inline">{{ currentRagMeta.label }}</span>
           </button>
 
           <span v-if="queuedSend && sendLockedByUpload" class="inline-flex items-center gap-1.5 text-[12px] text-accent">

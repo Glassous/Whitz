@@ -18,7 +18,6 @@ import type {
   PendingControl,
   Plan,
   PlanItem,
-  RagMode,
   RagScope,
   ReasoningBlock,
   ScheduledTaskPendingItem,
@@ -55,32 +54,11 @@ export const useChatStore = defineStore("chat", () => {
   const reasoning = ref<ReasoningBlock[]>([]);
   const citations = ref<CitationItem[]>([]);
   const ragPrefetching = ref(false);
-  const RAG_MODE_STORAGE_KEY = "whitz_rag_mode";
-  function loadInitialRagMode(): RagMode {
-    if (typeof window === "undefined") return "auto";
-    const saved = window.localStorage.getItem(RAG_MODE_STORAGE_KEY);
-    return saved === "files_only" || saved === "off" || saved === "auto" ? saved : "auto";
-  }
   const ragScope = ref<RagScope>({
-    mode: loadInitialRagMode(),
+    mode: "auto",
     include_memory: true,
     include_chats: true,
   });
-  function setRagMode(mode: RagMode) {
-    ragScope.value = {
-      ...ragScope.value,
-      mode,
-      include_memory: mode === "auto",
-      include_chats: mode === "auto",
-    };
-    if (typeof window !== "undefined") {
-      try {
-        window.localStorage.setItem(RAG_MODE_STORAGE_KEY, mode);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
   const pendingControl = ref<PendingControl | null>(null);
   const pendingMemory = ref<MemoryPendingItem[]>([]);
   const pendingSkills = ref<SkillPendingItem[]>([]);
@@ -1506,7 +1484,7 @@ export const useChatStore = defineStore("chat", () => {
   return {
     convId, messages, stableKeys, stableKeyOf, latestTurnTriggerSeq,
     streaming, waitingFirstByte, ragPrefetching, stopping, reconnecting, approvingChoice, submittingClarify,
-    activeAssistantId, activeRunId, plan, reasoning, citations, ragScope, setRagMode, currentStep, runningTool,
+    activeAssistantId, activeRunId, plan, reasoning, citations, ragScope, currentStep, runningTool,
     selectedTurnId, selectedTurn, assistantTurns, viewPlan, viewReasoning, viewStreaming, viewCurrentStep,
     viewRunningTool, selectTurn,
     pendingControl, pendingMemory, pendingSkills, pendingSchedules, error,

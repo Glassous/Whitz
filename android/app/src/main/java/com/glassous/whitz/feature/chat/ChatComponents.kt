@@ -144,7 +144,6 @@ import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.model.UnifiedChatSearchHit
 import com.glassous.whitz.core.model.UnifiedFileSearchHit
-import com.glassous.whitz.core.model.UnifiedMemorySearchHit
 import com.glassous.whitz.core.model.UnifiedSearchResponse
 import com.glassous.whitz.core.model.displaySideTitle
 import com.glassous.whitz.core.model.displayTitle
@@ -598,13 +597,14 @@ fun MessageBubble(
             val effectiveCitations = remember(turnCitations, message.toolPayload?.citations) {
                 val base = message.toolPayload?.citations.orEmpty()
                 val live = turnCitations.orEmpty()
-                if (live.isEmpty()) base
+                val merged = if (live.isEmpty()) base
                 else {
                     val map = LinkedHashMap<String, CitationItem>()
                     base.forEach { map[it.citationId] = it }
                     live.forEach { map[it.citationId] = it }
                     map.values.toList()
                 }
+                merged.filter { it.sourceType != "memory" }
             }
             var citationsExpanded by remember(message.id) { mutableStateOf(false) }
             var highlightedCitationId by remember(message.id) { mutableStateOf<String?>(null) }
@@ -783,7 +783,7 @@ fun MessageBubble(
                             } else {
                                 "正在等待你的澄清回答，提交后将继续执行…"
                             }
-                            ragPrefetching -> "正在检索知识库与记忆…"
+                            ragPrefetching -> "正在检索知识库…"
                             waitingFirstByte -> "助理已接收请求，正在准备回复…"
                             else -> "正在组织回答…"
                         }
@@ -2560,11 +2560,9 @@ private fun CitationsDisclosureCard(
     )
     val summaryText = remember(citations) {
         val fileCount = citations.count { it.sourceType == "file" }
-        val memCount = citations.count { it.sourceType == "memory" }
         val chatCount = citations.count { it.sourceType == "chat_digest" || it.sourceType == "chat_turn" }
         val parts = buildList {
             if (fileCount > 0) add("$fileCount 份文档")
-            if (memCount > 0) add("$memCount 条记忆")
             if (chatCount > 0) add("$chatCount 段历史对话")
         }
         if (parts.isNotEmpty()) "参考了 ${parts.joinToString(" · ")}" else "参考来源 · ${citations.size} 条"
@@ -2622,13 +2620,11 @@ private fun CitationsDisclosureCard(
                         highlightedCitationId.equals(cite.citationId, ignoreCase = true)
                     val typeLabel = when (cite.sourceType) {
                         "file" -> "文档"
-                        "memory" -> "记忆"
                         "chat_digest", "chat_turn" -> "历史对话"
                         else -> "来源"
                     }
                     val typeIcon = when (cite.sourceType) {
                         "file" -> Icons.Default.Description
-                        "memory" -> Icons.Default.Psychology
                         else -> Icons.Default.History
                     }
                     Surface(
@@ -2716,7 +2712,6 @@ private val OMNIBOX_TABS = listOf(
     "all" to "全部",
     "chat" to "对话",
     "file" to "资料库正文",
-    "memory" to "长期记忆",
 )
 
 @Composable
@@ -2731,7 +2726,6 @@ fun SearchDialog(
     onSelectSourceTab: (source: String, currentQuery: String) -> Unit = { _, _ -> },
     onSelectConversation: (convId: String, messageId: String?) -> Unit,
     onSelectFileHit: (UnifiedFileSearchHit) -> Unit = {},
-    onSelectMemoryHit: (UnifiedMemorySearchHit) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     val colors = LocalWhitzColors.current
@@ -2749,7 +2743,7 @@ fun SearchDialog(
                         query = it
                         onQueryChange(it)
                     },
-                    placeholder = "搜索聊天、资料库正文、长期记忆…",
+                    placeholder = "搜索聊天、资料库正文…",
                     leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = colors.fgMuted) },
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -2851,9 +2845,8 @@ fun SearchDialog(
                 } else if (unifiedResults != null) {
                     val chatHits = if (selectedSourceTab == "all" || selectedSourceTab == "chat") unifiedResults.chats else emptyList()
                     val fileHits = if (selectedSourceTab == "all" || selectedSourceTab == "file") unifiedResults.files else emptyList()
-                    val memHits = if (selectedSourceTab == "all" || selectedSourceTab == "memory") unifiedResults.memories else emptyList()
 
-                    if (chatHits.isEmpty() && fileHits.isEmpty() && memHits.isEmpty()) {
+                    if (chatHits.isEmpty() && fileHits.isEmpty()) {
                         Text("没有找到匹配的结果", fontSize = 13.sp, color = colors.fgFaint, modifier = Modifier.padding(8.dp))
                     } else {
                         LazyColumn(
@@ -2902,53 +2895,6 @@ fun SearchDialog(
                                         }
                                         if (fh.snippet.isNotBlank()) {
                                             Text(fh.snippet, fontSize = 12.sp, color = colors.fgMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (memHits.isNotEmpty()) {
-                                item(key = "hdr-mem") {
-                                    Text(
-                                        text = "长期记忆 (${memHits.size})",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = colors.fgFaint,
-                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-                                    )
-                                }
-                                items(memHits, key = { "mem-${it.entryId}" }) { mh ->
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .clickable {
-                                                onSelectMemoryHit(mh)
-                                                onDismiss()
-                                            }
-                                            .padding(horizontal = 8.dp, vertical = 8.dp),
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                        ) {
-                                            Icon(Icons.Default.Psychology, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
-                                            Text(
-                                                text = mh.title.ifBlank { mh.collectionName.ifBlank { "长期记忆" } },
-                                                fontWeight = FontWeight.Medium,
-                                                fontSize = 13.5.sp,
-                                                color = colors.fg,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.weight(1f),
-                                            )
-                                            if (mh.collectionName.isNotBlank()) {
-                                                Text(mh.collectionName, fontSize = 10.5.sp, color = colors.fgFaint)
-                                            }
-                                        }
-                                        val body = mh.snippet.ifBlank { mh.content }
-                                        if (body.isNotBlank()) {
-                                            Text(body, fontSize = 12.sp, color = colors.fgMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                         }
                                     }
                                 }

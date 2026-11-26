@@ -255,7 +255,7 @@ fun computeLiveStepLabel(
         StreamingPhase.RECONNECTING -> "网络重连中，正在恢复进度…"
         StreamingPhase.WAITING_APPROVAL -> "等待你的批准"
         StreamingPhase.WAITING_CLARIFY -> "等待你补充信息"
-        StreamingPhase.RAG_PREFETCH -> "正在检索知识库与记忆…"
+        StreamingPhase.RAG_PREFETCH -> "正在检索知识库…"
         StreamingPhase.RUNNING_STEP -> {
             val step = currentStep!!
             if (step.title.isNotBlank()) {
