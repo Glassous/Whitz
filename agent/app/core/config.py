@@ -103,6 +103,17 @@ class AgentSettings(BaseSettings):
     side_max_prompt_tokens: int = 20000
     recent_verbatim_messages: int = 16
 
+    # Security Guardrails (Prompt Injection / PII Vault / Tool Safety)
+    guardrails_mode: Literal["off", "warn", "block"] = "block"
+    guardrails_pii_redaction_enabled: bool = True
+    guardrails_block_threshold: int = 70
+
+    # Multi-tenant Semantic Cache (L1 Exact + L2 Cosine Vector)
+    semantic_cache_enabled: bool = True
+    semantic_cache_similarity_threshold: float = 0.94
+    semantic_cache_ttl_seconds: int = 3600
+    semantic_cache_max_entries_per_user: int = 64
+
     # LangSmith
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""

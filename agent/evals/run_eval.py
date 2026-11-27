@@ -122,12 +122,24 @@ async def run_live_eval(dataset: list[dict[str, Any]], dataset_name: str) -> dic
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run Whitz Agent LangSmith evaluations.")
+    parser = argparse.ArgumentParser(description="Run Whitz Agent LangSmith or Harness evaluations.")
     parser.add_argument("--dry-run", action="store_true", help="Run offline deterministic evals without API keys.")
+    parser.add_argument("--harness", action="store_true", help="Delegate to the unified multi-suite Eval Harness.")
+    parser.add_argument("--suites", default="rag,guardrails,cache,agent_core", help="Suites when using --harness.")
     parser.add_argument("--dataset-name", default="whitz-agent-golden", help="LangSmith dataset name.")
     parser.add_argument("--report-url", default="", help="Optional Whitz server eval report URL.")
     parser.add_argument("--token", default="", help="Optional Bearer token for --report-url.")
     args = parser.parse_args(argv)
+
+    if args.harness:
+        from evals.harness.runner import main as harness_main
+
+        h_args = ["--suites", args.suites]
+        if args.report_url:
+            h_args.extend(["--report-url", args.report_url])
+        if args.token:
+            h_args.extend(["--token", args.token])
+        return harness_main(h_args)
 
     dataset = load_dataset()
     if args.dry_run:

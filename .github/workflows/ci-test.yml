@@ -100,3 +100,6 @@ jobs:
       - name: Test
         working-directory: agent
         run: python -m pytest -q
+      - name: Eval harness regression gate
+        working-directory: agent
+        run: python -m evals.harness --suites rag,guardrails,cache,agent_core --baseline evals/baselines/offline_baseline.json --fail-on-regression

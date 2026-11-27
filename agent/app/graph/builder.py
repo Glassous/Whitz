@@ -1018,6 +1018,41 @@ def build_agent_graph(*, checkpointer: Any = None, store: Any = None):
                 True,
                 None,
             )
+
+        # Tool-stage security guardrail (SSRF & sensitive path protection)
+        cfg_tool = dict(config.get("configurable") or {})
+        g_engine = cfg_tool.get("guardrail_engine")
+        if g_engine is not None and hasattr(g_engine, "inspect_tool_call"):
+            t_dec = g_engine.inspect_tool_call(name, args)
+            if not t_dec.allowed:
+                try:
+                    from app.core.metrics import AGENT_GUARDRAIL_TRIGGERS_TOTAL
+
+                    cat = t_dec.matches[0].category if t_dec.matches else "tool_policy"
+                    AGENT_GUARDRAIL_TRIGGERS_TOTAL.labels(stage="tool", action=t_dec.action, category=cat).inc()
+                except Exception:
+                    pass
+                try:
+                    from langgraph.config import get_stream_writer
+
+                    get_stream_writer()({"type": "guardrail.event", **t_dec.to_event_payload(), "tool": name})
+                except Exception:
+                    pass
+                return (
+                    ToolMessage(
+                        tool_call_id=call_id,
+                        name=name,
+                        content=json.dumps(
+                            {"error": t_dec.reason or f"工具 {name} 参数触发安全护栏拦截", "guardrail": t_dec.to_event_payload()},
+                            ensure_ascii=False,
+                        ),
+                        status="error",
+                    ),
+                    None,
+                    False,
+                    True,
+                    None,
+                )
         try:
             res = await tool_obj.ainvoke(args, config=config)
 

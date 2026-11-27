@@ -49,6 +49,9 @@ _ACTION_BASE_RISK: dict[str, int] = {
     "schedule.delete": 25,
     "schedule.run_now": 15,
     "schedule.proposal.resolve": 20,
+    "guardrail.input_blocked": 75,
+    "guardrail.tool_blocked": 80,
+    "guardrail.pii_redacted": 25,
 }
 
 

@@ -1,0 +1,56 @@
+{
+  "dataset_name": "whitz-eval-harness-v1",
+  "mode": "offline-harness",
+  "suites": {
+    "rag": {
+      "total": 24,
+      "passed": 24,
+      "pass_rate": 1.0,
+      "metrics": {
+        "recall_at_3": 0.875,
+        "recall_at_5": 0.9167,
+        "mrr_at_5": 1.0,
+        "ndcg_at_5": 0.9547,
+        "p95_latency_ms": 6.4224,
+        "recall_5_gain_vs_vector": 0.0417,
+        "mrr_5_gain_vs_vector": 0.1146
+      }
+    },
+    "guardrails": {
+      "total": 41,
+      "passed": 41,
+      "pass_rate": 1.0,
+      "metrics": {
+        "attack_tpr": 1.0,
+        "benign_fpr": 0.0,
+        "tool_safety_accuracy": 1.0,
+        "pii_f1": 1.0,
+        "pii_recall": 1.0,
+        "p95_latency_ms": 0.116
+      }
+    },
+    "cache": {
+      "total": 17,
+      "passed": 17,
+      "pass_rate": 1.0,
+      "metrics": {
+        "positive_hit_rate": 1.0,
+        "false_hit_rate": 0.0,
+        "tenant_isolation_rate": 1.0,
+        "bypass_accuracy": 1.0,
+        "invalidation_ok": 1.0,
+        "tokens_saved_sample": 3150,
+        "p95_latency_ms": 0.4121
+      }
+    },
+    "agent_core": {
+      "total": 12,
+      "passed": 12,
+      "pass_rate": 1.0,
+      "metrics": {
+        "routing_accuracy": 1.0,
+        "topology_valid": 1.0
+      }
+    }
+  }
+}

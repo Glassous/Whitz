@@ -1,0 +1,59 @@
+{
+  "dataset_name": "whitz-semantic-cache-v1",
+  "description": "Positive exact/paraphrase pairs, hard negative non-equivalent pairs, bypass rules, and tenant isolation checks.",
+  "seed_entries": [
+    {
+      "id": "seed-01",
+      "user_id": "user-a",
+      "query": "What is Reciprocal Rank Fusion in hybrid RAG?",
+      "response": "Reciprocal Rank Fusion (RRF) combines ranked lists using 1/(k + rank) without needing score calibration.",
+      "tokens": 420
+    },
+    {
+      "id": "seed-02",
+      "user_id": "user-a",
+      "query": "如何优化 PostgreSQL HNSW 向量检索的召回率？",
+      "response": "可以通过调大 hnsw.ef_search、开启 iterative_scan 以及结合 FTS/pg_trgm 混合召回来提升召回率。",
+      "tokens": 580
+    },
+    {
+      "id": "seed-03",
+      "user_id": "user-a",
+      "query": "解释 FastAPI 依赖注入的工作机制",
+      "response": "FastAPI 通过 Depends 声明依赖树，在请求生命周期内按拓扑顺序解析并支持 yield 资源清理。",
+      "tokens": 510
+    },
+    {
+      "id": "seed-04",
+      "user_id": "user-a",
+      "query": "Compare Docker sandbox and E2B sandbox isolation tradeoffs",
+      "response": "Docker provides low-latency self-hosted container isolation with cgroups/pids limits, while E2B offers microVM isolation.",
+      "tokens": 640
+    },
+    {
+      "id": "seed-05",
+      "user_id": "user-b",
+      "query": "如何优化 PostgreSQL HNSW 向量检索的召回率？",
+      "response": "这是租户 B 专属的回答内容。",
+      "tokens": 300
+    }
+  ],
+  "lookup_cases": [
+    {"id": "exact-01", "category": "exact", "user_id": "user-a", "query": "  what is reciprocal rank fusion in hybrid rag?  ", "expect_hit": true, "expected_seed": "seed-01"},
+    {"id": "exact-02", "category": "exact", "user_id": "user-a", "query": "如何优化 PostgreSQL HNSW 向量检索的召回率？", "expect_hit": true, "expected_seed": "seed-02"},
+    {"id": "para-01", "category": "semantic_positive", "user_id": "user-a", "query": "What is Reciprocal Rank Fusion in hybrid RAG", "expect_hit": true, "expected_seed": "seed-01"},
+    {"id": "para-02", "category": "semantic_positive", "user_id": "user-a", "query": "如何优化 PostgreSQL HNSW 向量检索的召回率", "expect_hit": true, "expected_seed": "seed-02"},
+    {"id": "para-03", "category": "semantic_positive", "user_id": "user-a", "query": "解释 FastAPI 依赖注入的工作机制。", "expect_hit": true, "expected_seed": "seed-03"},
+    {"id": "para-04", "category": "semantic_positive", "user_id": "user-a", "query": "Compare Docker sandbox and E2B sandbox isolation tradeoffs.", "expect_hit": true, "expected_seed": "seed-04"},
+    {"id": "neg-01", "category": "hard_negative", "user_id": "user-a", "query": "如何优化 MySQL B+ 树索引的写入性能？", "expect_hit": false},
+    {"id": "neg-02", "category": "hard_negative", "user_id": "user-a", "query": "What is BM25 scoring in Elasticsearch?", "expect_hit": false},
+    {"id": "neg-03", "category": "hard_negative", "user_id": "user-a", "query": "解释 Vue 3 Pinia 状态管理的持久化机制", "expect_hit": false},
+    {"id": "neg-04", "category": "hard_negative", "user_id": "user-a", "query": "Compare Kubernetes HPA and VPA autoscaling strategies", "expect_hit": false},
+    {"id": "iso-01", "category": "tenant_isolation", "user_id": "user-c", "query": "如何优化 PostgreSQL HNSW 向量检索的召回率？", "expect_hit": false},
+    {"id": "iso-02", "category": "tenant_isolation", "user_id": "user-b", "query": "如何优化 PostgreSQL HNSW 向量检索的召回率？", "expect_hit": true, "expected_seed": "seed-05"},
+    {"id": "bypass-01", "category": "bypass", "user_id": "user-a", "query": "今天最新的 AI 新闻有哪些？", "expect_hit": false, "expect_hit_type": "bypass"},
+    {"id": "bypass-02", "category": "bypass", "user_id": "user-a", "query": "请帮我分析这份合同", "has_attachments": true, "expect_hit": false, "expect_hit_type": "bypass"},
+    {"id": "bypass-03", "category": "bypass", "user_id": "user-a", "query": "请继续展开说说上面那个方案", "history_len": 4, "expect_hit": false, "expect_hit_type": "bypass"},
+    {"id": "bypass-04", "category": "bypass", "user_id": "user-a", "query": "如何优化 PostgreSQL HNSW 向量检索的召回率？", "has_pii": true, "expect_hit": false, "expect_hit_type": "bypass"}
+  ]
+}

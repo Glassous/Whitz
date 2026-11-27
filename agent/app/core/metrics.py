@@ -26,6 +26,30 @@ AGENT_ARQ_QUEUE_DEPTH = Gauge(
     "whitz_agent_arq_queue_depth",
     "Current ARQ queue depth observed on agent API",
 )
+AGENT_GUARDRAIL_TRIGGERS_TOTAL = Counter(
+    "whitz_agent_guardrail_triggers_total",
+    "Total security guardrail triggers by stage, action, and category",
+    ["stage", "action", "category"],
+)
+AGENT_PII_REDACTED_TOTAL = Counter(
+    "whitz_agent_pii_redacted_total",
+    "Total PII/secret entities redacted before LLM calls",
+    ["entity_type"],
+)
+AGENT_SEMANTIC_CACHE_REQUESTS_TOTAL = Counter(
+    "whitz_agent_semantic_cache_requests_total",
+    "Total semantic cache lookups by outcome",
+    ["result"],
+)
+AGENT_SEMANTIC_CACHE_TOKENS_SAVED_TOTAL = Counter(
+    "whitz_agent_semantic_cache_tokens_saved_total",
+    "Estimated LLM tokens saved by semantic cache hits",
+)
+AGENT_SEMANTIC_CACHE_LOOKUP_SECONDS = Histogram(
+    "whitz_agent_semantic_cache_lookup_seconds",
+    "Semantic cache lookup latency in seconds",
+    buckets=(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25),
+)
 
 
 def _route_label(request: Request) -> str:

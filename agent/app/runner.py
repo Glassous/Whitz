@@ -13,8 +13,17 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from app.cache import RedisCacheStore, SemanticCache
 from app.core.config import AgentSettings, get_settings
+from app.core.metrics import (
+    AGENT_GUARDRAIL_TRIGGERS_TOTAL,
+    AGENT_PII_REDACTED_TOTAL,
+    AGENT_SEMANTIC_CACHE_LOOKUP_SECONDS,
+    AGENT_SEMANTIC_CACHE_REQUESTS_TOTAL,
+    AGENT_SEMANTIC_CACHE_TOKENS_SAVED_TOTAL,
+)
 from app.core.models import EmbeddingClient, ModelRouter, RerankClient
+from app.guardrails import GuardrailEngine, PiiVault
 from app.core.multimodal import (
     HydratedTurnMedia,
     build_multimodal_user_message,
@@ -321,6 +330,11 @@ async def _build_runtime_config(
         rerank_client=rerank_client,
     )
     sandbox_executor = get_sandbox_executor(settings=settings)
+    guardrail_engine = GuardrailEngine(
+        mode=settings.guardrails_mode,
+        pii_redaction_enabled=settings.guardrails_pii_redaction_enabled,
+        block_threshold=settings.guardrails_block_threshold,
+    )
 
     skills_list = payload.get("skills") or []
     skills_catalog = {
@@ -344,6 +358,7 @@ async def _build_runtime_config(
             "conversation_kind": str(payload.get("conversation_kind") or "side"),
             "assistant_name": str(payload.get("assistant_name") or "").strip() or "Whitz",
             "agent_namespace": agent_namespace,
+            "guardrail_engine": guardrail_engine,
             "agent_api_key": agent_api_key,
             "internal_mcp_base_url": settings.internal_mcp_base_url,
             "memory_enabled": bool(payload.get("memory_enabled", True)),
@@ -1155,6 +1170,72 @@ async def execute_run(
         agent_api_key = raw_api_key or await load_run_secret(redis, run_id)
         raw_attachments = list(payload.get("attachments") or [])
         input_text = str(payload.get("input") or payload.get("input_text") or "")
+
+        # --- Stage 1: Input Security Guardrail (Prompt Injection + PII Vault) ---
+        guardrail_engine = GuardrailEngine(
+            mode=s.guardrails_mode,
+            pii_redaction_enabled=s.guardrails_pii_redaction_enabled,
+            block_threshold=s.guardrails_block_threshold,
+        )
+        pii_vault = PiiVault()
+        guardrail_events: list[dict[str, Any]] = []
+        in_decision = guardrail_engine.inspect_input(input_text, vault=pii_vault)
+        if in_decision.action != "allow":
+            ev_payload = in_decision.to_event_payload()
+            guardrail_events.append(ev_payload)
+            cat = in_decision.matches[0].category if in_decision.matches else ("pii" if in_decision.pii_count else "policy")
+            AGENT_GUARDRAIL_TRIGGERS_TOTAL.labels(stage="input", action=in_decision.action, category=cat).inc()
+            for etype, cnt in in_decision.pii_types.items():
+                AGENT_PII_REDACTED_TOTAL.labels(entity_type=etype).inc(cnt)
+            await publish_event(
+                redis,
+                run_id,
+                "guardrail.event",
+                ev_payload,
+                ttl_seconds=s.event_stream_ttl_seconds,
+                max_len=s.stream_max_len,
+            )
+
+        if not in_decision.allowed:
+            refusal = in_decision.reason or "该请求触发了安全护栏策略，无法执行。"
+            meta["status"] = "completed"
+            meta["output"] = refusal
+            meta["guardrail_events"] = guardrail_events
+            meta["usage"] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            meta["pending_controls"] = []
+            await publish_event(
+                redis,
+                run_id,
+                "message.delta",
+                {"delta": refusal},
+                ttl_seconds=s.event_stream_ttl_seconds,
+                max_len=s.stream_max_len,
+            )
+            entry_id = await publish_event(
+                redis,
+                run_id,
+                "run.completed",
+                {
+                    "output": refusal,
+                    "usage": meta["usage"],
+                    "guardrail_events": guardrail_events,
+                },
+                ttl_seconds=s.event_stream_ttl_seconds,
+                max_len=s.stream_max_len,
+            )
+            if entry_id:
+                meta["last_event_id"] = entry_id
+            await save_run_meta(redis, run_id, meta, ttl_seconds=s.run_state_ttl_seconds)
+            return meta
+
+        effective_payload = dict(payload)
+        if in_decision.pii_count > 0 and in_decision.sanitized_text != input_text:
+            if "input" in effective_payload:
+                effective_payload["input"] = in_decision.sanitized_text
+            if "input_text" in effective_payload:
+                effective_payload["input_text"] = in_decision.sanitized_text
+            input_text = in_decision.sanitized_text
+
         seen_fids: set[str] = set()
         attached_fids: list[str] = []
         for a in raw_attachments:
@@ -1167,6 +1248,83 @@ async def execute_run(
             if fid not in seen_fids:
                 seen_fids.add(fid)
                 attached_fids.append(fid)
+
+        # --- Stage 2: Multi-Tenant Semantic Cache Fast-Path ---
+        rag_scope_dict = dict(payload.get("rag_scope") or {}) if isinstance(payload.get("rag_scope"), dict) else {}
+        history_list = payload.get("conversation_history") or payload.get("history") or []
+        req_route = str(payload.get("model_route") or "auto")
+        scache = SemanticCache(
+            store=RedisCacheStore(redis),
+            embedding_client=EmbeddingClient(settings=s, redis_client=redis),
+            enabled=s.semantic_cache_enabled and redis is not None,
+            similarity_threshold=s.semantic_cache_similarity_threshold,
+            ttl_seconds=s.semantic_cache_ttl_seconds,
+            max_entries_per_user=s.semantic_cache_max_entries_per_user,
+        )
+        cache_res = await scache.lookup(
+            user_id=meta["user_id"],
+            query=input_text,
+            model_route=req_route,
+            rag_scope=rag_scope_dict,
+            has_attachments=bool(attached_fids),
+            has_images=any(isinstance(a, dict) and a.get("category") == "image" and a.get("attached") for a in raw_attachments),
+            history_len=len(history_list) if isinstance(history_list, list) else 0,
+            has_pii=in_decision.pii_count > 0,
+            guardrail_flagged=bool(in_decision.matches),
+            allow_hitl=bool(payload.get("allow_hitl", True)),
+            bypass_requested=bool(payload.get("bypass_cache", False)),
+        )
+        AGENT_SEMANTIC_CACHE_REQUESTS_TOTAL.labels(result=cache_res.hit_type).inc()
+        AGENT_SEMANTIC_CACHE_LOOKUP_SECONDS.observe(cache_res.latency_ms / 1000.0)
+
+        if cache_res.hit and cache_res.entry is not None:
+            cached = cache_res.entry
+            if cached.original_tokens > 0:
+                AGENT_SEMANTIC_CACHE_TOKENS_SAVED_TOTAL.inc(cached.original_tokens)
+            cache_meta = cache_res.to_meta()
+            meta["status"] = "completed"
+            meta["output"] = cached.response_text
+            meta["route"] = cached.route
+            meta["model"] = cached.model or "semantic-cache"
+            meta["citations"] = cached.citations
+            meta["cache_meta"] = cache_meta
+            meta["rag_metrics"] = {"cache_hit": True, "cache_hit_type": cache_res.hit_type, "cache_similarity": round(cache_res.similarity, 4)}
+            meta["usage"] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens_saved": cached.original_tokens}
+            meta["pending_controls"] = []
+            await publish_event(
+                redis,
+                run_id,
+                "semantic_cache.hit",
+                cache_meta,
+                ttl_seconds=s.event_stream_ttl_seconds,
+                max_len=s.stream_max_len,
+            )
+            await publish_event(
+                redis,
+                run_id,
+                "message.delta",
+                {"delta": cached.response_text},
+                ttl_seconds=s.event_stream_ttl_seconds,
+                max_len=s.stream_max_len,
+            )
+            entry_id = await publish_event(
+                redis,
+                run_id,
+                "run.completed",
+                {
+                    "output": cached.response_text,
+                    "usage": meta["usage"],
+                    "citations": cached.citations or None,
+                    "rag_metrics": meta["rag_metrics"],
+                    "cache_meta": cache_meta,
+                },
+                ttl_seconds=s.event_stream_ttl_seconds,
+                max_len=s.stream_max_len,
+            )
+            if entry_id:
+                meta["last_event_id"] = entry_id
+            await save_run_meta(redis, run_id, meta, ttl_seconds=s.run_state_ttl_seconds)
+            return meta
 
         # Parallelize Turn-0 MCP tool discovery & multimodal attachment hydration to slash TTFT!
         async def _load_mcp() -> list[Any]:
@@ -1217,7 +1375,7 @@ async def execute_run(
         )
         graph = compiled_graph if compiled_graph is not None else build_agent_graph(checkpointer=checkpointer, store=store)
         graph_input = {
-            "messages": _build_initial_messages(payload, hydrated_media=hydrated_media),
+            "messages": _build_initial_messages(effective_payload, hydrated_media=hydrated_media),
             "run_id": run_id,
             "thread_id": meta["thread_id"],
             "conversation_id": meta["conversation_id"],
@@ -1256,6 +1414,37 @@ async def execute_run(
             redis=redis,
             settings=s,
         )
+
+        # --- Stage 3: Output Guardrail, PII Restore & Semantic Cache Write-Back ---
+        if meta.get("status") == "completed":
+            raw_out = str(meta.get("output") or "")
+            out_dec = guardrail_engine.inspect_output(raw_out, vault=pii_vault)
+            if out_dec.action != "allow":
+                ev_out = out_dec.to_event_payload()
+                guardrail_events.append(ev_out)
+                cat = out_dec.matches[0].category if out_dec.matches else "output_policy"
+                AGENT_GUARDRAIL_TRIGGERS_TOTAL.labels(stage="output", action=out_dec.action, category=cat).inc()
+            if out_dec.sanitized_text != raw_out:
+                meta["output"] = out_dec.sanitized_text
+                await save_run_meta(redis, run_id, meta, ttl_seconds=s.run_state_ttl_seconds)
+            if guardrail_events:
+                meta["guardrail_events"] = guardrail_events
+                await save_run_meta(redis, run_id, meta, ttl_seconds=s.run_state_ttl_seconds)
+
+            if cache_res.hit_type == "miss" and out_dec.action == "allow" and pii_vault.entity_count == 0:
+                usage_dict = meta.get("usage") if isinstance(meta.get("usage"), dict) else {}
+                total_tok = int(usage_dict.get("total_tokens") or 0)
+                await scache.store_response(
+                    user_id=meta["user_id"],
+                    query=input_text,
+                    response_text=str(meta.get("output") or ""),
+                    model_route=str(meta.get("route") or req_route),
+                    model_name=str(meta.get("model") or ""),
+                    rag_scope=rag_scope_dict,
+                    original_tokens=total_tok,
+                    citations=list(meta.get("citations") or []),
+                    tool_events=list(meta.get("tool_events") or []),
+                )
         if async_memory_extract:
             await _maybe_dispatch_async_memory_extract(meta=meta, payload=payload, arq_pool=arq_pool)
     except asyncio.CancelledError:

@@ -49,6 +49,8 @@ class AgentState(TypedDict, total=False):
     current_time_str: str
     async_memory_extract: bool
     memory_extracted: bool
+    guardrail_events: list[dict[str, Any]]
+    cache_meta: dict[str, Any]
     final_output: str
 
 
