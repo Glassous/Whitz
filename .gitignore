@@ -49,6 +49,7 @@ logs/
 *.hprof
 android/.gradle/
 android/**/build/
+android/app/release/
 android/local.properties
 
 # --- Editor / OS ---
