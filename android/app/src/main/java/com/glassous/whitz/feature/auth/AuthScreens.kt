@@ -57,10 +57,12 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.glassous.whitz.core.network.LogoutReason
+import com.glassous.whitz.ui.theme.LocalOneHandedConfig
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzBrandMark
 import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
+import com.glassous.whitz.ui.theme.WhitzOneHandedBackDock
 import com.glassous.whitz.ui.theme.WhitzTextField
 import kotlin.math.hypot
 
@@ -186,6 +188,10 @@ private fun AuthScaffold(
             }
 
             Spacer(modifier = Modifier.weight(1f, fill = true))
+        }
+
+        if (onBack != null) {
+            WhitzOneHandedBackDock(onBack = onBack)
         }
     }
 }

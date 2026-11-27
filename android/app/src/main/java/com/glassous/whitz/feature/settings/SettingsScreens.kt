@@ -3,7 +3,9 @@ package com.glassous.whitz.feature.settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -50,6 +52,7 @@ import com.glassous.whitz.ui.theme.Psychology
 import com.glassous.whitz.ui.theme.PushPin
 import com.glassous.whitz.ui.theme.RateReview
 import com.glassous.whitz.ui.theme.SmartToy
+import com.glassous.whitz.ui.theme.Smartphone
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -79,7 +82,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
@@ -89,6 +96,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import com.glassous.whitz.core.model.OneHandedConfig
+import com.glassous.whitz.core.model.OneHandedSide
 import com.glassous.whitz.core.model.ThemePreference
 import com.glassous.whitz.core.model.availablePercent
 import com.glassous.whitz.core.model.fiveHourPercent
@@ -98,9 +107,11 @@ import com.glassous.whitz.core.model.weeklyPercent
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.feature.chat.LibraryPane
 import com.glassous.whitz.ui.theme.LocalWhitzColors
+import com.glassous.whitz.ui.theme.WhitzCollapsibleTopBarLayout
 import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
 import com.glassous.whitz.ui.theme.WhitzLogoMark
+import com.glassous.whitz.ui.theme.WhitzOneHandedBackDock
 import com.glassous.whitz.ui.theme.WhitzTextField
 
 object SettingsRoutes {
@@ -119,9 +130,9 @@ object SettingsRoutes {
     const val PERSONA = "settings/persona"
     const val DEVICES = "settings/devices"
     const val FEEDBACK = "settings/feedback"
+    const val ONE_HANDED = "settings/one_handed"
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SettingsPageScaffold(
     title: String,
@@ -130,69 +141,42 @@ private fun SettingsPageScaffold(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = LocalWhitzColors.current
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
-    Scaffold(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.canvas)
-            .nestedScroll(scrollBehavior.nestedScrollConnection),
-        containerColor = colors.canvas,
-        contentWindowInsets = WindowInsets(0),
-        topBar = {
-            MediumFlexibleTopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.canvas,
-                    scrolledContainerColor = colors.canvas,
-                ),
-                scrollBehavior = scrollBehavior,
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = colors.fg)
-                    }
-                },
-                title = {
-                    Text(title, fontWeight = FontWeight.SemiBold, color = colors.fg)
-                },
-            )
-        },
-    ) { innerPadding ->
-        Box(
+    WhitzCollapsibleTopBarLayout(
+        title = title,
+        onBack = onBack,
+        applyImePadding = true,
+        overlay = { WhitzOneHandedBackDock(onBack = onBack) },
+    ) { topPadding ->
+        Column(
             modifier = Modifier
+                .widthIn(max = 840.dp)
                 .fillMaxSize()
-                .padding(top = innerPadding.calculateTopPadding())
-                .imePadding(),
-            contentAlignment = Alignment.TopCenter,
+                .padding(top = topPadding),
         ) {
-            Column(
-                modifier = Modifier
-                    .widthIn(max = 840.dp)
-                    .fillMaxSize(),
-            ) {
-                val errorText = ui.error
-                if (!errorText.isNullOrBlank()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(colors.dangerWeak)
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                    ) {
-                        Text(errorText, color = colors.danger, fontSize = 13.sp)
-                    }
+            val errorText = ui.error
+            if (!errorText.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.dangerWeak)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                ) {
+                    Text(errorText, color = colors.danger, fontSize = 13.sp)
                 }
-                val messageText = ui.message
-                if (!messageText.isNullOrBlank()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(colors.successWeak)
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                    ) {
-                        Text(messageText, color = colors.success, fontSize = 13.sp)
-                    }
-                }
-                content()
             }
+            val messageText = ui.message
+            if (!messageText.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.successWeak)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                ) {
+                    Text(messageText, color = colors.success, fontSize = 13.sp)
+                }
+            }
+            content()
         }
     }
 }
@@ -208,6 +192,7 @@ fun SettingsHomeScreen(
     val colors = LocalWhitzColors.current
     val user by vm.user.collectAsState()
     val theme by vm.themePreference.collectAsState()
+    val oneHanded by vm.oneHandedConfig.collectAsState()
     val ui by vm.ui.collectAsState()
     var confirmLogout by remember { mutableStateOf(false) }
 
@@ -388,6 +373,13 @@ fun SettingsHomeScreen(
                     HorizontalDivider(color = colors.line)
                     SettingsMenuRow(Icons.Default.Devices, "登录设备", null) { go(SettingsRoutes.DEVICES) }
                     HorizontalDivider(color = colors.line)
+                    val oneHandedBadge = if (oneHanded.enabled) {
+                        if (oneHanded.side == OneHandedSide.LEFT) "已开启 · 左下角" else "已开启 · 右下角"
+                    } else {
+                        "已关闭"
+                    }
+                    SettingsMenuRow(Icons.Default.Smartphone, "单手模式", oneHandedBadge) { go(SettingsRoutes.ONE_HANDED) }
+                    HorizontalDivider(color = colors.line)
                     SettingsMenuRow(Icons.Default.RateReview, "反馈与评价", null) { go(SettingsRoutes.FEEDBACK) }
                 }
             }
@@ -452,6 +444,315 @@ private fun SettingsMenuRow(
             Text(badge, fontSize = 12.sp, color = colors.fgFaint, modifier = Modifier.padding(end = 4.dp))
         }
         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = colors.fgFaint)
+    }
+}
+
+@Composable
+fun OneHandedSettingsScreen(
+    vm: SettingsViewModel,
+    onBack: () -> Unit,
+) {
+    val colors = LocalWhitzColors.current
+    val config by vm.oneHandedConfig.collectAsState()
+    val ui by vm.ui.collectAsState()
+
+    SettingsPageScaffold(
+        title = "单手模式",
+        ui = ui,
+        onBack = {
+            vm.clearFeedback()
+            onBack()
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            OneHandedPreviewCard(config = config)
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = colors.surface,
+                border = BorderStroke(0.5.dp, colors.line),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        Text(
+                            text = "启用单手模式",
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = colors.fg,
+                        )
+                        Text(
+                            text = "将主页菜单键、各页面返回键及悬浮操作统一收拢到单侧竖排，贴合拇指自然触达区",
+                            fontSize = 12.5.sp,
+                            lineHeight = 18.sp,
+                            color = colors.fgMuted,
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Switch(
+                        checked = config.enabled,
+                        onCheckedChange = { vm.setOneHandedEnabled(it) },
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .alpha(if (config.enabled) 1f else 0.72f),
+                shape = RoundedCornerShape(18.dp),
+                color = colors.surface,
+                border = BorderStroke(0.5.dp, colors.line),
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "悬浮位置",
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 14.sp,
+                        color = colors.fg,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "根据常用握持手势，选择控件竖排悬浮在左下角或右下角",
+                        fontSize = 12.sp,
+                        color = colors.fgMuted,
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    WhitzConnectedRadioGroup(
+                        options = listOf(
+                            OneHandedSide.LEFT to "左下角",
+                            OneHandedSide.RIGHT to "右下角",
+                        ),
+                        selected = config.side,
+                        onSelect = { vm.setOneHandedSide(it) },
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = colors.surface.copy(alpha = 0.7f),
+                border = BorderStroke(0.5.dp, colors.line),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "交互说明",
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 13.5.sp,
+                        color = colors.fg,
+                    )
+                    Text(
+                        text = "• 默认不主动开启，随时可在此开关或切换左右侧。\n• 竖排悬浮栏已抬升至拇指热区，避开底部系统导航栏与聊天输入框。\n• 主页侧栏将自动切换为「对话列表在上、按钮区固定在底部」，设置等子页面同时保留顶部原有按钮。",
+                        fontSize = 12.5.sp,
+                        lineHeight = 19.sp,
+                        color = colors.fgMuted,
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun OneHandedPreviewCard(config: OneHandedConfig) {
+    val colors = LocalWhitzColors.current
+    val primary = MaterialTheme.colorScheme.primary
+    val onPrimary = MaterialTheme.colorScheme.onPrimary
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = colors.surface,
+        border = BorderStroke(0.5.dp, colors.line),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 18.dp, horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            // Minimalist phone silhouette showing live control placement & thumb zone
+            Box(
+                modifier = Modifier
+                    .width(126.dp)
+                    .height(212.dp)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(colors.canvas)
+                    .border(1.5.dp, colors.lineStrong, RoundedCornerShape(22.dp)),
+            ) {
+                // Soft thumb-reach arc highlight when enabled
+                if (config.enabled) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val centerX = if (config.side == OneHandedSide.LEFT) 0f else size.width
+                        val centerY = size.height * 0.76f
+                        val radius = size.width * 0.85f
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colors = listOf(
+                                    primary.copy(alpha = if (colors.isDark) 0.22f else 0.12f),
+                                    Color.Transparent,
+                                ),
+                                center = Offset(centerX, centerY),
+                                radius = radius,
+                            ),
+                            radius = radius,
+                            center = Offset(centerX, centerY),
+                        )
+                    }
+                }
+
+                // Top status / header bar preview
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (!config.enabled) {
+                        Box(
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clip(CircleShape)
+                                .background(primary),
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.size(14.dp))
+                    }
+                    Box(
+                        modifier = Modifier
+                            .width(34.dp)
+                            .height(6.dp)
+                            .clip(CircleShape)
+                            .background(colors.lineStrong),
+                    )
+                    if (!config.enabled) {
+                        Box(
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clip(CircleShape)
+                                .background(colors.lineStrong),
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.size(14.dp))
+                    }
+                }
+
+                // Mock content lines
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.75f)
+                            .height(8.dp)
+                            .clip(CircleShape)
+                            .background(colors.surface),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.55f)
+                            .height(8.dp)
+                            .clip(CircleShape)
+                            .background(colors.surface),
+                    )
+                }
+
+                // Floating vertical dock preview in thumb zone (raised above bottom composer/nav)
+                if (config.enabled) {
+                    Column(
+                        modifier = Modifier
+                            .align(
+                                if (config.side == OneHandedSide.LEFT) {
+                                    Alignment.BottomStart
+                                } else {
+                                    Alignment.BottomEnd
+                                },
+                            )
+                            .padding(horizontal = 8.dp)
+                            .padding(bottom = 36.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clip(CircleShape)
+                                .background(colors.surface)
+                                .border(0.8.dp, colors.lineStrong, CircleShape),
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clip(CircleShape)
+                                .background(colors.surface)
+                                .border(0.8.dp, colors.lineStrong, CircleShape),
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(15.dp)
+                                .clip(CircleShape)
+                                .background(primary),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(onPrimary),
+                            )
+                        }
+                    }
+                }
+
+                // Bottom composer / nav bar placeholder
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                        .fillMaxWidth()
+                        .height(14.dp)
+                        .clip(CircleShape)
+                        .background(colors.surface),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = when {
+                    !config.enabled -> "当前为标准布局（按钮位于顶部）"
+                    config.side == OneHandedSide.LEFT -> "单手模式已开启 · 左下角拇指热区竖排悬浮"
+                    else -> "单手模式已开启 · 右下角拇指热区竖排悬浮"
+                },
+                fontSize = 12.5.sp,
+                color = colors.fgMuted,
+            )
+        }
     }
 }
 

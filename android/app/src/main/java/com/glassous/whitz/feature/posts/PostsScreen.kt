@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -105,10 +106,15 @@ import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.feature.chat.ChatViewModel
 import com.glassous.whitz.feature.chat.MarkdownText
 import com.glassous.whitz.ui.theme.AutoAwesome
+import com.glassous.whitz.ui.theme.LocalOneHandedConfig
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.OpenInNew
 import com.glassous.whitz.ui.theme.RateReview
+import com.glassous.whitz.ui.theme.WhitzCollapsibleTopBarLayout
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
+import com.glassous.whitz.ui.theme.WhitzOneHandedActionButton
+import com.glassous.whitz.ui.theme.WhitzOneHandedActionDock
+import com.glassous.whitz.ui.theme.WhitzOneHandedBackDock
 import com.glassous.whitz.ui.theme.WhitzTextField
 import kotlinx.coroutines.delay
 
@@ -123,9 +129,9 @@ fun PostsScreen(
     onBack: () -> Unit,
 ) {
     val colors = LocalWhitzColors.current
+    val oneHanded = LocalOneHandedConfig.current
     val user by vm.user.collectAsState()
     val ui by vm.posts.ui.collectAsState()
-    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
     val isEnabled = user?.aiPostsEnabled == true
     val assistantName = user?.resolvedAssistantName() ?: "Whitz"
@@ -147,59 +153,84 @@ fun PostsScreen(
         }
     }
 
-    Scaffold(
-        modifier = Modifier
-            .fillMaxSize()
-            .nestedScroll(scrollBehavior.nestedScrollConnection),
-        containerColor = colors.canvas,
-        topBar = {
-            TopAppBar(
-                title = { Text("动态", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                actions = {
-                    IconButton(onClick = onOpenGuide) {
-                        Icon(Icons.Default.Info, contentDescription = "功能说明")
-                    }
-                    if (isEnabled) {
-                        IconButton(
-                            onClick = { vm.posts.loadFeed(reset = true) },
-                            enabled = !ui.loading,
-                        ) {
-                            Icon(Icons.Default.Refresh, contentDescription = "刷新")
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.canvas,
-                    scrolledContainerColor = colors.canvas,
-                    titleContentColor = colors.fg,
-                    navigationIconContentColor = colors.fg,
-                    actionIconContentColor = colors.fgMuted,
-                ),
-                scrollBehavior = scrollBehavior,
-            )
-        },
-        floatingActionButton = {
+    WhitzCollapsibleTopBarLayout(
+        title = "动态",
+        onBack = onBack,
+        actions = {
+            IconButton(onClick = onOpenGuide) {
+                Icon(Icons.Default.Info, contentDescription = "功能说明", tint = colors.fgMuted)
+            }
             if (isEnabled) {
+                IconButton(
+                    onClick = { vm.posts.loadFeed(reset = true) },
+                    enabled = !ui.loading,
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = "刷新", tint = colors.fgMuted)
+                }
+            }
+        },
+        overlay = {
+            if (isEnabled && !oneHanded.enabled) {
                 FloatingActionButton(
                     onClick = onOpenCompose,
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
                     shape = CircleShape,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .navigationBarsPadding()
+                        .padding(16.dp),
                 ) {
                     Icon(Icons.Default.Add, contentDescription = "发布私人动态")
                 }
             }
+            WhitzOneHandedActionDock {
+                WhitzOneHandedActionButton(onClick = onOpenGuide) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = "功能说明",
+                        tint = colors.fgMuted,
+                        modifier = Modifier.size(21.dp),
+                    )
+                }
+                if (isEnabled) {
+                    WhitzOneHandedActionButton(
+                        onClick = { vm.posts.loadFeed(reset = true) },
+                        enabled = !ui.loading,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "刷新",
+                            tint = colors.fgMuted,
+                            modifier = Modifier.size(21.dp),
+                        )
+                    }
+                    WhitzOneHandedActionButton(
+                        onClick = onOpenCompose,
+                        emphasized = true,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "发布私人动态",
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+                WhitzOneHandedActionButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "返回",
+                        tint = colors.fg,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
         },
-    ) { innerPadding ->
+    ) { topPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
+                .padding(top = topPadding),
         ) {
             AnimatedContent(
                 targetState = isEnabled,
@@ -963,29 +994,15 @@ fun PostsGuideScreen(
         vm.posts.loadQuota()
     }
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = colors.canvas,
-        topBar = {
-            MediumFlexibleTopAppBar(
-                title = { Text("私人动态说明", fontWeight = FontWeight.SemiBold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.canvas,
-                    titleContentColor = colors.fg,
-                    navigationIconContentColor = colors.fg,
-                ),
-            )
-        },
-    ) { innerPadding ->
+    WhitzCollapsibleTopBarLayout(
+        title = "私人动态说明",
+        onBack = onBack,
+        overlay = { WhitzOneHandedBackDock(onBack = onBack) },
+    ) { topPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
+                .padding(top = topPadding)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp)
                 .padding(bottom = navBottom + 24.dp),

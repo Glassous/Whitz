@@ -178,6 +178,7 @@ import com.glassous.whitz.core.model.CitationItem
 import com.glassous.whitz.core.model.Conversation
 import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.core.model.Message
+import com.glassous.whitz.core.model.OneHandedSide
 import com.glassous.whitz.core.model.UploadTaskStatus
 import com.glassous.whitz.core.model.User
 import com.glassous.whitz.core.model.displaySideTitle
@@ -185,11 +186,14 @@ import com.glassous.whitz.core.model.isScheduledSide
 import com.glassous.whitz.core.model.quotaPercentLabel
 import com.glassous.whitz.core.model.resolvedAssistantName
 import com.glassous.whitz.core.util.DateTimeUtils
+import com.glassous.whitz.ui.theme.LocalOneHandedConfig
 import com.glassous.whitz.ui.theme.LocalWhitzColors
 import com.glassous.whitz.ui.theme.WhitzBrandMark
 import com.glassous.whitz.ui.theme.WhitzGlassCircleButton
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
 import com.glassous.whitz.ui.theme.WhitzLogoMark
+import com.glassous.whitz.ui.theme.WhitzOneHandedActionButton
+import com.glassous.whitz.ui.theme.WhitzOneHandedActionDock
 import com.glassous.whitz.ui.theme.WhitzProgressiveBlurBottom
 import com.glassous.whitz.ui.theme.WhitzProgressiveBlurTop
 import com.glassous.whitz.ui.theme.WhitzTextField
@@ -355,6 +359,7 @@ fun ChatScreen(
     val user by vm.user.collectAsState()
     val authReady by vm.authReady.collectAsState()
     val colors = LocalWhitzColors.current
+    val oneHanded = LocalOneHandedConfig.current
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val conversationScrollKey = ui.currentConvId ?: "local-new"
@@ -972,6 +977,7 @@ fun ChatScreen(
                     // 2b. Floating Header:
                     // - Main Chat: left sidebar button + enlarged centered Assistant Avatar & 80%-opaque capsule Nickname (shared element -> task panel), right toggle hidden
                     // - Side Chat: left sidebar button + right task panel toggle (unchanged)
+                    // - In One-Handed Mode: corner action buttons move into the thumb-zone vertical dock; Main Chat keeps centered identity header
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopCenter)
@@ -979,45 +985,29 @@ fun ChatScreen(
                             .statusBarsPadding()
                             .padding(horizontal = 10.dp, vertical = 10.dp),
                     ) {
-                        WhitzGlassCircleButton(
-                            hazeState = headerHazeState,
-                            showBorder = visibleMessages.isNotEmpty(),
-                            modifier = Modifier.align(Alignment.TopStart),
-                            onClick = {
-                                if (isExpandedScreen) {
-                                    desktopSidebarCollapsed = !desktopSidebarCollapsed
-                                } else {
-                                    scope.launch { drawerState.open() }
-                                }
-                            },
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_sidebar_toggle),
-                                contentDescription = "切换侧栏",
-                                tint = colors.fgMuted,
-                                modifier = Modifier.size(23.dp),
-                            )
+                        if (!oneHanded.enabled) {
+                            WhitzGlassCircleButton(
+                                hazeState = headerHazeState,
+                                showBorder = visibleMessages.isNotEmpty(),
+                                modifier = Modifier.align(Alignment.TopStart),
+                                onClick = {
+                                    if (isExpandedScreen) {
+                                        desktopSidebarCollapsed = !desktopSidebarCollapsed
+                                    } else {
+                                        scope.launch { drawerState.open() }
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_sidebar_toggle),
+                                    contentDescription = "切换侧栏",
+                                    tint = colors.fgMuted,
+                                    modifier = Modifier.size(23.dp),
+                                )
+                            }
                         }
 
                         if (ui.isMainChat) {
-                            if (ui.currentConvId != null && !mainPanelOpen) {
-                                WhitzGlassCircleButton(
-                                    hazeState = headerHazeState,
-                                    showBorder = visibleMessages.isNotEmpty(),
-                                    modifier = Modifier.align(Alignment.TopEnd),
-                                    onClick = {
-                                        showContextState = true
-                                        vm.loadContextState()
-                                    },
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Psychology,
-                                        contentDescription = "认知记忆状态",
-                                        tint = colors.fgMuted,
-                                        modifier = Modifier.size(21.dp),
-                                    )
-                                }
-                            }
                             val mainAvatarUrl = vm.resolveAssetUrl(user?.assistantAvatarUrl)
                             androidx.compose.animation.AnimatedVisibility(
                                 visible = !mainPanelOpen,
@@ -1094,29 +1084,12 @@ fun ChatScreen(
                                     }
                                 }
                             }
-                        } else {
+                        } else if (!oneHanded.enabled) {
                             Row(
                                 modifier = Modifier.align(Alignment.TopEnd),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                if (ui.currentConvId != null) {
-                                    WhitzGlassCircleButton(
-                                        hazeState = headerHazeState,
-                                        showBorder = visibleMessages.isNotEmpty(),
-                                        onClick = {
-                                            showContextState = true
-                                            vm.loadContextState()
-                                        },
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Psychology,
-                                            contentDescription = "认知记忆状态",
-                                            tint = colors.fgMuted,
-                                            modifier = Modifier.size(21.dp),
-                                        )
-                                    }
-                                }
                                 androidx.compose.animation.AnimatedVisibility(
                                     visible = visibleMessages.isNotEmpty(),
                                     enter = fadeIn(animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()),
@@ -1148,6 +1121,56 @@ fun ChatScreen(
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // 2b-OH. One-Handed Mode vertical floating dock positioned in thumb arc above composer
+                    val oneHandedChatBottom = maxOf(
+                        if (composerOverlayDp > 0.dp) composerOverlayDp + 16.dp else navBottom + 124.dp,
+                        navBottom + 124.dp,
+                    )
+                    WhitzOneHandedActionDock(
+                        visible = oneHanded.enabled && !mainPanelOpen,
+                        bottomOffset = oneHandedChatBottom,
+                        applyImePadding = false,
+                    ) {
+                        if (ui.isMainChat || visibleMessages.isNotEmpty()) {
+                            WhitzOneHandedActionButton(
+                                hazeState = headerHazeState,
+                                showBadge = !ui.isMainChat && ui.files.isNotEmpty(),
+                                onClick = {
+                                    focusManager.clearFocus()
+                                    if (ui.isMainChat) {
+                                        mainPanelOpen = true
+                                    } else {
+                                        onOpenTaskDetails(0)
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_task_panel),
+                                    contentDescription = "步骤与文件",
+                                    tint = colors.fgMuted,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                        }
+                        WhitzOneHandedActionButton(
+                            hazeState = headerHazeState,
+                            onClick = {
+                                if (isExpandedScreen) {
+                                    desktopSidebarCollapsed = !desktopSidebarCollapsed
+                                } else {
+                                    scope.launch { drawerState.open() }
+                                }
+                            },
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_sidebar_toggle),
+                                contentDescription = "切换侧栏",
+                                tint = colors.fgMuted,
+                                modifier = Modifier.size(23.dp),
+                            )
                         }
                     }
 
@@ -1441,17 +1464,8 @@ fun ChatScreen(
 
                             // Standalone circular '+' button + borderless, shadowless input capsule
                             // (plus menu overlay lives in a separate layer above mainStage so it never shifts layout)
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .onGloballyPositioned { coords ->
-                                        composerRowCoords = coords
-                                        refreshBottomBlurHeight()
-                                    }
-                                    .padding(horizontal = composerHorizontalInset.coerceAtLeast(0.dp)),
-                                verticalAlignment = Alignment.Bottom,
-                            ) {
-                                // Independent circular '+' button on the left
+                            val plusOnRight = oneHanded.enabled && oneHanded.side == OneHandedSide.RIGHT
+                            val plusButtonContent: @Composable () -> Unit = {
                                 Box(
                                     modifier = Modifier.onGloballyPositioned { coords ->
                                         plusButtonCoords = coords
@@ -1490,8 +1504,21 @@ fun ChatScreen(
                                         )
                                     }
                                 }
-
-                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .onGloballyPositioned { coords ->
+                                        composerRowCoords = coords
+                                        refreshBottomBlurHeight()
+                                    }
+                                    .padding(horizontal = composerHorizontalInset.coerceAtLeast(0.dp)),
+                                verticalAlignment = Alignment.Bottom,
+                            ) {
+                                if (!plusOnRight) {
+                                    plusButtonContent()
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                }
 
                                 // Borderless, shadowless input capsule
                                 Surface(
@@ -1940,6 +1967,11 @@ fun ChatScreen(
                                             }
                                         }
                                     }
+
+                                if (plusOnRight) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    plusButtonContent()
+                                }
                                 }
                             }
                         }
@@ -2004,6 +2036,7 @@ fun ChatScreen(
                 ComposerPlusMenuOverlay(
                     visible = plusMenuExpanded,
                     anchorBounds = { plusAnchorBounds },
+                    alignEnd = oneHanded.enabled && oneHanded.side == OneHandedSide.RIGHT,
                     selectedSkillCount = ui.selectedSkillNames.size,
                     showAttachMenu = showAttachMenu,
                     onDismiss = dismissPlusMenu,
@@ -2333,6 +2366,7 @@ private fun SidebarContent(
     onOpenSettings: () -> Unit,
 ) {
     val colors = LocalWhitzColors.current
+    val oneHanded = LocalOneHandedConfig.current
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val assistantName = user?.resolvedAssistantName() ?: "Whitz"
     val assistantAvatarUrl = resolveAssetUrl(user?.assistantAvatarUrl)
@@ -2390,90 +2424,86 @@ private fun SidebarContent(
             }
         }
 
-        // Top Action Rows: Row 1 = Search, Row 2 = Library (above Main Chat)
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onOpenPosts)
-                    .padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box {
-                    Icon(Icons.Filled.AutoAwesome, contentDescription = "动态", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
-                    if (hasUnreadPosts) {
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(colors.danger),
-                        )
+        val actionRowsSection: @Composable () -> Unit = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(onClick = onOpenPosts)
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box {
+                        Icon(Icons.Filled.AutoAwesome, contentDescription = "动态", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
+                        if (hasUnreadPosts) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(colors.danger),
+                            )
+                        }
+                    }
+                    if (!collapsed) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("动态", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
                     }
                 }
-                if (!collapsed) {
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text("动态", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
-                }
-            }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onOpenSearch)
-                    .padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Default.Search, contentDescription = "搜索", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
-                if (!collapsed) {
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text("搜索", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(onClick = onOpenSearch)
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.Search, contentDescription = "搜索", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
+                    if (!collapsed) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("搜索", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                    }
                 }
-            }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onOpenLibrary)
-                    .padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Default.FolderOpen, contentDescription = "资料库", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
-                if (!collapsed) {
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text("资料库", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(onClick = onOpenLibrary)
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = "资料库", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
+                    if (!collapsed) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("资料库", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                    }
                 }
-            }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onOpenSchedules)
-                    .padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Default.Schedule, contentDescription = "定时任务", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
-                if (!collapsed) {
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text("定时任务", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(onClick = onOpenSchedules)
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.Schedule, contentDescription = "定时任务", tint = colors.fgMuted, modifier = Modifier.size(19.dp))
+                    if (!collapsed) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("定时任务", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = colors.fgMuted)
+                    }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        if (collapsed) {
-            Spacer(modifier = Modifier.weight(1f))
-        } else {
-            // Pinned Main Chat Entry
+        val mainChatEntry: @Composable () -> Unit = {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2521,10 +2551,9 @@ private fun SidebarContent(
                     )
                 }
             }
+        }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Side Chats Section Header + New Side Chat '+' Button
+        val sideChatsHeader: @Composable () -> Unit = {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2550,15 +2579,16 @@ private fun SidebarContent(
                     )
                 }
             }
+        }
 
-            // Side Chats List
+        val sideChatsListSection: @Composable (Modifier) -> Unit = { listModifier ->
             val sideList = ui.sideConversations
             val pinned = remember(sideList) { sideList.filter { it.isPinned } }
             val recent = remember(sideList) { sideList.filterNot { it.isPinned } }
             val showColdStartLoading = (!authReady || ui.conversationsLoading) && ui.conversations.isEmpty()
 
             if (showColdStartLoading) {
-                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Box(modifier = listModifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     WhitzLoadingIndicator(size = 56.dp)
                 }
             } else {
@@ -2574,7 +2604,7 @@ private fun SidebarContent(
                             modifier = Modifier.align(Alignment.TopCenter),
                         )
                     },
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    modifier = listModifier.fillMaxWidth(),
                 ) {
                     if (sideList.isEmpty()) {
                         Box(
@@ -2584,7 +2614,11 @@ private fun SidebarContent(
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
-                                text = "还没有旁聊\n点击上方「+」新建旁聊",
+                                text = if (oneHanded.enabled) {
+                                    "还没有旁聊\n点击下方「+」新建旁聊"
+                                } else {
+                                    "还没有旁聊\n点击上方「+」新建旁聊"
+                                },
                                 color = colors.fgFaint,
                                 fontSize = 13.sp,
                                 textAlign = TextAlign.Center,
@@ -2659,6 +2693,40 @@ private fun SidebarContent(
                         }
                     }
                 }
+            }
+        }
+
+        if (oneHanded.enabled) {
+            // One-Handed Mode: Conversation list at top, fixed button controls docked at bottom
+            if (collapsed) {
+                Spacer(modifier = Modifier.weight(1f))
+                actionRowsSection()
+            } else {
+                sideChatsListSection(Modifier.weight(1f))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp)
+                        .height(0.5.dp)
+                        .background(colors.line),
+                )
+                sideChatsHeader()
+                Spacer(modifier = Modifier.height(4.dp))
+                mainChatEntry()
+                Spacer(modifier = Modifier.height(6.dp))
+                actionRowsSection()
+            }
+        } else {
+            // Standard Mode: Action rows & Main Chat at top, conversation list below
+            actionRowsSection()
+            Spacer(modifier = Modifier.height(8.dp))
+            if (collapsed) {
+                Spacer(modifier = Modifier.weight(1f))
+            } else {
+                mainChatEntry()
+                Spacer(modifier = Modifier.height(8.dp))
+                sideChatsHeader()
+                sideChatsListSection(Modifier.weight(1f))
             }
         }
 
@@ -3305,6 +3373,7 @@ private fun ComposerPureImageChip(
 private fun ComposerPlusMenuOverlay(
     visible: Boolean,
     anchorBounds: () -> Rect?,
+    alignEnd: Boolean = false,
     selectedSkillCount: Int,
     showAttachMenu: Boolean,
     onDismiss: () -> Unit,
@@ -3315,6 +3384,7 @@ private fun ComposerPlusMenuOverlay(
     onPickFromLibrary: () -> Unit,
     onOpenSkillPicker: () -> Unit,
 ) {
+    val origin = if (alignEnd) TransformOrigin(1f, 1f) else TransformOrigin(0f, 1f)
     // Scrim outside the card: tapping any other area dismisses the card
     if (visible) {
         Box(
@@ -3336,7 +3406,7 @@ private fun ComposerPlusMenuOverlay(
                 visible = visible && anchorBounds() != null,
                 enter = scaleIn(
                     initialScale = 0.62f,
-                    transformOrigin = TransformOrigin(0f, 1f),
+                    transformOrigin = origin,
                     animationSpec = tween(durationMillis = 260, easing = FloatingMenuEnterCurve),
                 ) + slideInVertically(
                     animationSpec = tween(durationMillis = 260, easing = FloatingMenuEnterCurve),
@@ -3344,7 +3414,7 @@ private fun ComposerPlusMenuOverlay(
                     fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
                 exit = scaleOut(
                     targetScale = 0.72f,
-                    transformOrigin = TransformOrigin(0f, 1f),
+                    transformOrigin = origin,
                     animationSpec = tween(durationMillis = 180, easing = FloatingMenuExitCurve),
                 ) + slideOutVertically(
                     animationSpec = tween(durationMillis = 180, easing = FloatingMenuExitCurve),
@@ -3402,11 +3472,16 @@ private fun ComposerPlusMenuOverlay(
             val bounds = anchorBounds()
             if (bounds != null) {
                 placeables.forEach { placeable ->
-                    val x = bounds.left.roundToInt().coerceIn(
+                    val rawX = if (alignEnd) {
+                        bounds.right.roundToInt() - placeable.width
+                    } else {
+                        bounds.left.roundToInt()
+                    }
+                    val x = rawX.coerceIn(
                         0,
                         (constraints.maxWidth - placeable.width).coerceAtLeast(0),
                     )
-                    // Align bottom-left of card with bottom-left of '+' button so it expands upward in place
+                    // Align bottom corner of card with '+' button so it expands upward in place
                     val y = (bounds.bottom.roundToInt() - placeable.height).coerceAtLeast(0)
                     placeable.place(x, y)
                 }

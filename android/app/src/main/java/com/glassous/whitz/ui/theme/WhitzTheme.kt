@@ -13,6 +13,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.glassous.whitz.core.model.OneHandedConfig
 import com.glassous.whitz.core.model.ThemePreference
 
 data class WhitzExtendedColors(
@@ -79,6 +80,7 @@ private val DarkExtended = WhitzExtendedColors(
 )
 
 val LocalWhitzColors = staticCompositionLocalOf { LightExtended }
+val LocalOneHandedConfig = staticCompositionLocalOf { OneHandedConfig() }
 
 private val LightColorScheme = expressiveLightColorScheme().copy(
     primary = Color(0xFF111113),
@@ -166,13 +168,17 @@ fun isWhitzDarkTheme(preference: ThemePreference): Boolean = when (preference) {
 @Composable
 fun WhitzTheme(
     preference: ThemePreference = ThemePreference.SYSTEM,
+    oneHandedConfig: OneHandedConfig = OneHandedConfig(),
     content: @Composable () -> Unit,
 ) {
     val dark = isWhitzDarkTheme(preference)
     val extended = if (dark) DarkExtended else LightExtended
     val scheme = if (dark) DarkColorScheme else LightColorScheme
 
-    CompositionLocalProvider(LocalWhitzColors provides extended) {
+    CompositionLocalProvider(
+        LocalWhitzColors provides extended,
+        LocalOneHandedConfig provides oneHandedConfig,
+    ) {
         MaterialExpressiveTheme(
             colorScheme = scheme,
             motionScheme = MotionScheme.expressive(),

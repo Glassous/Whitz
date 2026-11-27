@@ -79,9 +79,14 @@ import com.glassous.whitz.core.model.ScheduledTaskPendingItem
 import com.glassous.whitz.core.model.ScheduledTaskRun
 import com.glassous.whitz.core.util.DateTimeUtils
 import com.glassous.whitz.feature.chat.ChatViewModel
+import com.glassous.whitz.ui.theme.LocalOneHandedConfig
 import com.glassous.whitz.ui.theme.LocalWhitzColors
+import com.glassous.whitz.ui.theme.WhitzCollapsibleTopBarLayout
 import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
 import com.glassous.whitz.ui.theme.WhitzLoadingIndicator
+import com.glassous.whitz.ui.theme.WhitzOneHandedActionButton
+import com.glassous.whitz.ui.theme.WhitzOneHandedActionDock
+import com.glassous.whitz.ui.theme.WhitzOneHandedBackDock
 import com.glassous.whitz.ui.theme.WhitzTextField
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonArray
@@ -105,8 +110,8 @@ fun SchedulesScreen(
     onBack: () -> Unit,
 ) {
     val colors = LocalWhitzColors.current
+    val oneHanded = LocalOneHandedConfig.current
     val state by vm.schedules.ui.collectAsState()
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
     var historyTask by remember { mutableStateOf<ScheduledTask?>(null) }
@@ -116,59 +121,50 @@ fun SchedulesScreen(
         vm.schedules.loadAll()
     }
 
-    Scaffold(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.canvas)
-            .nestedScroll(scrollBehavior.nestedScrollConnection),
-        containerColor = colors.canvas,
-        contentWindowInsets = WindowInsets(0),
-        topBar = {
-            MediumFlexibleTopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.canvas,
-                    scrolledContainerColor = colors.canvas,
-                ),
-                scrollBehavior = scrollBehavior,
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回",
-                            tint = colors.fg,
-                        )
-                    }
-                },
-                title = {
-                    Text(
-                        text = "定时任务",
-                        fontWeight = FontWeight.SemiBold,
-                        color = colors.fg,
+    WhitzCollapsibleTopBarLayout(
+        title = "定时任务",
+        onBack = onBack,
+        overlay = {
+            if (!oneHanded.enabled) {
+                FloatingActionButton(
+                    onClick = { onOpenEditor(null) },
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp)
+                        .padding(bottom = navBottom),
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "新建定时任务")
+                }
+            }
+            WhitzOneHandedActionDock {
+                WhitzOneHandedActionButton(
+                    onClick = { onOpenEditor(null) },
+                    emphasized = true,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "新建定时任务",
+                        modifier = Modifier.size(22.dp),
                     )
-                },
-            )
-        },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = { onOpenEditor(null) },
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                modifier = Modifier.padding(bottom = navBottom),
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "新建定时任务")
+                }
+                WhitzOneHandedActionButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "返回",
+                        tint = colors.fg,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
             }
         },
-    ) { innerPadding ->
-        Box(
+    ) { topPadding ->
+        LazyColumn(
             modifier = Modifier
+                .widthIn(max = 840.dp)
                 .fillMaxSize()
-                .padding(top = innerPadding.calculateTopPadding()),
-            contentAlignment = Alignment.TopCenter,
-        ) {
-            LazyColumn(
-                modifier = Modifier
-                    .widthIn(max = 840.dp)
-                    .fillMaxSize(),
+                .padding(top = topPadding),
                 contentPadding = PaddingValues(
                     start = 16.dp,
                     end = 16.dp,
@@ -343,7 +339,6 @@ fun SchedulesScreen(
                     }
                 }
             }
-        }
     }
 
     // Execution History Bottom Sheet
@@ -737,7 +732,6 @@ fun ScheduleEditorScreen(
     val schedState by vm.schedules.ui.collectAsState()
     val chatState by vm.ui.collectAsState()
     val user by vm.user.collectAsState()
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
     val existing = remember(taskId, schedState.tasks) {
@@ -861,43 +855,16 @@ fun ScheduleEditorScreen(
         previewing = false
     }
 
-    Scaffold(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.canvas)
-            .nestedScroll(scrollBehavior.nestedScrollConnection),
-        containerColor = colors.canvas,
-        contentWindowInsets = WindowInsets(0),
-        topBar = {
-            MediumFlexibleTopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.canvas,
-                    scrolledContainerColor = colors.canvas,
-                ),
-                scrollBehavior = scrollBehavior,
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回",
-                            tint = colors.fg,
-                        )
-                    }
-                },
-                title = {
-                    Text(
-                        text = if (existing == null) "新建定时任务" else "编辑定时任务",
-                        fontWeight = FontWeight.SemiBold,
-                        color = colors.fg,
-                    )
-                },
-            )
-        },
-    ) { innerPadding ->
+    WhitzCollapsibleTopBarLayout(
+        title = if (existing == null) "新建定时任务" else "编辑定时任务",
+        onBack = onBack,
+        overlay = { WhitzOneHandedBackDock(onBack = onBack) },
+    ) { topPadding ->
         Column(
             modifier = Modifier
+                .widthIn(max = 840.dp)
                 .fillMaxSize()
-                .padding(top = innerPadding.calculateTopPadding())
+                .padding(top = topPadding)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 8.dp)
                 .padding(bottom = navBottom + 28.dp),

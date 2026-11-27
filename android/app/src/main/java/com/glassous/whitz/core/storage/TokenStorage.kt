@@ -6,6 +6,8 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import com.glassous.whitz.BuildConfig
+import com.glassous.whitz.core.model.OneHandedConfig
+import com.glassous.whitz.core.model.OneHandedSide
 import com.glassous.whitz.core.model.ThemePreference
 import com.glassous.whitz.core.model.User
 import com.glassous.whitz.core.network.WhitzJson
@@ -83,6 +85,20 @@ class TokenStorage(context: Context) {
 
     fun setThemePreference(pref: ThemePreference) {
         prefs.edit().putString(KEY_THEME, pref.name).apply()
+    }
+
+    fun getOneHandedConfig(): OneHandedConfig {
+        val enabled = prefs.getBoolean(KEY_ONE_HANDED_ENABLED, false)
+        val side = OneHandedSide.fromStored(prefs.getString(KEY_ONE_HANDED_SIDE, OneHandedSide.RIGHT.name))
+        return OneHandedConfig(enabled = enabled, side = side)
+    }
+
+    fun setOneHandedEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_ONE_HANDED_ENABLED, enabled).apply()
+    }
+
+    fun setOneHandedSide(side: OneHandedSide) {
+        prefs.edit().putString(KEY_ONE_HANDED_SIDE, side.name).apply()
     }
 
     fun getApiBaseUrl(): String {
@@ -171,6 +187,8 @@ class TokenStorage(context: Context) {
         private const val KEY_REFRESH_TOKEN = "refresh_token_enc"
         private const val KEY_USER = "user_json"
         private const val KEY_THEME = "theme_pref"
+        private const val KEY_ONE_HANDED_ENABLED = "one_handed_enabled"
+        private const val KEY_ONE_HANDED_SIDE = "one_handed_side"
         private const val KEY_API_BASE_URL = "api_base_url"
         private const val KEY_RAG_MODE = "rag_mode"
     }

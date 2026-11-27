@@ -2,6 +2,8 @@ package com.glassous.whitz
 
 import android.content.Context
 import com.glassous.whitz.core.files.CosUploader
+import com.glassous.whitz.core.model.OneHandedConfig
+import com.glassous.whitz.core.model.OneHandedSide
 import com.glassous.whitz.core.model.ThemePreference
 import com.glassous.whitz.core.model.resolveServerAssetUrl
 import com.glassous.whitz.core.network.AuthManager
@@ -23,9 +25,22 @@ class AppContainer(context: Context) {
     private val _themePreference = MutableStateFlow(storage.getThemePreference())
     val themePreference: StateFlow<ThemePreference> = _themePreference.asStateFlow()
 
+    private val _oneHandedConfig = MutableStateFlow(storage.getOneHandedConfig())
+    val oneHandedConfig: StateFlow<OneHandedConfig> = _oneHandedConfig.asStateFlow()
+
     fun setThemePreference(pref: ThemePreference) {
         storage.setThemePreference(pref)
         _themePreference.value = pref
+    }
+
+    fun setOneHandedEnabled(enabled: Boolean) {
+        storage.setOneHandedEnabled(enabled)
+        _oneHandedConfig.value = _oneHandedConfig.value.copy(enabled = enabled)
+    }
+
+    fun setOneHandedSide(side: OneHandedSide) {
+        storage.setOneHandedSide(side)
+        _oneHandedConfig.value = _oneHandedConfig.value.copy(side = side)
     }
 
     fun resolveAssetUrl(pathOrUrl: String?): String? =

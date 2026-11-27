@@ -835,6 +835,20 @@ enum class ThemePreference {
     SYSTEM, LIGHT, DARK
 }
 
+enum class OneHandedSide {
+    LEFT, RIGHT;
+
+    companion object {
+        fun fromStored(name: String?): OneHandedSide =
+            entries.firstOrNull { it.name == name } ?: RIGHT
+    }
+}
+
+data class OneHandedConfig(
+    val enabled: Boolean = false,
+    val side: OneHandedSide = OneHandedSide.RIGHT,
+)
+
 enum class UploadTaskStatus {
     SIGNING, UPLOADING, COMPLETING, ERROR
 }

@@ -50,6 +50,7 @@ import com.glassous.whitz.feature.settings.GithubSkillInstallScreen
 import com.glassous.whitz.feature.settings.LibrarySettingsScreen
 import com.glassous.whitz.feature.settings.MembershipSettingsScreen
 import com.glassous.whitz.feature.settings.MemorySettingsScreen
+import com.glassous.whitz.feature.settings.OneHandedSettingsScreen
 import com.glassous.whitz.feature.settings.PasswordSettingsScreen
 import com.glassous.whitz.feature.settings.PersonaSettingsScreen
 import com.glassous.whitz.feature.settings.ProfileSettingsScreen
@@ -69,6 +70,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val themePref by container.themePreference.collectAsState()
+            val oneHandedConfig by container.oneHandedConfig.collectAsState()
             val dark = isWhitzDarkTheme(themePref)
 
             SideEffect {
@@ -84,7 +86,10 @@ class MainActivity : ComponentActivity() {
                 window.isNavigationBarContrastEnforced = false
             }
 
-            WhitzTheme(preference = themePref) {
+            WhitzTheme(
+                preference = themePref,
+                oneHandedConfig = oneHandedConfig,
+            ) {
                 WhitzRoot(container = container)
             }
         }
@@ -431,6 +436,14 @@ private fun WhitzRoot(container: AppContainer) {
             composable(SettingsRoutes.FEEDBACK) { entry ->
                 rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
                     FeedbackSettingsScreen(
+                        vm = vm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(SettingsRoutes.ONE_HANDED) { entry ->
+                rememberSharedSettingsVm(navController, entry, factory)?.let { vm ->
+                    OneHandedSettingsScreen(
                         vm = vm,
                         onBack = { navController.popBackStack() },
                     )

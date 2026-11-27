@@ -66,8 +66,10 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.glassous.whitz.core.model.ConversationFile
 import com.glassous.whitz.ui.theme.LocalWhitzColors
+import com.glassous.whitz.ui.theme.WhitzCollapsibleTopBarLayout
 import com.glassous.whitz.ui.theme.WhitzConnectedRadioGroup
 import com.glassous.whitz.ui.theme.WhitzLogoMark
+import com.glassous.whitz.ui.theme.WhitzOneHandedBackDock
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -126,23 +128,24 @@ fun MainChatTaskPanelOverlay(
         )
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        // Upper region above "执行步骤": 70% opaque so the live conversation faintly shows through; tap anywhere to return to chat
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(colors.canvas.copy(alpha = 0.70f))
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onDismiss,
-                )
-                .statusBarsPadding()
-                .padding(top = 24.dp, bottom = 14.dp),
-            contentAlignment = Alignment.Center,
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
         ) {
+            // Upper region above "执行步骤": 70% opaque so the live conversation faintly shows through; tap anywhere to return to chat
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(colors.canvas.copy(alpha = 0.70f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDismiss,
+                    )
+                    .statusBarsPadding()
+                    .padding(top = 24.dp, bottom = 14.dp),
+                contentAlignment = Alignment.Center,
+            ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -263,6 +266,9 @@ fun MainChatTaskPanelOverlay(
                 }
             }
         }
+        }
+
+        WhitzOneHandedBackDock(onBack = onDismiss)
     }
 }
 
@@ -284,7 +290,6 @@ fun TaskDetailScreen(
     var showCreateFile by remember { mutableStateOf(false) }
     var showLibraryPicker by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<ConversationFile?>(null) }
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
@@ -314,50 +319,17 @@ fun TaskDetailScreen(
     BackHandler(enabled = ui.imageLightbox != null) { vm.closeImageLightbox() }
     BackHandler(enabled = ui.previewTarget != null) { vm.closeFilePreview() }
 
-    Scaffold(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.canvas)
-            .nestedScroll(scrollBehavior.nestedScrollConnection),
-        containerColor = colors.canvas,
-        contentWindowInsets = WindowInsets(0),
-        topBar = {
-            MediumFlexibleTopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colors.canvas,
-                    scrolledContainerColor = colors.canvas,
-                ),
-                scrollBehavior = scrollBehavior,
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回",
-                            tint = colors.fg,
-                        )
-                    }
-                },
-                title = {
-                    Text(
-                        text = if (selectedTab == 0) "执行步骤" else "对话文件",
-                        fontWeight = FontWeight.SemiBold,
-                        color = colors.fg,
-                    )
-                },
-            )
-        },
-    ) { innerPadding ->
-        Box(
+    WhitzCollapsibleTopBarLayout(
+        title = if (selectedTab == 0) "执行步骤" else "对话文件",
+        onBack = onBack,
+        overlay = { WhitzOneHandedBackDock(onBack = onBack) },
+    ) { topPadding ->
+        Column(
             modifier = Modifier
+                .widthIn(max = 840.dp)
                 .fillMaxSize()
-                .padding(top = innerPadding.calculateTopPadding()),
-            contentAlignment = Alignment.TopCenter,
+                .padding(top = topPadding),
         ) {
-            Column(
-                modifier = Modifier
-                    .widthIn(max = 840.dp)
-                    .fillMaxSize(),
-            ) {
                 val fileError = ui.fileError
                 if (!fileError.isNullOrBlank()) {
                     Box(
@@ -432,7 +404,6 @@ fun TaskDetailScreen(
                 }
             }
         }
-    }
 
     if (showCreateFile) {
         CreateTextFileDialog(

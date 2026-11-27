@@ -11,6 +11,7 @@ import com.glassous.whitz.core.model.GithubSkillPreviewResponse
 import com.glassous.whitz.core.model.MemoryEntry
 import com.glassous.whitz.core.model.MemoryOverview
 import com.glassous.whitz.core.model.MemorySearchHit
+import com.glassous.whitz.core.model.OneHandedSide
 import com.glassous.whitz.core.model.SkillItem
 import com.glassous.whitz.core.model.SkillPendingItem
 import com.glassous.whitz.core.model.ThemePreference
@@ -81,12 +82,21 @@ class SettingsViewModel(
 
     val user = container.authManager.user
     val themePreference = container.themePreference
+    val oneHandedConfig = container.oneHandedConfig
     val library = LibraryController(viewModelScope, container)
 
     fun resolveAssetUrl(pathOrUrl: String?): String? = container.resolveAssetUrl(pathOrUrl)
 
     fun setTheme(pref: ThemePreference) {
         container.setThemePreference(pref)
+    }
+
+    fun setOneHandedEnabled(enabled: Boolean) {
+        container.setOneHandedEnabled(enabled)
+    }
+
+    fun setOneHandedSide(side: OneHandedSide) {
+        container.setOneHandedSide(side)
     }
 
     fun clearFeedback() {

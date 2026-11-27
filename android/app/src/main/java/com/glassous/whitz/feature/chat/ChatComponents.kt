@@ -797,10 +797,15 @@ fun MessageBubble(
                     Text("等待你的确认...", fontSize = 13.5.sp, color = colors.warning)
                 }
 
-                if (effectiveCitations.isNotEmpty()) {
+                val visibleCitations = remember(effectiveCitations) {
+                    effectiveCitations.filterNot {
+                        it.sourceType == "chat_digest" || it.sourceType == "chat_turn"
+                    }
+                }
+                if (visibleCitations.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(10.dp))
                     CitationsDisclosureCard(
-                        citations = effectiveCitations,
+                        citations = visibleCitations,
                         expanded = citationsExpanded,
                         highlightedCitationId = highlightedCitationId,
                         onToggleExpanded = { citationsExpanded = !citationsExpanded },
