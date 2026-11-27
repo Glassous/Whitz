@@ -1,6 +1,10 @@
 appId: com.whitz.desktop
 productName: Whitz
 copyright: Copyright © 2026 Whitz
+compression: maximum
+electronLanguages:
+  - zh-CN
+  - en-US
 
 directories:
   output: release
@@ -11,6 +15,18 @@ afterPack: scripts/after-pack.cjs
 files:
   - out/**/*
   - package.json
+  - "!node_modules/better-sqlite3/deps/**"
+  - "!node_modules/better-sqlite3/src/**"
+  - "!node_modules/better-sqlite3/binding.gyp"
+  - "!node_modules/better-sqlite3/build/Release/obj/**"
+  - "!node_modules/better-sqlite3/build/Release/*.pdb"
+  - "!node_modules/better-sqlite3/build/Release/*.lib"
+  - "!node_modules/better-sqlite3/build/Release/*.exp"
+  - "!node_modules/better-sqlite3/build/Release/*.iobj"
+  - "!node_modules/better-sqlite3/build/Release/*.ipdb"
+  - "!node_modules/**/*.{map,d.ts,d.cts,d.mts,ts,mts,cts}"
+  - "!node_modules/**/{README,CHANGELOG,HISTORY,CONTRIBUTING,AUTHORS}*"
+  - "!node_modules/**/{test,tests,__tests__,example,examples,docs}/**"
 
 asarUnpack:
   - "**/node_modules/better-sqlite3/**"

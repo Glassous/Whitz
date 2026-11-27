@@ -2,8 +2,30 @@ import { resolve } from "node:path";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
+import type { Plugin } from "vite";
 
 const webSrc = resolve(__dirname, "../web/src");
+
+// Electron 38 (Chromium) natively supports woff2; drop legacy .woff/.ttf fallbacks from KaTeX CSS and assets.
+function katexWoff2OnlyPlugin(): Plugin {
+  return {
+    name: "whitz-katex-woff2-only",
+    enforce: "post",
+    generateBundle(_options, bundle) {
+      for (const [fileName, item] of Object.entries(bundle)) {
+        if (item.type === "asset" && /(?:^|\/)KaTeX_[^/]+\.(?:woff|ttf)$/.test(fileName)) {
+          delete bundle[fileName];
+        } else if (item.type === "asset" && fileName.endsWith(".css")) {
+          const css = typeof item.source === "string" ? item.source : Buffer.from(item.source).toString("utf8");
+          item.source = css.replace(
+            /,\s*url\(["']?[^)"']*KaTeX_[^)"']+\.(?:woff|ttf)["']?\)\s*format\(["'](?:woff|truetype)["']\)/g,
+            "",
+          );
+        }
+      }
+    },
+  };
+}
 
 export default defineConfig({
   main: {
@@ -43,7 +65,7 @@ export default defineConfig({
         "@renderer": resolve(__dirname, "src/renderer"),
       },
     },
-    plugins: [vue(), tailwindcss()],
+    plugins: [katexWoff2OnlyPlugin(), vue(), tailwindcss()],
     server: {
       port: 5174,
       strictPort: true,
