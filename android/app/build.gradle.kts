@@ -19,6 +19,32 @@ android {
         buildConfigField("String", "API_BASE_URL", "\"https://whitzapi.kamisato.top/api\"")
     }
 
+    androidResources {
+        localeFilters += listOf("zh-rCN", "en")
+    }
+
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
+    packaging {
+        dex {
+            useLegacyPackaging = true
+        }
+        jniLibs {
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += setOf(
+                "DebugProbesKt.bin",
+                "META-INF/*.version",
+                "META-INF/androidx/**/LICENSE.txt",
+                "kotlin/**/*.kotlin_builtins",
+            )
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
@@ -28,8 +54,16 @@ android {
         }
         release {
             resValue("string", "app_name", "Whitz")
+            isShrinkResources = true
+            vcsInfo {
+                include = false
+            }
             optimization {
-                enable = false
+                enable = true
+                keepRules {
+                    includeDefault = true
+                    files.add(file("proguard-rules.pro"))
+                }
             }
             buildConfigField("String", "API_BASE_URL", "\"https://whitzapi.kamisato.top/api\"")
         }
